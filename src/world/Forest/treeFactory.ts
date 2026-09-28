@@ -1,0 +1,452 @@
+import * as THREE from 'three'
+import { ATLAS_CELLS, cellUv, SOLID_UV } from '../../rendering/materials/FoliageAtlas'
+import { Rng } from '../noise/rng'
+import { TreeSpecies } from '../types'
+
+/**
+ * Procedural stylized trees (refer/forest, refer/roads hero) built from alpha-tested FOLIAGE CARDS on a solid
+ * core, with "canopy" normals (pointing out of the crown volume instead of per-face) — the standard trick for
+ * soft, painterly foliage shading instead of faceted low-poly.
+ *
+ * Every part (cards, cores, trunks) is in ONE geometry with ONE material (solid parts sample an opaque atlas
+ * texel), so a species is still one instanced draw call. Built once with fixed seeds → identical everywhere.
+ *   levels: [0] near (dense sprays)  [1] mid (fewer, larger cards — LOW's near level)  [2] far (core + few cards)
+ */
+export interface SpeciesDef {
+  id: number
+  name: string
+  levels: [THREE.BufferGeometry, THREE.BufferGeometry, THREE.BufferGeometry]
+  trunkRadius: number
+  trunkHalfHeight: number
+}
+
+type V3 = [number, number, number]
+const srgb = (hex: number) => new THREE.Color().setHex(hex, THREE.SRGBColorSpace)
+
+/** Triangle soup with explicit normals, uvs and colours. */
+class Soup {
+  readonly pos: number[] = []
+  readonly nor: number[] = []
+  readonly uv: number[] = []
+  readonly col: number[] = []
+  readonly bbC: number[] = []
+  readonly bbO: number[] = []
+  vert(p: V3, n: V3, uv: [number, number], c: THREE.Color, bbCenter?: V3, bbOff?: [number, number]): void {
+    this.bbC.push(...(bbCenter ?? [0, 0, 0]))
+    this.bbO.push(...(bbOff ?? [0, 0]))
+    this.pos.push(p[0], p[1], p[2])
+    // Zero-length normals → NaN in the shader → bright blobs spread by the paint filter/bloom. Guard them.
+    const l = Math.hypot(n[0], n[1], n[2])
+    if (l < 1e-5) this.nor.push(0, 1, 0)
+    else this.nor.push(n[0] / l, n[1] / l, n[2] / l)
+    this.uv.push(uv[0], uv[1])
+    this.col.push(c.r, c.g, c.b)
+  }
+  geometry(name: string): THREE.BufferGeometry {
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3))
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3))
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2))
+    g.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3))
+    g.setAttribute('bbCenter', new THREE.Float32BufferAttribute(this.bbC, 3))
+    g.setAttribute('bbOff', new THREE.Float32BufferAttribute(this.bbO, 2))
+    g.name = name
+    g.computeBoundingSphere()
+    return g
+  }
+}
+
+const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+
+/**
+ * Camera-facing fluffy TUFT (billboarded in the vertex shader): quad of half-size `r` at `c`, normal from the
+ * crown centre `crown` (the canopy lights as one soft volume), colour dark→light bottom→top.
+ */
+function tuft(s: Soup, c: V3, r: number, crown: V3, dark: THREE.Color, light: THREE.Color): void {
+  const [u0, v0, u1, v1] = cellUv(ATLAS_CELLS.tuft)
+  const n: V3 = [c[0] - crown[0], (c[1] - crown[1]) * 0.8 + 0.25, c[2] - crown[2]]
+  const up = Math.max(0, Math.min(1, (c[1] - crown[1]) * 0.3 + 0.5))
+  const cb = dark.clone().lerp(light, up * 0.7), ct = dark.clone().lerp(light, 0.35 + up * 0.65)
+  const q: [number, number, number, number, THREE.Color][] = [[-r, -r, u0, v0, cb], [r, -r, u1, v0, cb], [r, r, u1, v1, ct], [-r, r, u0, v1, ct]]
+  for (const i of [0, 1, 2, 0, 2, 3]) {
+    const [ox, oy, u, v, col] = q[i]
+    // Authored position = flat quad in XY (what the shadow pass sees); the shader re-orients it to the camera.
+    s.vert([c[0] + ox, c[1] + oy, c[2]], n, [u, v], col, c, [ox, oy])
+  }
+}
+
+/** A flat card p0→p1 with half-width vector `side`; normals from `centre` (canopy volume). */
+function card(s: Soup, p0: V3, p1: V3, side: V3, cell: number, centre: V3, c0: THREE.Color, c1: THREE.Color, upBias = 0.35): void {
+  const [u0, v0, u1, v1] = cellUv(cell)
+  const corners: [V3, [number, number], THREE.Color][] = [
+    [[p0[0] - side[0], p0[1] - side[1], p0[2] - side[2]], [u0, v0], c0],
+    [[p0[0] + side[0], p0[1] + side[1], p0[2] + side[2]], [u0, v1], c0],
+    [[p1[0] + side[0], p1[1] + side[1], p1[2] + side[2]], [u1, v1], c1],
+    [[p1[0] - side[0], p1[1] - side[1], p1[2] - side[2]], [u1, v0], c1],
+  ]
+  const n = (p: V3): V3 => {
+    const d = sub(p, centre)
+    return [d[0], d[1] * 0.6 + upBias * Math.hypot(d[0], d[2]), d[2]]
+  }
+  for (const i of [0, 1, 2, 0, 2, 3]) s.vert(corners[i][0], n(corners[i][0]), corners[i][1], corners[i][2])
+}
+
+/** Solid tapered cylinder / cone (trunk or canopy core) with smooth radial (+up-biased) normals. */
+function solid(s: Soup, y0: number, y1: number, r0: number, r1: number, sides: number, c0: THREE.Color, c1: THREE.Color, upBias = 0): void {
+  for (let i = 0; i < sides; i++) {
+    const a0 = (i / sides) * Math.PI * 2
+    const a1 = ((i + 1) / sides) * Math.PI * 2
+    const q = (a: number, y: number, r: number): V3 => [Math.cos(a) * r, y, Math.sin(a) * r]
+    const n = (a: number): V3 => [Math.cos(a), upBias, Math.sin(a)]
+    const A = q(a0, y0, r0), B = q(a1, y0, r0), C = q(a1, y1, r1), D = q(a0, y1, r1)
+    const uv = SOLID_UV
+    s.vert(A, n(a0), uv, c0); s.vert(C, n(a1), uv, c1); s.vert(B, n(a1), uv, c0)
+    s.vert(A, n(a0), uv, c0); s.vert(D, n(a0), uv, c1); s.vert(C, n(a1), uv, c1)
+  }
+}
+
+/** Solid lumpy blob with spherical normals (crown cores, bushes). */
+function blob(s: Soup, c: V3, r: number, flat: number, rng: Rng, col: THREE.Color, detail = 0): void {
+  const g = new THREE.IcosahedronGeometry(1, detail)
+  const p = g.getAttribute('position')
+  const j = new Map<string, number>()
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i)
+    const key = `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`
+    if (!j.has(key)) j.set(key, rng.range(0.8, 1.15))
+    const k = j.get(key)!
+    const v: V3 = [c[0] + x * r * k, c[1] + y * r * k * flat, c[2] + z * r * k]
+    const shade = 0.7 + 0.3 * (y * 0.5 + 0.5)
+    s.vert(v, [x, y, z], SOLID_UV, col.clone().multiplyScalar(shade))
+  }
+  g.dispose()
+}
+
+/** Leaf/needle cluster: cards arranged over a sphere, facing outward, spherical normals. */
+function cluster(s: Soup, c: V3, r: number, cards: number, cell: number, rng: Rng, dark: THREE.Color, light: THREE.Color): void {
+  for (let i = 0; i < cards; i++) {
+    const u = rng.next() * 2 - 1
+    const a = rng.next() * Math.PI * 2
+    const d: V3 = [Math.sqrt(1 - u * u) * Math.cos(a), u * 0.75 + 0.2, Math.sqrt(1 - u * u) * Math.sin(a)]
+    const size = r * rng.range(0.85, 1.25)
+    const centre: V3 = [c[0] + d[0] * r * 0.55, c[1] + d[1] * r * 0.55, c[2] + d[2] * r * 0.55]
+    // Card plane perpendicular to d: pick two tangent axes.
+    const t1: V3 = Math.abs(d[1]) < 0.9 ? [-d[2], 0, d[0]] : [1, 0, 0]
+    const l1 = Math.hypot(...t1)
+    const tx: V3 = [t1[0] / l1, t1[1] / l1, t1[2] / l1]
+    const ty: V3 = [d[1] * tx[2] - d[2] * tx[1], d[2] * tx[0] - d[0] * tx[2], d[0] * tx[1] - d[1] * tx[0]]
+    const half = size * 0.5
+    const p0: V3 = [centre[0] - ty[0] * half, centre[1] - ty[1] * half, centre[2] - ty[2] * half]
+    const p1: V3 = [centre[0] + ty[0] * half, centre[1] + ty[1] * half, centre[2] + ty[2] * half]
+    const side: V3 = [tx[0] * half, tx[1] * half, tx[2] * half]
+    const k = 0.5 + 0.5 * (d[1] * 0.5 + 0.5)
+    card(s, p0, p1, side, cell, c, dark.clone().lerp(light, k * 0.6), dark.clone().lerp(light, k), 0.2)
+  }
+}
+
+interface ConiferOpts {
+  height: number
+  radius: number
+  /** Trunk height without branches (m). */
+  bare: number
+  tiers: number[]
+  points: number[]
+  droop: number
+  dark: number
+  light: number
+  trunk: number
+}
+
+/**
+ * One drooping SKIRT: solid star cone (alternating long/short points, tips hanging below the base, slightly
+ * up-turned), soft canopy normals, lighter top; plus hanging needle-FRINGE cards along the rim (level 0: all
+ * gaps, level 1: every other, level 2: none). Double-sided material → the back face is the underside.
+ */
+function skirt(s: Soup, c: V3, r: number, h: number, points: number, droop: number, dark: THREE.Color, light: THREE.Color, lit: number, level: number, rng: Rng): void {
+  const [fu0, fv0, fu1, fv1] = cellUv(ATLAS_CELLS.spray)
+  const rot = rng.next() * 6.28
+  const y = c[1]
+  const apex: V3 = [c[0], y + h, c[2]]
+  const n = points * 2
+  const ring: V3[] = []
+  for (let i = 0; i < n; i++) {
+    const a = rot + (i / n) * Math.PI * 2 + rng.range(-0.1, 0.1)
+    const long = i % 2 === 0
+    const rr = r * (long ? rng.range(0.92, 1.1) : rng.range(0.62, 0.74))
+    const dy = -(long ? droop : droop * 0.4) * rr + (long ? rng.range(0, 0.12) * rr : 0)
+    ring.push([c[0] + Math.cos(a) * rr, y + dy, c[2] + Math.sin(a) * rr])
+  }
+  const topC = dark.clone().lerp(light, lit)
+  const rimC = dark.clone().lerp(light, lit * 0.5)
+  const nrm = (p: V3): V3 => [p[0] - c[0], (p[1] - y) * 0.8 + 0.55 * Math.hypot(p[0] - c[0], p[2] - c[2]), p[2] - c[2]]
+  for (let i = 0; i < n; i++) {
+    const a = ring[i]
+    const b = ring[(i + 1) % n]
+    s.vert(apex, [0, 1, 0], SOLID_UV, topC); s.vert(b, nrm(b), SOLID_UV, rimC); s.vert(a, nrm(a), SOLID_UV, rimC)
+  }
+  if (level >= 2) return
+  for (let i = 0; i < n; i += level === 0 ? 1 : 2) {
+    const a = ring[i]
+    const b = ring[(i + 1) % n]
+    const drop = r * rng.range(0.28, 0.42)
+    const out = (p: V3, k: number, dy: number): V3 => [c[0] + (p[0] - c[0]) * k, p[1] + dy, c[2] + (p[2] - c[2]) * k]
+    const A = out(a, 1.06, 0.05), B = out(b, 1.06, 0.05), C = out(b, 1.08, -drop), D = out(a, 1.08, -drop)
+    const na = nrm(a), nb = nrm(b)
+    const fc = rimC.clone().multiplyScalar(0.9)
+    s.vert(A, na, [fu0, fv1], fc); s.vert(B, nb, [fu1, fv1], fc); s.vert(C, nb, [fu1, fv0], fc)
+    s.vert(A, na, [fu0, fv1], fc); s.vert(C, nb, [fu1, fv0], fc); s.vert(D, na, [fu0, fv0], fc)
+  }
+}
+
+/**
+ * Painted spruce/fir (refer/roads hero, refer/forest): trunk + thin dark core + IRREGULAR drooping branch
+ * clumps spiralling up the trunk (golden angle + jitter, lengths ±35%, ~12% skipped → sky shows through),
+ * each clump = 2 crossed branch-spray cards. Canopy normals from the trunk axis → soft painterly light;
+ * colour darkens toward trunk/bottom, lightens toward tips/top. Far level keeps solid skirts (cheap).
+ */
+function conifer(level: number, rng: Rng, o: ConiferOpts): THREE.BufferGeometry {
+  const s = new Soup()
+  const H = o.height
+  const dark = srgb(o.dark)
+  const light = srgb(o.light)
+  const bark = srgb(o.trunk)
+  solid(s, 0, H * 0.9, 0.2, 0.05, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.6), bark)
+  if (level === 2) {
+    const tiers = o.tiers[2]
+    for (let t = 0; t < tiers; t++) {
+      const k = t / tiers
+      const y = o.bare + (H * 0.93 - o.bare) * k
+      skirt(s, [0, y, 0], o.radius * Math.pow(1 - k, 1.1) + 0.3, Math.max(0.9, (H - y) * 0.34), o.points[2], o.droop, dark, light, 0.35 + 0.5 * k, 2, rng)
+    }
+    return s.geometry('conifer')
+  }
+  // Thin core: only plugs the densest gaps near the trunk.
+  solid(s, o.bare + 0.5, H * 0.96, o.radius * 0.32, 0.02, 5, dark.clone().multiplyScalar(0.45), dark.clone().multiplyScalar(0.7), 0.4)
+  const [u0, v0, u1, v1] = cellUv(ATLAS_CELLS.spray)
+  const clumps = level === 0 ? 42 : 16
+  const GOLD = 2.39996
+  for (let i = 0; i < clumps; i++) {
+    if (rng.next() < 0.08) continue
+    const k = (i + rng.next() * 0.7) / clumps
+    const y = o.bare + (H * 0.94 - o.bare) * k
+    const a = i * GOLD + rng.range(-0.35, 0.35)
+    const L = (o.radius * Math.pow(1 - k, 0.9) + 0.35) * rng.range(0.65, 1.3) * (level === 1 ? 1.15 : 1)
+    const droop = o.droop * rng.range(0.6, 1.3) * (1 - k * 0.5)
+    const dx = Math.cos(a), dz = Math.sin(a)
+    const p0: V3 = [dx * 0.08, y, dz * 0.08]
+    const p1: V3 = [dx * L * Math.cos(droop), y - L * Math.sin(droop), dz * L * Math.cos(droop)]
+    const w = L * (level === 0 ? 0.55 : 0.62)
+    const centre: V3 = [0, y + 0.4, 0]
+    const base = dark.clone().lerp(light, 0.1 + 0.35 * k)
+    const tip = dark.clone().lerp(light, 0.45 + 0.45 * k)
+    // Card 1: upright (seen from the side) — hanging needles downward. Card 2: tilted flat (seen from below/above).
+    const up: V3 = [0, w, 0]
+    const flat: V3 = [-dz * w * 0.9, w * 0.35, dx * w * 0.9]
+    for (const side of level === 0 ? [up, flat] : [up, flat]) {
+      const c0: V3 = [p0[0] - side[0] * 0.25, p0[1] - side[1] * 0.25, p0[2] - side[2] * 0.25]
+      const c1: V3 = [p1[0] - side[0] * 0.25, p1[1] - side[1] * 0.25, p1[2] - side[2] * 0.25]
+      cardUv(s, c0, c1, side, [u0, v0, u1, v1], centre, base, tip)
+    }
+    // Fluffy tuft near the branch end (silhouette clump).
+    const tc: V3 = [p0[0] + (p1[0] - p0[0]) * 0.7, p0[1] + (p1[1] - p0[1]) * 0.7 + 0.1, p0[2] + (p1[2] - p0[2]) * 0.7]
+    tuft(s, tc, L * (level === 0 ? 0.42 : 0.5), [0, y + 0.3, 0], dark.clone().lerp(light, 0.1 + 0.3 * k), dark.clone().lerp(light, 0.5 + 0.45 * k))
+    // Genshin-style mass: a second, inner tuft so the cone is a dense fluffy volume, not a skeleton.
+    if (level === 0) {
+      const ti: V3 = [p0[0] + (p1[0] - p0[0]) * 0.35, p0[1] + (p1[1] - p0[1]) * 0.35 + 0.25, p0[2] + (p1[2] - p0[2]) * 0.35]
+      tuft(s, ti, L * 0.4, [0, y + 0.3, 0], dark.clone().lerp(light, 0.05 + 0.25 * k), dark.clone().lerp(light, 0.35 + 0.4 * k))
+    }
+  }
+  // Top: short upward sprays + spire.
+  for (let i = 0; i < 4; i++) {
+    const a = i * 1.57 + rng.range(-0.3, 0.3)
+    const y = H * 0.9
+    const p0: V3 = [0, y, 0]
+    const p1: V3 = [Math.cos(a) * 0.55, y + 0.5, Math.sin(a) * 0.55]
+    cardUv(s, p0, p1, [0, 0.35, 0], [u0, v0, u1, v1], [0, y, 0], light, light)
+  }
+  const sp: V3 = [0, H * 1.03, 0]
+  for (let i = 0; i < 5; i++) {
+    const a0 = (i / 5) * 6.283, a1 = ((i + 1) / 5) * 6.283
+    const q0: V3 = [Math.cos(a0) * 0.22, H * 0.9, Math.sin(a0) * 0.22]
+    const q1: V3 = [Math.cos(a1) * 0.22, H * 0.9, Math.sin(a1) * 0.22]
+    s.vert(sp, [0, 1, 0], SOLID_UV, light); s.vert(q1, [q1[0], 0.3, q1[2]], SOLID_UV, dark); s.vert(q0, [q0[0], 0.3, q0[2]], SOLID_UV, dark)
+  }
+  return s.geometry('conifer')
+}
+
+/** Card with an explicit uv rect (u along p0→p1, v across `side`). */
+function cardUv(s: Soup, p0: V3, p1: V3, side: V3, uv: [number, number, number, number], centre: V3, c0: THREE.Color, c1: THREE.Color): void {
+  const [u0, v0, u1, v1] = uv
+  const P: [V3, [number, number], THREE.Color][] = [
+    [p0, [u0, v0], c0],
+    [[p0[0] + side[0], p0[1] + side[1], p0[2] + side[2]], [u0, v1], c0],
+    [[p1[0] + side[0], p1[1] + side[1], p1[2] + side[2]], [u1, v1], c1],
+    [p1, [u1, v0], c1],
+  ]
+  const n = (p: V3): V3 => [p[0] - centre[0], (p[1] - centre[1]) * 0.5 + 0.45 * Math.hypot(p[0] - centre[0], p[2] - centre[2]), p[2] - centre[2]]
+  for (const i of [0, 1, 2, 0, 2, 3]) s.vert(P[i][0], n(P[i][0]), P[i][1], P[i][2])
+}
+
+function spruce(level: number, rng: Rng): THREE.BufferGeometry {
+  return conifer(level, rng, { height: 8.5, radius: 2.6, bare: 1.5, tiers: [8, 4, 3], points: [6, 5, 4], droop: 0.5, dark: 0x16302e, light: 0x4c7a5c, trunk: 0x4e3a2e })
+}
+
+function fir(level: number, rng: Rng): THREE.BufferGeometry {
+  return conifer(level, rng, { height: 7, radius: 2.9, bare: 1.2, tiers: [7, 4, 3], points: [7, 5, 4], droop: 0.38, dark: 0x15292c, light: 0x3f6a5a, trunk: 0x4a372c })
+}
+
+/** Tall pine: long bare reddish trunk, a few flat drooping PADS offset around the top third (refs). */
+function pine(level: number, rng: Rng): THREE.BufferGeometry {
+  const s = new Soup()
+  const bark = srgb(0x7a4a32)
+  const dark = srgb(0x1f3d2c)
+  const light = srgb(0x557f4f)
+  // Genshin proportions: ~2 m of bare trunk, then a big fluffy crown.
+  solid(s, 0, 6.5, 0.3, 0.12, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.6), bark)
+  const pads = [6, 4, 2][level]
+  for (let i = 0; i < pads; i++) {
+    const k = i / pads
+    const a = rng.next() * 6.28
+    const off = i === pads - 1 ? 0 : rng.range(0.5, 1.1)
+    const c: V3 = [Math.cos(a) * off, 2.4 + k * 4.0, Math.sin(a) * off]
+    const pr = rng.range(1.7, 2.3) * (1 - k * 0.45)
+    skirt(s, c, pr, 0.8, level === 0 ? 6 : 5, 0.22, dark, light, 0.55, level, rng)
+    // Fluffy rim: tufts around each pad.
+    const nt = level === 0 ? 10 : level === 1 ? 5 : 0
+    for (let t = 0; t < nt; t++) {
+      const ta = (t / nt) * Math.PI * 2 + rng.range(-0.3, 0.3)
+      tuft(s, [c[0] + Math.cos(ta) * pr * 0.75, c[1] + 0.2 + rng.range(-0.15, 0.35), c[2] + Math.sin(ta) * pr * 0.75], pr * 0.55, c, dark, light)
+    }
+  }
+  return s.geometry('pine')
+}
+
+/** Lump of a crown: jittered icosahedron whose normals point from the CROWN centre (unified soft shading). */
+function crownLump(s: Soup, c: V3, r: number, crown: V3, rng: Rng, dark: THREE.Color, light: THREE.Color, detail: number): void {
+  const g = new THREE.IcosahedronGeometry(1, detail)
+  const p = g.getAttribute('position')
+  const j = new Map<string, number>()
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i)
+    const key = `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`
+    if (!j.has(key)) j.set(key, rng.range(0.85, 1.12))
+    const k = j.get(key)!
+    const v: V3 = [c[0] + x * r * k, c[1] + y * r * k * 0.9, c[2] + z * r * k]
+    const n: V3 = [v[0] - crown[0], (v[1] - crown[1]) * 1.2 + 0.3, v[2] - crown[2]]
+    const up = THREE.MathUtils.clamp((v[1] - crown[1]) / 1.6 * 0.5 + 0.5, 0, 1)
+    s.vert(v, n, SOLID_UV, dark.clone().lerp(light, up))
+  }
+  g.dispose()
+}
+
+/** Birch/aspen: banded white trunk, soft rounded crown MASSES (smooth normals) with leaf tufts at the edge. */
+function birch(level: number, rng: Rng): THREE.BufferGeometry {
+  const s = new Soup()
+  const barkL = srgb(0xd9d4c4)
+  const barkD = srgb(0x55504a)
+  const segs = level === 0 ? 4 : 2
+  for (let k = 0; k < segs; k++) {
+    const y0 = (k / segs) * 4.2
+    const y1 = ((k + 1) / segs) * 4.2
+    const c = k % 3 === 1 && level === 0 ? barkD : barkL
+    solid(s, y0, y1, 0.2 - k * 0.025, 0.2 - (k + 1) * 0.025, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.75), c)
+  }
+  // Crown = a cumulus of small lumps shaded as ONE soft volume (normals from the crown centre, not per lump):
+  // bumpy painted silhouette, smooth painterly light — refer/roads roadside trees.
+  const dark = srgb(0x44603a)
+  const light = srgb(0x8c9c4c)
+  const centre: V3 = [0, 3.9, 0]
+  // Near/mid: small solid core + a cloud of camera-facing tufts over the crown (fluffy tree). Far: lumps.
+  if (level < 2) {
+    crownLump(s, centre, 1.6, centre, rng, dark, light, 0)
+    const n = level === 0 ? 44 : 18
+    for (let i = 0; i < n; i++) {
+      const u = rng.next() * 2 - 1
+      const a = rng.next() * Math.PI * 2
+      const rr = rng.range(0.75, 1.2)
+      const c: V3 = [Math.sqrt(1 - u * u) * Math.cos(a) * rr * 2.1, centre[1] + u * rr * 1.5 + 0.2, Math.sqrt(1 - u * u) * Math.sin(a) * rr * 2.1]
+      tuft(s, c, rng.range(0.8, 1.1) * (level === 1 ? 1.35 : 1), centre, dark, light)
+    }
+    return s.geometry('birch')
+  }
+  const lumps = [8, 4, 1][level]
+  for (let i = 0; i < lumps; i++) {
+    const u = rng.next() * 2 - 1
+    const a = rng.next() * Math.PI * 2
+    const rr = i === 0 ? 0 : rng.range(0.55, 1.0)
+    const c: V3 = [centre[0] + Math.sqrt(1 - u * u) * Math.cos(a) * rr * 1.1, centre[1] + u * rr * 0.75, centre[2] + Math.sqrt(1 - u * u) * Math.sin(a) * rr * 1.1]
+    const r = (i === 0 ? 1.6 : rng.range(0.9, 1.2)) * (lumps === 1 ? 1.9 : 1)
+    crownLump(s, c, r, centre, rng, dark, light, level === 0 && i < 3 ? 1 : 0)
+  }
+  return s.geometry('birch')
+}
+
+function dead(level: number, rng: Rng): THREE.BufferGeometry {
+  const s = new Soup()
+  const c = srgb(0x6e665c)
+  solid(s, 0, 6, 0.24, 0.05, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.6), c)
+  const branches = [6, 3, 0][level]
+  const m = new THREE.Matrix4()
+  const nm = new THREE.Matrix3()
+  const p = new THREE.Vector3()
+  const n = new THREE.Vector3()
+  for (let i = 0; i < branches; i++) {
+    const y = rng.range(2.2, 5.4)
+    const a = rng.next() * 6.28
+    const len = rng.range(0.9, 1.8)
+    const b = new Soup()
+    solid(b, 0, len, 0.07, 0.015, 4, c.clone().multiplyScalar(0.7), c)
+    m.makeRotationFromEuler(new THREE.Euler(0, -a, -1.0 + rng.range(-0.2, 0.2), 'YXZ')).setPosition(0, y, 0)
+    nm.getNormalMatrix(m)
+    for (let v = 0; v < b.pos.length / 3; v++) {
+      p.fromArray(b.pos, v * 3).applyMatrix4(m)
+      n.fromArray(b.nor, v * 3).applyMatrix3(nm)
+      s.vert([p.x, p.y, p.z], [n.x, n.y, n.z], SOLID_UV, new THREE.Color(b.col[v * 3], b.col[v * 3 + 1], b.col[v * 3 + 2]))
+    }
+  }
+  return s.geometry('dead')
+}
+
+export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } {
+  const build = (fn: (l: number, r: Rng) => THREE.BufferGeometry, seed: number, name: string) =>
+    [0, 1, 2].map((l) => {
+      const g = fn(l, new Rng(seed + l))
+      g.name = `${name}.lod${l}`
+      return g
+    }) as SpeciesDef['levels']
+  const species: SpeciesDef[] = [
+    { id: TreeSpecies.Spruce, name: 'spruce', levels: build(spruce, 101, 'spruce'), trunkRadius: 0.24, trunkHalfHeight: 3 },
+    { id: TreeSpecies.Dead, name: 'dead', levels: build(dead, 202, 'dead'), trunkRadius: 0.22, trunkHalfHeight: 3 },
+    { id: TreeSpecies.Fir, name: 'fir', levels: build(fir, 303, 'fir'), trunkRadius: 0.28, trunkHalfHeight: 3 },
+    { id: TreeSpecies.Pine, name: 'pine', levels: build(pine, 404, 'pine'), trunkRadius: 0.26, trunkHalfHeight: 4 },
+    { id: TreeSpecies.Birch, name: 'birch', levels: build(birch, 505, 'birch'), trunkRadius: 0.16, trunkHalfHeight: 3 },
+  ]
+  return { species, dispose: () => species.forEach((s) => s.levels.forEach((g) => g.dispose())) }
+}
+
+/** Fern: 6 arched frond cards (fern cell). Bush: blob + leaf cards. */
+export function createUndergrowth(): { fern: THREE.BufferGeometry; bush: THREE.BufferGeometry } {
+  const rng = new Rng(909)
+  const s = new Soup()
+  const dark = srgb(0x2c4a26)
+  const light = srgb(0x5f7e3c)
+  for (let f = 0; f < 6; f++) {
+    const a = (f / 6) * Math.PI * 2 + rng.range(-0.25, 0.25)
+    const len = rng.range(0.7, 1.0)
+    const dx = Math.cos(a), dz = Math.sin(a)
+    const p0: V3 = [0, 0.02, 0]
+    const p1: V3 = [dx * len * 0.8, 0.45 * len, dz * len * 0.8]
+    const hw = len * 0.28
+    card(s, p0, p1, [-dz * hw, 0.05, dx * hw], ATLAS_CELLS.fern, [0, -0.4, 0], dark, light, 0.8)
+  }
+  const fern = s.geometry('fern')
+  const b = new Soup()
+  const bd = srgb(0x2a4424), bl = srgb(0x6e8a3e)
+  blob(b, [0, 0.3, 0], 0.22, 0.8, rng, bd)
+  cluster(b, [0, 0.45, 0], 0.6, 5, ATLAS_CELLS.leaves, rng, bd, bl)
+  for (let i = 0; i < 7; i++) {
+    const a = rng.next() * Math.PI * 2, u = rng.range(0.15, 0.7)
+    tuft(b, [Math.cos(a) * 0.4, u, Math.sin(a) * 0.4], rng.range(0.22, 0.32), [0, 0.2, 0], bd, bl)
+  }
+  return { fern, bush: b.geometry('bush') }
+}
