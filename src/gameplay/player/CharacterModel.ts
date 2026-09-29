@@ -256,10 +256,12 @@ export class CharacterModel {
    * Riding pose on the BMX: seated, feet ON the turning pedals and hands ON the steering bars (two-bone IK),
    * leaning forward and into turns with the bike. `pedal` = crank angle, `steer` = fork angle (rad).
    */
-  ride(pos: THREE.Vector3, heading: number, pedal: number, lean: number, rig?: RideRig, steer = 0): void {
+  ride(pos: THREE.Vector3, heading: number, pedal: number, lean: number, rig?: RideRig, steer = 0, bikeQ?: THREE.Quaternion): void {
     this.yaw = heading
     this.root.position.copy(pos)
-    this.root.rotation.set(0, heading, lean, 'YXZ')
+    // The rider sits in the bike's frame: its full simulated orientation (lean, pitch on slopes) when given.
+    if (bikeQ) this.root.quaternion.copy(bikeQ)
+    else this.root.rotation.set(0, heading, lean, 'YXZ')
     const bones = this.bones
     for (const b of bones) b.quaternion.identity()
     if (rig) bones[B.hips].position.copy(rig.seat).add(_v.set(0, 0.03, 0.02))

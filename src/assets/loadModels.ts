@@ -19,6 +19,11 @@ export interface TruckModel {
   glass: THREE.BufferGeometry
   /** Front-left wheel, centred on its hub (right-side wheels use it turned 180°). */
   wheel: THREE.BufferGeometry
+  /** Steering wheel (rim + spokes), centred on its hub; turns about `steeringAxis` (unit, pointing forward/down
+   *  the column, away from the driver) at `steeringPivot`. */
+  steeringWheel: THREE.BufferGeometry
+  steeringPivot: [number, number, number]
+  steeringAxis: [number, number, number]
   /** Hub centres FL, FR, RL, RR (m, truck space). */
   wheelPos: [number, number, number][]
   wheelRadius: number
@@ -36,9 +41,16 @@ export interface GameModels {
 /** Truck length after normalising (m): a mid-size pickup. */
 const TRUCK_LENGTH = 5.1
 
-export async function loadModels(): Promise<GameModels> {
+/** @param onProgress 0..1 over both downloads (bytes). */
+export async function loadModels(onProgress?: (f: number) => void): Promise<GameModels> {
   const loader = new GLTFLoader()
-  const [h, t] = await Promise.all([loader.loadAsync(humanUrl), loader.loadAsync(truckUrl)])
+  const got = [0, 0], total = [87_492, 1_725_472] // fallbacks when the server sends no Content-Length
+  const track = (i: number) => (e: ProgressEvent) => {
+    got[i] = e.loaded
+    if (e.lengthComputable) total[i] = e.total
+    onProgress?.(Math.min(1, (got[0] + got[1]) / (total[0] + total[1])))
+  }
+  const [h, t] = await Promise.all([loader.loadAsync(humanUrl, track(0)), loader.loadAsync(truckUrl, track(1))])
   return { human: bakeFirstMesh(h.scene), truck: bakeTruck(t.scene) }
 }
 
@@ -141,7 +153,33 @@ function bakeTruck(scene: THREE.Object3D): TruckModel {
     .multiply(new THREE.Matrix4().makeScale(k, k, k))
     .multiply(new THREE.Matrix4().makeTranslation(-cx, 0, -cz))
   const isWheel = new Set(wheels.map((w) => w.id))
-  const body = subset(bodyM.geo, (t) => !isWheel.has(triComp[t])).applyMatrix4(norm)
+  // Steering wheel: the ring (+ its spoke/hub part) in front of the LEFT seat — ~0.35–0.6 m wide, thin, at
+  // dashboard height, a little behind the windscreen base. Found in normalised space.
+  const steer = new Set<number>()
+  const nb = new THREE.Box3()
+  for (const [id, e] of boxes) {
+    nb.copy(e.box).applyMatrix4(norm)
+    const c = nb.getCenter(new THREE.Vector3()), sz = nb.getSize(new THREE.Vector3())
+    if (c.x < -0.15 && c.z > -0.8 && c.z < -0.4 && c.y > 0.8 && c.y < 1.3 && sz.x > 0.3 && sz.x < 0.65 && sz.z < 0.25) steer.add(id)
+  }
+  if (steer.size === 0) throw new Error('pickup truck: steering wheel not found')
+  const steeringWheel = subset(bodyM.geo, (t) => steer.has(triComp[t])).applyMatrix4(norm)
+  const body = subset(bodyM.geo, (t) => !isWheel.has(triComp[t]) && !steer.has(triComp[t])).applyMatrix4(norm)
+  // Pivot = rim centre; axis = rim-plane normal from its extreme points (left↔right × bottom↔top), pointing forward.
+  const sp = steeringWheel.getAttribute('position')
+  let lx = 0, rx = 0, by = 0, ty = 0
+  for (let i = 1; i < sp.count; i++) {
+    if (sp.getX(i) < sp.getX(lx)) lx = i
+    if (sp.getX(i) > sp.getX(rx)) rx = i
+    if (sp.getY(i) < sp.getY(by)) by = i
+    if (sp.getY(i) > sp.getY(ty)) ty = i
+  }
+  const P = (i: number) => new THREE.Vector3().fromBufferAttribute(sp, i)
+  steeringWheel.computeBoundingBox()
+  const pivot = steeringWheel.boundingBox!.getCenter(new THREE.Vector3())
+  const axis = new THREE.Vector3().crossVectors(P(rx).sub(P(lx)), P(ty).sub(P(by))).normalize()
+  if (axis.z > 0) axis.negate() // forward = −Z
+  steeringWheel.translate(-pivot.x, -pivot.y, -pivot.z)
   for (const w of wheels) w.c.applyMatrix4(norm)
   const fl = wheels.reduce((a, b) => (b.c.x + b.c.z < a.c.x + a.c.z ? b : a)) // most −x (left) and −z (front)
   const wheel = subset(bodyM.geo, (t) => triComp[t] === fl.id).applyMatrix4(norm)
@@ -158,13 +196,14 @@ function bakeTruck(scene: THREE.Object3D): TruckModel {
   const gcol = new Float32Array(gn * 3)
   for (let i = 0; i < gn; i++) gc.toArray(gcol, i * 3)
   glass.setAttribute('color', new THREE.BufferAttribute(gcol, 3))
-  for (const g of [body, wheel, glass]) (g.computeBoundingBox(), g.computeBoundingSphere())
+  for (const g of [body, wheel, glass, steeringWheel]) (g.computeBoundingBox(), g.computeBoundingSphere())
   const bb = body.boundingBox!
   const map = ((bodyM.mat as THREE.MeshStandardMaterial).map ?? new THREE.Texture()) as THREE.Texture
   map.colorSpace = THREE.SRGBColorSpace
   meshes.forEach((m) => m.geo.dispose())
   return {
     body, glass, wheel, wheelPos,
+    steeringWheel, steeringPivot: pivot.toArray() as [number, number, number], steeringAxis: axis.toArray() as [number, number, number],
     wheelRadius: fl.r * k,
     half: { x: (bb.max.x - bb.min.x) / 2, y: (bb.max.y - bb.min.y) / 2, z: (bb.max.z - bb.min.z) / 2 },
     bottom: bb.min.y,

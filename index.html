@@ -13,9 +13,48 @@
       body { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
       button { cursor: pointer; }
       body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfd3d6; }
+      /* BOOT / LOADING SCREEN — static so it shows while the JS (incl. 4 MB physics wasm) downloads.
+         The app drives the bar + text through src/app/boot.ts and fades it out once the world is ready. */
+      #boot { position: fixed; inset: 0; z-index: 100; background: #07080a; overflow: hidden; transition: opacity .7s ease; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
+      #boot.done { opacity: 0; pointer-events: none; }
+      /* Instant blurred preview (inline, ~1 KB) under the real image, which fades in when it arrives. */
+      #boot .lqip { position: absolute; inset: -40px; background: #2a2030 url("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7KCIoOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/wAARCAAbADADASIAAhEBAxEB/8QAGAABAQEBAQAAAAAAAAAAAAAABgUEAwf/xAAmEAACAQMDAwQDAAAAAAAAAAABAgMABBEFEhMhMVEGMmFxM0FC/8QAFwEAAwEAAAAAAAAAAAAAAAAAAwQFAf/EABwRAAMBAQEAAwAAAAAAAAAAAAECAwAhEQQSYf/aAAwDAQACEQMRAD8ANRxEntVjT7LewyM0bhvZB75WQeSlV7XWoLOITSX5Vc4/GTRaN+5qPnvczttMUIDxgDyK0GwUDIHahL61da5cLHaXDNBGcbkBUsT8U3tLm6isEE7FWdQHDjr0qTWhB6dUmytxRo2o23GGdv1UB9TmiJBQHxSXVH5U652/AondunIQFY48LRY0QjuFdWB5gTTyHvk4rvHcAKOhDD5zWY+0fVdIxmjEAjRPsda0vU+C4jlOMxtuwTT+y9U8+BMRyEdMdiK8vZQZTkfzVO0kfhQ7jSlphgM78a7IfMx1HVy+dpxUKbUCxO5Vb7FZ5pHIBLHqKyMSe5rJoFGbpQsd/9k=") 60% 50% / cover; filter: blur(22px) saturate(1.1); }
+      #boot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 60% 50%; animation: boot-drift 28s ease-in-out infinite alternate; opacity: 0; transition: opacity .6s ease; }
+      #boot img.loaded { opacity: 1; }
+      @keyframes boot-drift { from { transform: scale(1.04) translate(0, 0); } to { transform: scale(1.14) translate(-2%, -1%); } }
+      #boot .shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(7,8,10,.55) 0%, rgba(7,8,10,0) 28%, rgba(7,8,10,0) 52%, rgba(7,8,10,.88) 100%); }
+      #boot .brand { position: absolute; left: max(24px, 6vw); top: max(20px, 7vh); color: #fff; text-shadow: 0 2px 18px rgba(0,0,0,.45); }
+      #boot h1 { margin: 0; font-size: clamp(44px, 9vw, 104px); letter-spacing: .32em; font-weight: 800; line-height: 1; }
+      #boot .tag { margin-top: 10px; font-size: clamp(12px, 1.6vw, 17px); letter-spacing: .28em; text-transform: uppercase; opacity: .85; }
+      #boot .foot { position: absolute; left: max(24px, 6vw); right: max(24px, 6vw); bottom: max(22px, 6vh); color: #e8e4dc; }
+      #boot .row { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; font-size: 13px; letter-spacing: .08em; margin-bottom: 10px; }
+      #boot .status { opacity: .9; }
+      #boot .pct { font-variant-numeric: tabular-nums; opacity: .75; }
+      #boot .bar { height: 4px; border-radius: 4px; background: rgba(255,255,255,.18); overflow: hidden; }
+      #boot .fill { height: 100%; width: 4%; border-radius: 4px; background: linear-gradient(90deg, #ffb86b, #ffe2a8); box-shadow: 0 0 12px rgba(255,190,110,.7); transition: width .35s ease; }
+      #boot .tip { margin-top: 14px; font-size: 12.5px; opacity: .7; min-height: 1.4em; transition: opacity .4s; }
+      #boot .err { color: #ff9a8a; opacity: 1; }
+      /* Before the app's first report (JS still downloading): a moving shimmer instead of a frozen 0 %. */
+      #boot:not(.live) .fill { width: 30%; animation: boot-scan 1.6s ease-in-out infinite; }
+      #boot:not(.live) .pct { visibility: hidden; }
+      @keyframes boot-scan { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+      @media (prefers-reduced-motion: reduce) { #boot img { animation: none; } }
+      /* Portrait phones see ~a quarter of the image width: centre on the stranger + the sun. */
+      @media (orientation: portrait) { #boot img { object-position: 51% 50%; } #boot .lqip { background-position: 51% 50%; } }
     </style>
   </head>
   <body>
+    <div id="boot" role="status" aria-live="polite">
+      <div class="lqip"></div>
+      <img src="/src/assets/ui/loading-hero.jpg" alt="" fetchpriority="high" onload="this.classList.add('loaded')" />
+      <div class="shade"></div>
+      <div class="brand"><h1>DARK</h1><div class="tag">A new world every night</div></div>
+      <div class="foot">
+        <div class="row"><span class="status" id="boot-status">Downloading the game…</span><span class="pct" id="boot-pct">0%</span></div>
+        <div class="bar"><div class="fill" id="boot-fill"></div></div>
+        <div class="tip" id="boot-tip">Tip: the truck climbs almost any hill — the bike doesn't.</div>
+      </div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

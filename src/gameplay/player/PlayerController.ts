@@ -14,8 +14,6 @@ const SPRINT = 6.5
 const JUMP = 6.2
 const GRAVITY = -20
 const ACCEL = 12
-const BIKE_MAX = 9
-const BIKE_SPRINT = 12.5
 
 /**
  * First-person character on Rapier's KinematicCharacterController.
@@ -40,7 +38,8 @@ export class PlayerController {
   knock = 0
   /** Dead: no input at all. */
   dead = false
-  /** Riding state (set by Bike). When `riding`, W/S = pedal/brake, A/D = steer, the body follows `heading`. */
+  /** Riding state, written by Bike from its simulation (gameplay/vehicle/VehicleSim BikeSim). While riding the
+   *  player is carried like in the truck (`inVehicle`): collider off, teleported onto the saddle each step. */
   readonly ride = { riding: false, heading: 0, speed: 0, steer: 0, travelled: 0 }
   /** Inside a car: the car moves this body (collider disabled); no own movement. */
   inVehicle = false
@@ -123,25 +122,10 @@ export class PlayerController {
     this.wish.multiplyScalar(speed)
 
     const k = 1 - Math.exp(-(locked ? 2.5 : ACCEL) * dt) // thrown players slide to a stop
-    if (this.ride.riding) {
-      // BMX: pedal (W / stick up) accelerates, S brakes then reverses slowly, A/D steer; turn rate ∝ speed.
-      const r = this.ride
-      const thr = locked ? 0 : Math.max(-1, Math.min(1, (i.down('KeyW') ? 1 : 0) - (i.down('KeyS') ? 1 : 0) + i.touchMove.y))
-      const steerIn = locked ? 0 : Math.max(-1, Math.min(1, (i.down('KeyD') ? 1 : 0) - (i.down('KeyA') ? 1 : 0) + i.touchMove.x))
-      r.steer += (steerIn - r.steer) * Math.min(1, dt * 6)
-      const max = i.down('ShiftLeft') || stick > 0.92 ? BIKE_SPRINT : BIKE_MAX
-      if (thr > 0) r.speed += (max * thr - r.speed) * (1 - Math.exp(-0.8 * dt))
-      else if (thr < 0) r.speed = Math.max(-2.5, r.speed - 9 * dt)
-      else r.speed *= Math.exp(-0.35 * dt)
-      r.heading -= r.steer * 0.5 * Math.min(Math.abs(r.speed), 8) * Math.sign(r.speed) / 1.6 * dt
-      this.velocity.x = -Math.sin(r.heading) * r.speed
-      this.velocity.z = -Math.cos(r.heading) * r.speed
-    } else {
-      this.velocity.x += (this.wish.x - this.velocity.x) * k
-      this.velocity.z += (this.wish.z - this.velocity.z) * k
-    }
+    this.velocity.x += (this.wish.x - this.velocity.x) * k
+    this.velocity.z += (this.wish.z - this.velocity.z) * k
     if (this.grounded && this.velocity.y <= 0.5) {
-      this.velocity.y = this.jumpQueued && !locked && !this.ride.riding ? JUMP : Math.max(this.velocity.y, -2)
+      this.velocity.y = this.jumpQueued && !locked ? JUMP : Math.max(this.velocity.y, -2)
     }
     this.jumpQueued = false
     this.velocity.y += GRAVITY * dt
@@ -152,17 +136,6 @@ export class PlayerController {
       z: this.velocity.z * dt,
     })
     const mv = this.controller.computedMovement()
-    if (this.ride.riding) {
-      // Hitting a tree/pole/wall kills the speed; track distance for wheel spin.
-      // Blocked = the controller moved us much less than asked in 3D (climbing a slope moves partly UP, which
-      // is not a collision). Slopes slow you uphill and speed you up downhill instead.
-      const want = Math.hypot(this.velocity.x, this.velocity.z) * dt
-      const got3 = Math.hypot(mv.x, mv.y, mv.z)
-      if (want > 1e-3 && got3 / want < 0.45) this.ride.speed *= got3 / want
-      const horiz = Math.hypot(mv.x, mv.z)
-      if (horiz > 1e-4) this.ride.speed -= (mv.y / horiz) * 7 * dt * Math.sign(this.ride.speed)
-      this.ride.travelled += got3 * Math.sign(this.ride.speed)
-    }
     this.grounded = this.controller.computedGrounded()
     if (this.grounded && this.velocity.y < 0) this.velocity.y = 0
     const t = this.body.translation()
@@ -173,6 +146,13 @@ export class PlayerController {
   /** Called after physics.advance with its interpolation alpha. */
   interpolate(alpha: number): void {
     this.renderPosition.lerpVectors(this.prev, this.curr, alpha)
+  }
+
+  /** Carried by a vehicle (collider disabled): move without breaking render interpolation (prev stays). */
+  carryTo(p: THREE.Vector3): void {
+    this.body.setTranslation({ x: p.x, y: p.y + CENTER, z: p.z }, true)
+    this.curr.copy(p)
+    this.velocity.set(0, 0, 0)
   }
 
   teleport(p: THREE.Vector3): void {

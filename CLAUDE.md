@@ -14,5 +14,5 @@ Browser co-op survival horror: React + R3F + Three.js r186 + Rapier (compat) + T
 - World generation must stay deterministic (no `Math.random`, hash-based RNG keyed by seed/cell/layer).
 - Don't add dependencies without a concrete, stated reason (see ARCHITECTURE.md §1).
 
-Commands: `npm run dev` · `npm run typecheck` · `npm test` (determinism, seams, collider/mesh agreement) ·
+Commands: `npm run dev` · `npm run typecheck` · `npm test` (determinism, seams, collider/mesh agreement, vehicle simulation) ·
 `npm run build` · `npm run validate:assets [dir] [--strict]` · `npm run dev:lan` (test on a phone over Wi-Fi).

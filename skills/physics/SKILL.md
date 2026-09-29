@@ -28,10 +28,20 @@ Per-chunk physics = **one fixed RigidBody** owning: 1 heightfield collider + N t
 HULL per rock (the rock's own 12-point shape, `propGeometries.ROCK_HULL`, scaled/rotated like its instance —
 tested: a ray onto every rock hits it) + pole/fence/building boxes. Removing the body removes all its colliders.
 
-**Pickup truck** (`gameplay/vehicle/Car.ts`): kinematic body + box collider ROTATED to heading AND ground pitch
-(an unrotated box hangs off crests and stalls from 46°), moved by a KinematicCharacterController with
-`maxSlopeClimb 72°` (a 50° hillside has local patches > 60°), autostep 0.5 m, snap 1 m. Measured on generated
-terrain without trees (8 s full throttle): 14° → +10 m, 30° → +32 m, 49° → +47 m, 59° → +78 m.
+**Vehicles are SIMULATED** (`gameplay/vehicle/VehicleSim.ts`, tested headless in `tests/vehicle.test.ts`): Rapier
+DYNAMIC bodies + `DynamicRayCastVehicleController` (per-wheel spring/damper suspension, engine force, brakes, steering,
+tyre friction limit + side grip). Rapier's positive steering turns LEFT — we negate it.
+- **Truck** (1750 kg, COM 0.62 m): 4×4 with force/power curve (12 kN, 120 kW; automatic low range adds up to
+  24 kN nose-up), drive split by wheel load (traction control), drag + rolling resistance, speed-sensitive steering,
+  handbrake = locked slippery rear, anti-roll assist, wheelie/back-flip control on steep climbs, auto-righting after
+  2 s on its side. Measured: 0→72 km/h 4.7 s, top ≈ 90 km/h, 25 m/s → 0 in 27 m, climbs 20°–60° from standstill.
+- **Bike** (85 kg with rider, COM ≈ 0.9 m): 2 centre-line wheels, human power (900 W, 1500 W sprint, 900 N max),
+  weight shift over the bars. BALANCE = roll is a hard constraint while riding, eased toward the physical lean
+  φ = atan(v²·tanδ/(g·L)) — a torque PD on the tiny roll inertia explodes at 60 Hz and a velocity servo loses to the
+  tyres above ~8 m/s (both measured). Crash = −5.5 m/s within 0.15 s → rider thrown + knocked down, constraint
+  released, bike falls over. Measured: cruise 9.6 m/s, leans ±28° in full-lock turns, climbs 18°, not 32° (push it).
+- Simulated only where the ground has colliders (physics ring); a parked truck outside it is frozen, a parked bike
+  is kinematic scenery. Cost: ≈ +0.1 ms physics per 60 Hz step while driving (M4, HIGH and LOW).
 
 ## 3. When to use
 

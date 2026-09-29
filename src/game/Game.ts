@@ -115,12 +115,20 @@ export class Game {
   camera: THREE.PerspectiveCamera | null = null
   private truckMapLow: THREE.Texture | undefined
 
-  static async create(opts: GameOptions): Promise<Game> {
+  /** @param onProgress loading-screen progress (0..1) + stage text. */
+  static async create(opts: GameOptions, onProgress?: (f: number, status: string) => void): Promise<Game> {
     // Art style is fixed per session and must be known before any material/atlas/tree is built (artStyle.ts).
     ART.style = opts.look ?? loadSettings().artStyle
     applyShadowEdgeFade() // global shader-chunk patch; must precede any program compile
     // Models load in parallel with the physics wasm (both small: ~1.8 MB total).
-    const [R, models] = await Promise.all([PhysicsWorld.load(), loadModels()])
+    let phys = 0, mdl = 0
+    const report = () => onProgress?.(0.12 + 0.3 * (phys * 0.5 + mdl * 0.5), mdl < 1 ? 'Loading the truck and the stranger…' : 'Waking up physics…')
+    report()
+    const [R, models] = await Promise.all([
+      PhysicsWorld.load().then((r) => ((phys = 1), report(), r)),
+      loadModels((f) => ((mdl = f), report())),
+    ])
+    onProgress?.(0.45, 'Growing a new world…')
     return new Game(opts, new PhysicsWorld(R), models)
   }
 
@@ -171,7 +179,7 @@ export class Game {
     this.cameraCtl = new CameraController(physics, this.world.fields, this.character, this.blobShadow)
     this.cameraCtl.mode = this.settings.camera
     this.horizon = new HorizonTerrain(opts.seed)
-    this.bike = new Bike(this.materials.character, this.player, this.character, this.world.fields)
+    this.bike = new Bike(this.materials.character, this.player, this.character, this.world.fields, physics, this.input)
     this.bike.parkNear(spawn, this.player.yaw, 2.4)
     this.car = new Car(this.materials.character, models.truck, physics, this.world.fields, this.player, this.character, this.input)
     {
@@ -386,6 +394,7 @@ export class Game {
           this.physics.advance(dt, (fdt) => {
             p.fixedUpdate(fdt)
             this.car.fixedUpdate(fdt)
+            this.bike.fixedUpdate(fdt)
           })
           p.interpolate(this.physics.alpha)
           if (p.curr.y < this.world.fields.height(p.curr.x, p.curr.z) - 4) {
@@ -421,7 +430,7 @@ export class Game {
         },
       })
       .add({ name: 'camera', update: (dt) => this.camera && this.cameraCtl.update(dt, this.camera, p, this.lighting.flashlightOn) })
-      .add({ name: 'bike', update: (dt) => this.bike.update(dt) }) // after camera: overrides the rider pose
+      .add({ name: 'bike', update: (dt) => this.bike.update(dt, this.physics.alpha) }) // after camera: overrides the rider pose
       .add({
         name: 'car',
         update: (dt) => {
@@ -499,6 +508,20 @@ export class Game {
           this.physicsDebug.update()
         },
       })
+  }
+
+  /**
+   * Loading progress of the world around the player (0..1): chunks of the render ring built, the ground under
+   * the player has colliders, the horizon terrain arrived. 1 = ready to show.
+   */
+  worldReadiness(): number {
+    const R = this.world.renderRadius
+    const ring = (2 * R + 1) ** 2
+    const built = Math.min(1, this.world.chunks.size / ring)
+    const p = this.player.curr
+    const ground = this.world.isReadyAt(p.x, p.z) ? 1 : 0
+    const horizon = this.horizon.mesh.visible ? 1 : 0
+    return Math.min(built, 1) * 0.8 + ground * 0.1 + horizon * 0.1
   }
 
   /** Back on the road near where you fell, full health; nearby monsters retreat. */

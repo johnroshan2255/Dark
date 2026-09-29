@@ -9,11 +9,12 @@
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "validate:assets": "node scripts/validate-assets.mjs",
-    "test": "npm run test:world && npm run test:adaptive && npm run test:time",
+    "test": "npm run test:world && npm run test:adaptive && npm run test:time && npm run test:vehicle",
     "test:world": "rolldown tests/world.test.ts --format esm --platform node --external @dimforge/rapier3d-compat -o node_modules/.cache/tests/world.test.mjs --log-level warn && node node_modules/.cache/tests/world.test.mjs",
     "test:adaptive": "rolldown tests/adaptive.test.ts --format esm --platform node -o node_modules/.cache/tests/adaptive.test.mjs --log-level warn && node node_modules/.cache/tests/adaptive.test.mjs",
     "dev:lan": "vite --host",
-    "test:time": "rolldown tests/time.test.ts --format esm --platform node -o node_modules/.cache/tests/time.test.mjs --log-level warn && node node_modules/.cache/tests/time.test.mjs"
+    "test:time": "rolldown tests/time.test.ts --format esm --platform node -o node_modules/.cache/tests/time.test.mjs --log-level warn && node node_modules/.cache/tests/time.test.mjs",
+    "test:vehicle": "rolldown tests/vehicle.test.ts --format esm --platform node --external @dimforge/rapier3d-compat -o node_modules/.cache/tests/vehicle.test.mjs --log-level warn && node node_modules/.cache/tests/vehicle.test.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

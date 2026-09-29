@@ -9,6 +9,7 @@ import { GameHud } from '../ui/GameHud'
 import { SettingsPanel } from '../ui/SettingsPanel'
 import { Toolbar } from '../ui/Toolbar'
 import { GameCanvas } from './Canvas'
+import { bootError, bootFinish, bootProgress } from './boot'
 
 /**
  * Every new game gets a fresh random world unless ?seed= is given (co-op joiners receive the host's
@@ -37,7 +38,8 @@ export function App() {
   useEffect(() => {
     let cancelled = false
     let created: Game | null = null
-    Game.create(readOptions())
+    bootProgress(0.1, 'Starting…')
+    Game.create(readOptions(), bootProgress)
       .then((g) => {
         if (cancelled) g.dispose()
         else {
@@ -46,15 +48,36 @@ export function App() {
           if (import.meta.env.DEV) (window as unknown as { __game?: Game }).__game = g
         }
       })
-      .catch((e: unknown) => setError(String(e)))
+      .catch((e: unknown) => {
+        setError(String(e))
+        bootError(String(e))
+      })
     return () => {
       cancelled = true
       created?.dispose()
     }
   }, [])
 
+  // World streaming behind the loading screen: fade it out once the ring around the player is built, the
+  // ground has colliders, and a few frames have rendered (first-frame shader compiles happen under cover).
+  useEffect(() => {
+    if (!game) return
+    const t0 = performance.now()
+    let readyAt = 0
+    const id = window.setInterval(() => {
+      const r = game.worldReadiness()
+      bootProgress(0.45 + 0.52 * r, r < 0.8 ? 'Growing a new world…' : r < 1 ? 'Raising the hills…' : 'Almost there…')
+      if (r >= 1 && !readyAt) readyAt = performance.now()
+      if ((readyAt && performance.now() - readyAt > 400) || performance.now() - t0 > 25_000) {
+        window.clearInterval(id)
+        bootFinish()
+      }
+    }, 100)
+    return () => window.clearInterval(id)
+  }, [game])
+
   if (error) return <Overlay>Failed to start: {error}</Overlay>
-  if (!game) return <Overlay>Loading…</Overlay>
+  if (!game) return null // the loading screen (index.html #boot) is showing
   return (
     <>
       <GameCanvas game={game} />
