@@ -17,6 +17,8 @@ export interface PropGeometries {
   /** Tree species library (5 species × 3 detail levels). */
   trees: SpeciesDef[]
   rock: THREE.BufferGeometry
+  /** Mid-distance rock (LOD1 chunks): same shape family, 20 tris instead of 80. */
+  rockFar: THREE.BufferGeometry
   fern: THREE.BufferGeometry
   bush: THREE.BufferGeometry
   pole: THREE.BufferGeometry
@@ -28,36 +30,63 @@ export interface PropGeometries {
 }
 
 /**
- * Boulder: lumpy low-poly rock, Genshin warm-grey stone with pale tops and bright moss caps. Per-FACE colours (flat look).
+ * Boulder: lumpy low-poly rock with SOFT painted shading (refer/ + forest-house study): normals bent toward
+ * the rock's centre so it lights as one rounded volume, a warm-grey vertical gradient in the vertex colours;
+ * brush strokes, pale tops and ragged moss caps are painted by the STONE surface shader (shaders/paint.ts).
  */
-function makeRock(): THREE.BufferGeometry {
-  const g0 = new THREE.IcosahedronGeometry(1, 1)
+/** The boulder's deterministic lumpy shape (shared by the meshes and the physics hull). */
+function rockVertex(x: number, y: number, z: number, out: THREE.Vector3): THREE.Vector3 {
+  const k = 0.72 + (hash4(Math.round(x * 100), Math.round(y * 100), Math.round(z * 100)) / 4294967296) * 0.5
+  return out.set(x * k * 1.15, Math.max(y * k * 0.62, -0.25), z * k)
+}
+
+/**
+ * Collision hull for a unit rock (the 12-vertex far-LOD shape, same jitter + base offset as the meshes):
+ * PhysicsWorld builds one convex hull per rock from it, scaled/rotated like the instance.
+ */
+export const ROCK_HULL: Float32Array = (() => {
+  const g = new THREE.IcosahedronGeometry(1, 0)
+  const p = g.getAttribute('position')
+  const seen = new Set<string>()
+  const pts: number[] = []
+  const v = new THREE.Vector3()
+  for (let i = 0; i < p.count; i++) {
+    rockVertex(p.getX(i), p.getY(i), p.getZ(i), v)
+    const key = `${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    pts.push(v.x, v.y + 0.2, v.z)
+  }
+  g.dispose()
+  return new Float32Array(pts)
+})()
+
+function makeRock(detail = 1): THREE.BufferGeometry {
+  const g0 = new THREE.IcosahedronGeometry(1, detail)
   const pos0 = g0.getAttribute('position')
+  const rv = new THREE.Vector3()
   for (let i = 0; i < pos0.count; i++) {
-    const x = pos0.getX(i), y = pos0.getY(i), z = pos0.getZ(i)
-    const k = 0.72 + (hash4(Math.round(x * 100), Math.round(y * 100), Math.round(z * 100)) / 4294967296) * 0.5
-    pos0.setXYZ(i, x * k * 1.15, Math.max(y * k * 0.62, -0.25), z * k)
+    rockVertex(pos0.getX(i), pos0.getY(i), pos0.getZ(i), rv)
+    pos0.setXYZ(i, rv.x, rv.y, rv.z)
   }
   const g = g0.index ? g0.toNonIndexed() : g0
   g.deleteAttribute('uv')
+  g.computeVertexNormals() // per-face (non-indexed)
   const pos = g.getAttribute('position')
+  const nor = g.getAttribute('normal')
   const col = new Float32Array(pos.count * 3)
-  // Genshin stone: warm light grey, pale sunlit tops, bright moss caps.
-  const body = srgb(0x6a6c74), mid = srgb(0x8c8c90), top = srgb(0xb8b4a8), moss = srgb(0x6e9a3e)
-  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), n = new THREE.Vector3(), tmp = new THREE.Color()
-  for (let f = 0; f < pos.count; f += 3) {
-    a.fromBufferAttribute(pos, f); b.fromBufferAttribute(pos, f + 1); c.fromBufferAttribute(pos, f + 2)
-    n.crossVectors(b.clone().sub(a), c.clone().sub(a)).normalize()
-    const up = n.y
-    tmp.copy(body).lerp(mid, THREE.MathUtils.smoothstep(up, -0.3, 0.35)).lerp(top, THREE.MathUtils.smoothstep(up, 0.35, 0.85))
-    if (up > 0.7 && hash4(f, 7) / 4294967296 < 0.6) tmp.lerp(moss, 0.6)
-    for (let k = 0; k < 3; k++) tmp.toArray(col, (f + k) * 3)
+  const body = srgb(0x7a7a80), top = srgb(0x9c9a96), tmp = new THREE.Color(), v = new THREE.Vector3(), n = new THREE.Vector3()
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i)
+    n.fromBufferAttribute(nor, i).multiplyScalar(0.35).add(v.clone().setY(v.y - 0.1).normalize().multiplyScalar(0.65)).normalize()
+    nor.setXYZ(i, n.x, n.y, n.z)
+    tmp.copy(body).lerp(top, THREE.MathUtils.smoothstep(v.y, -0.2, 0.5))
+    tmp.toArray(col, i * 3)
   }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3))
   g.translate(0, 0.2, 0)
-  g0.dispose()
-  g.name = 'rock'
-  g.computeVertexNormals()
+  if (g !== g0) g0.dispose()
+  g.name = detail ? 'rock' : 'rockFar'
   g.computeBoundingSphere()
   return g
 }
@@ -65,6 +94,7 @@ function makeRock(): THREE.BufferGeometry {
 export function createPropGeometries(): PropGeometries {
   const lib = createTreeLibrary()
   const rock = makeRock()
+  const rockFar = makeRock(0)
   const { fern, bush } = createUndergrowth()
   const pole = createPoleGeometry()
   const fence = createFenceGeometry()
@@ -79,6 +109,7 @@ export function createPropGeometries(): PropGeometries {
   return {
     trees: lib.species,
     rock,
+    rockFar,
     fern,
     bush,
     pole,
@@ -87,7 +118,7 @@ export function createPropGeometries(): PropGeometries {
     poi,
     dispose: () => {
       lib.dispose()
-      ;[rock, fern, bush, pole, fence].forEach((g) => g.dispose())
+      ;[rock, rockFar, fern, bush, pole, fence].forEach((g) => g.dispose())
       wire.dispose()
       poi.forEach((g) => g.dispose())
     },

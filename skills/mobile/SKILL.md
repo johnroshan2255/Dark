@@ -146,6 +146,13 @@ and sampling stay consistent; the frustum just lags N frames (≈0.3 m at sprint
 ## 9. Common mistakes
 
 - Hill-top views: everything is in the frustum at once. Cap it with the tier's `viewDistance` (fog + `ChunkVisibility.maxDistance` + horizon size), not with post effects.
+- DETAIL-BOUNDED RENDERING (both art styles): streamed detail (trees, rocks, props, buildings) dithers out at
+  the ring edge (`uCullFade`, ≤ `viewDistance`: LOW ~152 m, MED ~216, HIGH ~216) and chunks past it are not drawn.
+  Beyond, ONE warped horizon-terrain mesh (LOW 2.4 km/40², MED 3.2 km/52², HIGH 4.4 km/72²; dense near the player,
+  coarse at the rim) shows real hills to the skyline under a PARTIAL blue-green haze (TimeOfDay `fogMax`/`landHaze`)
+  — no white fog wall; only its outer rim fades into the sky. Hilltop view HIGH: GPU 7.5–8.3 ms (M4 2560×1440). HIGH ring 3 (was 4), tight LOD rings, low-poly rocks at
+  LOD1 (20 tris vs 80), HIGH grass radius 22 m (was 28). Measured M4 2560×1440, 5 spots: HIGH draws 225–281 →
+  176–188, tris 815–1087k → 540–817k, GPU −0.1…1.1 ms, CPU −0.2…0.4 ms; LOW tris −1…24 %, GPU −0.1…0.5 ms.
 
 - Reading `RADIUS.render`/`LOD_RINGS` constants — they no longer exist; use `game.quality`.
 - Letting `fog.far` exceed `fogLimit(radius)` → the ring edge pops on LOW.

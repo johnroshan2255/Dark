@@ -21,6 +21,18 @@ export const globalUniforms = {
   uScatterAmount: { value: 0.6 },
   /** Genshin cel-shading strength 0..1 (hard two-tone light/shadow terminator), per time of day. */
   uToon: { value: 1 },
+  /** Distance fog on land: max amount, land tint (× sky colour), horizon-rim fade (start, end m). Per frame. */
+  uFogMax: { value: 1 },
+  uLandHaze: { value: new THREE.Color(1, 1, 1) },
+  uFarEdge: { value: new THREE.Vector2(1e5, 1e5 + 1) },
+  /** Streamed-detail edge: trees/props dither out between x and y (view depth, m) — not drawn beyond. */
+  uCullFade: { value: new THREE.Vector2(1e5, 1e5 + 1) },
+  /** STORYBOOK art style: painted-shading weight, the painted light colour, world-up in view space. */
+  uStoryAmt: { value: 1 },
+  uStoryLight: { value: new THREE.Color(1, 1, 1) },
+  uUpView: { value: new THREE.Vector3(0, 1, 0) },
+  /** Shared hand-painted surface texture (materials/BrushTexture.ts), set by MaterialLibrary. */
+  uBrush: { value: null as THREE.Texture | null },
 }
 
 /**

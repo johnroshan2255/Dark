@@ -95,7 +95,7 @@ export class CameraController {
     if (tpp) {
       const moving = p.horizontalSpeed > 0.4
       const targetYaw = flashlightOn || !moving ? (flashlightOn ? p.yaw : this.character.yaw) : Math.atan2(-p.velocity.x, -p.velocity.z)
-      this.character.animate(dt, pos, targetYaw, p.horizontalSpeed, p.grounded, flashlightOn, p.pitch)
+      this.character.animate(dt, pos, targetYaw, p.horizontalSpeed, p.grounded, flashlightOn, p.pitch, p.velocity.y)
       this.character.root.rotation.x = -k * Math.PI * 0.48 // lying on the ground when knocked down
       this.character.root.position.y += k * 0.25
       this.blob.position.set(pos.x, this.fields.height(pos.x, pos.z) + 0.03, pos.z)

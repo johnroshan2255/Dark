@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type { WorldFields } from '../../world/WorldFields'
-import type { CharacterModel } from '../player/CharacterModel'
+import type { CharacterModel, RideRig } from '../player/CharacterModel'
 import type { PlayerController } from '../player/PlayerController'
 
 /**
@@ -9,10 +9,23 @@ import type { PlayerController } from '../player/PlayerController'
  * Riding reuses the player's Rapier character controller (collides with trees/poles, climbs slopes) with bike
  * dynamics in PlayerController (pedal / brake / steer, speed-dependent turning). This class owns the model:
  * wheels spin with distance, fork steers, bike + rider lean into turns, the rider pedals; the camera
- * auto-follows the heading when the mouse is idle. ~6 draws (shared vertex-colour material).
+ * auto-follows the heading when the mouse is idle. ~7 draws (shared vertex-colour material).
+ * Scaled to a small BMX (SCALE) so the stickman rider's feet reach the pedals; the crank arms turn with the
+ * wheels and the rider's feet/hands follow the pedals and the steered bars by IK (CharacterModel.ride).
  */
 const srgb = (h: number) => new THREE.Color().setHex(h, THREE.SRGBColorSpace)
 const WHEEL_R = 0.33
+const SCALE = 0.85
+const CRANK_R = 0.17
+/** Rider contact points in (scaled) bike space. */
+export const BIKE_RIG: RideRig = {
+  seat: new THREE.Vector3(0, 0.925, 0.16).multiplyScalar(SCALE),
+  crank: new THREE.Vector3(0, 0.36, 0.1).multiplyScalar(SCALE),
+  crankR: CRANK_R * SCALE,
+  pedalX: 0.13 * SCALE,
+  fork: new THREE.Vector3(0, 0.8, -0.46).multiplyScalar(SCALE),
+  grip: new THREE.Vector3(0.3, 0.3, 0.05).multiplyScalar(SCALE),
+}
 
 function coloured(g: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
   const n = g.index ? g.toNonIndexed() : g
@@ -56,6 +69,7 @@ export class Bike {
   private readonly fork = new THREE.Group()
   private readonly front: THREE.Mesh
   private readonly rear: THREE.Mesh
+  private readonly crank = new THREE.Group()
   private readonly geos: THREE.BufferGeometry[] = []
   readonly parked = new THREE.Vector3()
   parkedHeading = 0
@@ -72,6 +86,7 @@ export class Bike {
   ) {
     this.root.name = 'bmx'
     this.root.add(this.lean)
+    this.lean.scale.setScalar(SCALE)
     const RED = 0xb3262a
     const frame = mergeGeometries([
       tube(v(0, WHEEL_R, 0.52), v(0, 0.72, -0.05), 0.03, RED), // down/seat tube area
@@ -101,8 +116,18 @@ export class Bike {
     this.fork.add(this.front)
     this.rear = new THREE.Mesh(wg, material)
     this.rear.position.set(0, WHEEL_R, 0.52)
-    this.lean.add(frameMesh, this.fork, this.rear)
-    for (const m of [frameMesh, this.front, this.rear, this.fork.children[0] as THREE.Mesh]) (m as THREE.Mesh).castShadow = true
+    // Crank arms + pedals (turn with the wheels; the rider's feet are IK'd onto them).
+    const crankG = mergeGeometries([
+      tube(v(0.1, 0, 0), v(0.1, 0, -CRANK_R), 0.014, 0x3a3a3a), tube(v(-0.1, 0, 0), v(-0.1, 0, CRANK_R), 0.014, 0x3a3a3a),
+      coloured(new THREE.BoxGeometry(0.09, 0.02, 0.06).translate(0.14, 0, -CRANK_R), 0x222222),
+      coloured(new THREE.BoxGeometry(0.09, 0.02, 0.06).translate(-0.14, 0, CRANK_R), 0x222222),
+    ])!
+    this.geos.push(crankG)
+    const crankMesh = new THREE.Mesh(crankG, material)
+    this.crank.add(crankMesh)
+    this.crank.position.set(0, 0.36, 0.1)
+    this.lean.add(frameMesh, this.fork, this.rear, this.crank)
+    for (const m of [frameMesh, this.front, this.rear, crankMesh, this.fork.children[0] as THREE.Mesh]) (m as THREE.Mesh).castShadow = true
   }
 
   /** Park the bike on the verge `side` m to the right of the player, facing along its yaw. */
@@ -161,17 +186,19 @@ export class Bike {
       this.leanAngle += (targetLean - this.leanAngle) * Math.min(1, dt * 5)
       this.lean.rotation.z = this.leanAngle
       this.fork.rotation.y = -r.steer * 0.45
-      const spin = -r.travelled / WHEEL_R
+      const spin = -r.travelled / (WHEEL_R * SCALE)
       this.front.rotation.x = spin
       this.rear.rotation.x = spin
       this.pedal = spin * 0.55
+      this.crank.rotation.x = this.pedal
       // Camera follows the heading when the player isn't steering the view.
       if (p.lookIdle > 0.6) {
         let d = r.heading - p.yaw
         d = Math.atan2(Math.sin(d), Math.cos(d))
         p.yaw += d * Math.min(1, dt * 4)
       }
-      this.character.ride(pos, r.heading, this.pedal, this.leanAngle)
+      this.root.updateMatrixWorld()
+      this.character.ride(pos, r.heading, this.pedal, this.leanAngle, BIKE_RIG, this.fork.rotation.y)
     } else {
       this.root.position.copy(this.parked)
       this.root.rotation.set(0, this.parkedHeading, 0)

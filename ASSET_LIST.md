@@ -67,3 +67,12 @@ kid with cap + backpack (rigged, 5–8 k tris, 1024²) · BMX (2–4 k) · stalk
 Drop the `.glb` files into `src/assets/models/<category>/` and tell me. I will validate, simplify LODs, compress
 textures, remap them onto the shared painterly material (rim light, sky fog, haze), and swap them into the
 procedural scatter in place of the code-built shapes — no gameplay changes needed.
+
+## Credits (CC-BY-4.0 — attribution required, keep this section)
+
+| Asset | File | Author | Source | Licence | Notes |
+|---|---|---|---|---|---|
+| Player character "Stickman" | `src/assets/models/characters/human.lod0.glb` | ogulcantopsakal | https://sketchfab.com/3d-models/stickman-76d732e35c23477fae863dfe280b30bb | CC-BY-4.0 | static mesh; rigged + animated in code (`CharacterModel`) |
+| "Pickup Truck" | `src/assets/models/vehicles/pickup_truck.lod0.glb` | 00amza | https://sketchfab.com/3d-models/pickup-truck-047615f53e2d45b9a1a2a4dd203d459c | CC-BY-4.0 | wheels split out at load (`assets/loadModels`) |
+
+The in-game credits screen (when there is one) must list these too.

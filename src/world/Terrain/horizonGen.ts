@@ -15,6 +15,17 @@ export interface FarTerrainData {
   colors: Float32Array
 }
 
+/**
+ * WARPED grid: vertex i of res sits at offset farOffset(i) from the centre — dense near the player (where it
+ * meets the streamed chunks), coarse toward the multi-km rim — so hills reach the horizon for a few k tris.
+ * Shared by the worker (sampling) and HorizonTerrain (mesh) so both agree exactly.
+ */
+export const FAR_WARP = 2
+export function farOffset(i: number, res: number, size: number): number {
+  const t = (2 * i) / res - 1
+  return Math.sign(t) * Math.pow(Math.abs(t), FAR_WARP) * size * 0.5
+}
+
 const FOREST = [0.03, 0.058, 0.04]
 const TEAL = [0.02, 0.045, 0.045]
 const OLIVE_C = [0.07, 0.085, 0.03]
@@ -23,12 +34,10 @@ const AUTUMN = [0.22, 0.08, 0.025]
 
 export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, size: number, res: number): FarTerrainData {
   const n = res + 1
-  const step = size / res
-  const x0 = cx - size / 2
-  const z0 = cz - size / 2
+  const off = Array.from({ length: n }, (_, i) => farOffset(i, res, size))
   const heights = new Float32Array(n * n)
   const colors = new Float32Array(n * n * 3)
-  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) heights[j * n + i] = fields.height(x0 + i * step, z0 + j * step)
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) heights[j * n + i] = fields.height(cx + off[i], cz + off[j])
   const mix = (c: number[], t: [number, number, number] | readonly number[], k: number) => {
     c[0] += (t[0] - c[0]) * k
     c[1] += (t[1] - c[1]) * k
@@ -37,12 +46,13 @@ export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, 
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
       const k = j * n + i
-      const x = x0 + i * step
-      const z = z0 + j * step
+      const x = cx + off[i]
+      const z = cz + off[j]
       const h = heights[k]
-      const hx = heights[j * n + Math.min(n - 1, i + 1)] - heights[j * n + Math.max(0, i - 1)]
-      const hz = heights[Math.min(n - 1, j + 1) * n + i] - heights[Math.max(0, j - 1) * n + i]
-      const slope = Math.hypot(hx, hz) / (2 * step)
+      const i0 = Math.max(0, i - 1), i1 = Math.min(n - 1, i + 1), j0 = Math.max(0, j - 1), j1 = Math.min(n - 1, j + 1)
+      const hx = (heights[j * n + i1] - heights[j * n + i0]) / Math.max(1e-3, off[i1] - off[i0])
+      const hz = (heights[j1 * n + i] - heights[j0 * n + i]) / Math.max(1e-3, off[j1] - off[j0])
+      const slope = Math.hypot(hx, hz)
       const c: [number, number, number] = [0, 0, 0]
       groundColor(fields, x, z, h, Math.min(1, slope * 0.8), c)
       // Canopy seen from afar: clustered dark-teal / olive / golden stands (refer vista), not one green.

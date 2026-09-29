@@ -39,6 +39,9 @@ export function SettingsPanel({ game }: { game: Game }) {
           <Row label="Resolution">
             <Seg value={st.resolution} onChange={(v) => set({ resolution: v })} opts={[{ label: 'Auto', value: 'auto' }, { label: '50%', value: 0.5 }, { label: '67%', value: 0.67 }, { label: '85%', value: 0.85 }, { label: '100%', value: 1 }]} />
           </Row>
+          <Row label="Art style (reloads)">
+            <Seg value={st.artStyle} onChange={(v) => set({ artStyle: v })} opts={[{ label: 'Bright', value: 'bright' }, { label: 'Storybook', value: 'storybook' }]} />
+          </Row>
           <Row label="Painterly art filter">
             <Seg value={st.painterly && (tier !== 'low' || st.painterlyForce)} onChange={(v) => set({ painterly: v, painterlyForce: v })} opts={[{ label: 'On', value: true }, { label: 'Off', value: false }]} />
           </Row>

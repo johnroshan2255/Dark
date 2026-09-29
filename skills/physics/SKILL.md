@@ -24,8 +24,14 @@ src/gameplay/bmx/      dynamic rigid body + raycast suspension (future)
 src/debug/PhysicsDebug.ts  world.debugRender() → LineSegments (F6)
 ```
 
-Per-chunk physics = **one fixed RigidBody** owning: 1 heightfield collider + N trunk cylinders.
-Removing the body removes all its colliders in one call.
+Per-chunk physics = **one fixed RigidBody** owning: 1 heightfield collider + N trunk cylinders + one CONVEX
+HULL per rock (the rock's own 12-point shape, `propGeometries.ROCK_HULL`, scaled/rotated like its instance —
+tested: a ray onto every rock hits it) + pole/fence/building boxes. Removing the body removes all its colliders.
+
+**Pickup truck** (`gameplay/vehicle/Car.ts`): kinematic body + box collider ROTATED to heading AND ground pitch
+(an unrotated box hangs off crests and stalls from 46°), moved by a KinematicCharacterController with
+`maxSlopeClimb 72°` (a 50° hillside has local patches > 60°), autostep 0.5 m, snap 1 m. Measured on generated
+terrain without trees (8 s full throttle): 14° → +10 m, 30° → +32 m, 49° → +47 m, 59° → +78 m.
 
 ## 3. When to use
 

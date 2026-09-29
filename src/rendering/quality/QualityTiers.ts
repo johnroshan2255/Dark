@@ -53,30 +53,38 @@ export interface QualitySettings {
   monsters: { stalkers: number; striders: number }
 }
 
+/*
+ * DETAIL-BOUNDED RENDERING (all art styles): streamed detail (trees, rocks, props) dithers out at the ring edge
+ * (≤ `viewDistance`) and chunks past it are culled (ChunkVisibility.maxDistance). Beyond, ONE warped horizon-
+ * terrain mesh (`horizon.size`, 3–10k tris) carries real hills to the skyline under a partial blue-green haze
+ * (TimeOfDay fogMax/landHaze) — no white fog wall. LOD rings are tight so full-detail trees stay near the player. Measured (M4, 2560×1440, seed 7, 5 spots) before → after:
+ *   HIGH draws 225–281 → 176–188, tris 815–1087k → 540–817k, GPU −0.1…1.1 ms, CPU −0.2…0.4 ms
+ *   LOW  draws ≤ 68 (unchanged), tris −1…24 %, GPU −0.1…0.5 ms            (details: skills/mobile)
+ */
 export const QUALITY: Record<TierName, QualitySettings> = {
   // ~₹15k phones (Mali-G57 / Adreno 610), Intel UHD laptops.
   low: {
-    name: 'low', renderRadius: 2, lodRings: [0.9, 1.6], maxDpr: 1,
+    name: 'low', renderRadius: 2, lodRings: [0.8, 1.4], maxDpr: 1,
     renderScale: { min: 0.5, max: 0.85, start: 0.75 }, aa: 'fxaa', sharpen: 0.35,
     godRays: { divisor: 6, samples: 12, volumeSteps: 8 }, paint: { stride: 0, bloom: 0.45 }, grass: { radius: 12, density: 18, blades: 1 }, trees: { near: 1 },
     sunShadowSize: 1024, sunShadowEvery: 3, sunShadowExtent: 34, flashlightShadow: false,
-    plants: false, buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, horizon: { size: 640, res: 32 }, pixelBudget: 0.6e6, viewDistance: 280,
+    plants: false, buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, horizon: { size: 2400, res: 40 }, pixelBudget: 0.6e6, viewDistance: 230,
   },
   // Upper mid phones (Adreno 7xx, recent iPhones), Iris Xe / Radeon iGPU.
   medium: {
-    name: 'medium', renderRadius: 3, lodRings: [1.0, 1.9], maxDpr: 1.25,
+    name: 'medium', renderRadius: 3, lodRings: [0.9, 1.8], maxDpr: 1.25,
     renderScale: { min: 0.6, max: 1, start: 0.85 }, aa: 'fxaa', sharpen: 0.25,
     godRays: { divisor: 4, samples: 20, volumeSteps: 14 }, paint: { stride: 1.4, bloom: 0.4 }, grass: { radius: 15.5, density: 20, blades: 2 }, trees: { near: 0 },
     sunShadowSize: 1024, sunShadowEvery: 2, sunShadowExtent: 40, flashlightShadow: false,
-    plants: true, buildPerFrame: 2, monsters: { stalkers: 2, striders: 1 }, horizon: { size: 1000, res: 44 }, pixelBudget: 1.4e6, viewDistance: 440,
+    plants: true, buildPerFrame: 2, monsters: { stalkers: 2, striders: 1 }, horizon: { size: 3200, res: 52 }, pixelBudget: 1.4e6, viewDistance: 330,
   },
   // Discrete GPUs, Apple M-series.
   high: {
-    name: 'high', renderRadius: 4, lodRings: [1.5, 3.5], maxDpr: 1.5,
+    name: 'high', renderRadius: 3, lodRings: [1.2, 2.3], maxDpr: 1.5,
     renderScale: { min: 0.7, max: 1, start: 1 }, aa: 'msaa4', sharpen: 0.15,
-    godRays: { divisor: 4, samples: 24, volumeSteps: 16 }, paint: { stride: 1.8, bloom: 0.45 }, grass: { radius: 28, density: 34, blades: 2 }, trees: { near: 0 },
+    godRays: { divisor: 4, samples: 24, volumeSteps: 16 }, paint: { stride: 1.8, bloom: 0.45 }, grass: { radius: 22, density: 34, blades: 2 }, trees: { near: 0 },
     sunShadowSize: 2048, sunShadowEvery: 1, sunShadowExtent: 50, flashlightShadow: true,
-    plants: true, buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, horizon: { size: 2200, res: 80 }, pixelBudget: 2.4e6, viewDistance: 1000,
+    plants: true, buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, horizon: { size: 4400, res: 72 }, pixelBudget: 2.4e6, viewDistance: 420,
   },
 }
 

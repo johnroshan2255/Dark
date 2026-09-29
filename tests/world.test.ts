@@ -4,8 +4,9 @@
  *  2. Seams: shared chunk borders have identical heights and normals.
  *  3. Physics: Rapier heightfield built by PhysicsWorld matches the render mesh (raycasts).
  */
-import { PhysicsWorld } from '../src/physics/PhysicsWorld'
+import { group, Groups, PhysicsWorld } from '../src/physics/PhysicsWorld'
 import { CHUNK_SIZE, CHUNK_VERTS } from '../src/world/constants'
+import { PROP_STRIDE } from '../src/world/types'
 import { Rng } from '../src/world/noise/rng'
 import { sampleHeight } from '../src/world/Terrain/generateTerrain'
 import { WorldGenerator } from '../src/world/WorldGenerator'
@@ -56,11 +57,25 @@ for (let i = 0; i < 200; i++) {
   const lx = rng.range(0.5, CHUNK_SIZE - 0.5)
   const lz = rng.range(0.5, CHUNK_SIZE - 0.5)
   const ray = new R.Ray({ x: chunk.cx * CHUNK_SIZE + lx, y: 500, z: chunk.cz * CHUNK_SIZE + lz }, { x: 0, y: -1, z: 0 })
-  const hit = phys.world.castRay(ray, 1000, true)
+  const hit = phys.world.castRay(ray, 1000, true, undefined, group(0xffff, Groups.Terrain)) // heightfield only (rocks sit on it)
   const y = hit ? 500 - hit.timeOfImpact : Number.NaN
   maxErr = Math.max(maxErr, Math.abs(y - sampleHeight(chunk.heights, lx, lz)))
 }
 check('heightfield collider matches render mesh (200 raycasts)', maxErr < 0.01, `max err ${maxErr.toFixed(4)} m`)
+// Rock colliders: a ray straight down onto each rock's centre hits the rock (above the ground, below its top).
+{
+  const rk = chunk.rocks
+  let n = 0, ok = 0
+  for (let i = 0; i < rk.length; i += PROP_STRIDE) {
+    const x = chunk.cx * CHUNK_SIZE + rk[i], z = chunk.cz * CHUNK_SIZE + rk[i + 2], s = rk[i + 4]
+    const hit = phys.world.castRay(new R.Ray({ x, y: 500, z }, { x: 0, y: -1, z: 0 }), 1000, true, undefined, group(0xffff, Groups.Static))
+    const y = hit ? 500 - hit.timeOfImpact : -1e9
+    const ground = sampleHeight(chunk.heights, rk[i], rk[i + 2])
+    n++
+    if (y > ground + 0.25 * s && y < ground + 1.3 * s) ok++
+  }
+  check(`rock colliders sit on the rocks (${n} rocks)`, n > 0 && ok === n, `${ok}/${n}`)
+}
 phys.dispose()
 
 process.exit(failures ? 1 : 0)

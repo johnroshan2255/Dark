@@ -1,4 +1,7 @@
 import * as THREE from 'three'
+import { ART } from '../rendering/artStyle'
+import { downscaleTexture, loadModels, type GameModels } from '../assets/loadModels'
+import { CHUNK_SIZE } from '../world/constants'
 import { ChunkDebug } from '../debug/ChunkDebug'
 import { CullingDebug } from '../debug/CullingDebug'
 import { PerformanceMonitor } from '../debug/PerformanceMonitor'
@@ -51,6 +54,8 @@ export interface GameOptions {
   stressMs?: number
   /** Start hour override (tests / screenshots). */
   hour?: number
+  /** Art style override (?look=, not persisted). */
+  look?: 'bright' | 'storybook'
 }
 
 /**
@@ -108,22 +113,28 @@ export class Game {
   private renderer: THREE.WebGLRenderer | null = null
   private scene: THREE.Scene | null = null
   camera: THREE.PerspectiveCamera | null = null
+  private truckMapLow: THREE.Texture | undefined
 
   static async create(opts: GameOptions): Promise<Game> {
+    // Art style is fixed per session and must be known before any material/atlas/tree is built (artStyle.ts).
+    ART.style = opts.look ?? loadSettings().artStyle
     applyShadowEdgeFade() // global shader-chunk patch; must precede any program compile
-    const R = await PhysicsWorld.load()
-    return new Game(opts, new PhysicsWorld(R))
+    // Models load in parallel with the physics wasm (both small: ~1.8 MB total).
+    const [R, models] = await Promise.all([PhysicsWorld.load(), loadModels()])
+    return new Game(opts, new PhysicsWorld(R), models)
   }
 
-  private constructor(opts: GameOptions, physics: PhysicsWorld) {
+  private constructor(opts: GameOptions, physics: PhysicsWorld, private readonly models: GameModels) {
     this.physics = physics
     this.opts = opts
     this.settings = loadSettings()
     this.savedQuality = this.settings.quality
     if (opts.tier && opts.tier !== 'auto') this.settings = { ...this.settings, quality: opts.tier }
+    this.settings = { ...this.settings, artStyle: ART.style }
     this.adaptive.enabled = opts.adaptive !== false && this.settings.quality === 'auto'
     this.tod = new TimeOfDay(opts.hour ?? 10.5) // start on a bright Genshin morning; night still comes with the cycle
     this.tod.dayLengthMinutes = this.settings.dayLength
+    this.tod.setStyle(ART.style)
     this.lighting = new LightingSystem(this.tod)
     this.store = createStore<GameStateShape>({
       status: 'ready',
@@ -155,15 +166,14 @@ export class Game {
     this.player.yaw = Math.atan2(-(this.world.fields.roadCenterX(z + 1) - x), -1)
     this.player.pitch = -0.08
 
-    this.character = new CharacterModel(this.materials.character)
+    this.character = new CharacterModel(this.materials.character, models.human)
     this.character.yaw = this.player.yaw
     this.cameraCtl = new CameraController(physics, this.world.fields, this.character, this.blobShadow)
     this.cameraCtl.mode = this.settings.camera
     this.horizon = new HorizonTerrain(opts.seed)
     this.bike = new Bike(this.materials.character, this.player, this.character, this.world.fields)
     this.bike.parkNear(spawn, this.player.yaw, 2.4)
-    const paints = [0x3aa6b8, 0xe8a23a, 0xd9534f, 0x6cbf5a, 0xf2f0e8]
-    this.car = new Car(this.materials.character, physics, this.world.fields, this.player, this.character, this.input, paints[opts.seed % paints.length])
+    this.car = new Car(this.materials.character, models.truck, physics, this.world.fields, this.player, this.character, this.input)
     {
       // Parked on the verge ~14 m down the road from the spawn.
       const cz = z + 14
@@ -218,10 +228,12 @@ export class Game {
     i.onPress('KeyO', () => this.openSettings(!s.get().settingsOpen))
     i.onPress('KeyF', () => s.set({ flashlight: this.lighting.toggleFlashlight() }))
     i.onPress('KeyE', () => {
-      // Car takes priority when both are near; one key for everything (touch: BIKE/CAR button).
-      if (this.car.driving || this.car.near) {
+      // One key for everything (touch: BIKE/CAR button). Riding → get off the bike first (the truck can't be
+      // entered from the saddle); otherwise the truck takes priority when both are near.
+      if (this.bike.riding) this.bike.toggle()
+      else if (this.car.driving || this.car.near) {
         this.car.toggle()
-        this.cameraCtl.vehicle = this.car.driving ? { distance: 8, pivot: 2.8 } : null
+        this.cameraCtl.vehicle = this.car.driving ? { distance: 9, pivot: 2.9 } : null
       } else this.bike.toggle()
     })
     i.onPress('BracketLeft', () => this.updateSettings({ resolution: Math.max(0.5, this.post.renderScale - 0.1) }))
@@ -257,6 +269,14 @@ export class Game {
 
   updateSettings(patch: Partial<Settings>): void {
     const prev = this.settings
+    if (patch.artStyle !== undefined && patch.artStyle !== ART.style) {
+      // Shader programs, atlas and tree geometry depend on the style → apply it with a reload (artStyle.ts).
+      saveSettings({ ...prev, ...patch, quality: this.savedQuality })
+      const url = new URL(location.href)
+      url.searchParams.delete('look')
+      location.replace(url.toString())
+      return
+    }
     this.settings = { ...prev, ...patch }
     if (patch.quality !== undefined) this.savedQuality = patch.quality
     saveSettings({ ...this.settings, quality: this.savedQuality })
@@ -288,6 +308,9 @@ export class Game {
     this.monsters.rig.castShadow = q.name !== 'low'
     this.bike.castShadow = q.name !== 'low'
     this.car.castShadow = q.name !== 'low'
+    // LOW: half-size truck texture (1024² → 512², ~4 MB less GPU memory).
+    this.truckMapLow ??= downscaleTexture(this.models.truck.map, 512)
+    this.car.setMap(q.name === 'low' ? this.truckMapLow : this.models.truck.map)
     this.post.setGodRays(q.godRays.divisor, q.godRays.samples, q.godRays.volumeSteps)
     this.post.setPaint(q.paint.stride, q.paint.bloom)
     this.horizon.configure(q.horizon)
@@ -295,7 +318,8 @@ export class Game {
     this.post.setRenderScale(q.renderScale.start)
     globalUniforms.uGrassFade.value.set(q.grass.radius * 0.7, q.grass.radius)
     if (this.camera) {
-      this.camera.far = q.viewDistance * 1.08
+      // Far plane covers the horizon terrain (hills to the skyline); detail stops at viewDistance/the ring.
+      this.camera.far = Math.max(q.viewDistance * 1.08, q.horizon.size * 0.56)
       this.camera.updateProjectionMatrix()
     }
     this.applyOverrides()
@@ -319,7 +343,7 @@ export class Game {
     const dpr = st.pixelRatio === 'auto' ? Math.min(native, q.maxDpr) : st.pixelRatio === 'native' ? native : Math.min(native, st.pixelRatio)
     this.setDpr?.(dpr)
     // Real dynamic shadow for the character where the sun map re-renders every frame; blob otherwise.
-    const realShadow = q.sunShadowEvery === 1
+    const realShadow = q.sunShadowEvery === 1 && ART.style !== 'storybook'
     this.character.castShadow = realShadow
     this.blobShadow.userData.enabled = !realShadow
   }
@@ -435,13 +459,22 @@ export class Game {
           // Clear up close; complete no later than the edge of this tier's loaded ring (skills/fog).
           // Fog closes in only at the horizon terrain's edge; the chunk ring edge is covered by it.
           // Fog completes at the tier's view distance; nothing beyond is drawn (see ChunkVisibility).
-          const limit = this.quality.viewDistance
-          this.fog.far = Math.min(tp.fogEnd, limit)
+          // Fog is partial on land (fogMax/landHaze): hills stay hills out to the horizon mesh's rim, where they
+          // dissolve into the sky. Streamed detail (trees, props) dithers out at the ring edge and is not drawn
+          // past viewDistance — hidden by that fade + the forest-tinted horizon terrain, not by a white fog wall.
+          const q = this.quality
+          const farR = q.horizon.size * 0.5
+          this.fog.far = Math.min(tp.fogEnd, farR)
           this.fog.near = Math.min(tp.fogStart, this.fog.far * 0.55)
+          globalUniforms.uFogMax.value = tp.fogMax
+          globalUniforms.uLandHaze.value.copy(tp.landHaze)
+          globalUniforms.uFarEdge.value.set(farR * 0.7, farR * 0.96)
+          const detailEdge = Math.min(q.viewDistance, q.renderRadius * CHUNK_SIZE + 24)
+          globalUniforms.uCullFade.value.set(detailEdge * 0.74, detailEdge)
           if (this.scene?.background instanceof THREE.Color) this.scene.background.copy(tp.fogColor)
           this.sky.update(this.tod, cam, time)
           this.horizon.update(p.renderPosition, this.world.renderRadius)
-          this.world.visibility.maxDistance = this.fog.far + 20
+          this.world.visibility.maxDistance = Math.min(q.viewDistance, q.renderRadius * CHUNK_SIZE + 24) + 20
           this.water.update(time, cam.position, this.fog.near, this.fog.far, this.lighting.keyDir, this.lighting.sun.color)
           this.post.applyGrading(tp, time)
           const k = this.lighting.keyStrength
@@ -450,6 +483,9 @@ export class Game {
           globalUniforms.uCameraPos.value.copy(cam.position)
           globalUniforms.uPlayerPos.value.copy(p.renderPosition)
           globalUniforms.uKeyDirView.value.copy(this.lighting.keyDir).transformDirection(cam.matrixWorldInverse)
+          globalUniforms.uStoryAmt.value = tp.painted
+          globalUniforms.uStoryLight.value.copy(tp.paintLight)
+          globalUniforms.uUpView.value.set(0, 1, 0).transformDirection(cam.matrixWorldInverse)
           globalUniforms.uKeyColor.value.copy(this.lighting.sun.color).multiplyScalar(Math.min(this.lighting.sun.intensity, 3) * 0.35)
           // Aerial perspective: fog toward the key light glows in its colour (strongest at low sun).
           globalUniforms.uScatterColor.value.copy(tp.fogColor).lerp(this.lighting.sun.color, 0.75).multiplyScalar(1.25)

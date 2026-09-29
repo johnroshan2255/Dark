@@ -21,8 +21,20 @@ export function cellUv(cell: number): [number, number, number, number] {
   const e = 0.01
   return [cx * 0.5 + e, 1 - (cy + 1) * 0.5 + e, (cx + 1) * 0.5 - e, 1 - cy * 0.5 - e]
 }
-/** Opaque texel region (for solid parts). */
-export const SOLID_UV: [number, number] = [0.985, 0.015]
+/**
+ * Opaque texel region (for solid parts). Its exact U also picks the PAINTED SURFACE the shader draws there
+ * (shaders/paint.ts: u ∈ [0.9625, 1) in 0.0075 steps, all inside the white block) — no extra attribute.
+ */
+export const SURFACE_UV = {
+  stone: [0.966, 0.015],
+  wood: [0.974, 0.015],
+  bark: [0.981, 0.015],
+  plain: [0.989, 0.015],
+  roof: [0.996, 0.015],
+} as const satisfies Record<string, readonly [number, number]>
+export type SurfaceName = keyof typeof SURFACE_UV
+/** Default solid texel = PLAIN painted surface. */
+export const SOLID_UV: readonly [number, number] = SURFACE_UV.plain
 
 const SIZE = 1024
 const CELL = SIZE / 2
@@ -78,6 +90,51 @@ function drawSpray(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng
   g.moveTo(x0, stemY(0))
   for (let t = 0; t <= 1; t += 0.05) g.lineTo(x0 + (x1 - x0) * t, stemY(t))
   g.stroke()
+}
+
+/**
+ * STORYBOOK spray (cell 0, art style 'storybook' — the forest-house conifers): one drooping tier drawn as a
+ * FAN of broad flat brush strokes from the stem out and down, ragged dry-brush tips, a pale lit top edge and a
+ * darker underside — reads as a painted tier, not needles. Same cell/UVs as `drawSpray` → same geometry.
+ */
+function drawBrushSpray(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng): void {
+  const x0 = ox + CELL * 0.02
+  const x1 = ox + CELL * 0.98
+  const stemY = (t: number) => oy + CELL * (0.28 + 0.2 * t * t)
+  g.lineCap = 'round'
+  const stroke = (x: number, y: number, a: number, len: number, w: number, v: number) => {
+    // A brush stroke: thick at the root, splitting into 2–4 dry-brush bristle tips.
+    g.strokeStyle = grey(v)
+    g.lineWidth = w
+    g.beginPath()
+    g.moveTo(x, y)
+    g.lineTo(x + Math.cos(a) * len * 0.7, y + Math.sin(a) * len * 0.7)
+    g.stroke()
+    const tips = 3 + Math.floor(rng.next() * 3)
+    for (let k = 0; k < tips; k++) {
+      const aa = a + rng.range(-0.12, 0.12)
+      const l2 = len * rng.range(0.85, 1.12)
+      g.lineWidth = Math.max(5, w * rng.range(0.14, 0.28))
+      g.strokeStyle = grey(v * rng.range(0.92, 1.05))
+      g.beginPath()
+      g.moveTo(x + Math.cos(a) * len * 0.55, y + Math.sin(a) * len * 0.55)
+      g.lineTo(x + Math.cos(aa) * l2, y + Math.sin(aa) * l2)
+      g.stroke()
+    }
+  }
+  // Broad overlapping strokes build a SOLID drooping fan (dark underside → body → pale lit top edge);
+  // each ends in dry-brush bristles → the ragged painted tip line of the reference tiers. No visible stem.
+  for (const [layer, count, v0, v1] of [[0, 26, 0.32, 0.46], [1, 34, 0.5, 0.7], [2, 18, 0.82, 1]] as const) {
+    for (let i = 0; i < count; i++) {
+      const t = rng.next()
+      const x = x0 + (x1 - x0) * t * 0.8
+      const y = stemY(t) + (layer === 2 ? -CELL * 0.015 : 0)
+      const reach = CELL * (0.46 - 0.26 * t) * rng.range(0.85, 1.1)
+      const a = layer === 2 ? rng.range(0.1, 0.4) : layer === 1 ? rng.range(0.35, 0.8) : rng.range(0.7, 1.1)
+      const w = (layer === 2 ? rng.range(16, 26) : rng.range(34, 54)) * (1 - t * 0.45)
+      stroke(x, y, a, reach * (layer === 2 ? 0.75 : 1), w, rng.range(v0, v1))
+    }
+  }
 }
 
 function drawLeaves(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng): void {
@@ -151,19 +208,25 @@ function drawFern(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng)
   g.stroke()
 }
 
-export function createFoliageAtlas(): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas')
-  canvas.width = canvas.height = SIZE
+/** Draws the atlas ('storybook' art style swaps the conifer spray for brush-stroke fans). */
+function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean): void {
   const g = canvas.getContext('2d')!
   g.clearRect(0, 0, SIZE, SIZE)
   const rng = new Rng(4242)
-  drawSpray(g, 0, 0, rng)
+  if (storybook) drawBrushSpray(g, 0, 0, rng)
+  else drawSpray(g, 0, 0, rng)
   drawLeaves(g, CELL, 0, rng)
   drawTuft(g, 0, CELL, rng)
   drawFern(g, CELL, CELL, rng)
   // Opaque white block for solids (bottom-right corner of the fern cell, outside the frond).
   g.fillStyle = '#ffffff'
   g.fillRect(SIZE - 40, SIZE - 40, 40, 40)
+}
+
+export function createFoliageAtlas(storybook = false): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = SIZE
+  drawAtlas(canvas, storybook)
   const tex = new THREE.CanvasTexture(canvas)
   tex.colorSpace = THREE.SRGBColorSpace
   tex.anisotropy = 4

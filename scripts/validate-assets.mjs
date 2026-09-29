@@ -23,6 +23,7 @@ const BUDGETS = {
   monsters:   { tris: 12000, materials: 2, maxTexture: 2048, maxFileMB: 6 },
   characters: { tris: 15000, materials: 3, maxTexture: 2048, maxFileMB: 8 },
   bmx:        { tris: 8000,  materials: 2, maxTexture: 1024, maxFileMB: 3 },
+  vehicles:   { tris: 8000,  materials: 2, maxTexture: 1024, maxFileMB: 3 },  // drivable hero vehicles (pickup truck)
   default:    { tris: 5000,  materials: 2, maxTexture: 1024, maxFileMB: 3 },
 }
 const LOD_FACTOR = [1, 0.35, 0.1, 0.05]

@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import { SOLID_UV } from '../../rendering/materials/FoliageAtlas'
+import { isStorybook } from '../../rendering/artStyle'
+import { SOLID_UV, SURFACE_UV } from '../../rendering/materials/FoliageAtlas'
 import { CHUNK_SIZE } from '../constants'
 import type { ChunkData } from '../types'
 import type { WorldFields } from '../WorldFields'
@@ -12,7 +13,7 @@ import { POLE_LATERAL, POLE_SPACING, RoadProp, roadYaw } from './roadProps'
  */
 const srgb = (hex: number) => new THREE.Color().setHex(hex, THREE.SRGBColorSpace)
 
-function part(g: THREE.BufferGeometry, color: number, shadeBottom = 0.75): THREE.BufferGeometry {
+function part(g: THREE.BufferGeometry, color: number, shadeBottom = 0.75, surf: readonly [number, number] = SOLID_UV): THREE.BufferGeometry {
   const ng = g.toNonIndexed()
   g.dispose()
   const pos = ng.getAttribute('position')
@@ -28,8 +29,8 @@ function part(g: THREE.BufferGeometry, color: number, shadeBottom = 0.75): THREE
     col[i * 3] = c.r * k
     col[i * 3 + 1] = c.g * k
     col[i * 3 + 2] = c.b * k
-    uv[i * 2] = SOLID_UV[0]
-    uv[i * 2 + 1] = SOLID_UV[1]
+    uv[i * 2] = surf[0]
+    uv[i * 2 + 1] = surf[1]
   }
   ng.setAttribute('color', new THREE.BufferAttribute(col, 3))
   ng.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
@@ -40,8 +41,8 @@ export const WIRE_ATTACH: [number, number][] = [[-1.05, 8.95], [0, 8.95], [1.05,
 
 export function createPoleGeometry(): THREE.BufferGeometry {
   const parts = [
-    part(new THREE.CylinderGeometry(0.12, 0.17, 9.6, 7).translate(0, 4.8, 0), 0x5b4a3a, 0.6),
-    part(new THREE.BoxGeometry(2.6, 0.14, 0.14).translate(0, 8.75, 0), 0x4e4033),
+    part(new THREE.CylinderGeometry(0.12, 0.17, 9.6, 7).translate(0, 4.8, 0), isStorybook() ? 0xa8502e : 0x5b4a3a, 0.6, SURFACE_UV.bark),
+    part(new THREE.BoxGeometry(2.6, 0.14, 0.14).translate(0, 8.75, 0), isStorybook() ? 0xb85a36 : 0x4e4033, 0.75, SURFACE_UV.bark),
     ...WIRE_ATTACH.map(([x, y]) => part(new THREE.CylinderGeometry(0.05, 0.06, 0.2, 5).translate(x, y - 0.1, 0), 0x9aa3ad, 0.9)),
   ]
   const g = mergeGeometries(parts)!
@@ -54,7 +55,7 @@ export function createPoleGeometry(): THREE.BufferGeometry {
 export function createFenceGeometry(): THREE.BufferGeometry {
   const wood = 0x6d5a45
   const parts = [
-    part(new THREE.BoxGeometry(0.14, 1.25, 0.14).translate(0, 0.62, -2), wood, 0.55),
+    part(new THREE.BoxGeometry(0.14, 1.25, 0.14).translate(0, 0.62, -2), wood, 0.55, SURFACE_UV.bark),
     part(new THREE.BoxGeometry(0.07, 0.12, 4.05).translate(0, 0.48, 0).rotateX(0.01), wood, 0.85),
     part(new THREE.BoxGeometry(0.07, 0.12, 4.05).translate(0, 0.98, 0).rotateX(-0.012), wood, 0.9),
   ]

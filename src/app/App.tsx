@@ -12,7 +12,8 @@ import { GameCanvas } from './Canvas'
 
 /**
  * Every new game gets a fresh random world unless ?seed= is given (co-op joiners receive the host's
- * seed the same way). URL options: ?seed=<n|text> &tier=low|medium|high &adaptive=0 &hour=<0-24> &stress=<ms, dev>.
+ * seed the same way). URL options: ?seed=<n|text> &tier=low|medium|high &adaptive=0 &hour=<0-24> &look=bright|storybook
+ * &stress=<ms, dev>.
  */
 function readOptions(): GameOptions {
   const p = new URLSearchParams(location.search)
@@ -25,6 +26,7 @@ function readOptions(): GameOptions {
     adaptive: p.get('adaptive') !== '0',
     stressMs: Number(p.get('stress')) || 0,
     hour: p.get('hour') !== null ? Number(p.get('hour')) : undefined,
+    look: p.get('look') === 'storybook' ? 'storybook' : p.get('look') === 'bright' ? 'bright' : undefined,
   }
 }
 

@@ -81,7 +81,7 @@ export function GameHud({ game }: { game: Game }) {
         const show = car || game.bike.near || game.bike.riding
         prompt.current.style.display = show ? 'flex' : 'none'
         const label = prompt.current.lastChild as HTMLElement
-        if (label) label.textContent = car ? (game.car.driving ? 'Get out of car' : 'Drive car') : game.bike.riding ? 'Get off bike' : 'Mount bike'
+        if (label) label.textContent = game.bike.riding ? 'Get off bike' : car ? (game.car.driving ? 'Get out of truck' : 'Drive truck') : 'Mount bike'
       }
       if (hpBar.current) {
         const k = game.health.hp / game.health.max

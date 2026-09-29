@@ -1,6 +1,10 @@
 import * as THREE from 'three'
 import { createGrassMaterial } from '../../world/Forest/grass'
+import { SURFACE } from '../shaders/paint'
 import { stylize } from '../shaders/stylize'
+import { globalUniforms } from '../shaders/uniforms'
+import { createBrushTexture } from './BrushTexture'
+import { isStorybook } from '../artStyle'
 import { createFoliageAtlas } from './FoliageAtlas'
 
 /**
@@ -36,18 +40,20 @@ function billboardable(m: THREE.MeshLambertMaterial): THREE.MeshLambertMaterial 
  * Shared materials — created once, never disposed by chunks.
  *
  * Lambert (cheapest lit material with fog + shadows) + the shared painterly patch (rim light, directional
- * fog; terrain detail/road; see shaders/stylize.ts). SMOOTH shading everywhere except rocks: faceted
- * shading was the main reason the world read as "low-poly toy" instead of the painted reference.
+ * fog; terrain detail/road; see shaders/stylize.ts). SMOOTH shading everywhere, rocks included (painted STONE
+ * surface, shaders/paint.ts): faceted shading was the main reason the world read as "low-poly toy" instead of the painted reference.
  * Vegetation = one foliage-atlas material (alpha-tested cards + opaque solids) → one program for all trees.
  * Keep the number of distinct programs small: see skills/webgl.
  */
 export class MaterialLibrary {
-  readonly atlas = createFoliageAtlas()
+  readonly atlas = createFoliageAtlas(isStorybook())
+  /** Hand-painted surface detail for solids and ground (shaders/paint.ts) — 0.35 MB, shared. */
+  readonly brush = (globalUniforms.uBrush.value = createBrushTexture())
   readonly terrain = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'terrain', rim: 0.25, terrain: true, toon: 0.45 })
   readonly vegetation = stylize(billboardable(
     new THREE.MeshLambertMaterial({ vertexColors: true, map: this.atlas, alphaTest: 0.42, side: THREE.DoubleSide }),
-  ), { key: 'foliage', rim: 1.1, noFlip: true })
-  readonly rock = stylize(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), { key: 'rock', rim: 0.35 })
+  ), { key: 'foliage', rim: 1.1, noFlip: true, surface: 'atlas', cullFade: true })
+  readonly rock = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.35, surface: SURFACE.stone, cullFade: true })
   /** Smooth Lambert + wind/fade/translucency patch. */
   readonly grass = stylize(createGrassMaterial(), { key: 'grass', rim: 0.2, cheapFog: true })
   /** Player character parts. */
@@ -71,5 +77,6 @@ export class MaterialLibrary {
   dispose(): void {
     for (const m of this.all()) m.dispose()
     this.atlas.dispose()
+    this.brush.dispose()
   }
 }

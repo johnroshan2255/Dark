@@ -122,24 +122,27 @@ vec3 skyColor(vec3 d, bool full) {
   float sunAz = atan(uSkySunDir.z, uSkySunDir.x);
   // Real hills/mountains now come from the horizon terrain; the painted ranges are only the farthest backdrop.
   float hFar = ridgeFar(az) * 0.65;
-  float slope = (ridgeFar(az + 0.03) - ridgeFar(az - 0.03)) * 0.65; // wide stencil → broad faces, not stripes
+  float slope = (ridgeFar(az + 0.12) - ridgeFar(az - 0.12)) * 0.65; // very wide stencil → whole mountain faces, no crag stripes
   float towardSun = sign(atan(sin(az - sunAz), cos(az - sunAz)));
-  float litFace = smoothstep(-0.004, 0.02, slope * towardSun) * uSkySunVis;
-  vec3 cool = mix(uSkyZenith, uSkyHorizon, 0.5) * vec3(0.7, 0.72, 0.95);
+  float litFace = smoothstep(-0.01, 0.06, slope * towardSun) * uSkySunVis;
+  // Distant ranges read as LAND seen through air (Genshin): hazy blue-green-grey, darker than the sky,
+  // broad soft light/shadow faces (no fine vertical streaks — they read as white stripes).
+  vec3 cool = mix(uSkyZenith, uSkyHorizon, 0.55) * vec3(0.5, 0.62, 0.66);
   if (d.y < hFar) {
-    float streak = sky_noise(vec2(az * 160.0, d.y * 22.0)) * 0.6 + sky_noise(vec2(az * 420.0, d.y * 60.0)) * 0.4;
-    vec3 rock = cool * (0.72 + 0.22 * streak);
-    vec3 lit = rock * 0.75 + uSkySunColor * 0.22;
-    vec3 mc = mix(rock, lit, litFace * 0.7);
-    mc += keyCol * smoothstep(hFar - 0.008, hFar, d.y) * 0.25 * (0.4 + litFace);   // bright ridge line
+    float streak = sky_noise(vec2(az * 22.0, d.y * 5.0)) * 0.7 + sky_noise(vec2(az * 60.0, d.y * 12.0)) * 0.3;
+    vec3 rock = cool * (0.8 + 0.2 * streak);
+    // Sun-facing faces: a little warmer/lighter, never white (the sun colour is HDR — keep its share small).
+    vec3 lit = rock * 1.18 + uSkySunColor * 0.035;
+    vec3 mc = mix(rock, lit, litFace * 0.6);
+    mc += keyCol * smoothstep(hFar - 0.006, hFar, d.y) * 0.06 * (0.4 + litFace);   // soft rim on the ridge line
     float haze = exp(-max(d.y, 0.0) / max(hFar, 1e-3) * 3.2);
-    col = mix(mc, horizon, haze * 0.6);
+    col = mix(mc, horizon, haze * 0.45);
   }
   float hNear = ridgeNear(az) * 0.6;
   if (d.y < hNear) {
-    vec3 mc = mix(uSkyZenith, horizon, 0.35) * vec3(0.42, 0.5, 0.56);                 // dark blue-teal forested hills
+    vec3 mc = mix(uSkyZenith, horizon, 0.4) * vec3(0.36, 0.5, 0.44);                  // dark green-teal forested hills
     mc += keyCol * smoothstep(hNear - 0.004, hNear, d.y) * 0.15;
-    col = mix(mc, horizon, exp(-max(d.y, 0.0) / max(hNear, 1e-3) * 2.2) * 0.55);
+    col = mix(mc, horizon, exp(-max(d.y, 0.0) / max(hNear, 1e-3) * 2.2) * 0.4);
   }
   return col;
 }

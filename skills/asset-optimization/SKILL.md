@@ -62,6 +62,7 @@ Every asset, every time it changes. The validator is cheap; run it in CI later.
 | monster | 12 000 | 4 000 | 1 200 | ≤ 2 | 2048² | no (pooled) |
 | character (player) | 15 000 | 5 000 | 1 500 | ≤ 3 | 2048² | no |
 | bmx | 8 000 | 2 500 | 600 | ≤ 2 | 1024² | no |
+| vehicle (drivable pickup) | 8 000 | — | — | ≤ 2 | 1024² (LOW: 512² runtime copy) | no |
 | cave piece (modular) | 2 000 | 600 | 150 | 1 | 1024² atlas | yes |
 
 Why these numbers: a visible LOD0 ring of ~9 chunks × ~150 trees × 1 500 tris ≈ 2 M tris only if *all* are

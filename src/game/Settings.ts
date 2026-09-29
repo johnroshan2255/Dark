@@ -25,6 +25,8 @@ export interface Settings {
   painterly: boolean
   /** Force the painterly filter on tiers where it defaults off (LOW). */
   painterlyForce: boolean
+  /** Art style (rendering/artStyle.ts): 'bright' Genshin day, or 'storybook' (unlit hand-painted forest-house look). Changing it reloads. */
+  artStyle: 'bright' | 'storybook'
   /** Monsters and storms in monster time (off = exploration mode). */
   monsters: boolean
 }
@@ -42,6 +44,7 @@ export const DEFAULT_SETTINGS: Settings = {
   filmGrain: true,
   painterly: false,
   painterlyForce: false,
+  artStyle: 'bright',
   monsters: true,
 }
 

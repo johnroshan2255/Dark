@@ -98,7 +98,7 @@ Do not dispose cached terrain geometries on LOD change; dispose them on chunk un
 **Hysteresis selector**
 
 ```ts
-const T = [1.5, 3.5]      // LOD boundaries in chunk units
+const T = game.quality.lodRings // LOD boundaries in chunk units (HIGH [1.2, 2.3], MED [0.9, 1.8], LOW [0.8, 1.4])
 const H = 0.35
 export function selectLod(prev: number, d: number): number {
   let lod = prev

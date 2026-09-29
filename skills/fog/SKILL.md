@@ -20,6 +20,10 @@ Fog is DARK's most important visual *and* performance tool:
 > Per phase (TimeOfDay): DAY 70→260 m, EVENING 55→230, DAWN 50→220, DUSK 45→200, NIGHT 35→170, NIGHTMARE 28→150.
 > `fog.far = min(fogEnd, fogLimit(renderRadius))` (ring edge − 4 m) and `fog.near = min(fogStart, 0.55 × far)`, so
 > LOW (128 m ring) still hides its edge. Shafts/god rays use the SAME curve (`uFog` = near/far) for transmittance.
+> **Current (land haze):** fog on geometry is capped by the phase's `fogMax` and tinted by `landHaze` (× the sky
+> colour in that direction) — distant hills read as blue-green land, never a white wall; only the horizon mesh's rim
+> (`uFarEdge`) fades fully to sky. `fog.far = min(fogEnd, horizon.size / 2)`. Streamed detail is bounded by a dither
+> fade (`uCullFade`) at the ring edge, not by fog.
 > Lesson: a clear near field exposes dark albedos and missing fill light — palette and hemisphere fill were raised
 > together with this change (skills/lighting).
 

@@ -1,5 +1,6 @@
 import * as THREE from 'three'
-import { ATLAS_CELLS, cellUv, SOLID_UV } from '../../rendering/materials/FoliageAtlas'
+import { ATLAS_CELLS, cellUv, SOLID_UV, SURFACE_UV } from '../../rendering/materials/FoliageAtlas'
+import { isStorybook } from '../../rendering/artStyle'
 import { Rng } from '../noise/rng'
 import { TreeSpecies } from '../types'
 
@@ -31,7 +32,7 @@ class Soup {
   readonly col: number[] = []
   readonly bbC: number[] = []
   readonly bbO: number[] = []
-  vert(p: V3, n: V3, uv: [number, number], c: THREE.Color, bbCenter?: V3, bbOff?: [number, number]): void {
+  vert(p: V3, n: V3, uv: readonly [number, number], c: THREE.Color, bbCenter?: V3, bbOff?: [number, number]): void {
     this.bbC.push(...(bbCenter ?? [0, 0, 0]))
     this.bbO.push(...(bbOff ?? [0, 0]))
     this.pos.push(p[0], p[1], p[2])
@@ -92,14 +93,13 @@ function card(s: Soup, p0: V3, p1: V3, side: V3, cell: number, centre: V3, c0: T
 }
 
 /** Solid tapered cylinder / cone (trunk or canopy core) with smooth radial (+up-biased) normals. */
-function solid(s: Soup, y0: number, y1: number, r0: number, r1: number, sides: number, c0: THREE.Color, c1: THREE.Color, upBias = 0): void {
+function solid(s: Soup, y0: number, y1: number, r0: number, r1: number, sides: number, c0: THREE.Color, c1: THREE.Color, upBias = 0, uv: readonly [number, number] = SOLID_UV): void {
   for (let i = 0; i < sides; i++) {
     const a0 = (i / sides) * Math.PI * 2
     const a1 = ((i + 1) / sides) * Math.PI * 2
     const q = (a: number, y: number, r: number): V3 => [Math.cos(a) * r, y, Math.sin(a) * r]
     const n = (a: number): V3 => [Math.cos(a), upBias, Math.sin(a)]
     const A = q(a0, y0, r0), B = q(a1, y0, r0), C = q(a1, y1, r1), D = q(a0, y1, r1)
-    const uv = SOLID_UV
     s.vert(A, n(a0), uv, c0); s.vert(C, n(a1), uv, c1); s.vert(B, n(a1), uv, c0)
     s.vert(A, n(a0), uv, c0); s.vert(D, n(a0), uv, c1); s.vert(C, n(a1), uv, c1)
   }
@@ -210,7 +210,7 @@ function conifer(level: number, rng: Rng, o: ConiferOpts): THREE.BufferGeometry 
   const dark = srgb(o.dark)
   const light = srgb(o.light)
   const bark = srgb(o.trunk)
-  solid(s, 0, H * 0.9, 0.2, 0.05, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.6), bark)
+  solid(s, 0, H * 0.9, 0.2, 0.05, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.6), bark, 0, SURFACE_UV.bark)
   if (level === 2) {
     const tiers = o.tiers[2]
     for (let t = 0; t < tiers; t++) {
@@ -287,22 +287,51 @@ function cardUv(s: Soup, p0: V3, p1: V3, side: V3, uv: [number, number, number, 
   for (const i of [0, 1, 2, 0, 2, 3]) s.vert(P[i][0], n(P[i][0]), P[i][1], P[i][2])
 }
 
+/**
+ * STORYBOOK conifer (the forest-house study): neat STACKED drooping tiers — each a solid star cone with a
+ * hanging fringe of brush-fan cards (atlas spray cell = `drawBrushSpray` in this style) — on a straight
+ * orange-red trunk, pale sage with lit tier tops and darker undersides. Level 0 ≈ 7 tiers with full fringes,
+ * 1 fewer tiers / every other fringe, 2 solid tiers only. Triangle count is at or below the default conifer.
+ */
+function storyConifer(level: number, rng: Rng, o: { height: number; radius: number; bare: number; droop: number; trunk: number }): THREE.BufferGeometry {
+  const s = new Soup()
+  const H = o.height
+  const dark = srgb(0x2e4836)
+  const light = srgb(0x9cb57e)
+  const bark = srgb(o.trunk)
+  solid(s, 0, H * 0.92, 0.2, 0.05, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.7), bark, 0, SURFACE_UV.bark)
+  const tiers = [7, 5, 4][level]
+  const points = [7, 6, 5][level]
+  for (let t = 0; t < tiers; t++) {
+    const k = t / tiers
+    const y = o.bare + (H * 0.86 - o.bare) * k
+    const r = o.radius * Math.pow(1 - k, 0.95) + 0.35
+    skirt(s, [0, y, 0], r, Math.max(0.9, (H - y) * 0.3), points, o.droop, dark, light, 0.4 + 0.5 * k, level, rng)
+  }
+  skirt(s, [0, H * 0.88, 0], 0.5, H * 0.14, 5, 0.3, dark, light, 0.9, 2, rng) // spire
+  return s.geometry('conifer')
+}
+
 function spruce(level: number, rng: Rng): THREE.BufferGeometry {
+  if (isStorybook()) return storyConifer(level, rng, { height: 8.5, radius: 2.5, bare: 1.4, droop: 0.55, trunk: 0x9a4a2e })
   return conifer(level, rng, { height: 8.5, radius: 2.6, bare: 1.5, tiers: [8, 4, 3], points: [6, 5, 4], droop: 0.5, dark: 0x16302e, light: 0x4c7a5c, trunk: 0x4e3a2e })
 }
 
 function fir(level: number, rng: Rng): THREE.BufferGeometry {
+  if (isStorybook()) return storyConifer(level, rng, { height: 7, radius: 2.7, bare: 1.1, droop: 0.45, trunk: 0x9a4a2e })
   return conifer(level, rng, { height: 7, radius: 2.9, bare: 1.2, tiers: [7, 4, 3], points: [7, 5, 4], droop: 0.38, dark: 0x15292c, light: 0x3f6a5a, trunk: 0x4a372c })
 }
 
 /** Tall pine: long bare reddish trunk, a few flat drooping PADS offset around the top third (refs). */
 function pine(level: number, rng: Rng): THREE.BufferGeometry {
+  // Storybook: the tall redwood-like conifer of the reference (long bare orange-red trunk, tiers up top).
+  if (isStorybook()) return storyConifer(level, rng, { height: 11, radius: 2.3, bare: 3.2, droop: 0.5, trunk: 0xa8502e })
   const s = new Soup()
   const bark = srgb(0x7a4a32)
   const dark = srgb(0x1f3d2c)
   const light = srgb(0x557f4f)
   // Genshin proportions: ~2 m of bare trunk, then a big fluffy crown.
-  solid(s, 0, 6.5, 0.3, 0.12, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.6), bark)
+  solid(s, 0, 6.5, 0.3, 0.12, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.6), bark, 0, SURFACE_UV.bark)
   const pads = [6, 4, 2][level]
   for (let i = 0; i < pads; i++) {
     const k = i / pads
@@ -340,7 +369,44 @@ function crownLump(s: Soup, c: V3, r: number, crown: V3, rng: Rng, dark: THREE.C
 }
 
 /** Birch/aspen: banded white trunk, soft rounded crown MASSES (smooth normals) with leaf tufts at the edge. */
+/**
+ * STORYBOOK birch (the reference's pale snags): slim cream trunk with orange-rust bands, a few thin bare
+ * branches reaching up, two small brush-fan sprays near the top. Far level = trunk only.
+ */
+function storyBirch(level: number, rng: Rng): THREE.BufferGeometry {
+  const s = new Soup()
+  const cream = srgb(0xe6d8c2), rust = srgb(0xc8744a)
+  const segs = level === 0 ? 6 : 3
+  for (let k = 0; k < segs; k++) {
+    const y0 = (k / segs) * 5.4, y1 = ((k + 1) / segs) * 5.4
+    const c = k % 2 === 1 ? rust : cream
+    solid(s, y0, y1, 0.16 - k * 0.018, 0.16 - (k + 1) * 0.018, level === 2 ? 4 : 5, c.clone().multiplyScalar(0.85), c, 0, SURFACE_UV.bark)
+  }
+  if (level === 2) return s.geometry('birch')
+  const m = new THREE.Matrix4(), nm = new THREE.Matrix3(), p = new THREE.Vector3(), n = new THREE.Vector3()
+  for (let i = 0; i < (level === 0 ? 5 : 3); i++) {
+    const y = rng.range(2.4, 4.8), a = rng.next() * 6.28, len = rng.range(0.7, 1.4)
+    const b = new Soup()
+    solid(b, 0, len, 0.05, 0.012, 4, cream.clone().multiplyScalar(0.8), cream, 0, SURFACE_UV.bark)
+    m.makeRotationFromEuler(new THREE.Euler(0, -a, -0.6 + rng.range(-0.2, 0.2), 'YXZ')).setPosition(0, y, 0)
+    nm.getNormalMatrix(m)
+    for (let v = 0; v < b.pos.length / 3; v++) {
+      p.fromArray(b.pos, v * 3).applyMatrix4(m)
+      n.fromArray(b.nor, v * 3).applyMatrix3(nm)
+      s.vert([p.x, p.y, p.z], [n.x, n.y, n.z], SURFACE_UV.bark, new THREE.Color(b.col[v * 3], b.col[v * 3 + 1], b.col[v * 3 + 2]))
+    }
+  }
+  const [u0, v0, u1, v1] = cellUv(ATLAS_CELLS.spray)
+  const dark = srgb(0x4a6444), light = srgb(0x9cb57e)
+  for (let i = 0; i < 3; i++) {
+    const a = rng.next() * 6.28, y = 4.6 + i * 0.35
+    cardUv(s, [0, y, 0], [Math.cos(a) * 1.1, y - 0.3, Math.sin(a) * 1.1], [0, 0.7, 0], [u0, v0, u1, v1], [0, y, 0], dark, light)
+  }
+  return s.geometry('birch')
+}
+
 function birch(level: number, rng: Rng): THREE.BufferGeometry {
+  if (isStorybook()) return storyBirch(level, rng)
   const s = new Soup()
   const barkL = srgb(0xd9d4c4)
   const barkD = srgb(0x55504a)
@@ -349,7 +415,7 @@ function birch(level: number, rng: Rng): THREE.BufferGeometry {
     const y0 = (k / segs) * 4.2
     const y1 = ((k + 1) / segs) * 4.2
     const c = k % 3 === 1 && level === 0 ? barkD : barkL
-    solid(s, y0, y1, 0.2 - k * 0.025, 0.2 - (k + 1) * 0.025, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.75), c)
+    solid(s, y0, y1, 0.2 - k * 0.025, 0.2 - (k + 1) * 0.025, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.75), c, 0, SURFACE_UV.bark)
   }
   // Crown = a cumulus of small lumps shaded as ONE soft volume (normals from the crown centre, not per lump):
   // bumpy painted silhouette, smooth painterly light — refer/roads roadside trees.
@@ -384,7 +450,7 @@ function birch(level: number, rng: Rng): THREE.BufferGeometry {
 function dead(level: number, rng: Rng): THREE.BufferGeometry {
   const s = new Soup()
   const c = srgb(0x6e665c)
-  solid(s, 0, 6, 0.24, 0.05, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.6), c)
+  solid(s, 0, 6, 0.24, 0.05, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.6), c, 0, SURFACE_UV.bark)
   const branches = [6, 3, 0][level]
   const m = new THREE.Matrix4()
   const nm = new THREE.Matrix3()
@@ -395,13 +461,13 @@ function dead(level: number, rng: Rng): THREE.BufferGeometry {
     const a = rng.next() * 6.28
     const len = rng.range(0.9, 1.8)
     const b = new Soup()
-    solid(b, 0, len, 0.07, 0.015, 4, c.clone().multiplyScalar(0.7), c)
+    solid(b, 0, len, 0.07, 0.015, 4, c.clone().multiplyScalar(0.7), c, 0, SURFACE_UV.bark)
     m.makeRotationFromEuler(new THREE.Euler(0, -a, -1.0 + rng.range(-0.2, 0.2), 'YXZ')).setPosition(0, y, 0)
     nm.getNormalMatrix(m)
     for (let v = 0; v < b.pos.length / 3; v++) {
       p.fromArray(b.pos, v * 3).applyMatrix4(m)
       n.fromArray(b.nor, v * 3).applyMatrix3(nm)
-      s.vert([p.x, p.y, p.z], [n.x, n.y, n.z], SOLID_UV, new THREE.Color(b.col[v * 3], b.col[v * 3 + 1], b.col[v * 3 + 2]))
+      s.vert([p.x, p.y, p.z], [n.x, n.y, n.z], SURFACE_UV.bark, new THREE.Color(b.col[v * 3], b.col[v * 3 + 1], b.col[v * 3 + 2]))
     }
   }
   return s.geometry('dead')

@@ -2,10 +2,11 @@ import * as THREE from 'three'
 import { stylize } from '../../rendering/shaders/stylize'
 import { CHUNK_SIZE } from '../constants'
 import type { FarRequest } from '../Streaming/chunk.worker'
-import type { FarTerrainData } from './horizonGen'
+import { farOffset, type FarTerrainData } from './horizonGen'
 
 /**
- * Low-detail HORIZON terrain out to ~1–1.5 km, so hills, valleys, lakes and forests far beyond the streamed
+ * Low-detail HORIZON terrain out to 2.4–4.4 km (tier), on a warped grid (dense near the player, coarse at the
+ * rim — horizonGen.farOffset), so hills, valleys, lakes and forests far beyond the streamed
  * chunks stay visible (views from hilltops, refer/environment/procedural-world-vista). One mesh, one draw call.
  *
  *  - Generated in its own worker; rebuilt when the player moves `size/6` from its centre (double-buffered:
@@ -68,11 +69,11 @@ export class HorizonTerrain {
     const pcz = Math.floor(focus.z / CHUNK_SIZE)
     const r = Math.max(0, ring - 1)
     this.hole.set((pcx - r) * CHUNK_SIZE, (pcz - r) * CHUNK_SIZE, (pcx + r + 1) * CHUNK_SIZE, (pcz + r + 1) * CHUNK_SIZE)
-    const step = this.settings.size / this.settings.res
     const moved = Math.hypot(focus.x - this.centre.x, focus.z - this.centre.y)
-    if (!(moved < this.settings.size / 6)) {
-      // Snap to the grid step so vertices don't swim between rebuilds.
-      this.centre.set(Math.round(focus.x / step) * step, Math.round(focus.z / step) * step)
+    // The fine part of the warped grid must stay under the chunk-ring edge → re-centre every ~size/16.
+    if (!(moved < Math.max(96, this.settings.size / 16))) {
+      // Snap to the chunk grid so vertices don't swim between rebuilds.
+      this.centre.set(Math.round(focus.x / CHUNK_SIZE) * CHUNK_SIZE, Math.round(focus.z / CHUNK_SIZE) * CHUNK_SIZE)
       const msg: FarRequest = { type: 'far', id: ++this.pendingId, seed: this.seed, cx: this.centre.x, cz: this.centre.y, size: this.settings.size, res: this.settings.res }
       this.worker.postMessage(msg)
     }
@@ -80,14 +81,16 @@ export class HorizonTerrain {
 
   private build(d: FarTerrainData): void {
     const n = d.res + 1
-    const step = d.size / d.res
+    const off = Array.from({ length: n }, (_, i) => farOffset(i, d.res, d.size))
+    const cell = (i: number) => off[Math.min(n - 1, i + 1)] - off[Math.max(0, i - 1)]
     const pos = new Float32Array(n * n * 3)
     for (let j = 0; j < n; j++) {
       for (let i = 0; i < n; i++) {
         const k = j * n + i
-        pos[k * 3] = d.cx - d.size / 2 + i * step
-        pos[k * 3 + 1] = d.heights[k] - 3
-        pos[k * 3 + 2] = d.cz - d.size / 2 + j * step
+        pos[k * 3] = d.cx + off[i]
+        // Sits below the true surface by more where cells are coarse: chords over valleys never poke through.
+        pos[k * 3 + 1] = d.heights[k] - 3 - 0.04 * Math.max(cell(i), cell(j))
+        pos[k * 3 + 2] = d.cz + off[j]
       }
     }
     const idx = new Uint32Array(d.res * d.res * 6)

@@ -30,7 +30,7 @@ export class MonsterRig {
 
   constructor() {
     this.root.name = 'monsters'
-    const body = stylize(new THREE.MeshLambertMaterial({ color: new THREE.Color().setHex(0x120c10, THREE.SRGBColorSpace) }), { key: 'monster', rim: 2.2, fogAmount: 0.45 })
+    const body = stylize(new THREE.MeshLambertMaterial({ color: new THREE.Color().setHex(0x120c10, THREE.SRGBColorSpace) }), { key: 'monster', rim: 2.2, fogAmount: 0.45, lit: true })
     const seg = new THREE.CylinderGeometry(0.55, 1, 1, 6, 1).translate(0, 0.5, 0) // along +Y from 0 to 1, thinner at the far end
     const blob = new THREE.IcosahedronGeometry(1, 1)
     const eye = new THREE.SphereGeometry(1, 8, 6)

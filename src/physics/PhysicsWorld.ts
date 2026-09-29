@@ -1,6 +1,7 @@
 import RAPIER from '@dimforge/rapier3d-compat'
 import { CHUNK_RES, CHUNK_SIZE, CHUNK_VERTS } from '../world/constants'
-import { TREE_STRIDE, TRUNK_RADIUS, type ChunkData } from '../world/types'
+import { PROP_STRIDE, TREE_STRIDE, TRUNK_RADIUS, type ChunkData } from '../world/types'
+import { ROCK_HULL } from '../world/Forest/propGeometries'
 import { POI_COLLIDERS } from '../world/POI/poiGeometry'
 
 export type Rapier = typeof RAPIER
@@ -83,7 +84,23 @@ export class PhysicsWorld {
         .setFriction(0.9),
       body,
     )
-    // Trunks only: simplified cylinders. No colliders for plants/grass/small rocks.
+    // Rocks: a convex hull of the rock's own 12-point shape per boulder, scaled/rotated like its instance
+    // (the player steps onto small ones — autostep — and is blocked by big ones; the truck the same).
+    const rk = d.rocks
+    const hull = new Float32Array(ROCK_HULL.length)
+    for (let i = 0; i < rk.length; i += PROP_STRIDE) {
+      const sc = rk[i + 4]
+      for (let k = 0; k < hull.length; k++) hull[k] = ROCK_HULL[k] * sc
+      const desc = R.ColliderDesc.convexHull(hull)
+      if (!desc) continue
+      const a = rk[i + 3] / 2
+      this.world.createCollider(
+        desc.setTranslation(rk[i] - half, rk[i + 1], rk[i + 2] - half).setRotation({ x: 0, y: Math.sin(a), z: 0, w: Math.cos(a) })
+          .setCollisionGroups(group(Groups.Static, 0xffff)).setFriction(0.8),
+        body,
+      )
+    }
+    // Trunks: simplified cylinders. No colliders for plants/grass.
     const t = d.trees
     for (let i = 0; i < t.length; i += TREE_STRIDE) {
       const s = t[i + 4]

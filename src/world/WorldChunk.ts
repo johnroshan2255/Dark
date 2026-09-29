@@ -69,7 +69,7 @@ interface FarGroup {
  *                draws + terrain (+ rocks at LOD1 unless LOW). Dead snags hidden (thin; fog swallows them).
  * (A shadow-only low-poly proxy via layers does NOT work: three tests shadow-pass layers against the MAIN
  *  camera — WebGLShadowMap.renderObject. Budget is met by the per-tier near level instead.)
- *   LOD1: trees level 1, rocks      LOD2: trees level 2 (dead snags hidden)
+ *   LOD1: trees level 1, low-poly rocks      LOD2: trees level 2 (dead snags hidden)
  * Grass is NOT per chunk: GrassField draws it around the player in one call.
  */
 export class WorldChunk implements Cullable {
@@ -86,6 +86,8 @@ export class WorldChunk implements Cullable {
   private species: { id: number; m: SpeciesMeshes }[] = []
   private far: FarGroup[] = []
   private rocks: THREE.InstancedMesh | null = null
+  /** LOD1 rocks: low-poly geometry, same instances. */
+  private rocksFar: THREE.InstancedMesh | null = null
   private ferns: THREE.InstancedMesh | null = null
   private bushes: THREE.InstancedMesh | null = null
   private poles: THREE.InstancedMesh | null = null
@@ -132,6 +134,7 @@ export class WorldChunk implements Cullable {
     const rockAttrs = buildInstanceAttributes(data.rocks, PROP_STRIDE, undefined, 0.12)
     if (rockAttrs) {
       this.rocks = this.add(createInstancedMesh(geos.rock, mats.rock, rockAttrs, 'rocks'))
+      this.rocksFar = this.add(createInstancedMesh(geos.rockFar, mats.rock, rockAttrs, 'rocks.far'))
       this.instanceCount += rockAttrs.count
     }
     // Undergrowth (refer/forest): ferns + leafy bushes, split deterministically by record (2 draws per near chunk).
@@ -216,7 +219,8 @@ export class WorldChunk implements Cullable {
       // shadows don't stop at a chunk border. The shadow frustum culls the far ones.
       f.lod1.castShadow = lod === 1
     }
-    if (this.rocks) (this.rocks.visible = near || (lod === 1 && detail.farRocks)), (this.rocks.castShadow = near && !detail.lean)
+    if (this.rocks) (this.rocks.visible = near), (this.rocks.castShadow = near && !detail.lean)
+    if (this.rocksFar) this.rocksFar.visible = lod === 1 && detail.farRocks
     if (this.ferns) this.ferns.visible = near && detail.plants
     if (this.bushes) this.bushes.visible = near && detail.plants
     if (this.poles) (this.poles.visible = lod <= 1), (this.poles.castShadow = near)
@@ -250,7 +254,7 @@ export class WorldChunk implements Cullable {
     // Shared geometries/materials belong to the libraries; only per-chunk buffers are freed.
     for (const { m } of this.species) m.levels.forEach((x) => x.dispose())
     for (const f of this.far) (f.lod1.dispose(), f.lod2.dispose())
-    for (const m of [this.rocks, this.ferns, this.bushes, this.poles, this.fences]) m?.dispose()
+    for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.poles, this.fences]) m?.dispose()
     for (const { mesh } of this.places) mesh.geometry.dispose()
     this.wires?.geometry.dispose()
   }

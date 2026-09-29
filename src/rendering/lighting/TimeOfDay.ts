@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import type { ArtStyle } from '../artStyle'
 
 /**
  * Continuous day/night cycle. Time is in game hours [0, 24). The sun moves on a low tilted arc:
@@ -39,6 +40,14 @@ export interface LightingParams {
   cloudWhite: number
   /** Cel-shading strength (uToon). */
   toon: number
+  /** Most the distance fog may cover LAND (hills keep their shape; only the horizon mesh's rim reaches the sky). */
+  fogMax: number
+  /** Aerial-perspective tint of distant land (× the sky colour in that direction): blue-green hills, not white. */
+  landHaze: THREE.Color
+  /** STORYBOOK only: weight of the unlit hand-painted shading over real lighting (0 = lit, 1 = fully painted). */
+  painted: number
+  /** STORYBOOK only: the light "painted into" the colours (albedo × this; sky-side brighter). */
+  paintLight: THREE.Color
   // grading (PostPipeline)
   tint: THREE.Color
   lift: THREE.Color
@@ -55,7 +64,7 @@ function key(p: Partial<LightingParams> & Record<string, unknown>): LightingPara
   return {
     sunColor: c(0xfff0d8), sunIntensity: 0, moonColor: c(0xa8bcff), moonIntensity: 0,
     hemiSky: c(0x808080), hemiGround: c(0x202020), hemiIntensity: 0.5, fogColor: c(0x808080), skyZenith: c(0x404060),
-    fogStart: 60, fogEnd: 1000, exposure: 1, stars: 0, rays: 0, shafts: 0, clouds: 0.4, split: 0.45, haze: 0.4, cloudWhite: 0, toon: 0.7, tint: c(0xffffff), lift: c(0x000000), saturation: 0.85,
+    fogStart: 60, fogEnd: 1000, exposure: 1, stars: 0, rays: 0, shafts: 0, clouds: 0.4, split: 0.45, haze: 0.4, cloudWhite: 0, toon: 0.7, painted: 0, paintLight: c(0xffffff), fogMax: 1, landHaze: c(0xffffff), tint: c(0xffffff), lift: c(0x000000), saturation: 0.85,
     contrast: 1.05, vignette: 0.3, grain: 0.04, distortion: 0,
     ...p,
   } as LightingParams
@@ -73,7 +82,7 @@ const DAWN = key({
   fogColor: c(0xb08a86), skyZenith: c(0x4a5c8a), fogStart: 60, fogEnd: 950, exposure: 1.1, stars: 0.15, rays: 1, shafts: 1.1,
   clouds: 0.4,
   tint: c(0xfff0e8), vignette: 0.3, grain: 0.035,
-  haze: 0.5, cloudWhite: 0.45, toon: 0.85,
+  haze: 0.5, cloudWhite: 0.45, toon: 0.85, fogMax: 0.72, landHaze: c(0xb4b8cc),
 })
 // Clear golden-afternoon day (refer/environment/day-evening.png): strong warm key, bluer sky, lower fill
 // so shadows read, lighter hazy horizon.
@@ -83,7 +92,7 @@ const DAY = key({
   sunColor: c(0xfff2dc), sunIntensity: 2.9, hemiSky: c(0xb4d6ff), hemiGround: c(0x6f8f4c), hemiIntensity: 1.75,
   fogColor: c(0xcfe5f8), skyZenith: c(0x2a78e4), fogStart: 140, fogEnd: 1900, exposure: 1.0, rays: 0.35, shafts: 0.2,
   clouds: 0.5, split: 0.12, saturation: 1.2, contrast: 1.02, vignette: 0.05, grain: 0,
-  haze: 0.16, cloudWhite: 1, toon: 1,
+  haze: 0.16, cloudWhite: 1, toon: 1, fogMax: 0.62, landHaze: c(0xa8c4cc),
 })
 const EVENING = key({
   // refer/roads hero: strong warm key, COOL blue-violet fill (shadows read blue), peach horizon toward the sun
@@ -91,13 +100,13 @@ const EVENING = key({
   sunColor: c(0xffb468), sunIntensity: 3.6, hemiSky: c(0x6f86c8), hemiGround: c(0x46404a), hemiIntensity: 1.25,
   fogColor: c(0x6f86ba), skyZenith: c(0x2c5aa8), fogStart: 50, fogEnd: 1150, exposure: 1.5, stars: 0.05, rays: 0.35,
   shafts: 0.65, clouds: 0.55, split: 0.6, tint: c(0xfff4e8), lift: c(0x04050c), saturation: 1.0, contrast: 1.1, vignette: 0.3,
-  haze: 0.55, toon: 0.85,
+  haze: 0.55, toon: 0.85, fogMax: 0.75, landHaze: c(0xb0b8d4),
 })
 const DUSK = key({
   sunColor: c(0xff6a40), sunIntensity: 0.8, moonIntensity: 0.5, hemiSky: c(0x4a5078), hemiGround: c(0x1c1620),
   hemiIntensity: 1.0, fogColor: c(0x5a4660), skyZenith: c(0x1d2447), fogStart: 50, fogEnd: 800, exposure: 1.25, stars: 0.5,
   rays: 0.6, shafts: 0.7, clouds: 0.45, lift: c(0x030208), vignette: 0.4, grain: 0.045,
-  haze: 0.5,
+  haze: 0.5, fogMax: 0.9, landHaze: c(0xc8c4d4),
 })
 const NIGHTMARE = key({
   // refer/nightmare: glowing crimson sky, near-black silhouettes, dark red-brown ground — not a flat red wash.
@@ -107,6 +116,29 @@ const NIGHTMARE = key({
   contrast: 1.22, vignette: 0.5, grain: 0.06, distortion: 1,
   haze: 0.55,
 })
+
+// STORYBOOK art style (the forest-house study, artStyle.ts): the same sun path, but an UNLIT painting —
+// materials show their (pastel-remapped) colour × `paintLight`, lighter on sky-facing sides; no sun shading,
+// rim or cel terminator (stylize.ts). Pale slate-blue sky and a close pale haze that swallows the distance like
+// the diorama's edge (partial: land keeps its shape, see fogMax/landHaze). Grading stays neutral (the palette is done in the materials). At night `painted` drops
+// so the flashlight and moon still light the world (the horror mood is kept). God rays / volumetric shafts
+// and bloom are kept (the sun shadow map still renders: it feeds the shafts; the painted shading hides the
+// cast shadows by day). Sky/fog/haze are pale, so shafts read as soft light through the trees.
+const STORY_BASE = { toon: 0, split: 0.1, saturation: 1.0, contrast: 1.0, lift: c(0x000000), vignette: 0.08, grain: 0 }
+const STORY_DAWN = key({
+  ...DAWN, ...STORY_BASE, painted: 1, paintLight: c(0xf2dcd0), fogColor: c(0xc4b8c0), skyZenith: c(0x8a9cb8),
+  fogStart: 40, fogEnd: 1400, exposure: 1.0, clouds: 0.25, cloudWhite: 0.7, haze: 0.24, tint: c(0xffffff), fogMax: 0.7, landHaze: c(0xc8ccd4),
+})
+const STORY_DAY = key({
+  ...DAY, ...STORY_BASE, painted: 1, paintLight: c(0xf4f4ee), fogColor: c(0xb6c6d2), skyZenith: c(0x93adc4),
+  fogStart: 45, fogEnd: 1500, exposure: 1.0, clouds: 0.22, cloudWhite: 1, haze: 0.22, tint: c(0xffffff), fogMax: 0.66, landHaze: c(0xc4d2d4),
+})
+const STORY_EVENING = key({
+  ...EVENING, ...STORY_BASE, painted: 1, paintLight: c(0xf2d8c0), fogColor: c(0xb4b2c0), skyZenith: c(0x7a8cae),
+  fogStart: 40, fogEnd: 1400, exposure: 1.0, clouds: 0.3, cloudWhite: 0.6, haze: 0.26, tint: c(0xffffff), fogMax: 0.72, landHaze: c(0xc4c4d4),
+})
+const STORY_DUSK = key({ ...DUSK, painted: 0.7, paintLight: c(0x5c5270), toon: 0 })
+const STORY_NIGHT = key({ ...NIGHT, painted: 0.45, paintLight: c(0x1c2a44), toon: 0 })
 
 /** Hour keyframes (cyclic). */
 const SCHEDULE: [number, LightingParams, TimeLabel][] = [
@@ -119,6 +151,12 @@ const SCHEDULE: [number, LightingParams, TimeLabel][] = [
   [18.6, DUSK, 'DUSK'],
   [20.3, NIGHT, 'NIGHT'],
 ]
+
+const STORY_SCHEDULE: [number, LightingParams, TimeLabel][] = SCHEDULE.map(([h, p, l]) => [
+  h,
+  p === DAWN ? STORY_DAWN : p === DAY ? STORY_DAY : p === EVENING ? STORY_EVENING : p === DUSK ? STORY_DUSK : p === NIGHT ? STORY_NIGHT : p,
+  l,
+])
 
 /** Named jump targets for the T key / buttons. */
 export const TIME_PRESETS: { label: TimeLabel; hours: number }[] = [
@@ -169,6 +207,8 @@ export class TimeOfDay {
   readonly sunDir = new THREE.Vector3()
   readonly moonDir = new THREE.Vector3()
   label: TimeLabel = 'DAY'
+  /** Art style: picks the keyframe set (values only — same uniforms, same cost). */
+  style: ArtStyle = 'bright'
   /** Fast-forward animation state (the sun visibly travels to the target). */
   private anim: { from: number; to: number; t: number; seconds: number } | null = null
   private readonly scratch: LightingParams
@@ -225,12 +265,18 @@ export class TimeOfDay {
     this.evaluate()
   }
 
+  setStyle(style: ArtStyle): void {
+    this.style = style
+    this.evaluate()
+  }
+
   private evaluate(): void {
     const h = this.hours
-    let i = SCHEDULE.length - 1
-    for (let j = 0; j < SCHEDULE.length; j++) if (SCHEDULE[j][0] <= h) i = j
-    const [h0, p0, l0] = SCHEDULE[i]
-    const [h1raw, p1] = SCHEDULE[(i + 1) % SCHEDULE.length]
+    const sched = this.style === 'storybook' ? STORY_SCHEDULE : SCHEDULE
+    let i = sched.length - 1
+    for (let j = 0; j < sched.length; j++) if (sched[j][0] <= h) i = j
+    const [h0, p0, l0] = sched[i]
+    const [h1raw, p1] = sched[(i + 1) % sched.length]
     const h1 = h1raw <= h0 ? h1raw + 24 : h1raw
     const t = smooth(Math.min(1, Math.max(0, (h - h0) / (h1 - h0))))
     lerpParams(this.scratch, p0, p1, t)
