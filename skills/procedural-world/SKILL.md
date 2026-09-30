@@ -21,6 +21,18 @@ deltas (looted/destroyed/opened).
 > and TRAIL (1.35 m). `WorldFields.height` = natural → river → network → main road. Per-vertex `netEdge` /
 > `netType` drive the painted surface in the terrain shader; vegetation keeps clear via `anyRoadEdge`.
 > Cost: chunk generation 1.1 → 1.9 ms (worker). Rocks: slate-indigo boulders with mauve tops, 0.5–4 m.
+>
+> **Biomes (implemented, `src/world/Biomes.ts`):** the world is tiled by 900 m cells, each with a jittered
+> centre and a hashed type (forest 50 % / desert 27 % / snowfield 23 %); a point's weights `[desert, snow]`
+> blend the 3×3 surrounding cells over 260 m (`(1 − (d − dMin)/260)²`, normalised) after a ±150 m noise warp of
+> the lookup position, so borders wander. Altitude adds a snow line (78–112 m, higher in deserts). The spawn's
+> 3×3 cells are forest; cells (0, ±2) — on the road ~2 km up and down it — are always one desert and one snow, so
+> both are found by driving. Weights feed: `naturalHeight` (dunes / massifs), `groundColor` (dune gold, snow
+> white, ice at the shore), `forestDensity` (+ treeline above 95 m), species (desert: snags + pines; snow:
+> conifers), rock/plant density, per-instance tints (frosted / sun-dried, `WorldChunk`), grass (none on snow,
+> dry tufts on sand), the terrain shader (`biome` attribute: ripples / sparkle) and the fog colour under the
+> player. Chunk data carries `biome` (33² × 2). Cost: generation 2.5 → ~3.3 ms/chunk (worker), mostly the wider
+> secondary-road blend. Test: spawn is forest, desert + snow on the road, weights well-formed.
 
 ```
 seed (uint32)
@@ -164,3 +176,12 @@ export function generateChunk(seed: number, cx: number, cz: number): ChunkData {
 - Debug overlay: seed + `WORLD_GEN_VERSION` in HUD; seed override via URL `?seed=1234`.
 - Time `generateChunk` inside the worker (`performance.now()`), report average ms to the HUD.
 - Visual heatmaps: debug material that shows density noise / road mask as vertex colours.
+
+## Road crossings
+Secondary roads never CROSS (an X of two graded roads at different heights read as a "road intercept"):
+`RoadNetwork.link` rejects grid links whose samples enter the main road's corridor (bed + shoulder + 4 m;
+nodes on opposite sides connect through it), node→main links that cross a grid link, and driveways that cross
+a grid link, a main link, or the driveway of a place earlier in (z, x) order. The priority grid < main <
+driveway (+ the strict place order) keeps every decision independent of build order → identical on all
+clients. `RoadNetwork.crosses` (junctions within 28 m of an end are allowed) is tested over 348 roads / 3 seeds
+in `tests/world.test.ts`.

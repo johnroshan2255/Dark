@@ -224,3 +224,14 @@ Always compare against budget with `npm run validate:assets` after.
 - `npx @gltf-transform/cli inspect file.glb` → per-mesh/texture sizes and VRAM estimate.
 - In game: HUD `F3` shows `geometries`, `textures`, `programs`; loading a new asset type should add ≤ 1 program.
 - Chrome Memory → "GPU" process in Task Manager (`Shift+Esc`) to see actual VRAM trends when streaming assets.
+
+## Drivable vehicles (the garage)
+One hero car is in the world at a time, so a vehicle GLB may be richer than a scattered prop (validator budget:
+40k tris, 12 materials, 4 MB). What matters is DOWNLOAD size and that materials survive baking: `bakeVehicle`
+turns every material into vertex colours (+ `paintMask` for the panels named by `paintRegex`), so **strip the
+textures from flat-shaded models** before committing them — `node scripts/strip-glb-textures.mjs in.glb out.glb
+'{"MaterialName":"#rrggbb",...}'` (the Mercedes went 8.7 → 2.3 MB with zero visual change; the pickup and the Żuk
+keep their single texture). Wheels: separate nodes matching `wheelRegex`, or baked into the body and split out by
+shape (ground-touching, round in side view). Add the model to `gameplay/vehicle/catalogue.ts` with a stock setup
+and a card image (render it in-game on the turntable, 960×540 JPEG, `src/assets/ui/cars/<id>.jpg`) and credit it
+in ASSET_LIST.md.

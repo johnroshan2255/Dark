@@ -242,7 +242,8 @@ export class Bike {
     const locked = p.dead || p.stunned > 0
     c.throttle = riding && !locked ? Math.max(-1, Math.min(1, (i.down('KeyW') ? 1 : 0) - (i.down('KeyS') ? 1 : 0) + i.touchMove.y)) : 0
     c.steer = riding && !locked ? Math.max(-1, Math.min(1, (i.down('KeyD') ? 1 : 0) - (i.down('KeyA') ? 1 : 0) + i.touchMove.x)) : 0
-    c.boost = riding && (i.down('ShiftLeft') || Math.hypot(i.touchMove.x, i.touchMove.y) > 0.92)
+    c.boost = riding && (i.down('ShiftLeft') || i.down('ShiftRight') || Math.hypot(i.touchMove.x, i.touchMove.y) > 0.92)
+    c.parked = !riding
     if (this.state === 'parked') return
     this.readPose(this.prevP, this.prevQ)
     const t = this.sim.body.translation()

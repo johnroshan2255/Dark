@@ -25,6 +25,12 @@ export class Input {
     this.press.get(code)?.()
   }
 
+  /** Hold / release a key from a touch button (boost, handbrake): same state the keyboard writes. */
+  hold(code: string, down: boolean): void {
+    if (down) this.keys.add(code)
+    else this.keys.delete(code)
+  }
+
   addLook(dx: number, dy: number): void {
     this.dx += dx * this.touchLookScale
     this.dy += dy * this.touchLookScale

@@ -2,14 +2,22 @@
  * World invariants (run: npm test). No test framework — plain asserts, exit code 1 on failure.
  *  1. Determinism: same seed → bit-identical ChunkData.
  *  2. Seams: shared chunk borders have identical heights and normals.
- *  3. Physics: Rapier heightfield built by PhysicsWorld matches the render mesh (raycasts).
+ *  3. Physics: Rapier heightfield built by PhysicsWorld matches the render mesh (raycasts); rock hulls
+ *     contain every vertex of the rendered boulder.
+ *  4. Terrain layering: no cliffs at the main road's shoulder, places are flat, secondary roads sit on banks.
+ *  5. Biomes: forest at the spawn, desert + snow reachable along the road, weights well-formed.
  */
+import * as THREE from 'three'
 import { group, Groups, PhysicsWorld } from '../src/physics/PhysicsWorld'
 import { CHUNK_SIZE, CHUNK_VERTS } from '../src/world/constants'
 import { PROP_STRIDE } from '../src/world/types'
 import { Rng } from '../src/world/noise/rng'
 import { sampleHeight } from '../src/world/Terrain/generateTerrain'
 import { WorldGenerator } from '../src/world/WorldGenerator'
+import { createPropGeometries } from '../src/world/Forest/propGeometries'
+import { buildInstanceAttributes } from '../src/optimization/instancing/InstanceBuilder'
+import { Biome } from '../src/world/Biomes'
+import { RoadNetwork } from '../src/world/Road/RoadNetwork'
 
 let failures = 0
 const check = (name: string, ok: boolean, detail = '') => {
@@ -17,7 +25,7 @@ const check = (name: string, ok: boolean, detail = '') => {
   if (!ok) failures++
 }
 
-const keys = ['heights', 'normals', 'colors', 'roadLat', 'netEdge', 'netType', 'trees', 'rocks', 'plants', 'props'] as const
+const keys = ['heights', 'normals', 'colors', 'roadLat', 'netEdge', 'netType', 'biome', 'trees', 'rocks', 'plants', 'props'] as const
 const a = new WorldGenerator(1337)
 const b = new WorldGenerator(1337)
 let identical = true
@@ -76,6 +84,103 @@ check('heightfield collider matches render mesh (200 raycasts)', maxErr < 0.01, 
   }
   check(`rock colliders sit on the rocks (${n} rocks)`, n > 0 && ok === n, `${ok}/${n}`)
 }
+// Rock colliders match the RENDERED boulder: every vertex of the near rock mesh, placed with the same instance
+// matrix the chunk uses (scale + vertical jitter + rotation), lies inside its convex hull collider.
+{
+  const geos = createPropGeometries()
+  const attrs = buildInstanceAttributes(chunk.rocks, PROP_STRIDE, undefined, 0.12)!
+  const pos = geos.rock.getAttribute('position')
+  const m = new THREE.Matrix4(), v = new THREE.Vector3(), c = new THREE.Vector3()
+  let outside = 0, tested = 0, worst = 0
+  for (let k = 0; k < attrs.count; k++) {
+    m.fromArray(attrs.matrix.array as Float32Array, k * 16)
+    c.set(0, 0.2, 0).applyMatrix4(m)
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(m).lerp(c, 0.03) // 3 % inside the surface (hull tolerance)
+      v.x += chunk.cx * CHUNK_SIZE
+      v.z += chunk.cz * CHUNK_SIZE
+      const proj = phys.world.projectPoint(v, true, undefined, group(0xffff, Groups.Static))
+      tested++
+      if (!proj || !proj.isInside) {
+        outside++
+        if (proj) worst = Math.max(worst, Math.hypot(proj.point.x - v.x, proj.point.y - v.y, proj.point.z - v.z))
+      }
+    }
+  }
+  check(`rock hulls contain the rendered boulders (${tested} vertices)`, tested > 0 && outside === 0, `${outside} outside, worst ${worst.toFixed(2)} m`)
+  geos.dispose()
+}
 phys.dispose()
+
+// Terrain layering: the road runs on a valley floor (no walls at its shoulder), places are flat, secondary
+// roads meet the ground on banks. Three seeds × a few km each.
+for (const seed of [7, 1337, 42]) {
+  const f = new WorldGenerator(seed).fields
+  let step = 0
+  for (let z = -600; z < 3000; z += 4) {
+    const x = f.roadCenterX(z), rh = f.roadHeight(z)
+    step = Math.max(step, Math.abs(f.height(x + 12, z) - rh), Math.abs(f.height(x - 12, z) - rh))
+    if (Math.abs(f.height(x, z) - rh) > 1e-6) step = 1e9 // the bed itself is exact
+  }
+  check(`seed ${seed}: main-road shoulder step ≤ 9 m`, step <= 9, `${step.toFixed(1)} m`)
+  let disc = 0, n = 0
+  for (const p of f.pois.inBox(-1500, -1500, 1500, 1500)) {
+    let lo = Infinity, hi = -Infinity
+    for (let a = 0; a < 16; a++) {
+      const h = f.height(p.x + Math.cos((a / 16) * Math.PI * 2) * p.radius * 0.55, p.z + Math.sin((a / 16) * Math.PI * 2) * p.radius * 0.55)
+      lo = Math.min(lo, h); hi = Math.max(hi, h)
+    }
+    disc = Math.max(disc, hi - lo); n++
+  }
+  check(`seed ${seed}: places are flat (${n} places, relief across 55 % of the radius ≤ 0.5 m)`, n > 0 && disc <= 0.5, `${disc.toFixed(2)} m`)
+  let slope = 0
+  for (let z = -300; z < 1200; z += 6) {
+    for (let x = -600; x < 600; x += 6) {
+      if (!f.netRoad(x, z, 3)) continue
+      slope = Math.max(slope, Math.abs(f.height(x + 3, z) - f.height(x + 5, z)) / 2, Math.abs(f.height(x, z + 3) - f.height(x, z + 5)) / 2)
+    }
+  }
+  check(`seed ${seed}: ground beside secondary roads ≤ 2.2 m/m`, slope <= 2.2, `${slope.toFixed(2)} m/m`)
+  // Biomes.
+  const w0 = f.biome(f.roadCenterX(8), 8, [0, 0], f.height(f.roadCenterX(8), 8))
+  check(`seed ${seed}: spawn is forest`, w0[0] + w0[1] < 0.02, `desert ${w0[0].toFixed(2)} snow ${w0[1].toFixed(2)}`)
+  const types = [f.biomes.cell(0, 2).type, f.biomes.cell(0, -2).type].sort()
+  check(`seed ${seed}: desert and snow both lie on the road within ~2.7 km`, types[0] === Biome.Desert && types[1] === Biome.Snow)
+  let bad = 0
+  const rng2 = new Rng(seed)
+  for (let i = 0; i < 2000; i++) {
+    const w = f.biome(rng2.range(-5000, 5000), rng2.range(-5000, 5000), [0, 0])
+    if (w[0] < 0 || w[1] < 0 || w[0] + w[1] > 1 + 1e-6 || Number.isNaN(w[0] + w[1])) bad++
+  }
+  check(`seed ${seed}: biome weights well-formed`, bad === 0, `${bad} bad`)
+}
+
+// Secondary roads never CROSS each other or cut across the main road's corridor (junctions at shared ends are
+// fine): a crossing is two graded roads at different heights through each other — the "road intercepts".
+{
+  let crossings = 0, corridor = 0, roads = 0
+  for (const seed of [7, 1337, 42]) {
+    const f = new WorldGenerator(seed).fields
+    const seen = new Set<object>()
+    for (let cj = -4; cj <= 6; cj++) {
+      for (let ci = -3; ci <= 3; ci++) {
+        const list = f.network.roadsIn(ci, cj)
+        for (let a = 0; a < list.length; a++) {
+          const r = list[a]
+          if (!seen.has(r)) {
+            seen.add(r)
+            roads++
+            // Grid links (both ends off the main road) must stay out of its corridor.
+            const endOnMain = Math.abs(r.xs[r.n - 1] - f.roadCenterX(r.zs[r.n - 1])) < 3
+            if (!endOnMain) for (let i = 0; i < r.n; i++) if (Math.abs(r.xs[i] - f.roadCenterX(r.zs[i])) < 2.7 + 9) { corridor++; break }
+          }
+          for (let b = a + 1; b < list.length; b++) if (RoadNetwork.crosses(r, list[b])) { crossings++; console.log(`  crossing: seed ${seed} ${r.key} × ${list[b].key}`) }
+        }
+      }
+    }
+  }
+  check(`secondary roads never cross each other (${roads} roads, 3 seeds)`, roads > 50 && crossings === 0, `${crossings} crossings`)
+  check('grid links stay out of the main road corridor', corridor === 0, `${corridor} in the corridor`)
+}
 
 process.exit(failures ? 1 : 0)

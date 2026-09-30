@@ -8,7 +8,7 @@ import { group, Groups, type PhysicsWorld } from '../../physics/PhysicsWorld'
  * tyre friction with a traction limit (frictionSlip ≈ μ) and side grip. On top of it:
  *   TRUCK  4WD with a torque/power curve (strong low-speed pull for hills, power-limited top speed), air drag +
  *          rolling resistance, speed-sensitive steering, handbrake = locked + slippery rear (slides), anti-roll
- *          assist (anti-roll bars), auto-righting after a rollover.
+ *          assist (anti-roll bars), auto-righting after a rollover, and a DRIFT mode (see TruckSim.drive).
  *   BIKE   2 wheels on the centre line + a BALANCE controller: steady-state lean φ = atan(v²·tanδ / (g·L)) for the
  *          steered front wheel δ, reached with a PD roll torque — it leans INTO turns, stays up when slow (a foot
  *          down), and falls over when it crashes (rider thrown off). Human-power pedalling (P/v capped by max
@@ -21,6 +21,8 @@ const GRAVITY = 20 // world gravity (PhysicsWorld): 2× real for snappy jumps �
 const RAY_GROUPS = group(0xffff, Groups.Terrain | Groups.Static)
 
 export interface Controls {
+  /** Nobody at the controls (parked): the brakes are locked and it never creeps or rolls away. */
+  parked?: boolean
   /** −1 … 1 (W/S or stick). */
   throttle: number
   /** −1 … 1 (D = +1 = right). */
@@ -152,9 +154,18 @@ abstract class VehicleBase {
     this.body.resetTorques(false)
     const moving = Math.abs(this.speed) > 0.05 || Math.abs(this.controls.throttle) > 0.01
     if (moving) this.body.wakeUp()
+    this.holding = false
     this.drive(dt, this.speed)
     this.vc.updateVehicle(dt, undefined, RAY_GROUPS, (c) => c.parent()?.handle !== this.body.handle)
     this.afterWheels(dt, this.speed)
+    // Hill hold, AFTER the tyre impulses (they re-add a little drift every step): the horizontal velocity and
+    // the yaw spin are cancelled, the suspension keeps settling vertically.
+    if (this.holding) {
+      const v = this.body.linvel()
+      this.body.setLinvel({ x: 0, y: v.y, z: 0 }, false) // vertical kept: the suspension must still settle
+      const w = this.body.angvel()
+      this.body.setAngvel({ x: w.x * 0.5, y: 0, z: w.z * 0.5 }, false)
+    }
     for (let i = 0; i < this.wheels.length; i++) {
       const w = this.wheels[i]
       const len = this.vc.wheelSuspensionLength(i) ?? this.spec.suspension.rest
@@ -163,6 +174,12 @@ abstract class VehicleBase {
       w.steer = -(this.vc.wheelSteering(i) ?? 0)
       w.contact = this.vc.wheelIsInContact(i)
     }
+  }
+
+  private holding = false
+  /** Hill hold this step (applied after the tyre impulses in `step`). */
+  protected hold(): void {
+    this.holding = true
   }
 
   /** Streaming guard: the ground collider under a fast vehicle may not exist yet — never fall out of the world. */
@@ -199,42 +216,111 @@ export interface TruckDims {
   half: { x: number; y: number; z: number }
 }
 
-export class TruckSim extends VehicleBase {
-  static readonly MASS = 1750
-  /** Drive force limit (N) on the flat, and the extra an automatic low range adds nose-up (m·g·sin 60° ≈ 30 kN). */
-  static readonly MAX_FORCE = 12000
-  static readonly LOW_RANGE = 24000
-  static readonly POWER = 120_000
-  private upsideDown = 0
+/** The tunable part of a truck's setup (gameplay/vehicle/catalogue.ts `VehicleTuning`, minus paint). */
+export interface TruckTune {
+  /** kW */
+  power: number
+  /** kN on the flat */
+  force: number
+  boost: number
+  grip: number
+  suspension: number
+  tyre: number
+  mass: number
+}
+export const STOCK_TRUCK: TruckTune = { power: 120, force: 12, boost: 2.2, grip: 2.4, suspension: 36, tyre: 1, mass: 1750 }
 
-  constructor(physics: PhysicsWorld, d: TruckDims) {
+export class TruckSim extends VehicleBase {
+  /** Extra force an automatic low range adds nose-up, per kg (m·g·sin 60° for 1750 kg ≈ 24 kN). */
+  static readonly LOW_RANGE_PER_KG = 24000 / 1750
+  private upsideDown = 0
+  /** Live setup (retune() changes it in place). */
+  readonly tune: TruckTune
+  private readonly colliders: RAPIER.Collider[] = []
+  private readonly massShare = [0.85, 0.1, 0.05]
+  private readonly baseRadius: number
+  /** Drift state. `lateral`: sideways speed of the chassis (m/s, + = sliding to the right); `drift`: smoothed
+   *  0..1 slide amount (camera / audio / HUD); `wheelSlip[i]`: 0..1 tyre slip per wheel (tyre smoke, dust). */
+  lateral = 0
+  drift = 0
+  drifting = false
+  readonly wheelSlip = [0, 0, 0, 0]
+  private driftHold = 0
+
+  constructor(physics: PhysicsWorld, d: TruckDims, tune: TruckTune = STOCK_TRUCK) {
     const h = d.half
+    const t = { ...tune }
+    const r = d.wheelRadius * t.tyre
     super(physics, {
-      mass: TruckSim.MASS,
+      mass: t.mass,
       // Heavy low frame (engine, axles, fuel) + light cab/bed → centre of mass ≈ 0.62 m: rollover ≈ 1.2 g sideways,
       // back-flip tip-over ≈ 68° on a climb.
       boxes: [
-        { half: [h.x * 0.9, 0.2, h.z * 0.93], at: [0, 0.54, 0], mass: TruckSim.MASS * 0.85 },
-        { half: [h.x * 0.86, 0.42, h.z * 0.36], at: [0, 1.28, -h.z * 0.1], mass: TruckSim.MASS * 0.1 },
-        { half: [h.x * 0.88, 0.2, h.z * 0.42], at: [0, 1.05, h.z * 0.55], mass: TruckSim.MASS * 0.05 },
+        { half: [h.x * 0.9, 0.2, h.z * 0.93], at: [0, 0.54, 0], mass: t.mass * 0.85 },
+        { half: [h.x * 0.86, 0.42, h.z * 0.36], at: [0, 1.28, -h.z * 0.1], mass: t.mass * 0.1 },
+        { half: [h.x * 0.88, 0.2, h.z * 0.42], at: [0, 1.05, h.z * 0.55], mass: t.mass * 0.05 },
       ],
-      wheels: d.wheelPos.map((p, i) => ({ hub: p, radius: d.wheelRadius, front: i < 2 })),
-      suspension: { rest: 0.32, travel: 0.24, stiffness: 36, compression: 2.6, relaxation: 3.8 },
-      frictionSlip: 2.4,
+      // Bigger tyres lift the hubs so the tread still sits on the ground.
+      wheels: d.wheelPos.map((p, i) => ({ hub: [p[0], p[1] + (r - d.wheelRadius), p[2]] as [number, number, number], radius: r, front: i < 2 })),
+      suspension: { rest: 0.32, travel: 0.24, stiffness: t.suspension, compression: 2.6, relaxation: 3.8 },
+      frictionSlip: t.grip,
       sideStiffness: 0.55,
     })
+    this.tune = t
+    this.baseRadius = d.wheelRadius
+    // Keep the colliders for live retuning (mass).
+    for (let i = 0; i < this.body.numColliders(); i++) this.colliders.push(this.body.collider(i))
+  }
+
+  /** Change the setup live (garage sliders): mass, springs, grip and tyre size go straight to Rapier. */
+  retune(t: Partial<TruckTune>): void {
+    Object.assign(this.tune, t)
+    if (t.mass !== undefined) this.colliders.forEach((c, i) => c.setMass(this.tune.mass * (this.massShare[i] ?? 0)))
+    for (let i = 0; i < 4; i++) {
+      if (t.suspension !== undefined) this.vc.setWheelSuspensionStiffness(i, this.tune.suspension)
+      if (t.grip !== undefined) this.vc.setWheelFrictionSlip(i, this.tune.grip)
+      if (t.tyre !== undefined) {
+        const r = this.baseRadius * this.tune.tyre
+        this.vc.setWheelRadius(i, r)
+        const hub = this.spec.wheels[i].hub
+        const sag = GRAVITY / (4 * this.tune.suspension)
+        this.vc.setWheelChassisConnectionPointCs(i, { x: hub[0], y: hub[1] + (r - this.baseRadius) + this.spec.suspension.rest - sag, z: hub[2] })
+      }
+    }
+  }
+
+  /** Current tyre radius (m). */
+  get wheelRadius(): number {
+    return this.baseRadius * this.tune.tyre
   }
 
   protected drive(dt: number, v: number): void {
     const c = this.controls
     const vc = this.vc
-    const m = TruckSim.MASS
+    const T = this.tune
+    const m = T.mass
     const av = Math.abs(v)
     // Engine: constant force at low speed (gearing), constant power above it; boost = more power.
-    const power = TruckSim.POWER * (c.boost ? 1.45 : 1)
+    // BOOST (Shift / touch BOOST): a real kick — 2.2× power, 1.4× force cap, and a lower drag ceiling
+    // (top ≈ 90 km/h → ≈ 125 km/h); measured 0→72 km/h 4.7 s → ~3 s.
+    const power = T.power * 1000 * (c.boost ? T.boost : 1)
     const climb = Math.max(0, Math.sin(this.attitude().pitch)) // automatic low range on steep uphill
-    const maxForce = TruckSim.MAX_FORCE + TruckSim.LOW_RANGE * Math.min(1, climb * 1.3)
+    const maxForce = T.force * 1000 * (c.boost ? 1.4 : 1) + TruckSim.LOW_RANGE_PER_KG * m * Math.min(1, climb * 1.3)
     const pull = Math.min(maxForce, (power * (1 + climb * 2)) / Math.max(av, 0.5))
+    // DRIFT: the rear steps out on the handbrake (Space / touch JUMP) at speed, or on a boosted power slide
+    // (Shift + steer); once the truck is sliding it stays in drift mode ~0.35 s after the trigger lets go, so
+    // throttle + counter-steer hold the slide. While drifting the rear tyres keep only ~10 % of their side
+    // grip (the front keeps most of it, so counter-steering bites), the drive is biased to the rear axle, the
+    // steering lock opens up at speed, and a spin guard damps the yaw once the slide passes ~60°.
+    const { r: right } = this.axes()
+    const lv0 = this.body.linvel()
+    this.lateral = lv0.x * right[0] + lv0.y * right[1] + lv0.z * right[2]
+    const slipAngle = Math.atan2(Math.abs(this.lateral), Math.max(av, 0.5))
+    const trigger = (c.handbrake && av > 3) || (c.boost && Math.abs(c.steer) > 0.3 && av > 7)
+    if (trigger || (slipAngle > 0.28 && av > 4)) this.driftHold = 0.35
+    else this.driftHold = Math.max(0, this.driftHold - dt)
+    const drifting = (this.drifting = trigger || this.driftHold > 0)
+    this.drift += ((drifting ? Math.min(1, slipAngle / 0.6) : 0) - this.drift) * Math.min(1, dt * 8)
     let engine = 0, brake = 0
     if (c.throttle > 0.01) engine = pull * c.throttle // (rolling back on a hill: the wheels drive forward, no brake)
     // Wheelie / back-flip control on steep climbs: all the weight is on the rear axle and the drive torque lifts
@@ -246,22 +332,38 @@ export class TruckSim extends VehicleBase {
       if (v > 0.8) brake = -c.throttle
       else engine = -Math.min(maxForce * 0.7, power / Math.max(av, 0.5)) * -c.throttle * (v < -9 ? 0 : 1) // reverse, ≤ 9 m/s
     } else if (av < 0.6) brake = 0.6 // holding still (parking)
+    // HILL HOLD: parked, or idle at a crawl, the brakes lock and the chassis is held — a truck left on a slope
+    // used to creep backwards (~0.25 m/s) through the raycast tyres' low-speed drift.
+    if (c.parked || (Math.abs(c.throttle) < 0.01 && av < 1.2)) {
+      brake = 1
+      this.hold()
+    }
     // Brake impulse per wheel per step: ~1 g of deceleration at full pedal (tyres limit it further).
     const brakeImp = (brake * m * GRAVITY * 0.5 * dt) / 4
     // Steering: full lock slow, much less at speed (stable at 25 m/s); smoothed like a steering rack.
-    const lock = 0.62 / (1 + av * 0.12)
-    this.steerAngle += (c.steer * lock - this.steerAngle) * Math.min(1, dt * (c.steer === 0 ? 7 : 5))
+    const lock = 0.62 / (1 + av * (drifting ? 0.05 : 0.12))
+    this.steerAngle += (c.steer * lock - this.steerAngle) * Math.min(1, dt * (c.steer === 0 ? 7 : drifting ? 8 : 5))
     // 4×4 with traction control: drive split by each wheel's load (last step's suspension force) — on a steep
     // climb the weight sits on the rear axle and an equal split would waste the drive on the light front wheels.
     let load = 0
     const n = [0, 1, 2, 3].map((i) => (this.wheels[i].contact ? Math.max(0, vc.wheelSuspensionForce(i) ?? 0) : 0))
     for (const x of n) load += x
+    const burnout = c.throttle > 0.9 && av < 2.5 && !c.handbrake
     for (let i = 0; i < 4; i++) {
       const front = i < 2
-      vc.setWheelEngineForce(i, load > 1 ? (engine * n[i]) / load : engine / 4)
+      // Drifting: 75 % of the drive on the rear axle (the slide is held on the throttle); else by wheel load.
+      vc.setWheelEngineForce(i, drifting ? (engine * (front ? 0.25 : 0.75)) / 2 : load > 1 ? (engine * n[i]) / load : engine / 4)
       const hb = c.handbrake && !front
       vc.setWheelBrake(i, hb ? (m * GRAVITY * 1.2 * dt) / 4 : brakeImp)
-      vc.setWheelSideFrictionStiffness(i, hb ? 0.25 : 0.55)
+      // Side stiffness is the share of the lateral velocity the tyre cancels PER STEP (Bullet model): 0.55 holds
+      // the line within a few frames; a sliding rear needs ~0.05 (time constant ≈ 0.3 s) to step out and stay out.
+      vc.setWheelSideFrictionStiffness(i, hb ? 0.03 : drifting ? (front ? 0.5 : 0.06) : 0.55)
+      // Tyre slip for the effects: sideways slide (rear counts fully), a locked rear on the handbrake, a burnout.
+      const w = this.wheels[i]
+      const slide = Math.min(1, Math.abs(this.lateral) / 6) * (front ? 0.45 : 1)
+      const spin = burnout && w.contact ? 0.55 : 0
+      const target = w.contact ? Math.max(slide * (drifting ? 1 : 0.5), hb && av > 2 ? 0.7 : 0, spin) : 0
+      this.wheelSlip[i] += (target - this.wheelSlip[i]) * Math.min(1, dt * 10)
       // Ackermann-ish: the inner front wheel turns a little more.
       if (front) vc.setWheelSteering(i, -this.steerAngle * (1 + 0.08 * Math.sign(this.steerAngle) * (i === 1 ? 1 : -1)))
     }
@@ -269,7 +371,7 @@ export class TruckSim extends VehicleBase {
     const lv = this.body.linvel()
     const sp = Math.hypot(lv.x, lv.y, lv.z)
     if (sp > 0.05) {
-      const drag = 5.6 * sp * sp + 0.012 * m * GRAVITY
+      const drag = (c.boost ? 3.4 : 5.6) * (m / 1750) * sp * sp + 0.012 * m * GRAVITY
       this.body.addForce({ x: (-lv.x / sp) * drag, y: (-lv.y / sp) * drag, z: (-lv.z / sp) * drag }, true)
     }
     // Anti-roll assist (anti-roll bars + a little stability control): resists roll rate and large roll angles
@@ -282,6 +384,12 @@ export class TruckSim extends VehicleBase {
     if (grounded) {
       const tq = (-roll * 9 - rollRate * 3.2) * m * 0.9
       this.body.addTorque({ x: f[0] * tq, y: f[1] * tq, z: f[2] * tq }, true) // torque along +forward raises roll
+      // Drift spin guard: past ~60° of slide the yaw rate is damped so a slide ends in a save, not a spin.
+      if (drifting && slipAngle > 1.0) {
+        const yawRate = w.x * u[0] + w.y * u[1] + w.z * u[2]
+        const ty = -yawRate * m * 1.6 * Math.min(1, (slipAngle - 1.0) * 2)
+        this.body.addTorque({ x: u[0] * ty, y: u[1] * ty, z: u[2] * ty }, true)
+      }
     }
     // Pitch assist on steep climbs (the nose lifting off): damps the pitch-up and pushes the nose back down.
     if (wheelie) {
@@ -353,6 +461,11 @@ export class BikeSim extends VehicleBase {
       if (v > 0.4) brake = -c.throttle
       else pedal = -Math.min(180, 150 / Math.max(av, 0.5)) * -c.throttle * (v < -2 ? 0 : 1) // walk it backwards
     } else if (av < 0.3) brake = 0.5
+    // Hill hold: a foot down — stopped on a slope with no pedalling, the bike stays put (it rolled backwards).
+    if (c.parked || (Math.abs(c.throttle) < 0.01 && av < 0.8)) {
+      brake = 1
+      this.hold()
+    }
     // Wheelie guard: the rider eases off when the front wheel lifts, and leans over the bars while pushing
     // hard (weight shift ≈ a nose-down moment of ~85 % of the drive moment F·h).
     if (!this.wheels[0].contact && pedal > 0) pedal *= 0.3

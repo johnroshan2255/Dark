@@ -26,6 +26,22 @@ Fog is DARK's most important visual *and* performance tool:
 > fade (`uCullFade`) at the ring edge, not by fog.
 > Lesson: a clear near field exposes dark albedos and missing fill light — palette and hemisphere fill were raised
 > together with this change (skills/lighting).
+>
+> **VOLUMETRIC MIST (implemented):** two layers on top of the distance fog.
+> 1. *Analytic height fog* (`sky/skyShader.ts` `MIST_GLSL`, `mistAmount(dir, dist)`): density ρ(y) = ρ0·e^(−(y−y0)·f)
+>    integrated in closed form along the view ray, `d0·(1 − e^(−dy·f·L))/(dy·f)` — pools in valleys and over the
+>    water, thins up the hills, clear from a summit. Applied in every `stylize`d material (composited with the
+>    distance fog as two transmittances, using the same sky-coloured fog colour), the sky dome (integral to
+>    infinity, full below the horizon) and the water. ~10 ALU/fragment, every tier: measured +0.12 ms GPU on
+>    HIGH, +0.14 ms on LOW (M4, 1280×720, dawn). Per phase in `TimeOfDay.ts`: `mistDensity` (DAWN 0.022,
+>    NIGHT/DUSK 0.014, EVENING 0.009, DAY 0.0035, NIGHTMARE 0.02 per m at the base), `mistBase` (m), `mistFalloff` (1/m).
+>    Deserts thin it by 35 %. Game sets `uSkyMist = (density, base, falloff, cameraY)` per frame.
+> 2. *Fog banks* (`GodRaysShader.ts`, tier flag `fog.banks` — MEDIUM/HIGH): the existing low-res shafts march
+>    accumulates height-fog density × drifting 2-octave 3D value noise (only the denser-than-average part), written to
+>    the rays RT's alpha and composited in the grading pass (`uMistColor`) before the shafts are added; the shafts are
+>    also brighter where the air is thick. Range = the march range (~40–60 m). Measured +0.23 ms GPU on HIGH.
+> Colour = the phase fog colour nudged toward the key light. The sign of the integral was wrong on the first pass
+> (mist silently absent): verify new fog terms with a headless shot, not by reading the code.
 
 ```
 TimeOfDay keyframe (fogColor, fogDensity)             src/rendering/lighting/TimeOfDay.ts
@@ -64,7 +80,8 @@ Camera `far` = `d99(currentDensity) + 20 m`, clamped to the render radius. Pixel
 
 - Caves: switch to near-black fog colour with high density instead of adding darkness lights; don't layer
   extra fog cards in tight spaces (overdraw close to camera is full-screen overdraw).
-- Don't implement raymarched volumetric fog in the browser at full res (5–10 ms GPU). Fake it.
+- Don't implement raymarched volumetric fog in the browser at full res (5–10 ms GPU). The analytic height fog +
+  the 1/4–1/6-res bank march above is the budgeted version of it.
 - Don't use linear `THREE.Fog` for the main look — its hard `far` boundary reads as a wall; use it only for
   special cases (e.g. a stylized nightmare wall).
 
@@ -186,3 +203,6 @@ the camera walks through). Budget: ≤ 30 visible cards, each ≤ 1/6 of the scr
   streaming/culling).
 - Overdraw check for fog cards: temporarily render cards with additive `0x101010` colour → bright areas = overdraw.
 - Spector.js: confirm patched materials share a single program per material type (cache key working).
+
+## Weather
+Cloud cover and rain (`rendering/weather/Weather.ts`) raise `haze`, grey the fog colour and add mist density on top of the phase keyframes — fog is tuned per phase for CLEAR weather; weather only thickens it.

@@ -56,7 +56,7 @@ export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, 
       const c: [number, number, number] = [0, 0, 0]
       groundColor(fields, x, z, h, Math.min(1, slope * 0.8), c)
       // Canopy seen from afar: clustered dark-teal / olive / golden stands (refer vista), not one green.
-      const forest = h > WorldFields.WATER + 1 ? fields.forestDensity(x, z) : 0
+      const forest = h > WorldFields.WATER + 1 ? fields.forestDensity(x, z, h) : 0
       const stand = fields.colorVariation(x * 0.4 + 57, z * 0.4 - 13)
       const canopy = stand < 0.3 ? TEAL : stand < 0.55 ? FOREST : stand < 0.75 ? OLIVE_C : stand < 0.9 ? GOLD_C : AUTUMN
       mix(c, canopy, Math.min(1, forest * 1.4))

@@ -10,7 +10,23 @@ import { buildWires } from './Road/propMeshes'
 import { RoadProp } from './Road/roadProps'
 import { PropType } from './POI/poiLayout'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import type { WorldFields } from './WorldFields'
+import { WorldFields } from './WorldFields'
+import type { BiomeWeights } from './Biomes'
+import { isOverland } from '../rendering/artStyle'
+
+const _bw: BiomeWeights = [0, 0]
+/** Biome instance tints (linear multipliers): frosted canopies / snow-capped rocks, sun-dried desert foliage, sandstone. */
+const FROST_TREE = [1.55, 1.5, 1.7] as const
+const DRY_TREE = [1.2, 1.0, 0.62] as const
+const SNOW_ROCK = [1.6, 1.65, 1.85] as const
+const SAND_ROCK = [1.45, 1.2, 0.85] as const
+function biomeTint(fields: WorldFields, origin: readonly [number, number], data: Float32Array, o: number, snowT: readonly number[], sandT: readonly number[], out: [number, number, number]): void {
+  const w = fields.biome(origin[0] + data[o], origin[1] + data[o + 2], _bw, data[o + 1])
+  const s = w[0], n = w[1]
+  out[0] = 1 + (sandT[0] - 1) * s + (snowT[0] - 1) * n
+  out[1] = 1 + (sandT[1] - 1) * s + (snowT[1] - 1) * n
+  out[2] = 1 + (sandT[2] - 1) * s + (snowT[2] - 1) * n
+}
 
 /**
  * Genshin-style canopy palettes (linear multipliers on the leaf albedo), picked per ~28 m stand (65 %) or per
@@ -27,14 +43,27 @@ const ORANGE = [2.5, 1.35, 0.4] as const
 const RED = [2.7, 0.75, 0.38] as const
 const PINK = [2.5, 1.35, 1.55] as const
 const BASE = [1, 1, 1] as const
-const HUES: Record<number, readonly (readonly [number, number, number])[]> = {
+// OVERLAND stands (over the hill): saturated greens with golden-yellow larch stands and the odd orange one.
+const OVER_GREEN = [0.9, 1.1, 0.75] as const
+const OVER_DEEP = [0.75, 0.95, 0.8] as const
+const OVER_LARCH = [1.6, 1.55, 0.35] as const
+const OVER_GOLD = [1.9, 1.5, 0.3] as const
+const OVER_HUES: Record<number, readonly (readonly [number, number, number])[]> = {
+  [TreeSpecies.Spruce]: [OVER_GREEN, OVER_GREEN, OVER_DEEP, OVER_GREEN, OVER_LARCH],
+  [TreeSpecies.Fir]: [OVER_DEEP, OVER_GREEN, OVER_GREEN, OVER_LARCH],
+  [TreeSpecies.Pine]: [OVER_GREEN, OVER_GREEN, OVER_LARCH, OVER_GOLD],
+  [TreeSpecies.Birch]: [BASE, BASE, [1.15, 1.0, 0.8] as const, [0.95, 1.1, 0.6] as const, [1.2, 0.85, 0.6] as const],
+  [TreeSpecies.Dead]: [BASE],
+}
+const GENSHIN_HUES: Record<number, readonly (readonly [number, number, number])[]> = {
   [TreeSpecies.Spruce]: [TEAL, TEAL, DEEP, FRESH, BRIGHT, OLIVE],
   [TreeSpecies.Fir]: [DEEP, TEAL, FRESH, FRESH, BRIGHT],
   [TreeSpecies.Pine]: [FRESH, BRIGHT, LIME, OLIVE, ORANGE],
   [TreeSpecies.Birch]: [FRESH, BRIGHT, LIME, LIME, ORANGE, ORANGE, RED, PINK],
   [TreeSpecies.Dead]: [BASE],
 }
-const FAR_CONIFER_HUES = [TEAL, DEEP, FRESH, BRIGHT, LIME, ORANGE] as const
+const HUES = isOverland() ? OVER_HUES : GENSHIN_HUES
+const FAR_CONIFER_HUES = isOverland() ? ([OVER_GREEN, OVER_DEEP, OVER_GREEN, OVER_LARCH] as const) : ([TEAL, DEEP, FRESH, BRIGHT, LIME, ORANGE] as const)
 
 /** Per-tier chunk detail switches. */
 export interface ChunkDetail {
@@ -83,6 +112,8 @@ export class WorldChunk implements Cullable {
   instanceCount = 0
 
   private terrain: (THREE.Mesh | null)[] = new Array(LOD_COUNT).fill(null)
+  /** The chunk's ground crosses the water level (a lake or river shore): terrain stays at LOD0 (see setLod). */
+  private readonly shore: boolean
   private species: { id: number; m: SpeciesMeshes }[] = []
   private far: FarGroup[] = []
   private rocks: THREE.InstancedMesh | null = null
@@ -91,6 +122,7 @@ export class WorldChunk implements Cullable {
   private ferns: THREE.InstancedMesh | null = null
   private bushes: THREE.InstancedMesh | null = null
   private poles: THREE.InstancedMesh | null = null
+  private lamps: THREE.InstancedMesh | null = null
   private fences: THREE.InstancedMesh | null = null
   private wires: THREE.LineSegments | null = null
   /** Place objects (houses, barns, crops, tents…), one InstancedMesh per type present. */
@@ -104,6 +136,7 @@ export class WorldChunk implements Cullable {
     fields: WorldFields,
   ) {
     this.key = `${data.cx},${data.cz}`
+    this.shore = data.minY < WorldFields.WATER + 0.5 && data.maxY > WorldFields.WATER - 0.5
     this.origin = [data.cx * CHUNK_SIZE, data.cz * CHUNK_SIZE]
     this.group.name = `chunk ${this.key}`
     this.group.position.set(data.cx * CHUNK_SIZE, 0, data.cz * CHUNK_SIZE)
@@ -112,8 +145,10 @@ export class WorldChunk implements Cullable {
     this.bounds.min.set(data.cx * CHUNK_SIZE, data.minY - 8, data.cz * CHUNK_SIZE)
     this.bounds.max.set((data.cx + 1) * CHUNK_SIZE, data.maxY + 12, (data.cz + 1) * CHUNK_SIZE)
 
+    const treeTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.trees, o, FROST_TREE, DRY_TREE, out)
+    const rockTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.rocks, o, SNOW_ROCK, SAND_ROCK, out)
     for (const sp of geos.trees) {
-      const attrs = buildInstanceAttributes(data.trees, TREE_STRIDE, (o) => data.trees[o + 5] === sp.id, 0.16, 0.22, HUES[sp.id] ?? HUES[0], this.origin)
+      const attrs = buildInstanceAttributes(data.trees, TREE_STRIDE, (o) => data.trees[o + 5] === sp.id, 0.16, 0.22, HUES[sp.id] ?? HUES[0], this.origin, treeTint)
       if (!attrs) continue
       const levels = [0, 1].map((l) => this.add(createInstancedMesh(sp.levels[l], mats.vegetation, attrs, `${sp.name}.lod${l}`)))
       this.species.push({ id: sp.id, m: { levels } })
@@ -124,14 +159,14 @@ export class WorldChunk implements Cullable {
     const birch = geos.trees.find((x) => x.id === TreeSpecies.Birch)!
     const conifer = (o: number) => t[o + 5] === TreeSpecies.Spruce || t[o + 5] === TreeSpecies.Fir || t[o + 5] === TreeSpecies.Pine
     for (const [filter, sp] of [[conifer, spruce], [(o: number) => t[o + 5] === TreeSpecies.Birch, birch]] as const) {
-      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === TreeSpecies.Birch ? HUES[TreeSpecies.Birch] : FAR_CONIFER_HUES, this.origin)
+      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === TreeSpecies.Birch ? HUES[TreeSpecies.Birch] : FAR_CONIFER_HUES, this.origin, treeTint)
       if (!attrs) continue
       this.far.push({
         lod1: this.add(createInstancedMesh(sp.levels[1], mats.vegetation, attrs, `far.${sp.name}.lod1`)),
         lod2: this.add(createInstancedMesh(sp.levels[2], mats.vegetation, attrs, `far.${sp.name}.lod2`)),
       })
     }
-    const rockAttrs = buildInstanceAttributes(data.rocks, PROP_STRIDE, undefined, 0.12)
+    const rockAttrs = buildInstanceAttributes(data.rocks, PROP_STRIDE, undefined, 0.12, 0, undefined, this.origin, rockTint)
     if (rockAttrs) {
       this.rocks = this.add(createInstancedMesh(geos.rock, mats.rock, rockAttrs, 'rocks'))
       this.rocksFar = this.add(createInstancedMesh(geos.rockFar, mats.rock, rockAttrs, 'rocks.far'))
@@ -148,7 +183,13 @@ export class WorldChunk implements Cullable {
     const pr = data.props
     const poleAttrs = buildInstanceAttributes(pr, 6, (o) => pr[o + 5] === RoadProp.Pole, 0.1)
     const fenceAttrs = buildInstanceAttributes(pr, 6, (o) => pr[o + 5] === RoadProp.Fence, 0.12)
-    if (poleAttrs) this.poles = this.add(createInstancedMesh(geos.pole, mats.vegetation, poleAttrs, 'poles'))
+    if (poleAttrs) {
+      this.poles = this.add(createInstancedMesh(geos.pole, mats.vegetation, poleAttrs, 'poles'))
+      // Street lamps on every post: glow halo + light pool, same instances (one additive draw per road chunk).
+      this.lamps = this.add(createInstancedMesh(geos.lampGlow, mats.lampGlow, poleAttrs, 'lamps'))
+      this.lamps.castShadow = false
+      this.lamps.renderOrder = 8
+    }
     if (fenceAttrs) this.fences = this.add(createInstancedMesh(geos.fence, mats.vegetation, fenceAttrs, 'fences'))
     // Places: every prop type baked into two static meshes per chunk (buildings, small crops) → 2 draws, not ~14.
     const isSmall = (type: number) => type === PropType.Wheat || type === PropType.Cabbage || type === PropType.Corn || type === PropType.Campfire
@@ -193,16 +234,21 @@ export class WorldChunk implements Cullable {
     if (lod === this.lod && detail.plants === d.plants && detail.treeNear === d.treeNear && detail.farRocks === d.farRocks && detail.lean === d.lean) return
     this.lod = lod
     this.detail = { ...detail }
-    if (!this.terrain[lod]) {
-      const mesh = new THREE.Mesh(buildTerrainGeometry(this.data, lod), this.mats.terrain)
+    // SHORE CHUNKS keep the full-detail terrain at every LOD: the water is one flat plane, so a coarser bed mesh
+    // moves the waterline — 1.4 % (LOD1) to 5 % (LOD2) of the lake area flipped wet ↔ dry at the moment a chunk
+    // switched (measured over 190 shore chunks × 3 seeds): patches of lake popping in and out as you move.
+    // A LOD0 terrain is 2 k triangles; ~15 % of chunks touch water. Trees/props still use `lod`.
+    const tl = this.shore ? 0 : lod
+    if (!this.terrain[tl]) {
+      const mesh = new THREE.Mesh(buildTerrainGeometry(this.data, tl), this.mats.terrain)
       mesh.receiveShadow = true // constant: receiveShadow is part of the program key
       mesh.frustumCulled = true // bounding sphere set by buildTerrainGeometry; lets shadow passes cull
-      this.terrain[lod] = this.add(mesh)
+      this.terrain[tl] = this.add(mesh)
     }
-    this.terrain.forEach((m, i) => m && (m.visible = i === lod))
+    this.terrain.forEach((m, i) => m && (m.visible = i === tl))
     // Terrain casts at EVERY LOD: with only LOD0 casting, low sun/moon hill shadows end in straight lines at
     // chunk borders. Cheap now that shadow passes cull to the light frustum.
-    this.terrain[lod]!.castShadow = !(detail.lean && lod === 2)
+    this.terrain[tl]!.castShadow = !(detail.lean && lod === 2)
 
     const near = lod === 0
     for (const { id, m } of this.species) {
@@ -224,6 +270,7 @@ export class WorldChunk implements Cullable {
     if (this.ferns) this.ferns.visible = near && detail.plants
     if (this.bushes) this.bushes.visible = near && detail.plants
     if (this.poles) (this.poles.visible = lod <= 1), (this.poles.castShadow = near)
+    if (this.lamps) this.lamps.visible = lod <= 1
     if (this.fences) (this.fences.visible = lod <= 1), (this.fences.castShadow = near && !detail.lean)
     if (this.wires) this.wires.visible = lod <= 1
     for (const { mesh, small } of this.places) {
@@ -254,7 +301,7 @@ export class WorldChunk implements Cullable {
     // Shared geometries/materials belong to the libraries; only per-chunk buffers are freed.
     for (const { m } of this.species) m.levels.forEach((x) => x.dispose())
     for (const f of this.far) (f.lod1.dispose(), f.lod2.dispose())
-    for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.poles, this.fences]) m?.dispose()
+    for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.poles, this.lamps, this.fences]) m?.dispose()
     for (const { mesh } of this.places) mesh.geometry.dispose()
     this.wires?.geometry.dispose()
   }

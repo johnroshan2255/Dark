@@ -3,6 +3,7 @@ import { CHUNK_RES, CHUNK_SIZE, CHUNK_VERTS } from '../world/constants'
 import { PROP_STRIDE, TREE_STRIDE, TRUNK_RADIUS, type ChunkData } from '../world/types'
 import { ROCK_HULL } from '../world/Forest/propGeometries'
 import { POI_COLLIDERS } from '../world/POI/poiGeometry'
+import { instanceYScale } from '../optimization/instancing/InstanceBuilder'
 
 export type Rapier = typeof RAPIER
 
@@ -84,13 +85,19 @@ export class PhysicsWorld {
         .setFriction(0.9),
       body,
     )
-    // Rocks: a convex hull of the rock's own 12-point shape per boulder, scaled/rotated like its instance
-    // (the player steps onto small ones — autostep — and is blocked by big ones; the truck the same).
+    // Rocks: a convex hull of the rock's own mesh vertices per boulder, scaled (with the instance's vertical
+    // jitter, InstanceBuilder) and rotated like its instance → the collider IS the visible boulder (tested:
+    // every mesh vertex lies inside it). The player steps onto small ones (autostep), is blocked by big ones; the truck the same.
     const rk = d.rocks
     const hull = new Float32Array(ROCK_HULL.length)
     for (let i = 0; i < rk.length; i += PROP_STRIDE) {
       const sc = rk[i + 4]
-      for (let k = 0; k < hull.length; k++) hull[k] = ROCK_HULL[k] * sc
+      const sy = sc * instanceYScale(i / PROP_STRIDE)
+      for (let k = 0; k < hull.length; k += 3) {
+        hull[k] = ROCK_HULL[k] * sc
+        hull[k + 1] = ROCK_HULL[k + 1] * sy
+        hull[k + 2] = ROCK_HULL[k + 2] * sc
+      }
       const desc = R.ColliderDesc.convexHull(hull)
       if (!desc) continue
       const a = rk[i + 3] / 2

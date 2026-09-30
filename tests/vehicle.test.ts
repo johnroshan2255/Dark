@@ -91,6 +91,64 @@ function turned(s: TruckSim | BikeSim): { step: () => void; total: () => number 
   check('truck corners hard without flipping', maxRoll < 0.3 && t.axesUp() > 0.9, `max roll ${(maxRoll * 57.3).toFixed(1)}°`)
   p.dispose()
 }
+{
+  // GARAGE tuning: a heavier, bigger-tyred, stiffer setup still settles level; retune() changes it live.
+  const p = world()
+  const t = new TruckSim(p, TRUCK, { power: 300, force: 18, boost: 2, grip: 2.8, suspension: 44, tyre: 1.3, mass: 3000 })
+  t.place(0, 0, 0, 0)
+  run(p, t, 1.5, {})
+  const att = t.attitude()
+  check('tuned truck (3 t, 1.3× tyres) settles level', Math.abs(pos(t).y) < 0.12 && Math.abs(att.pitch) < 0.03 && t.wheelRadius > TRUCK.wheelRadius * 1.25, `ride ${pos(t).y.toFixed(3)} m, tyre r ${t.wheelRadius.toFixed(3)}`)
+  t.retune({ mass: 1200, tyre: 0.9, suspension: 30 })
+  run(p, t, 1.5, {})
+  check('retune() live: lighter + smaller tyres still level', Math.abs(pos(t).y) < 0.12 && Math.abs(t.attitude().pitch) < 0.03 && t.axesUp() > 0.99, `ride ${pos(t).y.toFixed(3)} m`)
+  run(p, t, 6, { throttle: 1 })
+  check('retuned truck drives', t.speed > 12, `${t.speed.toFixed(1)} m/s`)
+  p.dispose()
+}
+{
+  // BOOST: Shift / touch BOOST — clearly faster off the line and a higher top speed, still stable.
+  const p = world()
+  const t = new TruckSim(p, TRUCK)
+  t.place(0, 0, 0, 0)
+  let t20 = NaN
+  run(p, t, 14, { throttle: 1, boost: true }, (s) => { if (Number.isNaN(t20) && t.speed >= 20) t20 = s })
+  check('boost: 0→72 km/h clearly quicker', t20 > 1.5 && t20 < 3.8, `${t20.toFixed(1)} s (no boost 4.7 s)`)
+  check('boost: top speed ~ 110–140 km/h', t.speed > 30 && t.speed < 39 && t.axesUp() > 0.95, `${t.speed.toFixed(1)} m/s`)
+  p.dispose()
+}
+{
+  // DRIFT: handbrake + steer at speed → the rear steps out (a real sideways slide, the effects see tyre slip),
+  // the truck stays on its wheels, and it straightens out again once the handbrake is released.
+  const p = world()
+  const t = new TruckSim(p, TRUCK)
+  t.place(0, 0, 0, 0)
+  run(p, t, 4, { throttle: 1 })
+  const v = t.speed
+  let maxLat = 0, maxSlip = 0, driftFrames = 0, maxRoll = 0
+  run(p, t, 1.6, { throttle: 0.6, steer: 1, handbrake: true }, () => {
+    maxLat = Math.max(maxLat, Math.abs(t.lateral))
+    maxSlip = Math.max(maxSlip, t.wheelSlip[2], t.wheelSlip[3])
+    if (t.drifting) driftFrames++
+    maxRoll = Math.max(maxRoll, Math.abs(t.attitude().roll))
+  })
+  check('truck drifts on the handbrake (rear slides out)', maxLat > 3 && driftFrames > 30 && maxSlip > 0.5, `from ${v.toFixed(1)} m/s: lateral ${maxLat.toFixed(1)} m/s, rear slip ${maxSlip.toFixed(2)}, ${driftFrames} drift frames`)
+  check('drift keeps the truck on its wheels', maxRoll < 0.35 && t.axesUp() > 0.9, `max roll ${(maxRoll * 57.3).toFixed(1)}°`)
+  run(p, t, 3, { throttle: 0.5 })
+  check('truck recovers from the drift', Math.abs(t.lateral) < 1.5 && !t.drifting && t.drift < 0.15 && t.axesUp() > 0.9, `lateral ${t.lateral.toFixed(2)} m/s, drift ${t.drift.toFixed(2)}`)
+  p.dispose()
+}
+{
+  // No drift from normal cornering: a brisk turn without the handbrake keeps its grip.
+  const p = world()
+  const t = new TruckSim(p, TRUCK)
+  t.place(0, 0, 0, 0)
+  run(p, t, 3, { throttle: 1 })
+  let driftFrames = 0, maxLat = 0
+  run(p, t, 2.5, { throttle: 0.5, steer: 1 }, () => { if (t.drifting) driftFrames++; maxLat = Math.max(maxLat, Math.abs(t.lateral)) })
+  check('ordinary cornering does not drift', driftFrames === 0 && maxLat < 3.5, `lateral ${maxLat.toFixed(1)} m/s, ${driftFrames} drift frames`)
+  p.dispose()
+}
 /** Start ON the slope (real hills have no 55° kink at the bottom — the bumper would hit it first). */
 const onRamp = (deg: number, d = 6) => { const r = (deg * Math.PI) / 180; return [0, d * Math.sin(r), -4 - d * Math.cos(r), 0, r] as const }
 for (const deg of [20, 35, 45, 55, 60]) {

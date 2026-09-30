@@ -27,6 +27,10 @@ export const globalUniforms = {
   uFarEdge: { value: new THREE.Vector2(1e5, 1e5 + 1) },
   /** Streamed-detail edge: trees/props dither out between x and y (view depth, m) — not drawn beyond. */
   uCullFade: { value: new THREE.Vector2(1e5, 1e5 + 1) },
+  /** Ground wetness 0..1 (weather): darker ground, a sheen toward the key light, sky-reflecting puddles on flat ground. */
+  uWet: { value: 0 },
+  /** Foliage cards dissolve this close to the eye (view depth, m): start, end. */
+  uNearFade: { value: new THREE.Vector2(1.4, 3.0) },
   /** STORYBOOK art style: painted-shading weight, the painted light colour, world-up in view space. */
   uStoryAmt: { value: 1 },
   uStoryLight: { value: new THREE.Color(1, 1, 1) },
@@ -39,6 +43,26 @@ export const globalUniforms = {
  * Big rolling wind GUSTS (Genshin-style): bright bands sweeping across the meadow along the wind. Shared by
  * grass (sway + tip highlight) and the painted ground beyond the grass, so the waves continue to the horizon.
  */
+/**
+ * Tree SWAY (shared by the foliage vertex shader and the billboard tufts): object-space point `p` of an
+ * instance whose world xz is `ixz` bends with height — a slow whole-tree lean plus a faster flutter, both
+ * scaled by the wind and the rolling gusts. Tall parts move most; the trunk base stays put.
+ */
+export const SWAY_GLSL = /* glsl */ `
+vec3 foliageSway(vec3 p, vec2 ixz, float t, vec2 wind) {
+  float h = max(p.y, 0.0);
+  float k = h * h * 0.01;
+  float ws = length(wind);
+  vec2 dir = wind / max(ws, 1e-4);
+  float phase = dot(ixz, vec2(0.37, 0.61));
+  float gust = windGust(ixz, t, wind);
+  // ~1 m lean + ±1 m sway at the top of a 17 m tree in a strong wind (ws ≈ 1.8); a whisper in still air.
+  float lean = (0.35 + 0.65 * gust) * ws * 0.6;
+  float sway = sin(t * 1.1 + phase) * 0.5 + sin(t * 2.7 + phase * 1.7 + h * 0.4) * 0.2;
+  p.xz += dir * k * (lean + sway * ws * 0.4);
+  return p;
+}`
+
 export const GUST_GLSL = /* glsl */ `
 float windGust(vec2 xz, float t, vec2 wind) {
   vec2 d = normalize(wind + 1e-4);

@@ -1,7 +1,7 @@
 import * as THREE from 'three'
-import { SKY_GLSL, skyUniforms } from '../sky/skyShader'
-import { globalUniforms, GUST_GLSL } from './uniforms'
-import { isStorybook } from '../artStyle'
+import { MIST_GLSL, SKY_GLSL, skyUniforms } from '../sky/skyShader'
+import { globalUniforms, GUST_GLSL, SWAY_GLSL } from './uniforms'
+import { isOverland, isStorybook } from '../artStyle'
 import { ATLAS_SURF, PAINT_FRAG_PARS, PAINT_VERT_PARS, paintVert } from './paint'
 import { WorldFields } from '../../world/WorldFields'
 
@@ -36,6 +36,13 @@ export interface StylizeOptions {
   lit?: boolean
   /** Hand-painted solid surfaces (shaders/paint.ts): 'atlas' = picked per vertex by the atlas UV, or one SURFACE id. */
   surface?: 'atlas' | number
+  /** Foliage cards (atlas surface < 0) dither out within uNearFade of the camera: driving through a forest never
+   *  leaves the eye stuck inside leaves. Requires `surface: 'atlas'`. */
+  nearFade?: boolean
+  /** Trees bend and flutter with the wind (instanced foliage): uniforms.ts `foliageSway`. */
+  sway?: boolean
+  /** Darken with ground wetness (uWet): rain-soaked grass, bark, rocks. */
+  wet?: boolean
 }
 
 /**
@@ -53,6 +60,18 @@ vec3 storyPalette(vec3 c) {
   return o * vec3(1.0, 1.0, 0.9);
 }`
 
+/**
+ * OVERLAND palette (art of rally / over the hill): our albedos, hue kept, a touch less saturated and with the
+ * shadows lifted (nothing near black — their shadows are lit by the warm sky), a faint warm cast. ~8 ALU. Linear.
+ */
+const OVERLAND_GLSL = /* glsl */ `
+vec3 overlandPalette(vec3 c) {
+  c = max(c, vec3(0.0));
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  c = mix(vec3(l), c, 0.88);
+  return c * 0.94 + 0.012;
+}`
+
 const NOISE = /* glsl */ `
 float st_hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float st_noise(vec2 p) {
@@ -66,6 +85,7 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
   const prev = material.onBeforeCompile.bind(material)
   const rim = o.rim ?? 0.5
   const story = isStorybook() && !o.lit
+  const over = isOverland()
   material.onBeforeCompile = (shader, renderer) => {
     prev(shader, renderer)
     const u = globalUniforms
@@ -86,6 +106,8 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       uLandHaze: u.uLandHaze,
       uFarEdge: u.uFarEdge,
       uCullFade: u.uCullFade,
+      uNearFade: u.uNearFade,
+      uWet: u.uWet,
       ...skyUniforms,
     })
     let vs = shader.vertexShader
@@ -93,12 +115,44 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
     // Sky-coloured fog: the sky colour in the fragment's direction, evaluated PER VERTEX (it varies smoothly;
     // per-pixel it cost ~1 ms at 1080p on HIGH — measured) and interpolated.
     vs = vs
-      .replace('#include <common>', `#include <common>\n${vs.includes('uSkyHorizon') ? '' : SKY_GLSL}\nvarying vec3 vFogSky;`)
-      .replace('#include <fog_vertex>', o.cheapFog ? '#include <fog_vertex>\nvFogSky = vec3(-1.0);' : `#include <fog_vertex>\nvFogSky = skyColor(normalize((vec4(normalize(mvPosition.xyz), 0.0) * viewMatrix).xyz), false);`)
+      .replace('#include <common>', `#include <common>\n${vs.includes('uSkyHorizon') ? '' : SKY_GLSL}\nvarying vec3 vFogSky;\nvarying vec3 vWPos;`)
+      .replace(
+        '#include <fog_vertex>',
+        `#include <fog_vertex>
+        { vec4 wp4 = vec4(transformed, 1.0);
+          #ifdef USE_INSTANCING
+            wp4 = instanceMatrix * wp4;
+          #endif
+          vWPos = (modelMatrix * wp4).xyz; }
+        ${o.cheapFog ? 'vFogSky = vec3(-1.0);' : 'vFogSky = skyColor(normalize((vec4(normalize(mvPosition.xyz), 0.0) * viewMatrix).xyz), false);'}`,
+      )
+    if (o.nearFade) {
+      // Canopy parts of an instance within uNearFade of the eye COLLAPSE toward the trunk (cards, tufts and the
+      // overland solid shelves; trunks/props keep their shape) — a smooth shrink instead of a dither, which read
+      // as a dotted green haze around the truck when driving under a tree.
+      vs = vs
+        .replace('#include <common>', `#include <common>\n${vs.includes('uniform vec2 uNearFade') ? '' : 'uniform vec2 uNearFade;'}`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+        #ifdef USE_INSTANCING
+        { float nfSurf = ${ATLAS_SURF};
+          if (nfSurf < -0.5 || abs(nfSurf - 3.0) < 0.5) {
+            float nfDepth = -(modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).z;
+            transformed.xz *= smoothstep(uNearFade.x, uNearFade.y, nfDepth);
+          } }
+        #endif`)
+    }
+    if (o.sway) {
+      vs = vs
+        .replace('#include <common>', `#include <common>\n${vs.includes('uniform float uTimeS') ? '' : 'uniform float uTimeS; uniform vec2 uWindS;'}\n${vs.includes('float windGust(') ? '' : GUST_GLSL}\n${vs.includes('vec3 foliageSway(') ? '' : SWAY_GLSL}`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+        #ifdef USE_INSTANCING
+          transformed = foliageSway(transformed, (modelMatrix * vec4(instanceMatrix[3].xyz, 1.0)).xz, uTimeS, uWindS);
+        #endif`)
+    }
     if (o.terrain) {
       vs = vs
-        .replace('#include <common>', '#include <common>\nattribute float roadLat;\nattribute vec2 roadNet;\nvarying float vRoadLat;\nvarying vec2 vRoadNet;\nvarying vec3 vWorldPos;')
-        .replace('#include <project_vertex>', '#include <project_vertex>\nvRoadLat = roadLat;\nvRoadNet = roadNet;\nvWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;')
+        .replace('#include <common>', '#include <common>\nattribute float roadLat;\nattribute vec2 roadNet;\nattribute vec2 biome;\nvarying float vRoadLat;\nvarying vec2 vRoadNet;\nvarying vec2 vBiome;\nvarying vec3 vWorldPos;\nvarying float vUpN;')
+        .replace('#include <project_vertex>', '#include <project_vertex>\nvRoadLat = roadLat;\nvRoadNet = roadNet;\nvBiome = biome;\nvWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvUpN = normal.y; // terrain normals are world-space (the mesh is only translated)')
     }
     if (o.surface !== undefined) {
       const surf = o.surface === 'atlas' ? ATLAS_SURF : o.surface.toFixed(1)
@@ -113,12 +167,13 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       `#include <common>
 ${decl('uniform vec3 uKeyDirView;')}${decl('uniform vec3 uKeyColor;')}uniform vec3 uScatterColor; uniform float uScatterAmount; uniform float uRim; uniform float uToon; uniform float uTimeS; uniform vec2 uWindS;
 uniform vec2 uSkyHaze;
-uniform float uFogMax; uniform vec3 uLandHaze; uniform vec2 uFarEdge; uniform vec2 uCullFade;
+uniform float uFogMax; uniform vec3 uLandHaze; uniform vec2 uFarEdge; uniform vec2 uCullFade; uniform vec2 uNearFade; uniform float uWet;
 float skyHaze(float d) { return uSkyHaze.x * (1.0 - exp(-max(d - 12.0, 0.0) / uSkyHaze.y)); }
-varying vec3 vFogSky;
+varying vec3 vFogSky; varying vec3 vWPos;
+${fs.includes('uSkyMist') ? '' : MIST_GLSL}
 ${o.terrain || o.surface !== undefined ? 'uniform sampler2D uBrush;\n' : ''}${o.surface !== undefined ? PAINT_FRAG_PARS.replace('uniform sampler2D uBrush;', '') : ''}
-${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec3 vWorldPos;\n' + NOISE + GUST_GLSL : ''}
-${story ? STORY_GLSL : ''}`,
+${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying vec3 vWorldPos; varying float vUpN;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\n' + NOISE + GUST_GLSL : ''}
+${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
     )
     // Genshin CEL SHADING: N·L through a narrow ramp → lit / shadow sides with a crisp soft-edged terminator
     // (a little linear falloff kept so volumes still read). Shadows stay light because the sky fill is bright.
@@ -155,21 +210,44 @@ ${story ? STORY_GLSL : ''}`,
   vec2 wp = vWorldPos.xz;
   float n1 = st_noise(wp * 0.33), n2 = st_noise(wp * 1.9), n3 = st_hash(floor(wp * 6.0));
   diffuseColor.rgb *= 0.82 + 0.22 * n1 + 0.12 * n2 + 0.05 * st_noise(wp * 7.0);
-  // Painted ground (BrushTexture, 1 fetch): ~1.5 m brush strokes + soft watercolour blotches, strokes
+${over ? `  // OVERLAND: flat colour fields — only the big soft patches above, plus faint blade streaks on the straw so
+  // the meadow reads as grass beyond the real blades (no brush fetch, no gust bands).
+  float straw = smoothstep(0.0, 0.05, diffuseColor.r - diffuseColor.b) * (1.0 - vBiome.x - vBiome.y);
+  float streak = st_noise(wp * 9.0) * 0.5 + st_noise(wp * 23.0) * 0.5;
+  diffuseColor.rgb *= 1.0 + straw * (streak - 0.5) * 0.14;` : `  // Painted ground (BrushTexture, 1 fetch): ~1.5 m brush strokes + soft watercolour blotches, strokes
   // running across the slope like a painter's dabs.
   vec4 gb = texture2D(uBrush, wp * 0.045);
   diffuseColor.rgb *= 0.9 + 0.2 * gb.g + 0.26 * (gb.r - 0.5);
   // Painted meadow beyond the real grass (Genshin): on green ground, soft blade streaks + the same rolling
   // wind-gust bands as the grass, so the meadow reads continuous to the horizon.
-  float green = smoothstep(0.0, 0.03, diffuseColor.g - diffuseColor.b) * smoothstep(0.0, 0.02, diffuseColor.g - diffuseColor.r * 0.8);
+  float green = smoothstep(0.0, 0.03, diffuseColor.g - diffuseColor.b) * smoothstep(0.0, 0.02, diffuseColor.g - diffuseColor.r * 0.8) * (1.0 - vBiome.x - vBiome.y);
   float streak = st_noise(vec2(wp.x * 6.0 + wp.y * 1.5, wp.y * 6.0 - wp.x * 1.5));
-  diffuseColor.rgb *= 1.0 + green * ((streak - 0.5) * 0.14 + windGust(wp, uTimeS, uWindS) * 0.14);
+  diffuseColor.rgb *= 1.0 + green * ((streak - 0.5) * 0.14 + windGust(wp, uTimeS, uWindS) * 0.14);`}
+  // BIOMES (per-vertex weights): sand = wind ripples + fine grain; snow = sparkle + soft drifts (blue-white shading).
+  if (vBiome.x > 0.01) {
+    float rip = sin((wp.x * 0.9 + wp.y * 0.35) * 2.2 + st_noise(wp * 0.3) * 4.0) * 0.5 + 0.5;
+    diffuseColor.rgb *= 1.0 + vBiome.x * ((rip - 0.5) * 0.16 + (st_hash(floor(wp * 14.0)) - 0.5) * 0.06);
+  }
+  if (vBiome.y > 0.01) {
+    float sparkle = step(0.988, st_hash(floor(wp * 22.0))) * 0.5;
+    diffuseColor.rgb *= 1.0 + vBiome.y * ((st_noise(wp * 0.25) - 0.5) * 0.1 + sparkle);
+    diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.94, 0.97, 1.05), vBiome.y * 0.5);
+  }
   // Under water: the bed darkens and turns blue-green with depth (seen through the semi-clear water);
   // a soft foam/wet line right at the shore.
   float wd = ${WATER_LEVEL.toFixed(2)} - vWorldPos.y;
   diffuseColor.rgb *= 1.0 - 0.35 * smoothstep(-0.8, 0.0, wd) * step(wd, 0.0) * 0.5; // wet dark band above
   if (wd > 0.0) diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.5, 0.66, 0.7), vec3(0.015, 0.045, 0.055), smoothstep(0.0, 3.5, wd));
   diffuseColor.rgb += vec3(0.25, 0.27, 0.27) * (1.0 - smoothstep(0.0, 0.18, abs(wd - 0.04))) * (0.5 + 0.5 * st_noise(wp * 3.0 + vec2(uTimeS * 0.3)));
+  // WET GROUND (weather): darker, saturated soil; puddles in the dips of flat ground (noise mask) that mirror the
+  // sky (vFogSky = the sky colour in the view direction, already per vertex); a sheen toward the key light
+  // is added after lighting below. Puddles collect on the road and flat meadow, never on slopes.
+  if (uWet > 0.01) {
+    diffuseColor.rgb *= 1.0 - 0.35 * uWet;
+    float flatGround = smoothstep(0.85, 0.97, vUpN);
+    float pm = st_noise(wp * 0.35 + 5.0) * 0.6 + st_noise(wp * 1.4 + 9.0) * 0.4;
+    wetPuddle = smoothstep(0.62, 0.72, pm + 0.12 * uWet) * flatGround * uWet;
+  }
   float lat = abs(vRoadLat);
   const float HALF = 2.7;
   if (lat < HALF + 1.6) {
@@ -186,7 +264,11 @@ ${story ? STORY_GLSL : ''}`,
     asphalt = mix(asphalt, vec3(0.55, 0.45, 0.2), dash * (0.3 + 0.35 * a3) * (1.0 - worn * 0.5));
     float g1 = st_noise(wp * 9.0), g2 = st_noise(wp * 23.0);
     vec3 gravel = vec3(0.27, 0.23, 0.18) * (0.72 + 0.28 * g1 + 0.22 * g2 + 0.1 * n2);
-    vec3 road = mix(asphalt, gravel, smoothstep(HALF - 0.1, HALF + 0.25, lat));
+    ${over ? `// OVERLAND: the main road is a pale DIRT TRACK with two darker wheel ruts (over the hill has no asphalt).
+    vec3 dirt = vec3(0.58, 0.47, 0.32) * (0.84 + 0.2 * n2 + 0.1 * a3 + 0.08 * st_noise(wp * 2.3));
+    float ruts = (1.0 - smoothstep(0.25, 0.55, abs(lat - 1.35)));
+    dirt *= 1.0 - ruts * 0.18;
+    vec3 road = mix(dirt, gravel * 1.5, smoothstep(HALF - 0.1, HALF + 0.25, lat));` : `vec3 road = mix(asphalt, gravel, smoothstep(HALF - 0.1, HALF + 0.25, lat));`}
     diffuseColor.rgb = mix(diffuseColor.rgb, road, 1.0 - smoothstep(HALF + 0.9, HALF + 1.6, lat));
   }
   // Secondary roads: GRAVEL (type 0: grey-brown stones, two darker wheel ruts) / TRAIL (type 1: packed dirt,
@@ -209,6 +291,8 @@ ${story ? STORY_GLSL : ''}`,
 }`,
       )
     }
+    if (over) fs = fs.replace('#include <alphamap_fragment>', 'diffuseColor.rgb = overlandPalette(diffuseColor.rgb);\n#include <alphamap_fragment>')
+    if (o.wet) fs = fs.replace('#include <alphamap_fragment>', 'diffuseColor.rgb *= 1.0 - 0.3 * uWet; // soaked\n#include <alphamap_fragment>')
     if (story) {
       // Palette after every albedo patch (vertex colour, painted surfaces, terrain/road) and before lighting.
       fs = fs.replace('#include <alphamap_fragment>', 'diffuseColor.rgb = storyPalette(diffuseColor.rgb);\n#include <alphamap_fragment>')
@@ -232,6 +316,17 @@ ${story ? STORY_GLSL : ''}`,
   float ndv = clamp(dot(normal, V), 0.0, 1.0);
   float back = pow(clamp(dot(-V, uKeyDirView), 0.0, 1.0), 2.0);
   outgoingLight += uKeyColor * diffuseColor.rgb * pow(1.0 - ndv, 3.0) * (0.3 + back * 1.4) * uRim${story ? ' * (1.0 - uStoryAmt)' : ''};
+  ${o.terrain ? `if (uWet > 0.01) {
+    // Sheen: a broad specular lobe toward the key light on wet ground; puddles mirror the sky (Fresnel-ish).
+    vec3 H = normalize(V + uKeyDirView);
+    float sheen = pow(clamp(dot(normal, H), 0.0, 1.0), 24.0) * uWet * 0.5;
+    outgoingLight += uKeyColor * sheen;
+    if (wetPuddle > 0.001) {
+      vec3 mirror = vFogSky.r < 0.0 ? fogColor : vFogSky;
+      float fr = 0.25 + 0.75 * pow(1.0 - ndv, 2.0);
+      outgoingLight = mix(outgoingLight, mirror * 0.9 + uKeyColor * pow(clamp(dot(normal, H), 0.0, 1.0), 180.0) * 2.0, wetPuddle * fr);
+    }
+  }` : ''}
 }
 #include <opaque_fragment>`,
       )
@@ -245,6 +340,11 @@ ${story ? STORY_GLSL : ''}`,
   float rim = smoothstep(uFarEdge.x, uFarEdge.y, vFogDepth);
   fogFactor = max(min(fogFactor, uFogMax), rim);
   fogCol = mix(fogCol * uLandHaze, fogCol, rim);
+  // Volumetric ground mist (height fog integrated along the view ray; sky/skyShader MIST_GLSL): pools in the
+  // valleys and over the water, thins up the hills. Composited with the distance fog as two transmittances.
+  { vec3 wd = vWPos - cameraPosition; float wl = max(length(wd), 1e-3);
+    float mist = mistAmount(wd / wl, wl) * ${(o.fogAmount ?? 1).toFixed(3)};
+    fogFactor = 1.0 - (1.0 - fogFactor) * (1.0 - mist); }
   gl_FragColor.rgb = mix(gl_FragColor.rgb, fogCol, fogFactor);
 #endif`,
       )
@@ -252,6 +352,6 @@ ${story ? STORY_GLSL : ''}`,
     shader.fragmentShader = fs
   }
   const prevKey = material.customProgramCacheKey.bind(material)
-  material.customProgramCacheKey = () => `${prevKey()}|stylize-${o.key}${story ? '-story' : ''}`
+  material.customProgramCacheKey = () => `${prevKey()}|stylize2-${o.key}${story ? '-story' : ''}${over ? '-over' : ''}`
   return material
 }

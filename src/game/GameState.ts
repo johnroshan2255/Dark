@@ -28,6 +28,16 @@ export interface GameStateShape {
   settingsOpen: boolean
   /** Player is dead (death screen shown). */
   dead: boolean
+  /** Driving the truck (touch HUD: the JUMP button reads DRIFT). */
+  driving: boolean
+  /** Headlights on (HUD label while driving). */
+  lights: boolean
+  /** Front end open (the world idles behind it, camera orbiting the car): the main menu or the garage. */
+  landing: boolean
+  screen: 'menu' | 'garage'
+  /** Catalogue id of the vehicle in the world, and a model download in progress (0..1, or null). */
+  vehicle: string
+  vehicleLoading: number | null
 }
 
 export interface Store<T> {

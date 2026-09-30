@@ -74,5 +74,20 @@ procedural scatter in place of the code-built shapes — no gameplay changes nee
 |---|---|---|---|---|---|
 | Player character "Stickman" | `src/assets/models/characters/human.lod0.glb` | ogulcantopsakal | https://sketchfab.com/3d-models/stickman-76d732e35c23477fae863dfe280b30bb | CC-BY-4.0 | static mesh; rigged + animated in code (`CharacterModel`) |
 | "Pickup Truck" | `src/assets/models/vehicles/pickup_truck.lod0.glb` | 00amza | https://sketchfab.com/3d-models/pickup-truck-047615f53e2d45b9a1a2a4dd203d459c | CC-BY-4.0 | wheels split out at load (`assets/loadModels`) |
+| "2015 Mercedes-Benz G500 4x4² concept" | `src/assets/models/vehicles/mercedes_g500_4x4.lod0.glb` | **TODO: author from the Sketchfab download page** | (Sketchfab) | CC-BY-4.0 (verify) | textures stripped to flat material colours (`scripts/strip-glb-textures.mjs`, 8.7 → 2.3 MB); wheels found by node name |
+| "Free Zuk 3D model" (FSC Żuk A06) | `src/assets/models/vehicles/zuk_a06.lod0.glb` | **TODO: author from the Sketchfab download page** | (Sketchfab) | CC-BY-4.0 (verify) | one textured mesh; wheels split out by shape |
 
 The in-game credits screen (when there is one) must list these too.
+
+### Audio (all CC0 — public domain; attribution not required, given anyway)
+| Sound | File(s) | Source | Author | Licence | Processing |
+|---|---|---|---|---|---|
+| Theme "Gone Fishin'" (banjo) | `src/assets/audio/music/gone_fishin.mp3` | https://opengameart.org/content/gone-fishin | Memoraphile (You're Perfect Studio) | CC0 (also CC-BY 4.0 / OGA-BY 3.0) | loudness −20 LUFS, 112 kbps |
+| Engine drive loop | `car/engine_drive.wav` | https://opengameart.org/content/racing-car-engine-sound-loops | domasx2 | CC0 | loop crossfaded, −16 LUFS |
+| Engine idle, start, stop, door | `car/engine_idle.wav`, `engine_start.mp3`, `engine_stop.mp3`, `door.mp3` | https://opengameart.org/content/car-sound-effects-pack-low-quality | GGBotNet | CC0 | idle loop crossfaded, levelled |
+| Tyre squeal (drift) | `car/skid.mp3` | https://bigsoundbank.com/tire-squeal-s0500.html | Joseph Sardin (BigSoundBank) | CC0 | 12 s loop crossfaded |
+| Boost rush (wind) | `car/boost_wind.mp3` | https://opengameart.org/content/wind-whoosh-loop | SketchMan3 | CC0 | loop crossfaded |
+| Bicycle freewheel | `bike/freewheel.mp3` | https://bigsoundbank.com/detail-0140-bicycle-rear-wheel.html | Joseph Sardin (BigSoundBank) | CC0 | 14 s loop |
+| Bicycle rolling | `bike/roll.mp3` | https://bigsoundbank.com/bike-on-a-road-mtb-s1282.html | Joseph Sardin (BigSoundBank) | CC0 | 14 s loop |
+| Rain | `ambience/rain.mp3` | https://opengameart.org/content/rain-loopable | Ylmir | CC0 | 24 s loop crossfaded |
+| Footsteps (10) | `steps/step0–9.mp3` | https://kenney.nl/assets/rpg-audio | Kenney | CC0 | levelled |

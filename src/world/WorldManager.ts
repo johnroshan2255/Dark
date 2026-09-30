@@ -10,8 +10,9 @@ import { ChunkStreamer } from './Streaming/ChunkStreamer'
 import { LruCache } from './Streaming/LruCache'
 import { chunkKey, type ChunkData } from './types'
 import { WorldChunk, type ChunkDetail } from './WorldChunk'
-import { GrassField } from './Forest/GrassField'
+import { styledGrass, GrassField } from './Forest/GrassField'
 import { WorldFields } from './WorldFields'
+import { groundPalette } from '../rendering/artStyle'
 
 /** Soft time budget for chunk mesh builds per frame (count limit comes from the tier). */
 const BUILD_BUDGET_MS = 3
@@ -40,6 +41,8 @@ export class WorldManager {
   private detail: ChunkDetail = { plants: false, treeNear: 1, farRocks: false, lean: true }
   /** Dense grass around the player (one draw call). */
   readonly grass: GrassField
+  /** Chebyshev radius (chunks) around the player inside which every chunk is built (see update). */
+  builtRadius = 0
 
   stats = { loaded: 0, visible: 0, culled: 0, instances: 0, drawnInstances: 0, pending: 0, buildMs: 0, genMs: 0, physicsChunks: 0 }
 
@@ -51,6 +54,7 @@ export class WorldManager {
     this.root.name = 'world'
     this.root.matrixAutoUpdate = false
     this.fields = new WorldFields(seed)
+    this.fields.palette = groundPalette() // main-thread copy (grass, HUD); the workers get it per request
     this.geos = createPropGeometries()
     this.grass = new GrassField(mats.grass, this.fields, this.chunks)
     this.root.add(this.grass.root)
@@ -66,7 +70,7 @@ export class WorldManager {
     const radiusChanged = q.renderRadius !== this.q.renderRadius
     this.q = { ...q, lodRings: [...q.lodRings] as [number, number] }
     this.detail = { plants: q.plants, treeNear: q.trees.near, farRocks: q.name !== 'low', lean: q.name === 'low' }
-    this.grass.configure(q.grass)
+    this.grass.configure(styledGrass(q.grass))
     if (radiusChanged) this.centerX = this.centerZ = Number.NaN
   }
 
@@ -84,9 +88,15 @@ export class WorldManager {
     return this.chunks.has(key) && this.physics.hasChunk(key)
   }
 
-  update(focus: THREE.Vector3, camera: THREE.Camera): void {
+  /**
+   * @param ahead where the player will be in ~1.5 s (vehicle look-ahead): chunks within the physics ring of
+   *   EITHER point get colliders, so a fast truck never reaches ground that has no collider yet.
+   */
+  update(focus: THREE.Vector3, camera: THREE.Camera, ahead: THREE.Vector3 = focus): void {
     const pcx = Math.floor(focus.x / CHUNK_SIZE)
     const pcz = Math.floor(focus.z / CHUNK_SIZE)
+    const acx = Math.floor(ahead.x / CHUNK_SIZE)
+    const acz = Math.floor(ahead.z / CHUNK_SIZE)
     if (pcx !== this.centerX || pcz !== this.centerZ) {
       this.centerX = pcx
       this.centerZ = pcz
@@ -102,13 +112,25 @@ export class WorldManager {
       chunk.ring = Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz))
       chunk.setLod(selectLod(chunk.lod, chunkDistance(focus.x, focus.z, cx, cz), this.q.lodRings), this.detail)
       instances += chunk.instanceCount
-      // Physics ring with one ring of hysteresis.
-      if (chunk.ring <= RADIUS.physics) this.physics.addChunk(chunk.key, chunk.data)
-      else if (chunk.ring > RADIUS.physics + 1) this.physics.removeChunk(chunk.key)
+      // Physics ring (around the player and the look-ahead point) with one ring of hysteresis.
+      const ringAhead = Math.max(Math.abs(cx - acx), Math.abs(cz - acz))
+      if (Math.min(chunk.ring, ringAhead) <= RADIUS.physics) this.physics.addChunk(chunk.key, chunk.data)
+      else if (chunk.ring > RADIUS.physics + 1 && ringAhead > RADIUS.physics + 1) this.physics.removeChunk(chunk.key)
       if (this.physics.hasChunk(chunk.key)) physicsChunks++
     }
     this.visibility.update(camera, this.chunks.values())
     this.grass.update(focus)
+
+    // Largest ring around the player whose chunks are ALL built: the horizon terrain only discards inside it,
+    // so an unbuilt chunk shows the (slightly sunken) horizon hills, never a hole into the sky.
+    let r = 0
+    outer: for (; r < this.q.renderRadius; r++) {
+      const n = r + 1
+      for (let dz = -n; dz <= n; dz++) {
+        for (let dx = -n; dx <= n; dx++) if (!this.chunks.has(chunkKey(pcx + dx, pcz + dz))) break outer
+      }
+    }
+    this.builtRadius = r
 
     let drawn = 0
     for (const chunk of this.chunks.values()) drawn += chunk.drawnInstances

@@ -3,6 +3,7 @@ import { WorldFields } from '../WorldFields'
 import { groundColor } from './groundColor'
 import { farmFieldAt, toLocal } from '../POI/pois'
 import { PALETTE } from './terrainPalette'
+import type { BiomeWeights } from '../Biomes'
 
 const P = CHUNK_VERTS + 2 // padded grid for seamless normals
 
@@ -13,6 +14,8 @@ export interface TerrainArrays {
   roadLat: Float32Array
   netEdge: Float32Array
   netType: Float32Array
+  /** CHUNK_VERTS² × 2 biome weights (desert, snow) incl. the snow line — terrain shader surface detail. */
+  biome: Float32Array
   minY: number
   maxY: number
 }
@@ -45,9 +48,11 @@ export function generateTerrain(fields: WorldFields, cx: number, cz: number): Te
   const roadLat = new Float32Array(n)
   const netEdge = new Float32Array(n).fill(99)
   const netType = new Float32Array(n).fill(-1)
+  const biome = new Float32Array(n * 2)
   let minY = Infinity
   let maxY = -Infinity
   const gc: [number, number, number] = [0, 0, 0]
+  const bw: BiomeWeights = [0, 0]
 
   for (let iz = 0; iz <= CHUNK_RES; iz++) {
     for (let ix = 0; ix <= CHUNK_RES; ix++) {
@@ -77,6 +82,9 @@ export function generateTerrain(fields: WorldFields, cx: number, cz: number): Te
       const wz = oz + iz * CELL_SIZE
       groundColor(fields, wx, wz, h, 1 - ny, gc)
       colors[i * 3] = gc[0]; colors[i * 3 + 1] = gc[1]; colors[i * 3 + 2] = gc[2]
+      fields.biome(wx, wz, bw, h)
+      biome[i * 2] = bw[0]
+      biome[i * 2 + 1] = bw[1]
       const poi = fields.pois.near(wx, wz)
       if (poi) {
         if (farmFieldAt(poi, wx, wz)) {
@@ -104,7 +112,7 @@ export function generateTerrain(fields: WorldFields, cx: number, cz: number): Te
       }
     }
   }
-  return { heights, normals, colors, roadLat, netEdge, netType, minY, maxY }
+  return { heights, normals, colors, roadLat, netEdge, netType, biome, minY, maxY }
 }
 
 /**

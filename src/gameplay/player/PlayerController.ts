@@ -99,6 +99,8 @@ export class PlayerController {
   }
 
   private knockTarget = 0
+  private knockT = 0
+  private knockLanded = false
 
   fixedUpdate(dt: number): void {
     this.prev.copy(this.curr)
@@ -106,7 +108,20 @@ export class PlayerController {
     // Knockdown: fall fast, get up slowly once the stun ends.
     if (this.stunned <= 0.4 && !this.dead) this.knockTarget = 0
     if (this.dead) this.knockTarget = 1
-    this.knock += (this.knockTarget - this.knock) * Math.min(1, dt * (this.knockTarget > this.knock ? 9 : 2.2))
+    // FALL: a short stagger, then the body accelerates over like a felled tree (0.4 s, ease-in) and overshoots
+    // to 1.12 at impact (a bounce the pose reads as a thump), settling to 1. GET UP at a steady pace
+    // (~1.4 s: roll to the knees, push up, stand) — not an exponential crawl.
+    if (this.knockTarget > 0.5 && this.knock < 1.12 && !this.knockLanded) {
+      this.knockT += dt
+      const t = Math.min(1, (this.knockT - 0.12) / 0.4)
+      this.knock = t <= 0 ? this.knockT * 0.4 : 0.05 + 1.07 * t * t
+      if (t >= 1) this.knockLanded = true
+    } else if (this.knockTarget > 0.5) this.knock = Math.max(1, this.knock - dt * 0.6)
+    else {
+      this.knock = Math.max(0, Math.min(1, this.knock) - dt * 0.7)
+      this.knockT = 0
+      this.knockLanded = false
+    }
     const locked = this.stunned > 0 || this.dead
     this.stunned = Math.max(0, this.stunned - dt)
     const i = this.input
@@ -114,7 +129,7 @@ export class PlayerController {
     const strafe = locked ? 0 : (i.down('KeyD') ? 1 : 0) - (i.down('KeyA') ? 1 : 0) + i.touchMove.x
     // Touch: full joystick deflection sprints (no separate sprint button needed).
     const stick = Math.hypot(i.touchMove.x, i.touchMove.y)
-    const speed = i.down('ShiftLeft') || stick > 0.92 ? SPRINT : WALK
+    const speed = i.down('ShiftLeft') || i.down('ShiftRight') || stick > 0.92 ? SPRINT : WALK
     const sy = Math.sin(this.yaw)
     const cy = Math.cos(this.yaw)
     this.wish.set(strafe * cy - fwd * sy, 0, -strafe * sy - fwd * cy)

@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { stylize } from '../../rendering/shaders/stylize'
 import { CHUNK_SIZE } from '../constants'
 import type { FarRequest } from '../Streaming/chunk.worker'
+import { groundPalette } from '../../rendering/artStyle'
 import { farOffset, type FarTerrainData } from './horizonGen'
 
 /**
@@ -11,8 +12,9 @@ import { farOffset, type FarTerrainData } from './horizonGen'
  *
  *  - Generated in its own worker; rebuilt when the player moves `size/6` from its centre (double-buffered:
  *    the old mesh stays until the new one arrives).
- *  - Inside the loaded chunk area (minus one ring) its fragments are discarded, so detailed chunks show;
- *    in the overlap ring it sits 3 m lower with polygon offset → chunks win, no z-fighting.
+ *  - Inside the BUILT chunk area (WorldManager.builtRadius) its fragments are discarded, so detailed chunks
+ *    show; in the overlap ring it sits 3 m lower with polygon offset → chunks win, no z-fighting. A chunk that
+ *    hasn't streamed in yet is covered by the horizon hills instead of showing a hole into the sky.
  *  - Same painterly material patch (rim + sky-coloured fog) as the chunk terrain.
  */
 export interface FarSettings {
@@ -63,18 +65,18 @@ export class HorizonTerrain {
     this.centre.set(Number.NaN, Number.NaN)
   }
 
-  /** @param ring loaded chunk radius around the player's chunk (for the hole). */
-  update(focus: THREE.Vector3, ring: number): void {
+  /** @param builtRadius chunk radius around the player's chunk inside which every chunk is BUILT (the hole). */
+  update(focus: THREE.Vector3, builtRadius: number): void {
     const pcx = Math.floor(focus.x / CHUNK_SIZE)
     const pcz = Math.floor(focus.z / CHUNK_SIZE)
-    const r = Math.max(0, ring - 1)
+    const r = Math.max(0, builtRadius)
     this.hole.set((pcx - r) * CHUNK_SIZE, (pcz - r) * CHUNK_SIZE, (pcx + r + 1) * CHUNK_SIZE, (pcz + r + 1) * CHUNK_SIZE)
     const moved = Math.hypot(focus.x - this.centre.x, focus.z - this.centre.y)
     // The fine part of the warped grid must stay under the chunk-ring edge → re-centre every ~size/16.
     if (!(moved < Math.max(96, this.settings.size / 16))) {
       // Snap to the chunk grid so vertices don't swim between rebuilds.
       this.centre.set(Math.round(focus.x / CHUNK_SIZE) * CHUNK_SIZE, Math.round(focus.z / CHUNK_SIZE) * CHUNK_SIZE)
-      const msg: FarRequest = { type: 'far', id: ++this.pendingId, seed: this.seed, cx: this.centre.x, cz: this.centre.y, size: this.settings.size, res: this.settings.res }
+      const msg: FarRequest = { type: 'far', id: ++this.pendingId, seed: this.seed, palette: groundPalette(), cx: this.centre.x, cz: this.centre.y, size: this.settings.size, res: this.settings.res }
       this.worker.postMessage(msg)
     }
   }

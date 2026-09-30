@@ -181,6 +181,10 @@ export class PostPipeline {
   get targetSize(): string {
     return `${this.target.width}×${this.target.height}`
   }
+  /** Scene render-target height in pixels (point-sprite sizes are in RT pixels). */
+  get targetHeight(): number {
+    return this.target.height
+  }
 
   /** Lightning flash 0..1 and damage vignette 0..1 (set each frame by Game). */
   flash = 0
@@ -255,6 +259,22 @@ export class PostPipeline {
 
 
   private readonly bloomTexel = new THREE.Vector2(1, 1)
+  /** Fog banks in the shafts pass (tier flag). */
+  banks = false
+
+  /**
+   * Volumetric mist for the shafts pass: the same height-fog params as the materials (density, base, falloff,
+   * camera height), the mist colour, and the bank drift (time × wind). The pass runs when banks are visible even
+   * with no shafts.
+   */
+  setMist(density: number, base: number, falloff: number, camY: number, color: THREE.Color, time: number, wind: THREE.Vector2): void {
+    const u = this.raysMaterial.uniforms
+    ;(u.uSkyMist.value as THREE.Vector4).set(density, base, falloff, camY)
+    ;(u.uMistNoise.value as THREE.Vector4).set(0.045, 3.0, time * wind.x * 0.6, time * wind.y * 0.6)
+    u.uBanks.value = this.banks && density > 0 ? 1 : 0
+    ;(this.material.uniforms.uMistColor.value as THREE.Color).copy(color)
+    if (this.banks && density > 0) this.raysActive = true
+  }
 
   setPaint(stride: number, bloom: number): void {
     this.paintStride = stride

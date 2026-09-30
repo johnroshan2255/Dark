@@ -38,12 +38,45 @@ function part(g: THREE.BufferGeometry, color: number, shadeBottom = 0.75, surf: 
 }
 
 export const WIRE_ATTACH: [number, number][] = [[-1.05, 8.95], [0, 8.95], [1.05, 8.95]]
+/** Lamp housing in pole space (x toward the road, y up). */
+export const LAMP_POS: [number, number] = [-1.8, 8.1]
+
+/**
+ * Street-lamp GLOW: one camera-facing quad at the housing (`kind` 0) and a light pool on the ground under it
+ * (`kind` 1, radius 7 m) — instanced with the poles (same instance matrices), on the additive lamp material
+ * (MaterialLibrary.lampGlow), which fades them in with the darkness and flickers each post to life.
+ */
+export function createLampGlowGeometry(): THREE.BufferGeometry {
+  const pos: number[] = [], kind: number[] = [], corner: number[] = [], idx: number[] = []
+  const quad = (k: number, cx: number, cy: number, cz: number, r: number, flat: boolean) => {
+    const base = pos.length / 3
+    for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
+      pos.push(cx + (flat ? u * r : 0), cy + (flat ? 0 : 0), cz + (flat ? v * r : 0))
+      kind.push(k)
+      corner.push(u, v)
+    }
+    idx.push(base, base + 1, base + 2, base, base + 2, base + 3)
+  }
+  quad(0, LAMP_POS[0], LAMP_POS[1] - 0.1, 0, 0, false)
+  quad(1, LAMP_POS[0] - 1.2, 0.06, 0, 7, true)
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setAttribute('lampKind', new THREE.Float32BufferAttribute(kind, 1))
+  g.setAttribute('corner', new THREE.Float32BufferAttribute(corner, 2))
+  g.setIndex(idx)
+  g.name = 'lamp-glow'
+  g.computeBoundingSphere()
+  return g
+}
 
 export function createPoleGeometry(): THREE.BufferGeometry {
   const parts = [
     part(new THREE.CylinderGeometry(0.12, 0.17, 9.6, 7).translate(0, 4.8, 0), isStorybook() ? 0xa8502e : 0x5b4a3a, 0.6, SURFACE_UV.bark),
     part(new THREE.BoxGeometry(2.6, 0.14, 0.14).translate(0, 8.75, 0), isStorybook() ? 0xb85a36 : 0x4e4033, 0.75, SURFACE_UV.bark),
     ...WIRE_ATTACH.map(([x, y]) => part(new THREE.CylinderGeometry(0.05, 0.06, 0.2, 5).translate(x, y - 0.1, 0), 0x9aa3ad, 0.9)),
+    // Street-lamp arm over the road (local −X = toward the road) + a hooded housing; the glow is a separate mesh.
+    part(new THREE.CylinderGeometry(0.05, 0.06, 1.9, 5).rotateZ(Math.PI / 2).translate(-0.95, LAMP_POS[1] + 0.12, 0), 0x6a6f76, 0.85),
+    part(new THREE.CylinderGeometry(0.22, 0.12, 0.24, 6).translate(LAMP_POS[0], LAMP_POS[1], 0), 0x3a3d42, 0.7),
   ]
   const g = mergeGeometries(parts)!
   parts.forEach((p) => p.dispose())

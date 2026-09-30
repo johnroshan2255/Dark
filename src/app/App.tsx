@@ -7,13 +7,16 @@ import { TIERS, type TierName } from '../rendering/quality/QualityTiers'
 import { seedFromString } from '../world/noise/rng'
 import { GameHud } from '../ui/GameHud'
 import { SettingsPanel } from '../ui/SettingsPanel'
+import { MainMenu } from '../ui/MainMenu'
+import { Garage } from '../ui/Garage'
 import { Toolbar } from '../ui/Toolbar'
 import { GameCanvas } from './Canvas'
 import { bootError, bootFinish, bootProgress } from './boot'
+import { ART_STYLES } from '../rendering/artStyle'
 
 /**
  * Every new game gets a fresh random world unless ?seed= is given (co-op joiners receive the host's
- * seed the same way). URL options: ?seed=<n|text> &tier=low|medium|high &adaptive=0 &hour=<0-24> &look=bright|storybook
+ * seed the same way). URL options: ?seed=<n|text> &tier=low|medium|high &adaptive=0 &hour=<0-24> &look=<style> &car=<id> &play=1
  * &stress=<ms, dev>.
  */
 function readOptions(): GameOptions {
@@ -27,7 +30,9 @@ function readOptions(): GameOptions {
     adaptive: p.get('adaptive') !== '0',
     stressMs: Number(p.get('stress')) || 0,
     hour: p.get('hour') !== null ? Number(p.get('hour')) : undefined,
-    look: p.get('look') === 'storybook' ? 'storybook' : p.get('look') === 'bright' ? 'bright' : undefined,
+    look: ART_STYLES.find((a) => a === p.get('look')),
+    car: p.get('car') ?? undefined,
+    play: p.get('play') === '1',
   }
 }
 
@@ -81,10 +86,23 @@ export function App() {
   return (
     <>
       <GameCanvas game={game} />
+      <MainMenu game={game} />
+      <Garage game={game} />
+      <InGame game={game} />
+      <SettingsPanel game={game} />
+    </>
+  )
+}
+
+/** HUD, debug overlay and controls: only once the player has pressed PLAY (the landing page owns the screen before). */
+function InGame({ game }: { game: Game }) {
+  const landing = useStore(game.store, (s) => s.landing)
+  if (landing) return null
+  return (
+    <>
       <GameHud game={game} />
       <DebugHud game={game} />
       <Controls game={game} />
-      <SettingsPanel game={game} />
     </>
   )
 }

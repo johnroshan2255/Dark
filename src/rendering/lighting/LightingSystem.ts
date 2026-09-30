@@ -14,7 +14,9 @@ export class LightingSystem {
   readonly sun = new THREE.DirectionalLight()
   readonly hemi = new THREE.HemisphereLight()
   readonly flashlight = new THREE.SpotLight(0xfff1d6, 0, 42, 0.42, 0.5, 1.6)
-  flashlightOn = true
+  flashlightOn = false // off by default (daylight); F toggles — in the truck F toggles the headlights instead
+  /** What the spot light is doing THIS frame: the torch on foot, the headlights in the truck (set by Game). */
+  spotOn = false
   flashlightIntensity = 90
   /** Lightning flash 0..1 and its colour (set by Game). */
   flash = 0
@@ -101,13 +103,14 @@ export class LightingSystem {
 
     const f = this.flashlight
     f.position.copy(flashOrigin)
-    f.target.position.copy(flashTarget)
+    // The aim follows the look with a short lag: touch-look jitter otherwise wobbles the pool over the grass.
+    f.target.position.lerp(flashTarget, 1 - Math.exp(-dt * 14))
     this.flicker += dt
     const flick = 1 - 0.04 * Math.max(0, Math.sin(this.flicker * 37) * Math.sin(this.flicker * 11.3))
     // In daylight a flashlight barely registers — scale it down with the sun so the beam pool doesn't glow on a
     // sunny road; full strength at dusk/night/nightmare.
     const daylight = sunK * (1 - tod.nightmare)
-    f.intensity = this.flashlightOn ? this.flashlightIntensity * flick * (1 - 0.85 * daylight) : 0
+    f.intensity = this.spotOn ? this.flashlightIntensity * flick * (1 - 0.85 * daylight) : 0
     // No shadow re-render while off; the shadow pass is the flashlight's main cost.
     f.shadow.autoUpdate = this.flashlightOn && f.castShadow
     // But a castShadow light MUST have a map: shaders compiled with NUM_SPOT_LIGHT_SHADOWS sample it,

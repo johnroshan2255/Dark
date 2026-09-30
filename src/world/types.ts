@@ -18,6 +18,8 @@ export interface ChunkData {
   netEdge: Float32Array
   /** CHUNK_VERTS²: that road's type (RoadType) or -1. */
   netType: Float32Array
+  /** CHUNK_VERTS² × 2: biome weights (desert, snow) — see world/Biomes.ts. */
+  biome: Float32Array
   minY: number
   maxY: number
   /** Stride TREE_STRIDE: x, y, z, rotY, scale, species. */

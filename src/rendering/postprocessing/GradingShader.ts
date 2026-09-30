@@ -25,6 +25,8 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
       uFog: { value: new THREE.Vector2(50, 200) },
       uRaysColor: { value: new THREE.Color(0, 0, 0) },
       uVolColor: { value: new THREE.Color(0, 0, 0) },
+      /** Fog-bank colour (the mist colour) — banks are composited before the shafts are added. */
+      uMistColor: { value: new THREE.Color(0, 0, 0) },
       uTexel: { value: new THREE.Vector2(1, 1) },
       uRaysTexel: { value: new THREE.Vector2(1, 1) },
       uFxaa: { value: 1 },
@@ -58,7 +60,7 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
       uniform float uBloom;
       uniform float uNear, uFar;
       uniform vec2 uFog;
-      uniform vec3 uRaysColor, uVolColor, uTint, uLift;
+      uniform vec3 uRaysColor, uVolColor, uMistColor, uTint, uLift;
       uniform vec2 uTexel, uRaysTexel;
       uniform float uFxaa, uSharpen;
       uniform float uExposure, uSaturation, uContrast, uVignette, uGrain, uDistortion, uTime, uAspect;
@@ -121,12 +123,13 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
         // tap's stored depth code (B) is to this full-res pixel's → no blocky halos at silhouettes.
         float code0 = z >= 0.9999 ? 1.0 : 1.0 - exp(-(-perspectiveDepthToViewZ(z, uNear, uFar)) / 25.0);
         vec2 ro = uRaysTexel * 0.75;
-        vec3 t0 = texture2D(tRays, uv + vec2(ro.x, ro.y)).rgb;
-        vec3 t1 = texture2D(tRays, uv + vec2(-ro.x, ro.y)).rgb;
-        vec3 t2 = texture2D(tRays, uv + vec2(ro.x, -ro.y)).rgb;
-        vec3 t3 = texture2D(tRays, uv - ro).rgb;
+        vec4 t0 = texture2D(tRays, uv + vec2(ro.x, ro.y));
+        vec4 t1 = texture2D(tRays, uv + vec2(-ro.x, ro.y));
+        vec4 t2 = texture2D(tRays, uv + vec2(ro.x, -ro.y));
+        vec4 t3 = texture2D(tRays, uv - ro);
         vec4 w = vec4(exp(-abs(t0.b - code0) * 40.0), exp(-abs(t1.b - code0) * 40.0), exp(-abs(t2.b - code0) * 40.0), exp(-abs(t3.b - code0) * 40.0)) + 1e-4;
-        vec2 rays = (t0.rg * w.x + t1.rg * w.y + t2.rg * w.z + t3.rg * w.w) / (w.x + w.y + w.z + w.w);
+        vec3 rays = (t0.rga * w.x + t1.rga * w.y + t2.rga * w.z + t3.rga * w.w) / (w.x + w.y + w.z + w.w);
+        col = mix(col, uMistColor, rays.b); // drifting fog banks (volumetric march), then the light shafts on top
         col += rays.r * uRaysColor * air + rays.g * uVolColor;
         // Bloom: light bleeding around the sun, sky and lit edges (painted glow of the references).
         col += texture2D(tBloom, uv).rgb * uBloom;

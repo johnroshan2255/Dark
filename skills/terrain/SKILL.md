@@ -12,6 +12,20 @@ a heightfield per 64 m chunk, rendered cheaply, collidable via Rapier heightfiel
 
 ## 2. Architecture
 
+> **Implemented layering (`WorldFields.height`, current code) — supersedes the sketch below.** Each stage is
+> measured on the stages before it, so no stage can distort another later:
+> `natural` (fbm hills + massifs + ridges, biome-shaped: flatter dune basins in deserts, bigger massifs in snow)
+> → `valleyShape` (main-road corridor: relief × 0.12 next to the road → full at 159 m, AND a soft cap of
+> 1 m + 0.35 m per metre from the shoulder, so banks are ≤ ~19° and the road runs on a valley floor even beside
+> a 200 m massif — the old code left 25 m walls at the shoulder) → `riverShape` (bed below the water; bank width
+> grows with the cut depth but never reaches the road shoulder) → `poiShape` (places flattened to a base measured
+> on THAT ground; full inside 60 % of the radius) → `netShape` (secondary roads, `RoadNetwork.blendHeight`:
+> every road in range pulls the ground toward its graded height across an embankment 4 m + 1.6 × |Δh| wide,
+> strongest pull wins, pulls fade to 0 inside places) → `roadBed` (the main road bed is exact).
+> Secondary roads are graded within ±3 m of the ground they cross (target grade 22 %, samples every 14 m, both
+> ends exact, pinned to a place's base inside it). `npm test` asserts: main-road shoulder step ≤ 9 m at 12 m,
+> place relief ≤ 0.5 m, ground beside secondary roads ≤ 2.2 m/m, on three seeds.
+
 ```
 height(x,z) = base fbm + ridged hills + detail
             → road flattening (blend toward road bed height within road width + shoulder)
@@ -178,3 +192,13 @@ re-run the raycast check after any Rapier upgrade (see `src/physics/PhysicsWorld
 - Low sun angle (evening) reveals normal seams — check chunk borders there.
 - Worker timing for `sampleHeights` in HUD; if > 5 ms, reduce octaves or sample the detail octave only at LOD0.
 - Draw-call/tri counts per LOD in HUD; terrain should be ≤ 25 % of visible triangles.
+
+## Shores and terrain LOD
+The water is ONE flat plane (`rendering/water/Water.ts`), so the bed mesh decides the waterline. Coarser terrain
+LODs (stride 2 / 4) interpolate the bed over 4–8 m and MOVE the waterline: measured over ~190 shore chunks × 3
+seeds, 1.4 % (LOD1) and ~5 % (LOD2) of the lake area flipped wet ↔ dry at the moment a chunk switched — lake
+patches popping in and out as you move. SHORE CHUNKS (`minY < WATER + 0.5 && maxY > WATER − 0.5`) therefore keep
+the LOD0 terrain at every LOD (`WorldChunk.setLod`, trees/props still follow the LOD). Cost at a lake on HIGH:
+terrain 28 k → 64 k triangles (~9 % of the scene), GPU within noise. Tried and REVERTED: remapping heights away
+from the water level — it steepened the shore and made the LOD shift slightly worse. The water also has a
+polygon offset toward the camera (harmless insurance against bed/water depth fighting; none was measurable).

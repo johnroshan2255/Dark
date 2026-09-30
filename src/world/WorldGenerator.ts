@@ -18,8 +18,9 @@ import { WorldFields } from './WorldFields'
 export class WorldGenerator {
   readonly fields: WorldFields
 
-  constructor(readonly seed: number) {
+  constructor(readonly seed: number, palette = 0) {
     this.fields = new WorldFields(seed)
+    this.fields.palette = palette
   }
 
   private props(cx: number, cz: number, heights: Float32Array): Float32Array {
@@ -47,5 +48,5 @@ export class WorldGenerator {
 
 /** Buffers to transfer (zero-copy) when posting ChunkData from a worker. */
 export function chunkTransferables(d: ChunkData): ArrayBuffer[] {
-  return [d.heights, d.normals, d.colors, d.roadLat, d.netEdge, d.netType, d.trees, d.rocks, d.plants, d.props].map((a) => a.buffer as ArrayBuffer)
+  return [d.heights, d.normals, d.colors, d.roadLat, d.netEdge, d.netType, d.biome, d.trees, d.rocks, d.plants, d.props].map((a) => a.buffer as ArrayBuffer)
 }

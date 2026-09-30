@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { ATLAS_CELLS, cellUv, SOLID_UV, SURFACE_UV } from '../../rendering/materials/FoliageAtlas'
-import { isStorybook } from '../../rendering/artStyle'
+import { isOverland, isStorybook } from '../../rendering/artStyle'
 import { Rng } from '../noise/rng'
 import { TreeSpecies } from '../types'
 
@@ -12,6 +12,9 @@ import { TreeSpecies } from '../types'
  * Every part (cards, cores, trunks) is in ONE geometry with ONE material (solid parts sample an opaque atlas
  * texel), so a species is still one instanced draw call. Built once with fixed seeds → identical everywhere.
  *   levels: [0] near (dense sprays)  [1] mid (fewer, larger cards — LOW's near level)  [2] far (core + few cards)
+ * Canopies start ≥ ~3 m up (bare trunks below): the eye (1.6 m) and the driving camera (~3.5 m) pass UNDER the
+ * foliage through a forest instead of inside it; the foliage material also dithers out cards within ~2.5 m
+ * of the camera (stylize `nearFade`).
  */
 export interface SpeciesDef {
   id: number
@@ -231,7 +234,7 @@ function conifer(level: number, rng: Rng, o: ConiferOpts): THREE.BufferGeometry 
     const y = o.bare + (H * 0.94 - o.bare) * k
     const a = i * GOLD + rng.range(-0.35, 0.35)
     const L = (o.radius * Math.pow(1 - k, 0.9) + 0.35) * rng.range(0.65, 1.3) * (level === 1 ? 1.15 : 1)
-    const droop = o.droop * rng.range(0.6, 1.3) * (1 - k * 0.5)
+    const droop = o.droop * rng.range(0.6, 1.3) * (0.55 + 0.45 * k) // the lowest branches droop least: the canopy stays above the eye
     const dx = Math.cos(a), dz = Math.sin(a)
     const p0: V3 = [dx * 0.08, y, dz * 0.08]
     const p1: V3 = [dx * L * Math.cos(droop), y - L * Math.sin(droop), dz * L * Math.cos(droop)]
@@ -312,32 +315,90 @@ function storyConifer(level: number, rng: Rng, o: { height: number; radius: numb
   return s.geometry('conifer')
 }
 
+/**
+ * OVERLAND conifer (over the hill / art of rally): SOLID stacked spiky tiers — no cards, no tufts — many long/
+ * short points per tier and a strong droop for the ragged silhouette, a tall bare trunk, saturated green
+ * darkening toward the bottom (the per-stand hue palette adds the golden larches). Level 0 ≈ 9 tiers × 9
+ * points (≈ 330 tris), 1 ≈ 6 × 7, 2 ≈ 4 × 6 — every level cheaper than the card conifers, no overdraw.
+ */
+function overConifer(level: number, rng: Rng, o: { height: number; radius: number; bare: number; droop: number; trunk: number; dark: number; light: number }): THREE.BufferGeometry {
+  const s = new Soup()
+  const H = o.height
+  const dark = srgb(o.dark)
+  const light = srgb(o.light)
+  const bark = srgb(o.trunk)
+  solid(s, 0, H * 0.95, 0.2, 0.05, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.7), bark, 0, SURFACE_UV.bark)
+  // Over the hill's spruce: a tall narrow cone of many THIN horizontal SHELVES — flat star tiers with sharp
+  // alternating long/short points, stacked closely, a slight droop, no cards or tufts. Dark green base, the
+  // tops of the upper shelves lighter (yellow-green). ≈ 16 × 9-point tiers at level 0 (~600 tris), 9 × 7 at
+  // level 1, 5 × 6 at level 2 — all solid, no overdraw.
+  const tiers = [16, 9, 5][level]
+  const points = [9, 7, 6][level]
+  for (let t = 0; t < tiers; t++) {
+    const k = t / tiers
+    const y = o.bare + (H * 0.92 - o.bare) * k
+    const r = o.radius * Math.pow(1 - k, 0.85) + 0.22
+    skirt(s, [0, y, 0], r, Math.max(0.35, (H - y) * 0.12), points, o.droop * (0.7 + 0.3 * k), dark, light, 0.25 + 0.7 * k, 2, rng)
+  }
+  skirt(s, [0, H * 0.93, 0], 0.35, H * 0.09, 5, 0.3, dark, light, 0.95, 2, rng) // spire
+  return s.geometry('conifer')
+}
+
+/** OVERLAND broadleaf: banded trunk + a few SOLID crown lumps shaded as one volume (no tufts). */
+function overBirch(level: number, rng: Rng): THREE.BufferGeometry {
+  const s = new Soup()
+  const barkL = srgb(0xd9d4c4)
+  const barkD = srgb(0x55504a)
+  const segs = level === 0 ? 4 : 2
+  for (let k = 0; k < segs; k++) {
+    const y0 = (k / segs) * 7.2, y1 = ((k + 1) / segs) * 7.2
+    const c = k % 3 === 1 && level === 0 ? barkD : barkL
+    solid(s, y0, y1, 0.2 - k * 0.025, 0.2 - (k + 1) * 0.025, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.75), c, 0, SURFACE_UV.bark)
+  }
+  const dark = srgb(0x8a6420), light = srgb(0xe8b848) // autumn gold-orange crowns (their round trees)
+  const centre: V3 = [0, 7.0, 0]
+  const lumps = [7, 4, 1][level]
+  for (let i = 0; i < lumps; i++) {
+    const u = rng.next() * 2 - 1
+    const a = rng.next() * Math.PI * 2
+    const rr = i === 0 ? 0 : rng.range(0.55, 1.0)
+    const c: V3 = [centre[0] + Math.sqrt(1 - u * u) * Math.cos(a) * rr * 1.2, centre[1] + u * rr * 0.8, centre[2] + Math.sqrt(1 - u * u) * Math.sin(a) * rr * 1.2]
+    const r = (i === 0 ? 1.7 : rng.range(0.9, 1.25)) * (lumps === 1 ? 1.9 : 1)
+    crownLump(s, c, r, centre, rng, dark, light, level === 0 && i < 3 ? 1 : 0)
+  }
+  return s.geometry('birch')
+}
+
 function spruce(level: number, rng: Rng): THREE.BufferGeometry {
-  if (isStorybook()) return storyConifer(level, rng, { height: 8.5, radius: 2.5, bare: 1.4, droop: 0.55, trunk: 0x9a4a2e })
-  return conifer(level, rng, { height: 8.5, radius: 2.6, bare: 1.5, tiers: [8, 4, 3], points: [6, 5, 4], droop: 0.5, dark: 0x16302e, light: 0x4c7a5c, trunk: 0x4e3a2e })
+  if (isOverland()) return overConifer(level, rng, { height: 16, radius: 2.9, bare: 2.2, droop: 0.42, trunk: 0x4a3222, dark: 0x22482a, light: 0x7aa636 })
+  if (isStorybook()) return storyConifer(level, rng, { height: 11, radius: 2.5, bare: 4.2, droop: 0.55, trunk: 0x9a4a2e })
+  return conifer(level, rng, { height: 11, radius: 2.6, bare: 4.4, tiers: [8, 4, 3], points: [6, 5, 4], droop: 0.5, dark: 0x16302e, light: 0x4c7a5c, trunk: 0x4e3a2e })
 }
 
 function fir(level: number, rng: Rng): THREE.BufferGeometry {
-  if (isStorybook()) return storyConifer(level, rng, { height: 7, radius: 2.7, bare: 1.1, droop: 0.45, trunk: 0x9a4a2e })
-  return conifer(level, rng, { height: 7, radius: 2.9, bare: 1.2, tiers: [7, 4, 3], points: [7, 5, 4], droop: 0.38, dark: 0x15292c, light: 0x3f6a5a, trunk: 0x4a372c })
+  if (isOverland()) return overConifer(level, rng, { height: 13, radius: 3.1, bare: 2.0, droop: 0.4, trunk: 0x46301f, dark: 0x1e4228, light: 0x6c9e34 })
+  if (isStorybook()) return storyConifer(level, rng, { height: 9.5, radius: 2.7, bare: 4.0, droop: 0.45, trunk: 0x9a4a2e })
+  return conifer(level, rng, { height: 9.5, radius: 2.9, bare: 4.1, tiers: [7, 4, 3], points: [7, 5, 4], droop: 0.38, dark: 0x15292c, light: 0x3f6a5a, trunk: 0x4a372c })
 }
 
 /** Tall pine: long bare reddish trunk, a few flat drooping PADS offset around the top third (refs). */
 function pine(level: number, rng: Rng): THREE.BufferGeometry {
+  // Overland: the tallest, narrowest spire of the stand (their skyline pines), long bare trunk.
+  if (isOverland()) return overConifer(level, rng, { height: 19, radius: 2.6, bare: 4.2, droop: 0.42, trunk: 0x54392a, dark: 0x21482a, light: 0x7aa438 })
   // Storybook: the tall redwood-like conifer of the reference (long bare orange-red trunk, tiers up top).
-  if (isStorybook()) return storyConifer(level, rng, { height: 11, radius: 2.3, bare: 3.2, droop: 0.5, trunk: 0xa8502e })
+  if (isStorybook()) return storyConifer(level, rng, { height: 12.5, radius: 2.3, bare: 5.2, droop: 0.5, trunk: 0xa8502e })
   const s = new Soup()
   const bark = srgb(0x7a4a32)
   const dark = srgb(0x1f3d2c)
   const light = srgb(0x557f4f)
-  // Genshin proportions: ~2 m of bare trunk, then a big fluffy crown.
-  solid(s, 0, 6.5, 0.3, 0.12, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.6), bark, 0, SURFACE_UV.bark)
+  // Genshin proportions: ~4 m of bare trunk (the driving camera and the eye pass under the crown), then a big fluffy crown.
+  solid(s, 0, 9.2, 0.3, 0.12, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.6), bark, 0, SURFACE_UV.bark)
   const pads = [6, 4, 2][level]
   for (let i = 0; i < pads; i++) {
     const k = i / pads
     const a = rng.next() * 6.28
     const off = i === pads - 1 ? 0 : rng.range(0.5, 1.1)
-    const c: V3 = [Math.cos(a) * off, 2.4 + k * 4.0, Math.sin(a) * off]
+    const c: V3 = [Math.cos(a) * off, 5.2 + k * 4.0, Math.sin(a) * off]
     const pr = rng.range(1.7, 2.3) * (1 - k * 0.45)
     skirt(s, c, pr, 0.8, level === 0 ? 6 : 5, 0.22, dark, light, 0.55, level, rng)
     // Fluffy rim: tufts around each pad.
@@ -378,14 +439,14 @@ function storyBirch(level: number, rng: Rng): THREE.BufferGeometry {
   const cream = srgb(0xe6d8c2), rust = srgb(0xc8744a)
   const segs = level === 0 ? 6 : 3
   for (let k = 0; k < segs; k++) {
-    const y0 = (k / segs) * 5.4, y1 = ((k + 1) / segs) * 5.4
+    const y0 = (k / segs) * 6.8, y1 = ((k + 1) / segs) * 6.8
     const c = k % 2 === 1 ? rust : cream
     solid(s, y0, y1, 0.16 - k * 0.018, 0.16 - (k + 1) * 0.018, level === 2 ? 4 : 5, c.clone().multiplyScalar(0.85), c, 0, SURFACE_UV.bark)
   }
   if (level === 2) return s.geometry('birch')
   const m = new THREE.Matrix4(), nm = new THREE.Matrix3(), p = new THREE.Vector3(), n = new THREE.Vector3()
   for (let i = 0; i < (level === 0 ? 5 : 3); i++) {
-    const y = rng.range(2.4, 4.8), a = rng.next() * 6.28, len = rng.range(0.7, 1.4)
+    const y = rng.range(3.8, 6.2), a = rng.next() * 6.28, len = rng.range(0.7, 1.4)
     const b = new Soup()
     solid(b, 0, len, 0.05, 0.012, 4, cream.clone().multiplyScalar(0.8), cream, 0, SURFACE_UV.bark)
     m.makeRotationFromEuler(new THREE.Euler(0, -a, -0.6 + rng.range(-0.2, 0.2), 'YXZ')).setPosition(0, y, 0)
@@ -399,21 +460,22 @@ function storyBirch(level: number, rng: Rng): THREE.BufferGeometry {
   const [u0, v0, u1, v1] = cellUv(ATLAS_CELLS.spray)
   const dark = srgb(0x4a6444), light = srgb(0x9cb57e)
   for (let i = 0; i < 3; i++) {
-    const a = rng.next() * 6.28, y = 4.6 + i * 0.35
+    const a = rng.next() * 6.28, y = 6.0 + i * 0.35
     cardUv(s, [0, y, 0], [Math.cos(a) * 1.1, y - 0.3, Math.sin(a) * 1.1], [0, 0.7, 0], [u0, v0, u1, v1], [0, y, 0], dark, light)
   }
   return s.geometry('birch')
 }
 
 function birch(level: number, rng: Rng): THREE.BufferGeometry {
+  if (isOverland()) return overBirch(level, rng)
   if (isStorybook()) return storyBirch(level, rng)
   const s = new Soup()
   const barkL = srgb(0xd9d4c4)
   const barkD = srgb(0x55504a)
   const segs = level === 0 ? 4 : 2
   for (let k = 0; k < segs; k++) {
-    const y0 = (k / segs) * 4.2
-    const y1 = ((k + 1) / segs) * 4.2
+    const y0 = (k / segs) * 7.2
+    const y1 = ((k + 1) / segs) * 7.2
     const c = k % 3 === 1 && level === 0 ? barkD : barkL
     solid(s, y0, y1, 0.2 - k * 0.025, 0.2 - (k + 1) * 0.025, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.75), c, 0, SURFACE_UV.bark)
   }
@@ -421,7 +483,7 @@ function birch(level: number, rng: Rng): THREE.BufferGeometry {
   // bumpy painted silhouette, smooth painterly light — refer/roads roadside trees.
   const dark = srgb(0x44603a)
   const light = srgb(0x8c9c4c)
-  const centre: V3 = [0, 3.9, 0]
+  const centre: V3 = [0, 6.9, 0]
   // Near/mid: small solid core + a cloud of camera-facing tufts over the crown (fluffy tree). Far: lumps.
   if (level < 2) {
     crownLump(s, centre, 1.6, centre, rng, dark, light, 0)
@@ -450,14 +512,14 @@ function birch(level: number, rng: Rng): THREE.BufferGeometry {
 function dead(level: number, rng: Rng): THREE.BufferGeometry {
   const s = new Soup()
   const c = srgb(0x6e665c)
-  solid(s, 0, 6, 0.24, 0.05, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.6), c, 0, SURFACE_UV.bark)
+  solid(s, 0, 7, 0.24, 0.05, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.6), c, 0, SURFACE_UV.bark)
   const branches = [6, 3, 0][level]
   const m = new THREE.Matrix4()
   const nm = new THREE.Matrix3()
   const p = new THREE.Vector3()
   const n = new THREE.Vector3()
   for (let i = 0; i < branches; i++) {
-    const y = rng.range(2.2, 5.4)
+    const y = rng.range(3.4, 6.4)
     const a = rng.next() * 6.28
     const len = rng.range(0.9, 1.8)
     const b = new Soup()
@@ -494,8 +556,10 @@ export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } 
 export function createUndergrowth(): { fern: THREE.BufferGeometry; bush: THREE.BufferGeometry } {
   const rng = new Rng(909)
   const s = new Soup()
-  const dark = srgb(0x2c4a26)
-  const light = srgb(0x5f7e3c)
+  // Overland: lighter olive-green undergrowth (their bushes are soft green mounds, not dark spots).
+  const over = isOverland()
+  const dark = srgb(over ? 0x3e6a2e : 0x2c4a26)
+  const light = srgb(over ? 0x8ab04c : 0x5f7e3c)
   for (let f = 0; f < 6; f++) {
     const a = (f / 6) * Math.PI * 2 + rng.range(-0.25, 0.25)
     const len = rng.range(0.7, 1.0)
@@ -507,7 +571,7 @@ export function createUndergrowth(): { fern: THREE.BufferGeometry; bush: THREE.B
   }
   const fern = s.geometry('fern')
   const b = new Soup()
-  const bd = srgb(0x2a4424), bl = srgb(0x6e8a3e)
+  const bd = srgb(over ? 0x3c6a2c : 0x2a4424), bl = srgb(over ? 0x92b852 : 0x6e8a3e)
   blob(b, [0, 0.3, 0], 0.22, 0.8, rng, bd)
   cluster(b, [0, 0.45, 0], 0.6, 5, ATLAS_CELLS.leaves, rng, bd, bl)
   for (let i = 0; i < 7; i++) {

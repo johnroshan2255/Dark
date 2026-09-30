@@ -85,6 +85,9 @@ export class Lightning {
     this.mesh.renderOrder = 20
   }
 
+  /** Rain storm 0..1 (weather): strikes every 18–50 s in blue-white, day or night. */
+  storm = 0
+
   update(dt: number, monsterTime: boolean, nightmare: number, camera: THREE.Camera): void {
     this.age += dt
     const t = this.age
@@ -99,13 +102,19 @@ export class Lightning {
     u.uTime.value = t
     this.mesh.visible = t < 0.9 && (reveal < 1 || f > 0.05)
     // Reddish storm light: crimson-magenta corona at night, deep blood red in the nightmare realm.
-    ;(u.uGlow.value as THREE.Color).setRGB(0.95 + 0.05 * nightmare, 0.22 - 0.08 * nightmare, 0.42 - 0.2 * nightmare)
-    ;(u.uCore.value as THREE.Color).setRGB(1, 0.86 - 0.04 * nightmare, 0.95 - 0.05 * nightmare)
-    if (!this.enabled || !monsterTime) return
+    const stormOnly = this.storm > 0.5 && !monsterTime
+    if (stormOnly) {
+      ;(u.uGlow.value as THREE.Color).setRGB(0.55, 0.65, 1.0) // rain storm: blue-white
+      ;(u.uCore.value as THREE.Color).setRGB(0.96, 0.98, 1)
+    } else {
+      ;(u.uGlow.value as THREE.Color).setRGB(0.95 + 0.05 * nightmare, 0.22 - 0.08 * nightmare, 0.42 - 0.2 * nightmare)
+      ;(u.uCore.value as THREE.Color).setRGB(1, 0.86 - 0.04 * nightmare, 0.95 - 0.05 * nightmare)
+    }
+    if (!this.enabled || (!monsterTime && this.storm < 0.5)) return
     this.timer -= dt
     if (this.timer <= 0) {
-      this.timer = nightmare > 0.5 ? 5 + this.rng.next() * 10 : 15 + this.rng.next() * 30
-      this.strike(this.rng.next() < 0.15, camera)
+      this.timer = nightmare > 0.5 ? 5 + this.rng.next() * 10 : stormOnly ? 18 + this.rng.next() * 32 : 15 + this.rng.next() * 30
+      this.strike(!stormOnly && this.rng.next() < 0.15, camera) // storm strikes never target the player
     }
   }
 

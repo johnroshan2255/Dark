@@ -21,6 +21,7 @@ export function buildTerrainGeometry(d: ChunkData, lod: number): THREE.BufferGeo
   const col = new Float32Array(vCount * 3)
   const lat = new Float32Array(vCount)
   const net = new Float32Array(vCount * 2)
+  const bio = new Float32Array(vCount * 2)
 
   const copy = (dst: number, src: number, y: number) => {
     const ix = (src % CHUNK_VERTS)
@@ -35,6 +36,8 @@ export function buildTerrainGeometry(d: ChunkData, lod: number): THREE.BufferGeo
     lat[dst] = d.roadLat[src]
     net[dst * 2] = d.netEdge[src]
     net[dst * 2 + 1] = d.netType[src]
+    bio[dst * 2] = d.biome[src * 2]
+    bio[dst * 2 + 1] = d.biome[src * 2 + 1]
   }
 
   for (let j = 0; j < m; j++) {
@@ -78,6 +81,8 @@ export function buildTerrainGeometry(d: ChunkData, lod: number): THREE.BufferGeo
     lat[dst] = lat[top]
     net[dst * 2] = net[top * 2]
     net[dst * 2 + 1] = net[top * 2 + 1]
+    bio[dst * 2] = bio[top * 2]
+    bio[dst * 2 + 1] = bio[top * 2 + 1]
   }
   for (let k = 0; k < ring.length; k++) {
     const t0 = ring[k], t1 = ring[(k + 1) % ring.length]
@@ -94,6 +99,7 @@ export function buildTerrainGeometry(d: ChunkData, lod: number): THREE.BufferGeo
   g.setAttribute('color', new THREE.BufferAttribute(col, 3))
   g.setAttribute('roadLat', new THREE.BufferAttribute(lat, 1))
   g.setAttribute('roadNet', new THREE.BufferAttribute(net, 2))
+  g.setAttribute('biome', new THREE.BufferAttribute(bio, 2))
   g.setIndex(new THREE.BufferAttribute(idx, 1))
   const size = CHUNK_RES * CELL_SIZE
   g.boundingBox = new THREE.Box3(new THREE.Vector3(0, d.minY - skirtDepth, 0), new THREE.Vector3(size, d.maxY, size))

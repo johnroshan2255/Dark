@@ -16,6 +16,8 @@ export function TouchControls({ game }: { game: Game }) {
   const flashlight = useStore(game.store, (s) => s.flashlight)
   const phase = useStore(game.store, (s) => s.phase)
   const cam = useStore(game.store, (s) => s.settings.camera)
+  const driving = useStore(game.store, (s) => s.driving)
+  const lights = useStore(game.store, (s) => s.lights)
   const base = useRef<HTMLDivElement>(null)
   const knob = useRef<HTMLDivElement>(null)
   const moveId = useRef<number | null>(null)
@@ -82,6 +84,15 @@ export function TouchControls({ game }: { game: Game }) {
     e.preventDefault()
     input.trigger(code)
   }
+  /** Hold buttons (boost): key down while pressed, up on release / cancel / leave. */
+  // Held while the finger is down — pointer CAPTURE keeps the events on the button when the thumb slides off it
+  // (pointerleave used to release the boost as soon as the thumb moved a few pixels).
+  const hold = (code: string) => ({
+    onPointerDown: (e: RPointerEvent) => { e.stopPropagation(); e.preventDefault(); (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); input.hold(code, true) },
+    onPointerUp: () => input.hold(code, false),
+    onPointerCancel: () => input.hold(code, false),
+    onLostPointerCapture: () => input.hold(code, false),
+  })
 
   return (
     <div style={root} data-testid="touch-controls">
@@ -106,13 +117,18 @@ export function TouchControls({ game }: { game: Game }) {
       </div>
       <div style={buttons}>
         <button style={btn} data-testid="btn-light" onPointerDown={tap('KeyF')}>
-          {flashlight ? 'LIGHT ●' : 'LIGHT ○'}
+          {driving ? (lights ? 'LIGHTS ●' : 'LIGHTS ○') : flashlight ? 'TORCH ●' : 'TORCH ○'}
         </button>
         <button style={btn} data-testid="btn-bike" onPointerDown={tap('KeyE')}>
           RIDE
         </button>
+        {driving && (
+          <button style={{ ...btn, background: 'rgba(232,162,58,0.35)' }} data-testid="btn-boost" {...hold('ShiftLeft')}>
+            BOOST
+          </button>
+        )}
         <button style={{ ...btn, width: 76, height: 76 }} data-testid="btn-jump" onPointerDown={tap('Space')}>
-          JUMP
+          {driving ? 'DRIFT' : 'JUMP'}
         </button>
       </div>
       <div style={topRight}>

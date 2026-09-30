@@ -20,6 +20,9 @@ export class CameraController {
   mode: CameraMode = 'fpp'
   /** Vehicle view: farther and higher behind (car). null = on foot / bike. */
   vehicle: { distance: number; pivot: number } | null = null
+  /** Garage turntable: orbit this point (the parked car) slowly; the player and look input are ignored. */
+  garage: THREE.Vector3 | null = null
+  private orbit = 0
   readonly flashOrigin = new THREE.Vector3()
   readonly flashTarget = new THREE.Vector3()
   private dist = TPP_DISTANCE
@@ -42,6 +45,22 @@ export class CameraController {
   }
 
   update(dt: number, cam: THREE.PerspectiveCamera, p: PlayerController, flashlightOn: boolean): void {
+    if (this.garage) {
+      // Turntable: 7 m out, 2.2 m up, a slow lap every ~40 s, looking at the car's roofline.
+      this.orbit += dt * 0.16
+      const g = this.garage
+      const ground = this.fields.height(g.x + Math.sin(this.orbit) * 7, g.z + Math.cos(this.orbit) * 7)
+      cam.position.set(g.x + Math.sin(this.orbit) * 7, Math.max(g.y + 2.2, ground + 1.2), g.z + Math.cos(this.orbit) * 7)
+      // Look past the car's left so it sits in the open RIGHT half of the screen (the garage panel is on the left).
+      const dx = g.x - cam.position.x, dz = g.z - cam.position.z, l = Math.hypot(dx, dz)
+      cam.lookAt(g.x + (dz / l) * 1.7, g.y + 1.0, g.z - (dx / l) * 1.7)
+      cam.updateMatrixWorld()
+      this.character.root.visible = false
+      this.blob.visible = false
+      this.flashOrigin.copy(cam.position)
+      this.flashTarget.copy(g)
+      return
+    }
     const pos = p.renderPosition
     const cy = Math.cos(p.yaw)
     const sy = Math.sin(p.yaw)
@@ -95,9 +114,7 @@ export class CameraController {
     if (tpp) {
       const moving = p.horizontalSpeed > 0.4
       const targetYaw = flashlightOn || !moving ? (flashlightOn ? p.yaw : this.character.yaw) : Math.atan2(-p.velocity.x, -p.velocity.z)
-      this.character.animate(dt, pos, targetYaw, p.horizontalSpeed, p.grounded, flashlightOn, p.pitch, p.velocity.y)
-      this.character.root.rotation.x = -k * Math.PI * 0.48 // lying on the ground when knocked down
-      this.character.root.position.y += k * 0.25
+      this.character.animate(dt, pos, targetYaw, p.horizontalSpeed, p.grounded, flashlightOn, p.pitch, p.velocity.y, k) // knockdown / get-up posed inside
       this.blob.position.set(pos.x, this.fields.height(pos.x, pos.z) + 0.03, pos.z)
       this.character.handPosition(this.flashOrigin)
       this.flashTarget.copy(cam.position).addScaledVector(this.fwd, 28)

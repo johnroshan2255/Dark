@@ -27,6 +27,9 @@ export interface QualitySettings {
   paint: { stride: number; bloom: number }
   /** Light shafts: RT divisor, screen-space glare samples, volumetric (shadow-map) march steps (0 = off). */
   godRays: { divisor: number; samples: number; volumeSteps: number }
+  /** Volumetric fog: the analytic height mist is on every tier (~10 ALU/fragment); `banks` adds the drifting
+   *  noise-density fog banks marched in the low-res shafts pass (+~0.1–0.3 ms GPU; off on LOW). */
+  fog: { banks: boolean }
   /** Grass field around the player: fade radius (m), individual blades per m², blade segments (1 or 2). One draw call. */
   grass: { radius: number; density: number; blades: number }
   /** Trees: geometry level for near (LOD0) chunks (0 full ≈170–250 tris, 1 mid ≈50–100). */
@@ -51,6 +54,8 @@ export interface QualitySettings {
   horizon: { size: number; res: number }
   /** Monster count at night (the nightmare realm adds more). */
   monsters: { stalkers: number; striders: number }
+  /** Particle caps: vehicle exhaust + tyre smoke/dust sprites alive at once (one draw; ~0.03 ms CPU at 320); rain = share of the 1600-drop pool. */
+  particles: { vehicle: number; rain: number }
 }
 
 /*
@@ -66,25 +71,25 @@ export const QUALITY: Record<TierName, QualitySettings> = {
   low: {
     name: 'low', renderRadius: 2, lodRings: [0.8, 1.4], maxDpr: 1,
     renderScale: { min: 0.5, max: 0.85, start: 0.75 }, aa: 'fxaa', sharpen: 0.35,
-    godRays: { divisor: 6, samples: 12, volumeSteps: 8 }, paint: { stride: 0, bloom: 0.45 }, grass: { radius: 12, density: 18, blades: 1 }, trees: { near: 1 },
+    godRays: { divisor: 6, samples: 12, volumeSteps: 8 }, fog: { banks: false }, paint: { stride: 0, bloom: 0.45 }, grass: { radius: 12, density: 18, blades: 1 }, trees: { near: 1 },
     sunShadowSize: 1024, sunShadowEvery: 3, sunShadowExtent: 34, flashlightShadow: false,
-    plants: false, buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, horizon: { size: 2400, res: 40 }, pixelBudget: 0.6e6, viewDistance: 230,
+    plants: false, buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, particles: { vehicle: 110, rain: 0.35 }, horizon: { size: 2400, res: 40 }, pixelBudget: 0.6e6, viewDistance: 230,
   },
   // Upper mid phones (Adreno 7xx, recent iPhones), Iris Xe / Radeon iGPU.
   medium: {
     name: 'medium', renderRadius: 3, lodRings: [0.9, 1.8], maxDpr: 1.25,
     renderScale: { min: 0.6, max: 1, start: 0.85 }, aa: 'fxaa', sharpen: 0.25,
-    godRays: { divisor: 4, samples: 20, volumeSteps: 14 }, paint: { stride: 1.4, bloom: 0.4 }, grass: { radius: 15.5, density: 20, blades: 2 }, trees: { near: 0 },
+    godRays: { divisor: 4, samples: 20, volumeSteps: 14 }, fog: { banks: true }, paint: { stride: 1.4, bloom: 0.4 }, grass: { radius: 15.5, density: 20, blades: 2 }, trees: { near: 0 },
     sunShadowSize: 1024, sunShadowEvery: 2, sunShadowExtent: 40, flashlightShadow: false,
-    plants: true, buildPerFrame: 2, monsters: { stalkers: 2, striders: 1 }, horizon: { size: 3200, res: 52 }, pixelBudget: 1.4e6, viewDistance: 330,
+    plants: true, buildPerFrame: 2, monsters: { stalkers: 2, striders: 1 }, particles: { vehicle: 220, rain: 0.7 }, horizon: { size: 3200, res: 52 }, pixelBudget: 1.4e6, viewDistance: 330,
   },
   // Discrete GPUs, Apple M-series.
   high: {
     name: 'high', renderRadius: 3, lodRings: [1.2, 2.3], maxDpr: 1.5,
     renderScale: { min: 0.7, max: 1, start: 1 }, aa: 'msaa4', sharpen: 0.15,
-    godRays: { divisor: 4, samples: 24, volumeSteps: 16 }, paint: { stride: 1.8, bloom: 0.45 }, grass: { radius: 22, density: 34, blades: 2 }, trees: { near: 0 },
+    godRays: { divisor: 4, samples: 24, volumeSteps: 16 }, fog: { banks: true }, paint: { stride: 1.8, bloom: 0.45 }, grass: { radius: 22, density: 34, blades: 2 }, trees: { near: 0 },
     sunShadowSize: 2048, sunShadowEvery: 1, sunShadowExtent: 50, flashlightShadow: true,
-    plants: true, buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, horizon: { size: 4400, res: 72 }, pixelBudget: 2.4e6, viewDistance: 420,
+    plants: true, buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 320, rain: 1 }, horizon: { size: 4400, res: 72 }, pixelBudget: 2.4e6, viewDistance: 420,
   },
 }
 

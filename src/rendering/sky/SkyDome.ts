@@ -1,6 +1,7 @@
+import { isOverland } from '../artStyle'
 import * as THREE from 'three'
 import type { TimeOfDay } from '../lighting/TimeOfDay'
-import { SKY_GLSL, skyUniforms } from './skyShader'
+import { MIST_GLSL, SKY_GLSL, skyUniforms } from './skyShader'
 
 /**
  * Procedural sky: gradient (horizon == fog colour), sun disc + glow, moon disc + halo, stars, and a
@@ -32,8 +33,15 @@ export class SkyDome {
       `,
       fragmentShader: /* glsl */ `
         ${SKY_GLSL}
+        ${MIST_GLSL}
         varying vec3 vDir;
-        void main() { gl_FragColor = vec4(skyColor(normalize(vDir), true), 1.0); }
+        void main() {
+          vec3 d = normalize(vDir);
+          vec3 col = skyColor(d, true);
+          // Ground mist seen against the sky: full below the horizon, thinning with elevation (integral to infinity).
+          float mist = mistAmount(vec3(d.x, max(d.y, 0.004), d.z), 1.0e5);
+          gl_FragColor = vec4(mix(col, skyColor(d, false) * 1.06, mist * 0.9), 1.0);
+        }
       `,
     })
     this.mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 3), this.material)
@@ -57,7 +65,8 @@ export class SkyDome {
     u.uSkyStars.value = p.stars
     u.uSkyClouds.value = p.clouds
     u.uSkyCloudWhite.value = p.cloudWhite
-    u.uSkyHaze.value.set(p.haze, 110)
+    u.uSkyStorm.value = p.storm
+    u.uSkyHaze.value.set(p.haze, isOverland() ? 380 : 110) // overland: the haze builds over a longer distance — near field stays crisp
     u.uSkyTime.value = time
     // Follow the camera; scale inside the far plane (the vertex shader pins depth to far anyway).
     const r = camera.far * 0.9

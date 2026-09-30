@@ -20,6 +20,8 @@ export const skyUniforms = {
   uSkyClouds: { value: 0.4 },
   /** 0 = painted violet/gold clouds (dusk), 1 = Genshin white cumulus with soft blue-grey shading (day). */
   uSkyCloudWhite: { value: 0 },
+  /** Storm 0..1: clouds become a dark grey overcast lid (weather). */
+  uSkyStorm: { value: 0 },
   uSkyTime: { value: 0 },
   /** Lightning: direction to the bolt and its flash (clouds around it light up from inside). */
   uSkyBoltDir: { value: new THREE.Vector3(0, 1, 0) },
@@ -27,11 +29,32 @@ export const skyUniforms = {
   uSkyBoltColor: { value: new THREE.Color(1, 0.3, 0.4) },
   /** Aerial-perspective haze: x = max amount (0..1), y = distance scale (m). */
   uSkyHaze: { value: new THREE.Vector2(0.4, 110) },
+  /** Volumetric ground MIST (exponential height fog): x density at the base, y base height (m), z falloff (1/m), w camera height. */
+  uSkyMist: { value: new THREE.Vector4(0, -2, 0.09, 0) },
 }
+
+/**
+ * VOLUMETRIC MIST, analytic: fog density ρ(y) = ρ0·exp(−(y − y0)·f) integrated in closed form along the view
+ * ray from the camera to a point `dist` away — real height-dependent fog (pools in valleys and over lakes, thins
+ * up the hills, a clear view from a summit) for ~10 ALU per fragment on every tier, no march. Shared by every
+ * world material (stylize), the sky dome, the water and the shafts pass (which adds the drifting banks on top).
+ */
+export const MIST_GLSL = /* glsl */ `
+uniform vec4 uSkyMist;
+float mistAmount(vec3 dir, float dist) {
+  if (uSkyMist.x <= 0.0) return 0.0;
+  float f = uSkyMist.z;
+  float dy = dir.y;
+  float d0 = uSkyMist.x * exp(-(uSkyMist.w - uSkyMist.y) * f);
+  // ∫₀ᴸ ρ0·e^(−(camY + dy·t − y0)·f) dt = d0·(1 − e^(−dy·f·L)) / (dy·f)   (→ d0·L as dy → 0)
+  float e = min(-dy * f * dist, 40.0);
+  float t = abs(dy) > 1e-3 ? (1.0 - exp(e)) / (dy * f) : dist;
+  return 1.0 - exp(-d0 * max(t, 0.0));
+}`
 
 export const SKY_GLSL = /* glsl */ `
 uniform vec3 uSkyHorizon, uSkyZenith, uSkySunDir, uSkySunColor, uSkyMoonDir, uSkyMoonColor;
-uniform float uSkySunVis, uSkyMoonVis, uSkyStars, uSkyClouds, uSkyTime, uSkyBolt, uSkyCloudWhite;
+uniform float uSkySunVis, uSkyMoonVis, uSkyStars, uSkyClouds, uSkyTime, uSkyBolt, uSkyCloudWhite, uSkyStorm;
 uniform vec3 uSkyBoltDir, uSkyBoltColor;
 uniform vec2 uSkyHaze;
 // Layered depth haze on top of the distance fog (refer/roads: trees 40–150 m soften into blue-violet air).
@@ -94,7 +117,9 @@ vec3 skyColor(vec3 d, bool full) {
     if (uSkyStars > 0.001) {
       float h = sky_h3(floor(d * 420.0));
       float star = step(0.9984, h) * smoothstep(0.02, 0.25, d.y) * (0.6 + 0.4 * sin(uSkyTime * (1.5 + h * 4.0) + h * 40.0));
-      col += vec3(0.75, 0.82, 1.0) * star * uSkyStars * (0.7 + 1.2 * fract(h * 97.0)) * (1.0 - disc);
+      // Never over a bright sky: on a pale dawn/evening gradient twinkling stars read as blinking white specks.
+      float dark = 1.0 - smoothstep(0.035, 0.14, dot(col, vec3(0.3, 0.59, 0.11)));
+      col += vec3(0.75, 0.82, 1.0) * star * uSkyStars * dark * (0.7 + 1.2 * fract(h * 97.0)) * (1.0 - disc);
     }
     if (uSkyClouds > 0.01 && d.y > 0.0) {
       vec2 p = d.xz / (d.y + 0.12) * 1.6 + vec2(uSkyTime * 0.004, uSkyTime * 0.0015);
@@ -108,6 +133,12 @@ vec3 skyColor(vec3 d, bool full) {
       vec3 white = mix(vec3(0.62, 0.7, 0.88), vec3(1.08, 1.06, 1.02), smoothstep(0.1, 0.75, body + 0.25 * (n - sky_noise(p * 2.3 + vec2(0.4, 0.9)))));
       white += uSkySunColor * toward * 0.35;
       cloud = mix(cloud, white, uSkyCloudWhite);
+      // Storm: a heavy grey lid — dark bellies, ragged lighter edges, coverage pushed toward total.
+      if (uSkyStorm > 0.01) {
+        vec3 lid = mix(vec3(0.34, 0.36, 0.4), vec3(0.16, 0.17, 0.2), smoothstep(0.2, 0.9, n)) * (0.85 + 0.3 * sky_noise(p * 3.7 + 1.3));
+        cloud = mix(cloud, lid * (0.5 + 0.5 * uSkyHorizon.g / max(uSkyHorizon.g, 0.02)), uSkyStorm);
+        cov = max(cov, uSkyStorm * smoothstep(0.05, 0.5, n + 0.35 * uSkyStorm) * smoothstep(0.0, 0.12, d.y));
+      }
       col = mix(col, cloud, cov * mix(0.9, 0.97, uSkyCloudWhite));
       // Lightning inside the clouds: bright where they are thick and near the bolt, dim far from it.
       float near = pow(max(dot(d, uSkyBoltDir), 0.0), 6.0);

@@ -22,6 +22,7 @@ Read the relevant skill before touching a system.
 | `@dimforge/rapier3d-compat` | WASM physics: character controller, heightfield terrain, BMX rigid body. `-compat` embeds the wasm so Vite needs no plugin. Used directly (not `@react-three/rapier`) so we control body activation per chunk and step timing. |
 | `react`, `react-dom` | UI + R3F host. |
 | `vite`, `typescript`, `@vitejs/plugin-react` | Build. Vite gives native module workers (`new Worker(new URL(...))`) for chunk generation. |
+| `puppeteer-core` (dev) | Drives the locally installed Chrome for `npm run shot` (headless screenshots + fps/GPU ms per tier). Downloads nothing; dev-only. |
 
 Deliberately **not** added (yet): state libraries (we use a ~40-line external store), `postprocessing` (our single
 combined grading pass is cheaper and fully controlled; revisit if we need SSAO/bloom mip chains), `@react-three/rapier`,
@@ -74,6 +75,13 @@ World (seed)
   (`src/world/Streaming/chunk.worker.ts`). Same seed ⇒ same world on every client. Generation uses only
   arithmetic + `Math.floor` (no `Math.random`, no `sin/cos` in anything gameplay-relevant).
 - **Road** is a global analytic function `roadCenterX(z)` so any chunk can evaluate it without neighbours.
+- **Terrain layering** (`WorldFields.height`, skills/terrain §2): natural relief (biome-shaped) → main-road
+  VALLEY (slope-limited banks, never walls) → river → PLACES flattened to a base measured on that ground →
+  SECONDARY ROADS graded within ±3 m of it, meeting the ground on embankments → main road bed. Each stage is
+  measured on the stages before it; `npm test` checks the shoulder step, place flatness and road banks.
+- **Biomes** (`src/world/Biomes.ts`): 900 m cells (forest / desert / snowfield) with 260 m blended, noise-warped
+  borders + an altitude snow line; the spawn's 3×3 cells are forest and one desert + one snow cell always sit on
+  the road ~2 km up/down it. Weights drive relief, ground palette, trees/rocks/grass, the terrain shader and the fog tint.
 - **Streaming radii** (in chunks, Chebyshev distance from player chunk). The **render ring and LOD rings are per
   quality tier** (LOW 2 / MEDIUM 3 / HIGH 4 — `QualityTiers.ts`); the values below are HIGH:
 
@@ -113,6 +121,9 @@ margin of 0.35 chunk (LOD), so standing on a border does not thrash.
   keep `MeshStandardMaterial` but get remapped to library materials when possible.
 - **Fog**: linear-range `THREE.Fog` (smoothstep near→far): **clear up close, closing in at distance** (DAY 70→260 m,
   NIGHT 35→170 m), `far` capped at the tier's ring edge (`fogLimit`). Replaced FogExp2, which hazed everything from 0 m.
+  Plus **volumetric ground mist** (skills/fog): exponential height fog integrated analytically along the view ray in
+  every world material, the sky and the water (all tiers, ~0.1 ms GPU) and noise-marched drifting fog BANKS in the
+  low-res shafts pass (MEDIUM/HIGH, ~0.2 ms). Per-phase `mistDensity/Base/Falloff` in `TimeOfDay.ts`.
   Tone mapping: Khronos PBR Neutral (keeps the reference's saturation). Sun/moon shadows fade out at the shadow-map edge
   (`rendering/shadows/ShadowEdgeFade.ts`).
   distance, which sets the streaming radius, which sets the budget.
@@ -120,6 +131,23 @@ margin of 0.35 chunk (LOD), so standing on a border does not thrash.
   to texels. Only LOD0 chunk content casts. Flashlight shadow optional (1 map, 512²). Everything else: fake blob
   shadows / AO baked into vertex colors.
 - **Lighting phases**: `DAY → EVENING → NIGHT → NIGHTMARE` keyframes in `src/rendering/lighting/TimeOfDay.ts`.
+- **Art styles** (`src/rendering/artStyle.ts`, fixed per session, Settings/`?look=`): **`overland`** (default — the
+  "over the hill" look: straw meadows, solid spiky low-poly trees, faceted rocks, warm haze; also the cheapest),
+  `bright` (Genshin, card canopies, painted surfaces), `storybook` (unlit painting). Each style is a keyframe set
+  + material/geometry variants chosen at build time — no runtime branches. The ground palette is baked in the
+  chunk workers (`WorldFields.palette`, sent with every chunk/horizon request). See skills/art-direction.
+- **Weather** (`src/rendering/weather/Weather.ts`): deterministic cloud / rain / wind fields (seed + day + 20-min slot)
+  modulating the time-of-day params; rain streaks (`particles/RainParticles.ts`), tree sway (`uniforms.ts` `foliageSway`).
+- **Lights at night**: car head/brake lamps (`Car`, F switch in the truck, auto with the dark) share the single spot light
+  with the torch; street lamps on every roadside post are additive glow + road pool sprites instanced with the poles
+  (`MaterialLibrary.lampGlow`) that flicker on at dusk — no extra real lights (skills/lighting fixed light pool).
+- **Sound** (`src/audio/AudioSystem.ts`, files in `src/assets/audio/`, credits in ASSET_LIST.md): a WebAudio mixer —
+  master (Settings → Audio → Sound mutes everything) → music bus (Theme music) + effects bus. Persistent loops follow
+  the game each frame (`frame()`): engine idle + drive layers through a simulated gearbox, boost rush, tyre squeal from
+  wheel slip, bike rolling + freewheel, rain, the theme (fades out with the dark and the nightmare). One-shots: doors,
+  engine start/stop, footsteps by stride length. Loaded after the first gesture; the game never waits for audio.
+- **Vehicle effects** (`src/rendering/particles/VehicleFx.ts`): exhaust puffs + tyre smoke/dust as one tier-capped
+  point-sprite draw (`quality.particles.vehicle`), driven by the vehicle simulation's per-wheel slip.
 
 ---
 
@@ -146,9 +174,25 @@ with a bounding sphere covering the chunk; the chunk decides visibility.
 
 - `src/physics/PhysicsWorld.ts` owns the Rapier world, fixed 60 Hz step with accumulator.
 - Terrain: one heightfield collider per chunk inside physics radius; removed when leaving it.
-- Trees: fixed cylinder collider for trunk only, only inside physics radius. No colliders for plants/grass/rocks < 0.5 m.
+- Trees: fixed cylinder collider for trunk only, only inside physics radius. No colliders for plants/grass.
+- Rocks: one convex hull per boulder built from the rock mesh's own vertices with the instance's scale/rotation
+  (tested: every rendered vertex is inside). The physics ring also covers where a moving vehicle will be in ~1.5 s,
+  and a vehicle on ground without colliders is frozen instead of falling through.
 - Player: `KinematicCharacterController` + capsule.
-- BMX (future): dynamic rigid body + raycast wheels.
+- Vehicles (`src/gameplay/vehicle/VehicleSim.ts`): dynamic raycast vehicles (truck 4×4 with a DRIFT mode on the
+  handbrake / boosted power slide, BMX with a balance controller); `tests/vehicle.test.ts`. See skills/physics.
+- **The garage** (`src/gameplay/vehicle/catalogue.ts`): every drivable car — model URL, stock setup, tuning ranges,
+  paints. Models are baked by `assets/loadModels.ts` `bakeVehicle` (materials → vertex colours + a `paintMask`
+  attribute, wheels split out by name or shape, glass split off, normalised to metres / −Z / wheelbase origin) and
+  loaded on demand (`loadVehicle`, cached). `Game.selectVehicle` swaps the car in the world live; `Game.setTuning` →
+  `Car.retune` → `TruckSim.retune` changes power / force / boost / grip / springs / tyre size / mass in Rapier in
+  place; paint tints the masked panels in the car shader. Saved per vehicle in Settings (`garage`).
+- **Front end** (`src/ui/MainMenu.tsx`, `Garage.tsx`, `SettingsPanel.tsx`, tokens in `ui/theme.ts`): a racing-game
+  style menu over the live world (state `landing` + `screen`; the camera circles the parked car,
+  `CameraController.garage`, the player is frozen). MAIN MENU: Play / Garage / Settings + the current car's card.
+  GARAGE: car strip (tap → swapped in live), Performance tab (sliders + live rating), Paint tab (named swatches +
+  custom), Back / Drive. SETTINGS: full-page tabs Garage / Graphics / Controls / World (`Garage embedded`).
+  `Game.showScreen`, `play`, `openSettings`. `?play=1` skips the menu (tests), `?car=<id>` picks a car.
 
 ---
 
@@ -184,6 +228,9 @@ scripts/          asset validation tooling
 
 URL options: `?seed=<n|text>` (default: random per game) · `?tier=low|medium|high` · `?adaptive=0` ·
 `?stress=<ms>` (dev only, simulated slow device).
+
+Headless verification: `npm run dev`, then `npm run shot -- <outdir> <shots.json>` (`scripts/shoot.mjs`, local Google
+Chrome via puppeteer-core) teleports/drives/times the scene per shot, screenshots it and prints fps + GPU/CPU ms per tier.
 
 ## 9. Debug keys
 

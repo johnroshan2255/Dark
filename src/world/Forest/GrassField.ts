@@ -6,7 +6,9 @@ import { chunkKey } from '../types'
 import type { WorldChunk } from '../WorldChunk'
 import { WorldFields } from '../WorldFields'
 import { createGrassGeometry } from './grass'
+import { isOverland } from '../../rendering/artStyle'
 import { farmFieldAt } from '../POI/pois'
+import type { BiomeWeights } from '../Biomes'
 
 /**
  * Dense grass carpet AROUND THE PLAYER — cost ∝ radius², independent of loaded chunks. ONE draw call.
@@ -30,6 +32,23 @@ export interface GrassSettings {
   density: number
   /** Blade segments: 1 = 1 tri (LOW), 2 = 3 tris curved (MEDIUM/HIGH). */
   blades: number
+  /** Blade height / width multipliers (art style; default 1). */
+  tall?: number
+  wide?: number
+}
+
+/**
+ * The tier's grass budget adjusted for the art style. OVERLAND (over the hill): a pale straw meadow of single
+ * blades reaching further out.
+ */
+export function styledGrass(s: GrassSettings): GrassSettings {
+  if (!isOverland()) return s
+  // INDIVIDUAL blades like theirs (not card clumps): the tier's density, 1.35× taller and 1.4× wider blades so
+  // the straw closes into a soft carpet, 1.3× radius. ~1.7× the tier's blade triangles.
+  // Their meadow is FUR-dense short blades: 3× the tier's blades per m² as single-triangle blades (a 0.4 m blade
+  // has no visible curve) inside 0.85× the radius → ~2.2× the tier's blade count, the painted straw streaks carry
+  // the meadow beyond. Thinning starts late and blades widen faster with distance so the field stays SOLID.
+  return { radius: s.radius * 0.85, density: Math.round(s.density * 3), blades: 1, tall: 0.95, wide: 0.9 }
 }
 
 const _m = new THREE.Matrix4()
@@ -38,6 +57,7 @@ const _p = new THREE.Vector3()
 const _s = new THREE.Vector3()
 const _up = new THREE.Vector3(0, 1, 0)
 const ZERO = new THREE.Matrix4().makeScale(0, 0, 0)
+const _bw: BiomeWeights = [0, 0]
 
 export class GrassField {
   readonly root = new THREE.Group()
@@ -67,11 +87,11 @@ export class GrassField {
     this.settings = { ...s }
     const g = Math.ceil((s.radius * 2) / TILE) + 1
     const perTile = TILE * TILE // one 1 m² patch per cell
-    if (prev && prev.blades === s.blades && prev.density === s.density && g === this.g) return
+    if (prev && prev.blades === s.blades && prev.density === s.density && prev.tall === s.tall && g === this.g) return
     this.dispose()
     this.g = g
     this.perTile = perTile
-    this.geometry = createGrassGeometry(Math.round(s.density), s.blades)
+    this.geometry = createGrassGeometry(Math.round(s.density), s.blades, s.tall ?? 1, s.wide ?? 1)
     const count = g * g * perTile
     const mesh = new THREE.InstancedMesh(this.geometry, this.material, count)
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
@@ -129,7 +149,12 @@ export class GrassField {
     const czc = Math.floor((z0 + TILE / 2) / CHUNK_SIZE)
     let ok = this.chunks.has(chunkKey(cxc, czc))
     // Meadow factor once per tile (fbm is the expensive part): open ground & verges dense, deep forest sparse.
-    const meadow = 0.45 + 0.55 * (1 - this.fields.forestDensity(x0 + TILE / 2, z0 + TILE / 2))
+    // Biomes: no grass on snow; only a few dry tufts on sand (measured per tile centre — borders blend over 260 m).
+    const tileH = this.fields.height(x0 + TILE / 2, z0 + TILE / 2)
+    const bw = this.fields.biome(x0 + TILE / 2, z0 + TILE / 2, _bw, tileH)
+    const bare = 1 - bw[0] * 0.9 - bw[1]
+    const meadow = (0.45 + 0.55 * (1 - this.fields.forestDensity(x0 + TILE / 2, z0 + TILE / 2, tileH))) * bare
+    const dryBiome = bw[0] > 0.5
     const seed = this.fields.seed
     for (let i = 0; i < n; i++) {
       // Jittered 1 m grid: patches tile gap-free; random rotation hides the tiling.
@@ -141,7 +166,7 @@ export class GrassField {
       const verge = road < 9 ? 1 - road / 12 : 0
       if (!chunk) ok = false
       // Continuous meadow (no soil gaps); only dense forest floor thins it.
-      if (!chunk || road < 0.3 || r > Math.max(meadow, verge)) {
+      if (!chunk || road < 0.3 || r > Math.max(meadow, verge * bare)) {
         ZERO.toArray(mats, (base + i) * 16)
         continue
       }
@@ -157,15 +182,16 @@ export class GrassField {
       }
       _p.set(wx, gh - 0.04, wz)
       _q.setFromAxisAngle(_up, r * 97.0)
-      const sc = 0.9 + hashFloat(seed, tx, tz, i * 4) * 0.25 + verge * 0.3
+      const sc = isOverland() ? 0.95 + hashFloat(seed, tx, tz, i * 4) * 0.1 : 0.9 + hashFloat(seed, tx, tz, i * 4) * 0.25 + verge * 0.3
       _s.set(1, sc, 1) // XZ stays 1 so patches keep tiling
       _m.compose(_p, _q, _s).toArray(mats, (base + i) * 16)
       const vi = Math.min(CHUNK_VERTS - 1, Math.round(lz / CELL_SIZE)) * CHUNK_VERTS + Math.min(CHUNK_VERTS - 1, Math.round(lx / CELL_SIZE))
       const o = (base + i) * 3
       // Base colour = the ground's own colour (blades melt into the terrain → a carpet, not tufts); only a
       // few dry clumps on sunny verges (refs), and a slight per-clump hue jitter.
-      const dry = hashFloat(seed, tx, tz, i * 4 + DRY_KEY) < 0.03 + verge * 0.06
-      const j = 0.92 + hashFloat(seed, tx, tz, i * 4 + DRY_KEY + 1) * 0.16
+      // Overland: one even golden field — no dry clumps, no per-patch jitter (they read as tufts in a short field).
+      const dry = dryBiome || (!isOverland() && hashFloat(seed, tx, tz, i * 4 + DRY_KEY) < 0.03 + verge * 0.06)
+      const j = isOverland() ? 1 : 0.92 + hashFloat(seed, tx, tz, i * 4 + DRY_KEY + 1) * 0.16
       const tr = d.colors[vi * 3], tg = d.colors[vi * 3 + 1], tb = d.colors[vi * 3 + 2]
       if (dry) {
         cols[o] = tr * 1.3; cols[o + 1] = tg * 1.15; cols[o + 2] = tb * 0.7

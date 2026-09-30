@@ -4,8 +4,8 @@ import { hashFloat } from '../noise/rng'
  * Procedural PLACES (deterministic, global, per 300 m region — like the road network):
  *  - FARM (p ≈ 0.5 per region the main road crosses): 45–110 m to one side of the main road, on gentle ground.
  *  - CABIN / RUINS / CAMP (p ≈ 0.55 per region): anywhere suitable, away from road, river and steep slopes.
- * Each place flattens its ground to a base height (WorldFields.height), clears trees (scatter), and gets a
- * gravel road to the main road (RoadNetwork). Contents are laid out in `poiLayout.ts`.
+ * Each place flattens its ground to a base height measured on the valley-shaped ground (WorldFields), clears
+ * trees (scatter), and gets a gravel road to the main road (RoadNetwork). Contents are laid out in `poiLayout.ts`.
  */
 export const PoiType = { Farm: 0, Cabin: 1, Ruins: 2, Camp: 3 } as const
 export const POI_REGION = 300
@@ -49,7 +49,7 @@ export class PoiField {
     const first = hashFloat(s, 1221) < 0.5 ? -1 : 1
     for (let z = 110; z <= 230 && !this.homeFarm; z += 20) {
       for (const side of [first, -first]) {
-        const x = h.roadCenterX(z) + side * 56 // field edge ~8 m off the road → in view from the road
+        const x = h.roadCenterX(z) + side * 61 // field edge ~13 m off the road (past the shoulder) → in view from the road
         if (h.riverDistance(x, z) < 70) continue
         const base = this.flatEnough(x, z, RADIUS[PoiType.Farm])
         if (base === null) continue
@@ -68,7 +68,8 @@ export class PoiField {
       samples.push(h.baseHeight(x + Math.cos(a) * r * 0.7, z + Math.sin(a) * r * 0.7))
     }
     const lo = Math.min(...samples), hi = Math.max(...samples)
-    if (hi - lo > r * 0.35 || lo < h.water + 2) return null
+    // Relief across the place must fit its blend ring (0.4 r): otherwise the flattened disc ends in a cliff.
+    if (hi - lo > r * 0.28 || lo < h.water + 2) return null
     return samples.reduce((a, b) => a + b, 0) / samples.length
   }
 

@@ -1,6 +1,8 @@
 import type { CameraMode } from '../gameplay/player/CameraController'
 import type { AAMode } from '../rendering/postprocessing/PostPipeline'
 import type { TierName } from '../rendering/quality/QualityTiers'
+import type { ArtStyle } from '../rendering/artStyle'
+import { DEFAULT_VEHICLE, type VehicleTuning } from '../gameplay/vehicle/catalogue'
 
 /**
  * Player settings. 'auto' = use the quality tier's default (and let adaptive quality manage it).
@@ -25,10 +27,15 @@ export interface Settings {
   painterly: boolean
   /** Force the painterly filter on tiers where it defaults off (LOW). */
   painterlyForce: boolean
-  /** Art style (rendering/artStyle.ts): 'bright' Genshin day, or 'storybook' (unlit hand-painted forest-house look). Changing it reloads. */
-  artStyle: 'bright' | 'storybook'
+  /** Art style (rendering/artStyle.ts): 'overland' (default), 'bright' Genshin day, or 'storybook'. Changing it reloads. */
+  artStyle: ArtStyle
   /** Monsters and storms in monster time (off = exploration mode). */
   monsters: boolean
+  /** All sound on/off (one toggle), and the warm theme music on/off. */
+  sound: boolean
+  music: boolean
+  /** The garage: chosen vehicle and per-vehicle tuning overrides (gameplay/vehicle/catalogue.ts). */
+  garage: { vehicle: string; tuning: Record<string, Partial<VehicleTuning>> }
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -44,16 +51,28 @@ export const DEFAULT_SETTINGS: Settings = {
   filmGrain: true,
   painterly: false,
   painterlyForce: false,
-  artStyle: 'bright',
+  artStyle: 'overland',
   monsters: true,
+  sound: true,
+  music: true,
+  garage: { vehicle: DEFAULT_VEHICLE, tuning: {} },
 }
 
-const KEY = 'dark.settings.v2'
+const KEY = 'dark.settings.v3'
+/** v2 → v3: the default art style changed to 'overland'; a v2 save keeps everything but its style choice. */
+const OLD_KEY = 'dark.settings.v2'
 
 export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(KEY)
     if (raw) return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) }
+    const old = localStorage.getItem(OLD_KEY)
+    if (old) {
+      const { artStyle: _dropped, ...rest } = JSON.parse(old) as Partial<Settings>
+      const s = { ...DEFAULT_SETTINGS, ...rest }
+      saveSettings(s)
+      return s
+    }
   } catch {
     /* private mode / blocked storage → defaults */
   }

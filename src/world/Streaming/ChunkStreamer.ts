@@ -1,6 +1,7 @@
 import type { ChunkData } from '../types'
 import { chunkKey } from '../types'
 import type { ChunkRequest } from './chunk.worker'
+import { groundPalette } from '../../rendering/artStyle'
 
 interface Job {
   key: string
@@ -75,7 +76,7 @@ export class ChunkStreamer {
       const w = this.idle.pop()!
       const id = this.nextId++
       this.inFlight.set(id, job)
-      w.postMessage({ id, seed: this.seed, cx: job.cx, cz: job.cz } satisfies ChunkRequest)
+      w.postMessage({ id, seed: this.seed, palette: groundPalette(), cx: job.cx, cz: job.cz } satisfies ChunkRequest)
     }
   }
 

@@ -20,6 +20,12 @@ const _s = new THREE.Vector3()
 const _up = new THREE.Vector3(0, 1, 0)
 const _e = new THREE.Euler()
 const _c = new THREE.Color()
+const _t: [number, number, number] = [1, 1, 1]
+
+/** Vertical scale jitter of record `k` when `shape` = 0 (rocks): PhysicsWorld builds the rock hulls with the same factor. */
+export function instanceYScale(k: number): number {
+  return 0.9 + 0.2 * hashFloat(k, 7)
+}
 
 export interface InstanceAttributes {
   matrix: THREE.InstancedBufferAttribute
@@ -38,6 +44,8 @@ export function buildInstanceAttributes(
   hues?: readonly (readonly [number, number, number])[],
   /** World origin of the chunk (x, z) — colour stands must be keyed by WORLD position, not chunk-local. */
   origin: readonly [number, number] = [0, 0],
+  /** Extra per-instance colour multiplier from the record offset (biome tints: frosted / sun-dried). */
+  tintAt?: (o: number, out: [number, number, number]) => void,
 ): InstanceAttributes | null {
   const total = data.length / stride
   let count = 0
@@ -59,18 +67,23 @@ export function buildInstanceAttributes(
       _s.set(sc * wide, sc * (1 + (hashFloat(k, 7) - 0.35) * 2 * shape), sc * wide)
     } else {
       _q.setFromAxisAngle(_up, data[o + 3])
-      _s.set(sc, sc * (0.9 + 0.2 * hashFloat(k, 7)), sc)
+      _s.set(sc, sc * instanceYScale(k), sc)
     }
     _m.compose(_p, _q, _s).toArray(matrices, n * 16)
-    const v = 1 - tint + tint * 2 * hashFloat(k, 3)
+    let v = 1 - tint + tint * 2 * hashFloat(k, 3)
+    let bx = 1, by = 1, bz = 1
+    if (tintAt) {
+      tintAt(o, _t)
+      bx = _t[0]; by = _t[1]; bz = _t[2]
+    }
     if (hues) {
       const wx = Math.floor(data[o] + origin[0]), wz = Math.floor(data[o + 2] + origin[1])
       const stand = hashFloat(Math.floor(wx / 28), Math.floor(wz / 28), 71)
       const pick = hashFloat(wx, wz, 9) < 0.65 ? stand : hashFloat(wx, wz, 13) // 65 % follow the stand, 35 % individual
       const hh = hues[Math.min(hues.length - 1, Math.floor(pick * hues.length))]
-      _c.setRGB(v * hh[0], v * hh[1], v * hh[2]).toArray(colors, n * 3)
+      _c.setRGB(v * hh[0] * bx, v * hh[1] * by, v * hh[2] * bz).toArray(colors, n * 3)
     } else {
-      _c.setRGB(v, v * (0.97 + 0.06 * hashFloat(k, 5)), v).toArray(colors, n * 3)
+      _c.setRGB(v * bx, v * (0.97 + 0.06 * hashFloat(k, 5)) * by, v * bz).toArray(colors, n * 3)
     }
     n++
   }

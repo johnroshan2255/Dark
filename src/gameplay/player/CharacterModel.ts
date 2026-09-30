@@ -191,7 +191,7 @@ export class CharacterModel {
    * @param speed horizontal m/s   @param grounded   @param aimPitch camera pitch (arm follows when aiming)
    * @param aiming flashlight on → right arm raised forward   @param vy vertical velocity (jump/fall pose)
    */
-  animate(dt: number, pos: THREE.Vector3, targetYaw: number, speed: number, grounded: boolean, aiming: boolean, aimPitch: number, vy = 0): void {
+  animate(dt: number, pos: THREE.Vector3, targetYaw: number, speed: number, grounded: boolean, aiming: boolean, aimPitch: number, vy = 0, knock = 0): void {
     let d = targetYaw - this.yaw
     d = Math.atan2(Math.sin(d), Math.cos(d))
     this.yaw += d * (1 - Math.exp(-12 * dt))
@@ -245,10 +245,31 @@ export class CharacterModel {
       hipsY -= 0.14 * k
     }
     if (aiming) this.arm(1, Math.PI / 2, Math.PI / 2 - 0.1 + aimPitch * 0.8, 0.05) // flashlight: lowered, then swung straight forward
+    // KNOCKDOWN (knock 1 → 0 as the player gets up): lying on the back with arms thrown out and knees up, then
+    // the body tips upright while still crouched (pushing up), then the crouch straightens into standing —
+    // instead of a stiff plank tilting back to vertical.
+    let tilt = 0
+    if (knock > 0.001) {
+      const lie = smooth(0.45, 1, Math.min(1, knock)) // flat on the ground
+      const thump = Math.max(0, knock - 1) // impact overshoot (PlayerController): a bounce past flat
+      const crouch = Math.sin(Math.min(1, knock / 0.75) * Math.PI) * 0.9 + lie * 0.2 // deepest halfway up
+      const k = Math.max(lie, crouch)
+      this.leg(-1, 0.55 * lie + 1.15 * crouch, 0.9 * lie + 1.9 * crouch, 0.12 * k)
+      this.leg(1, 0.35 * lie + 1.15 * crouch, 0.6 * lie + 1.9 * crouch, 0.12 * k)
+      this.arm(1, 0.35 * lie + 1.1 * crouch, 0.3 * lie + 0.9 * crouch, 0.5 * lie + 0.3 * crouch, 0.4 * lie)
+      this.arm(-1, 0.25 * lie + 1.1 * crouch, 0.2 * lie + 0.9 * crouch, 0.6 * lie + 0.3 * crouch, 0.5 * lie)
+      this.pose(B.chest, 0.15 * lie + 0.55 * crouch)
+      this.pose(B.head, -0.25 * lie + 0.35 * crouch)
+      this.pose(B.hips, 0.1 * lie)
+      hipsY -= 0.42 * crouch + 0.6 * thump
+      tilt = Math.PI * (0.47 * lie + 0.1 * thump)
+    }
     this.bones[B.hips].position.set(this.rest[B.hips].x, this.rest[B.hips].y + hipsY, this.rest[B.hips].z)
     this.commit(1 - Math.exp(-16 * dt))
-    this.root.position.set(pos.x, pos.y, pos.z)
-    this.root.rotation.set(0, this.yaw, 0)
+    // Pivot: the body tips about the HIPS (feet slide forward as it goes over), not about the feet.
+    const hip = 0.95
+    this.root.position.set(pos.x, pos.y + hip * (1 - Math.cos(tilt)) * 0.25 + tilt * 0.06, pos.z)
+    this.root.rotation.set(-tilt, this.yaw, 0)
   }
   private airTime = 0
 

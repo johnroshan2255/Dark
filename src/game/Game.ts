@@ -1,6 +1,7 @@
 import * as THREE from 'three'
-import { ART } from '../rendering/artStyle'
-import { downscaleTexture, loadModels, type GameModels } from '../assets/loadModels'
+import { ART, isOverland, type ArtStyle } from '../rendering/artStyle'
+import { downscaleTexture, loadModels, loadVehicle, type GameModels } from '../assets/loadModels'
+import { tuningFor, vehicleDef, type VehicleTuning } from '../gameplay/vehicle/catalogue'
 import { CHUNK_SIZE } from '../world/constants'
 import { ChunkDebug } from '../debug/ChunkDebug'
 import { CullingDebug } from '../debug/CullingDebug'
@@ -14,6 +15,9 @@ import { MonsterSystem } from '../gameplay/monsters/MonsterSystem'
 import { Health } from '../gameplay/survival/Health'
 import { Lightning } from '../gameplay/weather/Lightning'
 import { AshParticles } from '../rendering/particles/AshParticles'
+import { VehicleFx } from '../rendering/particles/VehicleFx'
+import { RainParticles } from '../rendering/particles/RainParticles'
+import { Weather } from '../rendering/weather/Weather'
 import { CameraController, type CameraMode } from '../gameplay/player/CameraController'
 import { CharacterModel, createBlobShadow } from '../gameplay/player/CharacterModel'
 import { PlayerController } from '../gameplay/player/PlayerController'
@@ -38,11 +42,13 @@ import { applyShadowEdgeFade } from '../rendering/shadows/ShadowEdgeFade'
 import { SkyDome } from '../rendering/sky/SkyDome'
 import { skyUniforms } from '../rendering/sky/skyShader'
 import { WorldManager } from '../world/WorldManager'
+import { styledGrass } from '../world/Forest/GrassField'
 import { HorizonTerrain } from '../world/Terrain/HorizonTerrain'
 import { Water } from '../rendering/water/Water'
 import { GameLoop } from './GameLoop'
 import { createStore, type GameStateShape, type Store } from './GameState'
 import { loadSettings, saveSettings, type Settings } from './Settings'
+import type { BiomeWeights } from '../world/Biomes'
 
 export interface GameOptions {
   seed: number
@@ -55,7 +61,11 @@ export interface GameOptions {
   /** Start hour override (tests / screenshots). */
   hour?: number
   /** Art style override (?look=, not persisted). */
-  look?: 'bright' | 'storybook'
+  look?: ArtStyle
+  /** Vehicle override (?car=<catalogue id>, not persisted). */
+  car?: string
+  /** Skip the landing page (tests / screenshots). */
+  play?: boolean
 }
 
 /**
@@ -81,7 +91,7 @@ export class Game {
   readonly blobShadow = createBlobShadow()
   readonly beam = new LightBeam()
   readonly bike: Bike
-  readonly car: Car
+  car: Car
   readonly health = new Health()
   readonly audio = new AudioSystem()
   readonly ash = new AshParticles()
@@ -110,6 +120,22 @@ export class Game {
   /** Quality as saved by the player (a ?tier= URL override is never persisted). */
   private savedQuality: Settings['quality']
 
+  private readonly bw: BiomeWeights = [0, 0]
+  private readonly ahead = new THREE.Vector3()
+  private readonly mistColor = new THREE.Color()
+  private readonly fxLight = new THREE.Color()
+  private readonly fxDir = new THREE.Vector3()
+  private stepAcc = 0
+  private baseFov = 0
+  /** 0 by day … 1 at night (sun below the horizon or the nightmare), updated each frame. */
+  private darkness = 0
+  private lampOnAt: number | null = null
+  /** Exhaust puffs + tyre smoke/dust (one draw, tier-capped pool). */
+  readonly vehicleFx = new VehicleFx()
+  /** Dynamic weather (clouds / rain / wind) and its rain streaks. */
+  readonly weather: Weather
+  readonly rain = new RainParticles()
+  private rainBudget = 1
   private renderer: THREE.WebGLRenderer | null = null
   private scene: THREE.Scene | null = null
   camera: THREE.PerspectiveCamera | null = null
@@ -124,9 +150,11 @@ export class Game {
     let phys = 0, mdl = 0
     const report = () => onProgress?.(0.12 + 0.3 * (phys * 0.5 + mdl * 0.5), mdl < 1 ? 'Loading the truck and the stranger…' : 'Waking up physics…')
     report()
+    const saved = loadSettings()
+    const vehicle = opts.car && vehicleDef(opts.car).id === opts.car ? opts.car : saved.garage.vehicle
     const [R, models] = await Promise.all([
       PhysicsWorld.load().then((r) => ((phys = 1), report(), r)),
-      loadModels((f) => ((mdl = f), report())),
+      loadModels((f) => ((mdl = f), report()), vehicle),
     ])
     onProgress?.(0.45, 'Growing a new world…')
     return new Game(opts, new PhysicsWorld(R), models)
@@ -140,10 +168,11 @@ export class Game {
     if (opts.tier && opts.tier !== 'auto') this.settings = { ...this.settings, quality: opts.tier }
     this.settings = { ...this.settings, artStyle: ART.style }
     this.adaptive.enabled = opts.adaptive !== false && this.settings.quality === 'auto'
-    this.tod = new TimeOfDay(opts.hour ?? 10.5) // start on a bright Genshin morning; night still comes with the cycle
+    this.tod = new TimeOfDay(opts.hour ?? 15) // start in the warm afternoon (the garage view); night still comes with the cycle
     this.tod.dayLengthMinutes = this.settings.dayLength
     this.tod.setStyle(ART.style)
     this.lighting = new LightingSystem(this.tod)
+    this.weather = new Weather(opts.seed, globalUniforms.uWind.value)
     this.store = createStore<GameStateShape>({
       status: 'ready',
       error: null,
@@ -162,6 +191,12 @@ export class Game {
       settings: this.settings,
       settingsOpen: false,
       dead: false,
+      driving: false,
+      lights: false,
+      landing: opts.play !== true,
+      screen: 'menu',
+      vehicle: models.truck.id,
+      vehicleLoading: null,
     })
     this.world = new WorldManager(opts.seed, this.materials, physics)
 
@@ -181,7 +216,7 @@ export class Game {
     this.horizon = new HorizonTerrain(opts.seed)
     this.bike = new Bike(this.materials.character, this.player, this.character, this.world.fields, physics, this.input)
     this.bike.parkNear(spawn, this.player.yaw, 2.4)
-    this.car = new Car(this.materials.character, models.truck, physics, this.world.fields, this.player, this.character, this.input)
+    this.car = new Car(this.materials.character, models.truck, physics, this.world.fields, this.player, this.character, this.input, this.tuning(models.truck.id))
     {
       // Parked on the verge ~14 m down the road from the spawn.
       const cz = z + 14
@@ -195,6 +230,8 @@ export class Game {
     this.monsters = new MonsterSystem(this.world.fields, this.player, this.health, this.audio)
     this.lightning = new Lightning(this.world.fields, this.player, this.health, this.audio)
     this.monsters.enabled = this.lightning.enabled = this.settings.monsters
+    this.audio.setEnabled(this.settings.sound)
+    this.audio.setMusic(this.settings.music)
     this.health.onDamage = (e) => {
       this.audio.hurt()
       this.cameraCtl.shake = Math.min(1, this.cameraCtl.shake + 0.4 + e.amount / 60)
@@ -207,7 +244,7 @@ export class Game {
 
     this.physicsDebug = new PhysicsDebug(physics)
     this.envRoot.name = 'environment'
-    this.envRoot.add(this.sky.mesh, this.bike.root, this.car.root, this.horizon.mesh, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
+    this.envRoot.add(this.sky.mesh, this.bike.root, this.car.root, this.vehicleFx.points, this.rain.points, this.horizon.mesh, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
 
     this.bindKeys()
     this.buildLoop()
@@ -232,16 +269,33 @@ export class Game {
     i.onPress('KeyT', () => this.toggleDayNight())
     i.onPress('KeyG', () => this.tod.nextPreset())
     i.onPress('KeyN', () => this.toggleNightmare())
+    // R: cycle the weather (auto → clear → cloudy → rain → auto) — testing / screenshots.
+    i.onPress('KeyR', () => {
+      const order = [null, 'clear', 'cloudy', 'rain'] as const
+      this.weather.force = order[(order.indexOf(this.weather.force) + 1) % order.length]
+    })
     i.onPress('KeyV', () => this.toggleCamera())
     i.onPress('KeyO', () => this.openSettings(!s.get().settingsOpen))
-    i.onPress('KeyF', () => s.set({ flashlight: this.lighting.toggleFlashlight() }))
+    i.onPress('KeyF', () => {
+      // On foot / bike: the torch. In the truck: the headlights (the torch stays as it was).
+      if (this.car.driving) s.set({ lights: (this.car.lights = !this.car.lights) })
+      else s.set({ flashlight: this.lighting.toggleFlashlight() })
+    })
     i.onPress('KeyE', () => {
       // One key for everything (touch: BIKE/CAR button). Riding → get off the bike first (the truck can't be
       // entered from the saddle); otherwise the truck takes priority when both are near.
       if (this.bike.riding) this.bike.toggle()
       else if (this.car.driving || this.car.near) {
+        const wasDriving = this.car.driving
         this.car.toggle()
-        this.cameraCtl.vehicle = this.car.driving ? { distance: 9, pivot: 2.9 } : null
+        // Door, then the engine catching (in) / dying (out).
+        if (this.car.driving !== wasDriving) {
+          this.audio.play('door', 0.7)
+          this.audio.play(this.car.driving ? 'engineStart' : 'engineStop', 0.8)
+        }
+        this.cameraCtl.vehicle = this.car.driving ? { distance: 8, pivot: 2.3 } : null
+        if (this.car.driving) this.car.lights = this.darkness > 0.5 // lights come on with the dark; off by day
+        s.set({ driving: this.car.driving, lights: this.car.lights })
       } else this.bike.toggle()
     })
     i.onPress('BracketLeft', () => this.updateSettings({ resolution: Math.max(0.5, this.post.renderScale - 0.1) }))
@@ -298,6 +352,8 @@ export class Game {
       this.applyOverrides()
     }
     this.cameraCtl.mode = this.settings.camera as CameraMode
+    this.audio.setEnabled(this.settings.sound)
+    this.audio.setMusic(this.settings.music)
     this.monsters.enabled = this.lightning.enabled = this.settings.monsters
     this.tod.dayLengthMinutes = this.settings.dayLength
     this.player.sensitivity = 0.0022 * this.settings.lookSensitivity
@@ -316,15 +372,22 @@ export class Game {
     this.monsters.rig.castShadow = q.name !== 'low'
     this.bike.castShadow = q.name !== 'low'
     this.car.castShadow = q.name !== 'low'
-    // LOW: half-size truck texture (1024² → 512², ~4 MB less GPU memory).
-    this.truckMapLow ??= downscaleTexture(this.models.truck.map, 512)
-    this.car.setMap(q.name === 'low' ? this.truckMapLow : this.models.truck.map)
+    // LOW: half-size truck texture (1024² → 512², ~4 MB less GPU memory). Flat-coloured models have none.
+    const map = this.models.truck.map
+    if (map && this.car.modelId === this.models.truck.id) {
+      this.truckMapLow ??= downscaleTexture(map, 512)
+      this.car.setMap(q.name === 'low' ? this.truckMapLow : map)
+    }
     this.post.setGodRays(q.godRays.divisor, q.godRays.samples, q.godRays.volumeSteps)
+    this.post.banks = q.fog.banks
     this.post.setPaint(q.paint.stride, q.paint.bloom)
+    this.vehicleFx.budget = q.particles.vehicle
+    this.rainBudget = q.particles.rain
     this.horizon.configure(q.horizon)
     this.post.setPixelBudget(q.pixelBudget)
     this.post.setRenderScale(q.renderScale.start)
-    globalUniforms.uGrassFade.value.set(q.grass.radius * 0.7, q.grass.radius)
+    const gr = styledGrass(q.grass).radius
+    globalUniforms.uGrassFade.value.set(gr * 0.7, gr)
     if (this.camera) {
       // Far plane covers the horizon terrain (hills to the skyline); detail stops at viewDistance/the ring.
       this.camera.far = Math.max(q.viewDistance * 1.08, q.horizon.size * 0.56)
@@ -340,7 +403,8 @@ export class Game {
     const q = this.quality
     const st = this.settings
     this.post.setAA(st.aa === 'auto' ? q.aa : st.aa)
-    this.post.setSharpness(st.sharpness === 'auto' ? q.sharpen : st.sharpness)
+    // Overland: no sharpening — the unsharp mask makes thin grass blades sparkle on phones.
+    this.post.setSharpness(st.sharpness === 'auto' ? (isOverland() ? 0 : q.sharpen) : st.sharpness)
     this.post.grainScale = st.filmGrain ? 1 : 0
     // Painterly: tier default, or the player's explicit choice (LOW defaults off — ~25 fetches/px).
     const stride = q.paint.stride || (st.painterlyForce ? 1 : 0)
@@ -389,8 +453,8 @@ export class Game {
       .add({
         name: 'fixed',
         update: (dt) => {
-          // Hold the player until terrain colliders exist under them.
-          p.frozen = !this.world.isReadyAt(p.curr.x, p.curr.z)
+          // Hold the player until terrain colliders exist under them (and while the landing page is up).
+          p.frozen = !this.world.isReadyAt(p.curr.x, p.curr.z) || this.store.get().landing
           this.physics.advance(dt, (fdt) => {
             p.fixedUpdate(fdt)
             this.car.fixedUpdate(fdt)
@@ -406,6 +470,7 @@ export class Game {
         name: 'timeOfDay',
         update: (dt) => {
           this.tod.update(dt)
+          this.weather.update(dt, this.tod.hours, this.tod.day)
           if (this.tod.label !== this.store.get().phase) this.store.set({ phase: this.tod.label })
         },
       })
@@ -429,20 +494,51 @@ export class Game {
           }
         },
       })
-      .add({ name: 'camera', update: (dt) => this.camera && this.cameraCtl.update(dt, this.camera, p, this.lighting.flashlightOn) })
+      .add({
+        name: 'camera',
+        update: (dt) => {
+          if (!this.camera) return
+          // Landing page: slow orbit around the parked car (the garage turntable); no look input.
+          this.cameraCtl.garage = this.store.get().landing ? this.car.pos : null
+          this.cameraCtl.update(dt, this.camera, p, this.lighting.flashlightOn)
+          // BOOST feedback: the field of view widens (speed rush) while the boost is pushing the truck.
+          const cam = this.camera
+          this.baseFov ||= cam.fov
+          const sim = this.car.sim
+          const boosting = this.car.driving && sim.controls.boost && sim.controls.throttle > 0.1 && sim.speed > 3
+          const fov = cam.fov + ((boosting ? this.baseFov + 9 : this.baseFov) - cam.fov) * Math.min(1, dt * (boosting ? 3 : 2))
+          if (Math.abs(fov - cam.fov) > 0.01) {
+            cam.fov = fov
+            cam.updateProjectionMatrix()
+          }
+        },
+      })
       .add({ name: 'bike', update: (dt) => this.bike.update(dt, this.physics.alpha) }) // after camera: overrides the rider pose
       .add({
         name: 'car',
         update: (dt) => {
           this.car.showDriver = this.cameraCtl.mode === 'tpp'
           this.car.update(dt, this.physics.alpha, this.cameraCtl.flashOrigin, this.cameraCtl.flashTarget)
+          if (this.camera) {
+            // Exhaust + tyre smoke/dust, lit by the sky fill and a share of the sun, sized in RT pixels.
+            const L = this.lighting
+            const sk = Math.min(L.sun.intensity, 3) * 0.22
+            this.fxLight.copy(L.hemi.color).multiplyScalar(L.hemi.intensity * 0.55)
+            this.fxLight.r += L.sun.color.r * sk
+            this.fxLight.g += L.sun.color.g * sk
+            this.fxLight.b += L.sun.color.b * sk
+            this.vehicleFx.update(dt, this.car, this.world.fields, this.camera.position, globalUniforms.uWind.value, this.fxLight, this.post.targetHeight)
+          }
         },
       })
       .add({
         name: 'world',
         update: () => {
           if (!this.camera) return
-          this.world.update(p.renderPosition, this.cullingDebug.cullCamera(this.camera))
+          // Physics look-ahead: where a moving vehicle / player will be in ~1.5 s → its chunk gets colliders early.
+          const v = this.car.driving ? this.car.velocity(this.ahead) : this.ahead.copy(p.velocity)
+          this.ahead.copy(v).multiplyScalar(1.5).add(p.renderPosition)
+          this.world.update(p.renderPosition, this.cullingDebug.cullCamera(this.camera), this.ahead)
         },
       })
       .add({
@@ -461,9 +557,52 @@ export class Game {
           this.post.damage = Math.max(this.health.hurt, this.health.dead ? 1 : 0, (1 - this.health.hp / this.health.max) * 0.35)
           this.lighting.update(dt, p.renderPosition, c.flashOrigin, c.flashTarget)
           this.ash.update(time, cam.position, THREE.MathUtils.smoothstep(this.tod.nightmare, 0.2, 0.9), this.renderer?.domElement.height ?? 800)
-          const darkness = 1 - THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.05, 0.45) * (1 - this.tod.nightmare)
-          this.beam.update(c.flashOrigin, c.flashTarget, this.lighting.flashlightOn, darkness, c.mode === 'fpp')
+          const darkness = (this.darkness = 1 - THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.05, 0.45) * (1 - this.tod.nightmare))
+          // One spot light: the torch on foot, the headlights in the truck (its own switch).
+          const lit = this.car.driving ? this.car.lights : this.lighting.flashlightOn
+          this.lighting.spotOn = lit
+          this.beam.update(c.flashOrigin, c.flashTarget, lit, darkness, c.mode === 'fpp' && !this.car.driving)
+          this.car.updateLamps(darkness)
+          // Street lamps: on from dusk; `lampT` = seconds since they switched on (each post flickers to life in its own time).
+          if (darkness > 0.55) this.lampOnAt ??= time
+          else this.lampOnAt = null
+          this.materials.setLamps(darkness, this.lampOnAt === null ? -1 : time - this.lampOnAt, time)
           const tp = this.tod.current
+          // Weather on top of the phase blend: clouds dim/grey, rain washes, wind scales the shared uniform.
+          this.weather.apply(tp, globalUniforms.uWind.value)
+          globalUniforms.uWet.value = this.weather.wet
+          this.lightning.storm = this.weather.rain
+          // SOUND: the mixer follows the vehicles, weather and time of day; footsteps by stride length.
+          {
+            const camR = this.fxDir.set(1, 0, 0).applyQuaternion(cam.quaternion)
+            const pan = (x: number, z: number) => { const dx = x - cam.position.x, dz = z - cam.position.z, l = Math.hypot(dx, dz) || 1; return ((dx * camR.x + dz * camR.z) / l) * 0.6 }
+            const car = this.car, bike = this.bike, bs = bike.sim
+            const sim = car.sim, slip = Math.max(...sim.wheelSlip)
+            this.audio.frame({
+              dt, darkness, nightmare: this.tod.nightmare, menu: this.store.get().landing, rain: this.weather.rain,
+              car: { engineOn: car.driving, distance: car.pos.distanceTo(cam.position), pan: pan(car.pos.x, car.pos.z), speed: sim.speed, throttle: Math.max(0, sim.controls.throttle), boost: sim.controls.boost, slip },
+              bike: { riding: bike.riding, distance: bike.root.position.distanceTo(cam.position), pan: pan(bike.root.position.x, bike.root.position.z), speed: bs.speed, throttle: Math.max(0, bs.controls.throttle) },
+            })
+            const onFoot = !car.driving && !bike.riding && !p.dead && p.grounded && !this.store.get().landing
+            const v = onFoot ? p.horizontalSpeed : 0
+            if (v > 0.6) {
+              this.stepAcc += v * dt
+              const stride = v > 4 ? 1.2 : 0.75 // run / walk step length (m)
+              if (this.stepAcc >= stride) {
+                this.stepAcc -= stride
+                this.audio.footstep(0.3 + 0.3 * Math.min(1, v / 6))
+              }
+            } else this.stepAcc = 0.5 // the first step lands soon after you start moving
+          }
+          this.rain.update(time, cam.position, this.weather.rain, this.rainBudget, globalUniforms.uWind.value, this.fxLight.copy(tp.hemiSky).multiplyScalar(0.9), this.renderer?.domElement.height ?? 800)
+          // Biome air: warm dusty haze over the desert, cold blue-white over the snowfields (weights under the player).
+          const bw = this.world.fields.biome(p.renderPosition.x, p.renderPosition.z, this.bw, p.renderPosition.y)
+          if (bw[0] > 0.001 || bw[1] > 0.001) {
+            const r = 1 + 0.07 * bw[0] - 0.04 * bw[1], g = 1 - 0.02 * bw[0], b = 1 - 0.14 * bw[0] + 0.06 * bw[1]
+            tp.fogColor.r *= r
+            tp.fogColor.g *= g
+            tp.fogColor.b *= b
+          }
           this.fog.color.copy(tp.fogColor)
           // Clear up close; complete no later than the edge of this tier's loaded ring (skills/fog).
           // Fog closes in only at the horizon terrain's edge; the chunk ring edge is covered by it.
@@ -480,11 +619,20 @@ export class Game {
           globalUniforms.uFarEdge.value.set(farR * 0.7, farR * 0.96)
           const detailEdge = Math.min(q.viewDistance, q.renderRadius * CHUNK_SIZE + 24)
           globalUniforms.uCullFade.value.set(detailEdge * 0.74, detailEdge)
+          // Foliage cards near the eye dissolve; in the third-person vehicle view (camera ~8 m behind, up in the
+          // canopy) the band is wider so the leaves between the camera and the truck never fill the screen.
+          // (Overland spruces are full to ~2.5 m up, so the band is wider: canopies between camera and truck go.)
+          if (this.car.driving && c.mode === 'tpp') globalUniforms.uNearFade.value.set(isOverland() ? 3.0 : 2.5, isOverland() ? 12.0 : 7.0)
+          else globalUniforms.uNearFade.value.set(1.4, 3.0)
           if (this.scene?.background instanceof THREE.Color) this.scene.background.copy(tp.fogColor)
+          // Volumetric ground mist (materials + sky + water: analytic; shafts pass: drifting banks).
+          skyUniforms.uSkyMist.value.set(tp.mistDensity * (1 - 0.35 * bw[0]), tp.mistBase, tp.mistFalloff, cam.position.y)
+          this.mistColor.copy(tp.fogColor).lerp(this.lighting.sun.color, 0.12 * this.lighting.keyStrength).multiplyScalar(1.05)
+          this.post.setMist(skyUniforms.uSkyMist.value.x, tp.mistBase, tp.mistFalloff, cam.position.y, this.mistColor, time, globalUniforms.uWind.value)
           this.sky.update(this.tod, cam, time)
-          this.horizon.update(p.renderPosition, this.world.renderRadius)
+          this.horizon.update(p.renderPosition, this.world.builtRadius)
           this.world.visibility.maxDistance = Math.min(q.viewDistance, q.renderRadius * CHUNK_SIZE + 24) + 20
-          this.water.update(time, cam.position, this.fog.near, this.fog.far, this.lighting.keyDir, this.lighting.sun.color)
+          this.water.update(time, cam.position, this.fog.near, this.fog.far, this.lighting.keyDir, this.lighting.sun.color, this.weather.rain)
           this.post.applyGrading(tp, time)
           const k = this.lighting.keyStrength
           this.post.updateGodRays(cam, this.lighting.sun, this.lighting.keyDir, tp.rays * k, tp.shafts * k, this.fog.near, this.fog.far, this.quality.sunShadowExtent * 1.2)
@@ -522,6 +670,68 @@ export class Game {
     const ground = this.world.isReadyAt(p.x, p.z) ? 1 : 0
     const horizon = this.horizon.mesh.visible ? 1 : 0
     return Math.min(built, 1) * 0.8 + ground * 0.1 + horizon * 0.1
+  }
+
+  // ---------------------------------------------------------------- garage
+
+  /** The player's setup for a vehicle (stock + saved overrides). */
+  tuning(id: string): VehicleTuning {
+    return tuningFor(id, this.settings.garage.tuning[id])
+  }
+
+  /** Change the tuning of a vehicle; applied live when it is the one in the world. Persisted. */
+  setTuning(id: string, patch: Partial<VehicleTuning>): void {
+    const tuning = { ...this.settings.garage.tuning, [id]: { ...(this.settings.garage.tuning[id] ?? {}), ...patch } }
+    this.settings = { ...this.settings, garage: { ...this.settings.garage, tuning } }
+    saveSettings(this.settings)
+    this.store.set({ settings: this.settings })
+    if (this.car.modelId === id) this.car.retune(this.tuning(id))
+  }
+
+  /** Reset a vehicle to its stock setup. */
+  resetTuning(id: string): void {
+    const tuning = { ...this.settings.garage.tuning }
+    delete tuning[id]
+    this.settings = { ...this.settings, garage: { ...this.settings.garage, tuning } }
+    saveSettings(this.settings)
+    this.store.set({ settings: this.settings })
+    if (this.car.modelId === id) this.car.retune(this.tuning(id))
+  }
+
+  private selecting: Promise<void> | null = null
+  /** Put another catalogue vehicle in the world (downloads its model on first use), where the current one stands. */
+  selectVehicle(id: string): Promise<void> {
+    if (id === this.car.modelId || this.selecting) return this.selecting ?? Promise.resolve()
+    this.store.set({ vehicleLoading: 0 })
+    this.selecting = loadVehicle(id, (f) => this.store.set({ vehicleLoading: f }))
+      .then((model) => {
+        const pos = this.car.pos.clone(), heading = this.car.heading
+        if (this.car.driving) this.car.toggle()
+        this.car.dispose()
+        this.car = new Car(this.materials.character, model, this.physics, this.world.fields, this.player, this.character, this.input, this.tuning(id))
+        this.car.park(pos.x, pos.z, heading)
+        this.envRoot.add(this.car.root)
+        this.car.castShadow = this.quality.name !== 'low'
+        this.car.setMap(this.quality.name === 'low' && model.map ? downscaleTexture(model.map, 512) : model.map)
+        this.settings = { ...this.settings, garage: { ...this.settings.garage, vehicle: id } }
+        saveSettings(this.settings)
+        this.store.set({ settings: this.settings, vehicle: id, vehicleLoading: null, driving: false })
+      })
+      .catch((e: unknown) => {
+        console.error(e)
+        this.store.set({ vehicleLoading: null })
+      })
+      .finally(() => (this.selecting = null))
+    return this.selecting
+  }
+
+  /** Front-end navigation: PLAY hands over control; GARAGE / BACK switch screens; the pause menu returns to it. */
+  play(): void {
+    this.store.set({ landing: false, screen: 'menu' })
+  }
+  showScreen(screen: 'menu' | 'garage'): void {
+    if (document.pointerLockElement) document.exitPointerLock()
+    this.store.set({ landing: true, screen, settingsOpen: false })
   }
 
   /** Back on the road near where you fell, full health; nearby monsters retreat. */
@@ -627,6 +837,8 @@ export class Game {
     this.beam.dispose()
     this.bike.dispose()
     this.car.dispose()
+    this.vehicleFx.dispose()
+    this.rain.dispose()
     this.monsters.dispose()
     this.lightning.dispose()
     this.ash.dispose()

@@ -2,6 +2,7 @@ import { useEffect, useRef, type CSSProperties } from 'react'
 import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
 import { POI_ICONS, poiName, type Poi } from '../world/POI/pois'
+import { BIOME_NAMES } from '../world/Biomes'
 
 const MAP_RANGE = 600 // m shown inside the compass ring; farther places sit on the rim
 const MAX_PLACES = 6
@@ -47,7 +48,8 @@ export function GameHud({ game }: { game: Game }) {
           .slice(0, MAX_PLACES)
         const n = places[0]
         if (nearest.current) {
-          nearest.current.textContent = n ? `${POI_ICONS[n.type]} ${poiName(n)} · ${Math.round(Math.hypot(n.x - pp.x, n.z - pp.z))} m` : ''
+          const biome = BIOME_NAMES[game.world.fields.biomes.dominant(pp.x, pp.z, pp.y)]
+          nearest.current.textContent = `${biome}${n ? ` · ${POI_ICONS[n.type]} ${poiName(n)} · ${Math.round(Math.hypot(n.x - pp.x, n.z - pp.z))} m` : ''}`
         }
         // Arrival banner (Genshin-style area name) the first time you walk into a place.
         const inside = places.find((p) => Math.hypot(p.x - pp.x, p.z - pp.z) < p.radius + 10)
@@ -77,11 +79,12 @@ export function GameHud({ game }: { game: Game }) {
         el.style.transform = `translate(${Math.sin(a) * 52}px, ${-Math.cos(a) * 52}px)`
       })
       if (prompt.current) {
-        const car = game.car.near || game.car.driving
-        const show = car || game.bike.near || game.bike.riding
-        prompt.current.style.display = show ? 'flex' : 'none'
+        // Only when standing next to a vehicle — never while inside / riding (E or the RIDE button gets you out).
+        const car = game.car.near && !game.car.driving && !game.bike.riding
+        const bike = game.bike.near && !game.bike.riding && !game.car.driving
+        prompt.current.style.display = car || bike ? 'flex' : 'none'
         const label = prompt.current.lastChild as HTMLElement
-        if (label) label.textContent = game.bike.riding ? 'Get off bike' : car ? (game.car.driving ? 'Get out of truck' : 'Drive truck') : 'Mount bike'
+        if (label) label.textContent = car ? 'Drive truck' : 'Mount bike'
       }
       if (hpBar.current) {
         const k = game.health.hp / game.health.max

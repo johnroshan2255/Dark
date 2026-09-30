@@ -1,6 +1,7 @@
 import * as THREE from 'three'
+import { isOverland } from '../../rendering/artStyle'
 import { hash4 } from '../noise/rng'
-import { createFenceGeometry, createPoleGeometry } from '../Road/propMeshes'
+import { createFenceGeometry, createLampGlowGeometry, createPoleGeometry } from '../Road/propMeshes'
 import { createPoiGeometries } from '../POI/poiGeometry'
 import { createTreeLibrary, createUndergrowth, type SpeciesDef } from './treeFactory'
 
@@ -22,6 +23,8 @@ export interface PropGeometries {
   fern: THREE.BufferGeometry
   bush: THREE.BufferGeometry
   pole: THREE.BufferGeometry
+  /** Street-lamp glow + ground pool, instanced with the poles (MaterialLibrary.lampGlow). */
+  lampGlow: THREE.BufferGeometry
   fence: THREE.BufferGeometry
   wire: THREE.LineBasicMaterial
   /** Procedural-place geometry by PropType. */
@@ -41,11 +44,13 @@ function rockVertex(x: number, y: number, z: number, out: THREE.Vector3): THREE.
 }
 
 /**
- * Collision hull for a unit rock (the 12-vertex far-LOD shape, same jitter + base offset as the meshes):
- * PhysicsWorld builds one convex hull per rock from it, scaled/rotated like the instance.
+ * Collision hull for a unit rock: EVERY vertex of the near mesh (42, detail 1 — the far 12 are a subset), same
+ * jitter + base offset as the meshes. PhysicsWorld builds one convex hull per rock from it, scaled (incl. the
+ * instance's vertical jitter) and rotated like the instance, so the collider is exactly the visible boulder.
+ * (The old 12-point hull sat up to ~40 % inside the 42-vertex mesh: you walked into thin air around big rocks.)
  */
 export const ROCK_HULL: Float32Array = (() => {
-  const g = new THREE.IcosahedronGeometry(1, 0)
+  const g = new THREE.IcosahedronGeometry(1, 1)
   const p = g.getAttribute('position')
   const seen = new Set<string>()
   const pts: number[] = []
@@ -75,7 +80,10 @@ function makeRock(detail = 1): THREE.BufferGeometry {
   const pos = g.getAttribute('position')
   const nor = g.getAttribute('normal')
   const col = new Float32Array(pos.count * 3)
-  const body = srgb(0x7a7a80), top = srgb(0x9c9a96), tmp = new THREE.Color(), v = new THREE.Vector3(), n = new THREE.Vector3()
+  // OVERLAND: blue-grey, soft (normals bent to the centre like the painted rocks) — their boulders are low-poly
+  // but softly shaded, not hard-faceted.
+  const over = isOverland()
+  const body = srgb(over ? 0x505a72 : 0x7a7a80), top = srgb(over ? 0x8c98ac : 0x9c9a96), tmp = new THREE.Color(), v = new THREE.Vector3(), n = new THREE.Vector3()
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i)
     n.fromBufferAttribute(nor, i).multiplyScalar(0.35).add(v.clone().setY(v.y - 0.1).normalize().multiplyScalar(0.65)).normalize()
@@ -97,6 +105,7 @@ export function createPropGeometries(): PropGeometries {
   const rockFar = makeRock(0)
   const { fern, bush } = createUndergrowth()
   const pole = createPoleGeometry()
+  const lampGlow = createLampGlowGeometry()
   const fence = createFenceGeometry()
   const poi = createPoiGeometries()
   const wire = new THREE.LineBasicMaterial({ color: new THREE.Color().setHex(0x141414, THREE.SRGBColorSpace) })
@@ -113,12 +122,13 @@ export function createPropGeometries(): PropGeometries {
     fern,
     bush,
     pole,
+    lampGlow,
     fence,
     wire,
     poi,
     dispose: () => {
       lib.dispose()
-      ;[rock, rockFar, fern, bush, pole, fence].forEach((g) => g.dispose())
+      ;[rock, rockFar, fern, bush, pole, lampGlow, fence].forEach((g) => g.dispose())
       wire.dispose()
       poi.forEach((g) => g.dispose())
     },

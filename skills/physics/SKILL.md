@@ -25,8 +25,16 @@ src/debug/PhysicsDebug.ts  world.debugRender() → LineSegments (F6)
 ```
 
 Per-chunk physics = **one fixed RigidBody** owning: 1 heightfield collider + N trunk cylinders + one CONVEX
-HULL per rock (the rock's own 12-point shape, `propGeometries.ROCK_HULL`, scaled/rotated like its instance —
-tested: a ray onto every rock hits it) + pole/fence/building boxes. Removing the body removes all its colliders.
+HULL per rock (ALL 42 vertices of the near rock mesh, `propGeometries.ROCK_HULL`, scaled with the instance's
+vertical jitter (`InstanceBuilder.instanceYScale`) and rotated like it — tested: every rendered vertex of every
+rock lies inside its hull; the old 12-point hull sat up to ~40 % inside the mesh, so players walked into thin air
+around boulders) + pole/fence/building boxes. Removing the body removes all its colliders.
+
+**Streaming guards:** the physics ring covers chunks within 1 of the player AND of a look-ahead point (position +
+velocity × 1.5 s, `WorldManager.update(focus, camera, ahead)`), and a vehicle whose chunk has no colliders is
+frozen (`sim.enabled = hasChunk`) — even while driving — so a fast truck waits a few frames at an unstreamed chunk
+instead of falling through the road. The horizon terrain's discard hole is the BUILT radius, so an unbuilt chunk
+shows the horizon hills, never a hole into the sky.
 
 **Vehicles are SIMULATED** (`gameplay/vehicle/VehicleSim.ts`, tested headless in `tests/vehicle.test.ts`): Rapier
 DYNAMIC bodies + `DynamicRayCastVehicleController` (per-wheel spring/damper suspension, engine force, brakes, steering,
@@ -35,11 +43,24 @@ tyre friction limit + side grip). Rapier's positive steering turns LEFT — we n
   24 kN nose-up), drive split by wheel load (traction control), drag + rolling resistance, speed-sensitive steering,
   handbrake = locked slippery rear, anti-roll assist, wheelie/back-flip control on steep climbs, auto-righting after
   2 s on its side. Measured: 0→72 km/h 4.7 s, top ≈ 90 km/h, 25 m/s → 0 in 27 m, climbs 20°–60° from standstill.
+  **DRIFT** (`TruckSim.drive`): the handbrake at > 3 m/s (Space / touch JUMP→DRIFT) or a boosted power slide
+  (Shift + steer > 7 m/s) puts the truck in drift mode, held ~0.35 s after the trigger and while the slip angle
+  stays > 16°. Rear side-friction stiffness drops 0.55 → 0.06 (0.03 on the handbrake; the stiffness is the share
+  of lateral velocity cancelled PER STEP, so 0.2 still holds the line), the front keeps 0.5 for counter-steer, 75 %
+  of the drive goes to the rear, the steering lock opens at speed, and a spin guard damps yaw past 60° of slide.
+  BOOST (either Shift key / touch BOOST hold button — pointer-captured so a sliding thumb keeps it; the camera FOV
+  opens +9° and a wind-rush layer plays while it pushes): 2.2× power, 1.4× force cap, lower drag → 0→72 km/h 2.3 s (4.7 plain),
+  top 37.7 m/s ≈ 135 km/h (24.8 plain); tested. Exposed for effects: `lateral` (m/s), `drift` (0..1), `drifting`, `wheelSlip[4]`. Measured (tests): handbrake +
+  full lock from 18.7 m/s → 10 m/s lateral, roll < 2°, straightens within 3 s; ordinary cornering never drifts.
 - **Bike** (85 kg with rider, COM ≈ 0.9 m): 2 centre-line wheels, human power (900 W, 1500 W sprint, 900 N max),
   weight shift over the bars. BALANCE = roll is a hard constraint while riding, eased toward the physical lean
   φ = atan(v²·tanδ/(g·L)) — a torque PD on the tiny roll inertia explodes at 60 Hz and a velocity servo loses to the
   tyres above ~8 m/s (both measured). Crash = −5.5 m/s within 0.15 s → rider thrown + knocked down, constraint
   released, bike falls over. Measured: cruise 9.6 m/s, leans ±28° in full-lock turns, climbs 18°, not 32° (push it).
+- HILL HOLD (`Controls.parked`, and idle below 1.2 m/s truck / 0.8 m/s bike): brakes locked and the horizontal
+  velocity + yaw spin cancelled AFTER the tyre impulses (`VehicleBase.step`) — a parked truck crept 0.25 m/s backwards
+  through the raycast tyres' low-speed drift; now 0.02 m in 6 s on a slope (headless probe). Vertical velocity is kept
+  so the suspension still settles (clamping it sank the ride height 0.27 m — test caught it).
 - Simulated only where the ground has colliders (physics ring); a parked truck outside it is frozen, a parked bike
   is kinematic scenery. Cost: ≈ +0.1 ms physics per 60 Hz step while driving (M4, HIGH and LOW).
 
@@ -170,7 +191,7 @@ world.createCollider(
 | Object | Collider |
 |---|---|
 | Tree | cylinder trunk (h 3 m) |
-| Rock ≥ 0.5 m | ball or cuboid; convex hull only for large boulders |
+| Rock | convex hull of the rock mesh's vertices (42 points), scaled/rotated like the instance |
 | Car wreck / prop | 1–3 cuboids |
 | Cave | trimesh of *collision proxy* mesh (low-poly, separate from render mesh) |
 | Monster | capsule (kinematic) |

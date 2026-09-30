@@ -14,7 +14,8 @@
     "test:adaptive": "rolldown tests/adaptive.test.ts --format esm --platform node -o node_modules/.cache/tests/adaptive.test.mjs --log-level warn && node node_modules/.cache/tests/adaptive.test.mjs",
     "dev:lan": "vite --host",
     "test:time": "rolldown tests/time.test.ts --format esm --platform node -o node_modules/.cache/tests/time.test.mjs --log-level warn && node node_modules/.cache/tests/time.test.mjs",
-    "test:vehicle": "rolldown tests/vehicle.test.ts --format esm --platform node --external @dimforge/rapier3d-compat -o node_modules/.cache/tests/vehicle.test.mjs --log-level warn && node node_modules/.cache/tests/vehicle.test.mjs"
+    "test:vehicle": "rolldown tests/vehicle.test.ts --format esm --platform node --external @dimforge/rapier3d-compat -o node_modules/.cache/tests/vehicle.test.mjs --log-level warn && node node_modules/.cache/tests/vehicle.test.mjs",
+    "shot": "node scripts/shoot.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",
@@ -29,6 +30,7 @@
     "@types/react-dom": "^19.3.0",
     "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "puppeteer-core": "^24.43.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.1"
   }

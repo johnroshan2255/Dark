@@ -1,0 +1,7 @@
+[
+  { "name": "spawn_day", "seed": 7, "x": 69.2, "z": 8, "yaw": 3.1416, "pitch": -0.05, "cam": "tpp", "hour": 11 },
+  { "name": "spawn_dawn_low", "seed": 7, "tier": "low", "x": 69.2, "z": 8, "yaw": 3.1416, "pitch": -0.05, "cam": "tpp", "hour": 6.5 },
+  { "name": "forest_drive", "seed": 7, "x": -92, "z": 72, "yaw": 3.1416, "pitch": -0.1, "cam": "tpp", "drive": true, "keys": ["KeyW"], "keysMs": 2500 },
+  { "name": "desert", "seed": 7, "x": 86, "z": 2200, "yaw": 3.1416, "pitch": -0.05, "cam": "tpp" },
+  { "name": "snowfield", "seed": 7, "x": -29, "z": -1300, "yaw": 0, "pitch": -0.05, "cam": "tpp" }
+]
