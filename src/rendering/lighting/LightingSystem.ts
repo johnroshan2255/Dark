@@ -42,8 +42,16 @@ export class LightingSystem {
    * Tier settings. Shadow-map size changes free the old map; flashlight castShadow changes
    * recompile lit programs once (acceptable: only on tier switches, never per frame).
    */
-  setQuality(q: Pick<QualitySettings, 'sunShadowSize' | 'sunShadowEvery' | 'sunShadowExtent' | 'flashlightShadow'>): void {
+  setQuality(q: Pick<QualitySettings, 'shadows' | 'sunShadowSize' | 'sunShadowEvery' | 'sunShadowExtent' | 'flashlightShadow'>): void {
     const s = this.sun.shadow
+    // Shadows OFF: no sun shadow pass at all (one program recompile when toggled — settings changes only).
+    if (this.sun.castShadow !== q.shadows) {
+      this.sun.castShadow = q.shadows
+      if (!q.shadows) {
+        s.map?.dispose()
+        s.map = null
+      }
+    }
     if (s.mapSize.x !== q.sunShadowSize || s.camera.right !== q.sunShadowExtent) {
       configureSunShadow(this.sun, q.sunShadowExtent, q.sunShadowSize)
       s.map?.dispose()
@@ -116,7 +124,7 @@ export class LightingSystem {
     // But a castShadow light MUST have a map: shaders compiled with NUM_SPOT_LIGHT_SHADOWS sample it,
     // and a missing depth texture makes WebGL reject every lit draw (GL_INVALID_OPERATION → fog-only frame).
     if (f.castShadow && !f.shadow.map) f.shadow.needsUpdate = true
-    if (!this.sun.shadow.map) this.sun.shadow.needsUpdate = true
+    if (this.sun.castShadow && !this.sun.shadow.map) this.sun.shadow.needsUpdate = true
     f.updateMatrixWorld()
     f.target.updateMatrixWorld()
   }

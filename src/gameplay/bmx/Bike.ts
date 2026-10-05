@@ -155,7 +155,7 @@ export class Bike {
   /** Park the bike on the verge `side` m to the right of the player, facing along its yaw. */
   parkNear(p: THREE.Vector3, yaw: number, side = 2.2): void {
     this.parked.set(p.x + Math.cos(yaw) * side, 0, p.z - Math.sin(yaw) * side)
-    this.parked.y = this.fields.height(this.parked.x, this.parked.z)
+    this.parked.y = this.fields.surface(this.parked.x, this.parked.z)
     this.parkedHeading = yaw
   }
 
@@ -206,7 +206,7 @@ export class Bike {
   private getOff(): void {
     const p = this.player
     const t = this.sim.body.translation()
-    this.parked.set(t.x, this.fields.height(t.x, t.z), t.z)
+    this.parked.set(t.x, this.fields.surface(t.x, t.z), t.z)
     this.parkedHeading = this.sim.heading
     this.state = 'parked'
     this.fallenLean = -0.28 // back on its kickstand
@@ -248,7 +248,7 @@ export class Bike {
     this.readPose(this.prevP, this.prevQ)
     const t = this.sim.body.translation()
     this.sim.step(dt)
-    this.sim.keepAbove(this.fields.height(t.x, t.z))
+    this.sim.keepAbove(this.fields.surface(t.x, t.z))
     if (riding) {
       const v = this.sim.speed
       // A sudden stop (tree, wall, rock above ~20 km/h: −5.5 m/s within 0.15 s ≈ 1.9 g) or a hit (monster,
@@ -268,7 +268,7 @@ export class Bike {
       this.fallenFor += dt
       const lv = this.sim.body.linvel()
       if (this.fallenFor > 1.5 && Math.hypot(lv.x, lv.y, lv.z) < 0.3) {
-        this.parked.set(t.x, this.fields.height(t.x, t.z), t.z)
+        this.parked.set(t.x, this.fields.surface(t.x, t.z), t.z)
         this.parkedHeading = this.sim.heading
         this.sim.enabled = false
         this.state = 'parked'

@@ -38,6 +38,10 @@ export interface GameStateShape {
   /** Catalogue id of the vehicle in the world, and a model download in progress (0..1, or null). */
   vehicle: string
   vehicleLoading: number | null
+  /** Hold 60 fps reductions in effect on the chosen preset (e.g. "reflections ultra → high"), or null. */
+  held: string | null
+  /** The browser / OS is capping the page at 30 fps (Low Power Mode / battery saver). */
+  fpsCap: boolean
 }
 
 export interface Store<T> {

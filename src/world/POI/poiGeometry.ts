@@ -10,7 +10,7 @@ import { PropType } from './poiLayout'
  */
 const srgb = (h: number) => new THREE.Color().setHex(h, THREE.SRGBColorSpace)
 
-function finish(g: THREE.BufferGeometry, hex: number, shadeBottom = 0.8, surf: SurfaceName = 'plain'): THREE.BufferGeometry {
+export function finish(g: THREE.BufferGeometry, hex: number, shadeBottom = 0.8, surf: SurfaceName = 'plain'): THREE.BufferGeometry {
   const n = g.index ? g.toNonIndexed() : g
   if (n !== g) g.dispose()
   n.deleteAttribute('uv')

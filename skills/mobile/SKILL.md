@@ -16,19 +16,92 @@ and must scale with the device.
 ## 2. Architecture
 
 ```
-DeviceProfile (GPU string, mobile UA, cores, RAM) ──► initial tier
+DeviceProfile (GPU string, mobile UA, cores, RAM) ──► initial tier (never above HIGH)
                                                          │
-QualitySettings (QUALITY[tier]) ──► Game.applyQuality ──►│ world ring, LOD rings, plants, build budget
+resolveQuality(preset, Settings.gfx overrides)           │
+   = PRESETS[tier].base + FEATURE_TABLE[f][level] ──► Game.applyQuality ──►│ world ring, LOD rings, plants, build budget
                                                          │ sun shadow size/extent/cadence, flashlight shadow
                                                          │ MSAA, DPR cap, render-scale range, fog floor, camera far
 AdaptiveQuality (per frame: raw frame ms, GPU ms, CPU ms)
    over budget  → render scale −0.1 … tier min → tier −1
-   headroom     → render scale +0.1 → tier +1 (desktop only past medium)
+   headroom     → render scale +0.1 → tier +1 (desktop only past medium, never past HIGH)
 ```
+
+**Presets × features** (Settings → Graphics; 'auto' = the preset's level). LOW/MEDIUM/HIGH feature levels are the
+old tier values, so those presets render as before. Off levels are real savings (no pass at all).
+
+| Feature | LOW | MEDIUM | HIGH | ULTRA |
+|---|---|---|---|---|
+| Shadows | 1024², every 3rd frame, blob shadows for vehicles | 1024², every 2nd | 2048², every frame, torch shadow | 4096² over 140 m |
+| Reflections (planar, only while water is visible) | off — sky colour only | ¼ res, every 2nd frame | ½ res | ¾ res |
+| Ambient occlusion (SSAO) | off | off | ½ res, 10 taps | full res, 16 taps |
+| Volumetric light & fog | 8 steps, no banks | 14 steps + banks | 16 + banks | 24 steps, ⅓-res |
+| View distance | ring 2, 230 m | ring 3, 330 m | ring 3, 420 m | ring 4, 540 m, 5.6 km horizon |
+| Grass (own setting, Off–Ultra) | 12 m radius | 15.5 m | 22 m | 30 m, denser |
+| Ground & weather detail (Off–High) | off (+ no bloom) | tracks, relief, ½ drift | + heat shimmer, full drift | = High |
+| Sky resolution (`skyScale`) | ¼ | ⅓ | ½ | full |
+| Trees & bushes (Low–High) | no undergrowth, mid-detail trees, no far rocks | undergrowth, full trees | + far rocks | = High |
+
+Measured (M4, 1280×720, headless, seed 7): frozen river LOW 66 draws / 132 k tris → MEDIUM 74 / 175 k →
+HIGH 172 / 447 k → ULTRA 242 / 843 k; forest LOW 84 / 148 k, HIGH 160 / 451 k, ULTRA 228 / 867 k — all 60 fps.
+SSAO (HIGH level) ≈ +0.3 ms GPU, +2 draws. All features off on HIGH: 159 → 106 draws.
+
+**Phone pass (2026-10-05)** — measured with the §10 phone emulation + a FILL proxy (LOW/MEDIUM settings rendered at
+2–8 MP on the M4, where per-pixel cost dominates GPU ms the way it does on a fill-bound phone GPU):
+- The SKY was the most expensive pixels (2.4 of 16 ms at 8 MP on LOW: gradient + 3-octave clouds + mist, twice).
+  `SkyDome.prepare` now draws it into a small target (`QualitySettings.skyScale`: LOW ¼, MEDIUM ⅓, HIGH ½, ULTRA 1)
+  that the dome samples by screen position; stars are added at full resolution so they stay crisp.
+- LOW now has ONE post pass (bloom off via `fx.bloom`); the new "Ground & weather detail" feature (`fx`) gates the
+  snow/sand micro-relief + glints, the track map (an extra RT), the blowing-grain particles and the heat shimmer —
+  all off on LOW, half on MEDIUM. MEDIUM has no planar reflections. Biome-cover lookups are skipped when no snow /
+  sand is near (`uBiomeActive`). Hold-60 no longer re-resolves the preset every frame.
+- SMALL PHONES: in AUTO, once at LOW at minimum render scale, the Hold-60 steps continue (effects + bloom,
+  volumetrics, grass, view, trees… and sun shadows last) down to `HOLD_FLOOR` instead of stopping at "minimum".
+- Result (GPU ms, 1920×1080, seed 7, old build → now): LOW forest 3.95 → 2.52, snow 3.77 → 2.26, desert 2.50 → 2.26;
+  MEDIUM forest 5.02 → 4.83, snow 4.38 → 5.12, desert 4.17 → 4.59 (snow/desert detail; Hold-60 / auto drop to LOW on
+  weak devices). LOW draws 51–87, tris 74–122 k (budget 100 / 200 k). CPU (×4 throttle profile): main thread ~70 %
+  idle, no hot spot — phones are fill-bound here. Programs 23 on LOW (budget 10; was 20 before) — a load-time cost,
+  still to do. Real-device numbers are still required (below).
+
+**MSAA × depth readers (2026-10-05)** — the biggest single cost found: with MSAA 4× (the old HIGH/ULTRA default)
+every pass that SAMPLES scene depth (SSAO, volumetric light, grading) forces a multisampled depth resolve. Measured
+HIGH 1080p (M4): vista 14.4 → 8.0 ms, forest 9.4 → 6.5 ms, 720p 12.5 → 6.6 ms with FXAA; SSAO alone 4.6 → 0.9 ms;
+no visible difference (FXAA + sharpen). Tile-based phone GPUs pay resolves worse. Defaults are FXAA on every tier;
+ULTRA SSAO renders at ¾ res (full res was +3.1 ms). Never re-enable MSAA by default while a pass reads depth.
+Probes: scratchpad-style `ablate` (feature off one at a time, warm-up first — the first sample is high) and a
+streaming probe (player moved at 35 m/s, CPU ×4: mean 2.4 ms, 1 hitch in 20 s → streaming is not the problem).
+
+**Stutter pass (2026-10-05)** — "fps drops" on phones are FREEZES, not low averages:
+- SHADER WARM-UP (`Game.warmShaders`): once the world is ready, `renderer.compileAsync` over the whole scene with
+  hidden objects forced visible + stand-ins (non-instanced rock / vegetation / landmark / terrain), compiled against
+  `post.target` (LINEAR output — against the canvas it built the unused sRGB variants: 58 programs, the real rain /
+  drift ones still compiled later). Now 45 programs in ~0.8 s at load (M4), 1 tiny pass compiles later (trail copy).
+- HOLD 60 restores of SHADOWS (define change → every lit program recompiles), GRASS, TREES, VIEW (rebuilds) wait
+  90 s after the last step down; a restore that got reverted stays down for the session (`Game.holdRestoreOk`).
+- Landmarks: 3 bands (near = full + shadows, ≤ 350 m full, far LOD ≈ ½ tris, no small parts / rotors), range per
+  tier `landmarkRange` 700 / 1000 / 1500 / 2200 m. Horizon tree dots softened (read as dark objects on far hills).
+- GPU after the MSAA fix (1080p, M4): LOW forest/vista 2.3/2.6 ms, MEDIUM 4.8/5.1, HIGH 6.5/7.7, ULTRA 10.7/12.2.
+
+**Grass** (`world/Forest/GrassField.ts`): NEAR layer (dense, curved blades, 4 m tiles) to ~45 % of the radius +
+FAR layer (32 % of the blades, single wide triangles) to the edge, crossfaded blade by blade; per-patch density
+interpolated from an 8 m meadow grid (`iDensity`), per-patch terrain gradient (`iSlope`, blades stand on the slope —
+flat patches made terraced rows on hillsides), per-blade random thresholds for thinning and the ragged edge.
+Measured HIGH: grass 240 k → 126 k triangles (scene 483 k → 371 k); LOW scene 154 k → 99–126 k.
+
+**Hold 60 fps** (Settings → Graphics, default on; `Game.held`, `QualityTiers.nextHoldStep`): on a preset the player
+CHOSE, adaptive quality keeps running — render scale first (down to 0.65), then features one level at a time, the
+four GPU effects lowered evenly (reflections, AO, shadows, volumetrics — whichever is highest), then vegetation and
+view distance, floors in `HOLD_FLOOR`; restored in reverse with headroom (blind probes, reverted if they cost frames).
+Runtime only, shown in Settings ("lowered for now: …"). The chosen preset is the ceiling.
+**30 fps cap probe** (`Game.updateCapProbe`): ~33 ms frames for 3 s → 16 frames draw nothing while timed; still
+~33 ms with < 12 ms of our own CPU → the browser/OS caps the page (iOS Low Power Mode, Android battery saver):
+`store.fpsCap` notice, quality untouched. Verified headless by halving requestAnimationFrame (cap → notice) and with
+`?stress=31` (our CPU → not a cap → Hold 60 steps). Measured: ULTRA ≈ 12 ms GPU on an M4 at 1280×720 — a phone GPU
+is several times slower, so ULTRA on a phone settles near HIGH with Hold 60; no phone holds desktop ULTRA at 60.
 
 | File | Role |
 |---|---|
-| `src/rendering/quality/QualityTiers.ts` | the three tiers — the single source of every budget |
+| `src/rendering/quality/QualityTiers.ts` | presets + feature level tables (`resolveQuality`) — the single source of every budget |
 | `src/rendering/quality/DeviceProfile.ts` | initial guess (it is only a guess) |
 | `src/rendering/quality/AdaptiveQuality.ts` | pure controller, unit-tested in `tests/adaptive.test.ts` |
 | `src/game/Game.ts` → `applyQuality`, `onAdaptive` | applies settings to systems |
@@ -48,7 +121,7 @@ AdaptiveQuality (per frame: raw frame ms, GPU ms, CPU ms)
 | Flashlight shadow | off | off | 512² |
 | Small plants | off | on | on |
 | Chunk builds/frame | 1 | 2 | 2 |
-| Anti-aliasing (default) | FXAA + sharpen 0.35 | FXAA + sharpen 0.25 | MSAA 4× + sharpen 0.15 |
+| Anti-aliasing (default) | FXAA + sharpen 0.35 | FXAA + sharpen 0.25 | FXAA + sharpen 0.25 (MSAA optional) |
 | God rays | 1/6 res, 12 samples | 1/4 res, 20 | 1/4 res, 32 |
 | View distance (fog complete, nothing drawn beyond) · horizon | 280 m · 640 m/32² | 440 m · 1 km/44² | 1 km · 2.2 km/80² |
 | Pixel budget (scene RT) | 0.6 MP | 1.4 MP | 2.4 MP |

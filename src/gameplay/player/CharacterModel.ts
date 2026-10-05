@@ -4,9 +4,12 @@ import * as THREE from 'three'
  * Player character: the Sketchfab "Stickman" (assets/loadModels) RIGGED IN CODE — the GLB is a single static
  * T-pose mesh with no skeleton, so we build 16 bones from measured joint landmarks, skin every vertex by body
  * region (smooth 2-bone blends at the joints) and animate procedurally:
- *   idle (breathing), walk ↔ run (stride-matched cadence, arm swing, elbow bend, lean, bob, torso twist),
+ *   idle (breathing), walk ↔ jog ↔ sprint with PLANTED FEET (each foot stays put on the ground during its
+ *   stance, two-bone leg IK, hips drop to let the short legs reach, flight phase when running, feet follow the
+ *   terrain; footsteps fire on each touchdown — `steps`), arm swing against the legs, lean and twist,
  *   jump (take-off tuck, airborne pose, fall), landing squash, flashlight aim (right arm follows the view),
- *   cycling (two-bone IK: feet on the turning pedals, hands on the steering bars, leaning with the bike).
+ *   knockdown (stagger → fall onto the back → lie → sit up on the hands → squat → stand, solved against the
+ *   ground so the body never floats or sinks), cycling (two-bone IK: feet on the pedals, hands on the bars).
  * One SkinnedMesh = 1 draw call (the old box character was 5) on the shared vertex-colour material; skinning
  * 1.6k vertices × 16 bones is negligible on any GPU. Faces −Z in local space (camera convention).
  */
@@ -21,6 +24,11 @@ const HEIGHT = 1.85
 const U = HEIGHT / SRC.height
 const toFinal = (x: number, y: number, z: number) => new THREE.Vector3(-x * U, (y - SRC.sole) * U, -(z - SRC.zc) * U)
 const BODY_COLOUR = 0xeeeae2
+/** Hip joint height (m) standing, ankle above the sole (m), hip→ankle leg length (m), half the hip spacing. */
+const HIP_Y = (SRC.hip - SRC.sole) * U
+const ANKLE_Y = (SRC.ankle - SRC.sole) * U
+const LEG = (SRC.hip - SRC.ankle) * U
+const FOOT_X = SRC.legX * U
 
 const B = {
   hips: 0, chest: 1, head: 2,
@@ -51,7 +59,6 @@ export class CharacterModel {
   private readonly bones: THREE.Bone[] = []
   private readonly rest: THREE.Vector3[] = []
   private readonly target: THREE.Quaternion[] = []
-  private phase = 0
   private time = 0
   private air = 0
   private land = 0
@@ -60,6 +67,18 @@ export class CharacterModel {
   private moveK = 0
   /** Body yaw (smoothed toward movement / aim). */
   yaw = 0
+  /** Terrain height (world) for foot placement on slopes; null = flat ground at the player's feet. */
+  ground: ((x: number, z: number) => number) | null = null
+  /** Foot plants so far (a foot touched down): Game plays a footstep on every new one — sound matches the feet. */
+  steps = 0
+  /** Each foot plant: where (world x, z) and facing (forward x, z) — footprints in snow and sand (TrailMap). */
+  onStep: ((x: number, z: number, fx: number, fz: number) => void) | null = null
+  /** Gait cycle (0..1) and the smoothed hip height (m) of the foot-planting locomotion. */
+  private cycle = 0
+  private hipH = HIP_Y
+  /** Knockdown: 'fall' while going down, 'up' while getting up (the pose sequences differ). */
+  private knockMode: 'none' | 'fall' | 'up' = 'none'
+  private lastKnock = 0
 
   constructor(material: THREE.Material, source: THREE.BufferGeometry) {
     this.root.name = 'player-character'
@@ -196,11 +215,9 @@ export class CharacterModel {
     d = Math.atan2(Math.sin(d), Math.cos(d))
     this.yaw += d * (1 - Math.exp(-12 * dt))
     this.time += dt
-    // Walk ↔ run blend and a stride-matched cadence (feet don't skate): stride 1.3 m walking → 2.3 m running.
+    // Walk ↔ run blend (the cadence itself comes from the planted feet: plantFeet).
     this.runK += (smooth(3.9, 6.0, speed) - this.runK) * Math.min(1, dt * 6)
     this.moveK += (smooth(0.15, 1.2, speed) - this.moveK) * Math.min(1, dt * 8)
-    const stride = 1.3 + this.runK * 1.0
-    this.phase += dt * (Math.PI * 2 * Math.max(speed, 0.6 * this.moveK)) / stride
     // Air / landing timers.
     this.air = grounded ? 0 : this.air + dt
     if (grounded && !this.wasGrounded && this.airTime > 0.25) this.land = 0.22
@@ -208,7 +225,7 @@ export class CharacterModel {
     this.wasGrounded = grounded
     this.land = Math.max(0, this.land - dt)
 
-    const r = this.runK, m = this.moveK, s = Math.sin(this.phase), c = Math.cos(this.phase)
+    const r = this.runK, m = this.moveK
     let hipsY = 0
     if (!grounded && this.air > 0.06) {
       // Airborne: rising = tucked knees, arms up/out; falling = legs reaching down, arms higher.
@@ -221,20 +238,18 @@ export class CharacterModel {
       this.pose(B.hips, -0.05)
       this.pose(B.head, 0.1)
     } else {
-      // Ground locomotion (idle when m → 0).
-      const ampT = (0.45 + 0.4 * r) * m
-      const kneeSwing = (0.7 + 0.9 * r) * m
-      this.leg(-1, ampT * s, 0.08 + kneeSwing * Math.max(0, c) + 0.12 * r * m, 0.03)
-      this.leg(1, -ampT * s, 0.08 + kneeSwing * Math.max(0, -c) + 0.12 * r * m, 0.03)
+      // Upper body (legs are placed by foot IK below): arm swing against the legs, lean and twist, breathing.
       const breath = Math.sin(this.time * 2.2) * 0.03 * (1 - m)
-      const armSwing = (0.35 + 0.35 * r) * m
-      const elbow = 0.18 + 1.2 * r * m
-      this.arm(1, 1.35 - 0.1 * r, armSwing * s, elbow, 0.05)
-      this.arm(-1, 1.35 - 0.1 * r, -armSwing * s, elbow, 0.05)
-      this.pose(B.hips, -0.08 * r * m, 0.1 * s * m)
-      this.pose(B.chest, -0.22 * r * m - breath, -0.18 * s * m)
-      this.pose(B.head, 0.12 * r * m + breath)
-      hipsY = -(0.025 + 0.035 * r) * m * (0.5 - 0.5 * Math.cos(this.phase * 2))
+      const sw = Math.sin(this.cycle * Math.PI * 2)
+      const armSwing = (0.45 + 0.4 * r) * m
+      const elbow = 0.25 + 1.15 * r * m
+      this.arm(1, 1.35 - 0.1 * r, armSwing * sw, elbow, 0.05)
+      this.arm(-1, 1.35 - 0.1 * r, -armSwing * sw, elbow, 0.05)
+      this.pose(B.hips, -0.06 * m - 0.06 * r * m, -0.12 * sw * m)
+      this.pose(B.chest, -0.06 * m - 0.2 * r * m - breath, 0.2 * sw * m)
+      this.pose(B.head, 0.06 * m + 0.12 * r * m + breath)
+      this.leg(-1, 0, 0.08)
+      this.leg(1, 0, 0.08)
     }
     if (this.land > 0) {
       // Landing squash: knees give, hips drop, arms swing down.
@@ -245,31 +260,166 @@ export class CharacterModel {
       hipsY -= 0.14 * k
     }
     if (aiming) this.arm(1, Math.PI / 2, Math.PI / 2 - 0.1 + aimPitch * 0.8, 0.05) // flashlight: lowered, then swung straight forward
-    // KNOCKDOWN (knock 1 → 0 as the player gets up): lying on the back with arms thrown out and knees up, then
-    // the body tips upright while still crouched (pushing up), then the crouch straightens into standing —
-    // instead of a stiff plank tilting back to vertical.
-    let tilt = 0
+    // KNOCKDOWN / GET UP: authored human sequences (knockPose), solved against the ground (see `groundPose`).
     if (knock > 0.001) {
-      const lie = smooth(0.45, 1, Math.min(1, knock)) // flat on the ground
-      const thump = Math.max(0, knock - 1) // impact overshoot (PlayerController): a bounce past flat
-      const crouch = Math.sin(Math.min(1, knock / 0.75) * Math.PI) * 0.9 + lie * 0.2 // deepest halfway up
-      const k = Math.max(lie, crouch)
-      this.leg(-1, 0.55 * lie + 1.15 * crouch, 0.9 * lie + 1.9 * crouch, 0.12 * k)
-      this.leg(1, 0.35 * lie + 1.15 * crouch, 0.6 * lie + 1.9 * crouch, 0.12 * k)
-      this.arm(1, 0.35 * lie + 1.1 * crouch, 0.3 * lie + 0.9 * crouch, 0.5 * lie + 0.3 * crouch, 0.4 * lie)
-      this.arm(-1, 0.25 * lie + 1.1 * crouch, 0.2 * lie + 0.9 * crouch, 0.6 * lie + 0.3 * crouch, 0.5 * lie)
-      this.pose(B.chest, 0.15 * lie + 0.55 * crouch)
-      this.pose(B.head, -0.25 * lie + 0.35 * crouch)
-      this.pose(B.hips, 0.1 * lie)
-      hipsY -= 0.42 * crouch + 0.6 * thump
-      tilt = Math.PI * (0.47 * lie + 0.1 * thump)
+      if (knock > this.lastKnock + 1e-4 && this.knockMode !== 'up') this.knockMode = 'fall'
+      else if (knock < this.lastKnock - 1e-4) this.knockMode = 'up'
+      this.lastKnock = knock
+      this.knockPose(knock)
+      this.commit(1)
+      this.groundPose(pos)
+      return
     }
-    this.bones[B.hips].position.set(this.rest[B.hips].x, this.rest[B.hips].y + hipsY, this.rest[B.hips].z)
+    this.knockMode = 'none'
+    this.lastKnock = 0
     this.commit(1 - Math.exp(-16 * dt))
-    // Pivot: the body tips about the HIPS (feet slide forward as it goes over), not about the feet.
-    const hip = 0.95
-    this.root.position.set(pos.x, pos.y + hip * (1 - Math.cos(tilt)) * 0.25 + tilt * 0.06, pos.z)
-    this.root.rotation.set(-tilt, this.yaw, 0)
+    this.root.position.copy(pos)
+    this.root.rotation.set(0, this.yaw, 0)
+    if (!grounded && this.air > 0.06) {
+      this.bones[B.hips].position.set(this.rest[B.hips].x, this.rest[B.hips].y + hipsY, this.rest[B.hips].z)
+      return
+    }
+    this.plantFeet(dt, pos, speed, hipsY)
+  }
+
+  /**
+   * FOOT-PLANTING LOCOMOTION. Each foot is PLANTED on the ground during its stance (it moves backward under the
+   * body at exactly the body's speed — no skating) and swings forward in an arc in between; two-bone IK bends
+   * the leg to reach it and the hips drop just enough for the legs to reach (they are short: 0.41 m), so the
+   * walk bobs and the run bounces with a flight phase. Gait from the speed: walk (stance 62 % of the cycle,
+   * 0.38 m step) → jog (40 %, 0.5 m) → sprint (30 %, 0.56 m). On slopes the feet follow the terrain (`ground`).
+   */
+  private plantFeet(dt: number, pos: THREE.Vector3, speed: number, extraHipY: number): void {
+    const m = this.moveK
+    const v = Math.max(speed, 0.6 * m)
+    const beta = v < 1.5 ? 0.62 : v < 3.6 ? 0.62 - (v - 1.5) / 2.1 * 0.22 : Math.max(0.3, 0.4 - (v - 3.6) / 2.9 * 0.1)
+    const S = Math.min(0.56, 0.3 + v * 0.06) * m // step: how far a planted foot travels under the body
+    const strideLen = Math.max(0.2, S / beta)
+    const prevCycle = this.cycle
+    this.cycle = (this.cycle + (v * dt) / strideLen) % 1
+    const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw)
+    const fwdX = -sy, fwdZ = -cy, rightX = cy, rightZ = -sy
+    let hip = HIP_Y
+    const targets: [number, number, number, number][] = [] // world x, y, z, swing (0 = planted)
+    for (const side of [-1, 1] as const) {
+      const off = side < 0 ? 0 : 0.5
+      const c = (this.cycle + off) % 1
+      const cPrev = (prevCycle + off) % 1
+      const touchdown = c < cPrev && m > 0.35 && speed > 0.4 // a new stance begins
+      let fz: number, lift = 0, swing = 0
+      if (c < beta) fz = S / 2 - S * (c / beta)
+      else {
+        const t = (c - beta) / (1 - beta)
+        fz = -S / 2 + S * (0.5 - 0.5 * Math.cos(Math.PI * t))
+        lift = (0.05 + 0.1 * this.runK) * Math.sin(Math.PI * t) * m
+        swing = Math.sin(Math.PI * t)
+      }
+      const lx = side * FOOT_X * 0.9
+      const wx = pos.x + rightX * lx + fwdX * fz, wz = pos.z + rightZ * lx + fwdZ * fz
+      if (touchdown) {
+        this.steps++
+        this.onStep?.(wx, wz, fwdX, fwdZ)
+      }
+      const gy = (this.ground ? this.ground(wx, wz) : pos.y) - pos.y // terrain under the foot (root-local)
+      const fy = gy + ANKLE_Y + lift
+      // Highest hip that still lets this leg reach its foot (with 3 % slack so the knee keeps a little bend).
+      const reach = LEG * 0.97
+      hip = Math.min(hip, fy + Math.sqrt(Math.max(0, reach * reach - fz * fz)))
+      targets.push([wx, pos.y + fy, wz, swing])
+    }
+    // Hips: never above standing; smoothed (the landing / stance compression reads as a soft bob).
+    this.hipH += (hip - this.hipH) * (1 - Math.exp(-dt * 30))
+    const hipsY = this.hipH - HIP_Y + extraHipY
+    this.bones[B.hips].position.set(this.rest[B.hips].x, this.rest[B.hips].y + hipsY, this.rest[B.hips].z)
+    this.root.updateMatrixWorld(true)
+    _p.set(fwdX, 0.15, fwdZ) // knees bend forward
+    for (let i = 0; i < 2; i++) {
+      const side = i === 0 ? -1 : 1
+      const [x, y, z, swing] = targets[i]
+      const th = side > 0 ? B.thighR : B.thighL, sh = side > 0 ? B.shinR : B.shinL, ft = side > 0 ? B.footR : B.footL
+      this.ik(th, sh, ft, _t.set(x, y, z), _p)
+      // Foot flat on the ground (cancel the leg's rotation), toes dipping a little as it swings through.
+      this.bones[sh].getWorldQuaternion(_q).invert()
+      this.root.getWorldQuaternion(_q2)
+      this.bones[ft].quaternion.copy(_q).multiply(_q2).multiply(_q3.setFromAxisAngle(_xAxis, 0.35 * swing))
+      for (const id of [th, sh, ft]) this.target[id].copy(this.bones[id].quaternion)
+    }
+  }
+
+  /** Pose keyframes of the fall and the get-up (blended by `knockPose`). */
+  private static readonly KP = {
+    stand: { tilt: 0, chest: 0, head: 0, hips: 0, thL: 0, knL: 0.06, thR: 0, knR: 0.06, spread: 0.03, aDown: 1.35, aFwd: 0, aBend: 0.2, aOut: 0.05 },
+    // Hit: the knees buckle, the body folds forward over the blow, arms fly up.
+    stagger: { tilt: 0.3, chest: -0.45, head: -0.25, hips: -0.2, thL: 0.5, knL: 0.9, thR: 0.25, knR: 0.6, spread: 0.08, aDown: 0.55, aFwd: 1.0, aBend: 0.5, aOut: 0.3 },
+    // On the back: knees raised with the feet on the ground, arms lying alongside, head resting.
+    // (Angles are body-relative: a body tilted back by t points its thighs t further forward/up in the world.)
+    supine: { tilt: 1.5, chest: 0.05, head: 0.15, hips: 0, thL: 0.75, knL: 1.2, thR: 0.35, knR: 0.5, spread: 0.12, aDown: 1.3, aFwd: 0.1, aOut: 0.45, aBend: 0.25 },
+    // Sit up: torso raised ~35° off the ground, hands planted on the ground behind, knees drawn up, feet flat.
+    sit: { tilt: 0.95, chest: -0.35, head: 0.25, hips: -0.1, thL: 1.15, knL: 1.8, thR: 1.0, knR: 1.6, spread: 0.1, aDown: 1.2, aFwd: -1.5, aBend: 0.05, aOut: 0.2 },
+    // Rock forward onto the feet: a deep squat (knees ahead of the feet), arms reaching forward for balance.
+    squat: { tilt: -0.3, chest: -0.35, head: 0.35, hips: -0.15, thL: 1.95, knL: 2.1, thR: 1.95, knR: 2.1, spread: 0.1, aDown: 1.1, aFwd: 0.8, aBend: 0.45, aOut: 0.1 },
+    // Push up through the legs, torso still forward.
+    rise: { tilt: -0.18, chest: -0.2, head: 0.2, hips: -0.05, thL: 0.9, knL: 1.15, thR: 0.9, knR: 1.15, spread: 0.06, aDown: 1.25, aFwd: 0.3, aBend: 0.3, aOut: 0.08 },
+  }
+
+  /** Current knockdown pose: fall = stand → stagger → supine (knock 0 → 1, the impact overshoot > 1 is a thump);
+   *  get up = supine → sit up → squat → rise → stand (knock 1 → 0). */
+  private knockPose(knock: number): void {
+    const K = CharacterModel.KP
+    type P = typeof K.stand
+    const seq: [number, P][] = this.knockMode === 'up'
+      ? [[0, K.supine], [0.3, K.sit], [0.58, K.squat], [0.82, K.rise], [1, K.stand]]
+      : [[0, K.stand], [0.3, K.stagger], [1, K.supine]]
+    const x = this.knockMode === 'up' ? 1 - Math.min(1, knock) : Math.min(1, knock)
+    let i = 0
+    while (i < seq.length - 2 && x > seq[i + 1][0]) i++
+    const [x0, a] = seq[i], [x1, b] = seq[i + 1]
+    const t = smooth(0, 1, (x - x0) / (x1 - x0))
+    const L = (k: keyof P) => a[k] + (b[k] - a[k]) * t
+    const thump = Math.max(0, knock - 1) // impact overshoot: chest and head bounce
+    this.root.rotation.set(L('tilt'), this.yaw, 0) // + = tipped BACKWARD (head toward +Z, behind the facing direction)
+    this.pose(B.chest, L('chest') - thump * 0.6)
+    this.pose(B.head, L('head') - thump * 0.8)
+    this.pose(B.hips, L('hips'))
+    this.leg(-1, L('thL'), L('knL'), L('spread'), -0.3 * L('knL') * 0.3)
+    this.leg(1, L('thR'), L('knR'), L('spread'), -0.3 * L('knR') * 0.3)
+    this.arm(1, L('aDown'), L('aFwd'), L('aBend'), L('aOut'))
+    this.arm(-1, L('aDown') + 0.08, L('aFwd') * 0.9, L('aBend'), L('aOut') * 1.1)
+    this.bones[B.hips].position.copy(this.rest[B.hips])
+  }
+
+  /**
+   * Put the posed body ON the ground: the lowest body part (feet, hands, pelvis, back, the big head — each with
+   * its thickness) rests on the terrain, and the feet stay where the player stands (a body falling back lands
+   * behind its feet; getting up, the hips come forward over them) — no floating, no sinking, no sliding.
+   */
+  private groundPose(pos: THREE.Vector3): void {
+    const R = this.root
+    R.position.copy(pos)
+    R.updateMatrixWorld(true)
+    const b = this.bones
+    // Feet anchor: midpoint of the ankles → the player's position (horizontal).
+    b[B.footL].getWorldPosition(_a)
+    b[B.footR].getWorldPosition(_d)
+    R.position.x += pos.x - (_a.x + _d.x) / 2
+    R.position.z += pos.z - (_a.z + _d.z) / 2
+    R.updateMatrixWorld(true)
+    let low = Infinity
+    const probe = (id: BoneId, r: number, up = 0) => {
+      if (up) b[id].localToWorld(_t.set(0, up, 0))
+      else b[id].getWorldPosition(_t)
+      low = Math.min(low, _t.y - r)
+    }
+    probe(B.footL, ANKLE_Y)
+    probe(B.footR, ANKLE_Y)
+    probe(B.handL, 0.05)
+    probe(B.handR, 0.05)
+    probe(B.hips, 0.13)
+    probe(B.chest, 0.15)
+    probe(B.head, 0.27, 0.3)
+    const g = this.ground ? this.ground(pos.x, pos.z) : pos.y
+    R.position.y += g - low
+    R.updateMatrixWorld(true)
   }
   private airTime = 0
 
@@ -351,8 +501,9 @@ export class CharacterModel {
 const _v = new THREE.Vector3(), _t = new THREE.Vector3(), _t2 = new THREE.Vector3(), _p = new THREE.Vector3()
 const _a = new THREE.Vector3(), _d = new THREE.Vector3(), _n = new THREE.Vector3(), _b = new THREE.Vector3()
 const _e2 = new THREE.Vector3(), _dir = new THREE.Vector3(), _r = new THREE.Vector3()
-const _q = new THREE.Quaternion()
+const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _q3 = new THREE.Quaternion()
 const _up = new THREE.Vector3(0, 1, 0)
+const _xAxis = new THREE.Vector3(1, 0, 0)
 
 /** Soft round blob shadow (grounds the character on tiers without real dynamic shadows). */
 export function createBlobShadow(): THREE.Mesh {

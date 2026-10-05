@@ -63,12 +63,17 @@ export interface VehicleDef {
   forward: '+z' | '-z' | '+x' | '-x'
   /** Wheel meshes by node name (separate wheel parts); undefined = split wheels out of the body by shape. */
   wheelRegex?: RegExp
-  /** Meshes whose material name matches take the paint colour; undefined = the whole body (textured models). */
+  /** Meshes whose material name matches take the paint colour; undefined = every body mesh — for textured models
+   *  further limited per pixel to the body paint (loadModels buildPaintMap: the texture's dominant body hue). */
   paintRegex?: RegExp
   /** Look for a steering wheel to animate (the pickup has one). */
   steering?: boolean
-  /** Lamp positions (right side; mirrored): head [x, y, z] at the nose, tail at the rear. Default: from the body box. */
+  /** Lamp positions (right side; mirrored) — FALLBACK only: the lamps are found on the model itself at load
+   *  (loadModels findLamps / findLampsInParts); this is used when nothing is found, then a body-box guess. */
   lamps?: { head: [number, number, number]; tail: [number, number, number] }
+  /** Engine voice (AudioSystem): pitch × the recorded loops (V8 low, small 4-cylinder high) and the automatic
+   *  gearbox's shift speeds (m/s) — spaced to the car's own top speed so it never sits on the limiter. */
+  engine: { pitch: number; gears: number[] }
   stock: VehicleTuning
   /** Download size fallback for the progress bar (bytes). */
   bytes: number
@@ -86,6 +91,7 @@ export const VEHICLES: VehicleDef[] = [
     year: '1989',
     blurb: 'The farm truck. Tough, simple, climbs anything in low range.',
     url: pickupUrl, length: 5.1, forward: '+z', steering: true, bytes: 1_725_472,
+    engine: { pitch: 1, gears: [0, 5.5, 11, 17.5, 25, 34, 60] },
     stock: { power: 120, force: 12, boost: 2.2, grip: 2.4, suspension: 36, tyre: 1, mass: 1750, paint: '#ffffff' },
   },
   {
@@ -96,6 +102,7 @@ export const VEHICLES: VehicleDef[] = [
     blurb: 'Portal axles, twin-turbo V8, 45 cm of ground clearance. The mountain goat.',
     url: gwagenUrl, length: 4.8, forward: '+z', wheelRegex: /wheel(FL|FR|BL|BR)/i, paintRegex: /CarPaint/i, bytes: 2_266_000,
     lamps: { head: [0.66, 1.08, -2.44], tail: [0.72, 1.22, 2.43] },
+    engine: { pitch: 0.8, gears: [0, 7, 14, 22, 31, 42, 70] },
     stock: { power: 310, force: 18, boost: 2.0, grip: 2.8, suspension: 44, tyre: 1.15, mass: 3000, paint: '#c8d82a' },
   },
   {
@@ -105,6 +112,7 @@ export const VEHICLES: VehicleDef[] = [
     year: '1972',
     blurb: 'A Polish delivery van with a lawnmower engine. Slow, light, oddly capable.',
     url: zukUrl, length: 4.4, forward: '+z', bytes: 3_886_884,
+    engine: { pitch: 1.22, gears: [0, 4, 8.5, 14, 20, 27, 45] },
     stock: { power: 55, force: 8, boost: 2.4, grip: 2.0, suspension: 28, tyre: 0.9, mass: 1400, paint: '#ffffff' },
   },
 ]

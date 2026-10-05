@@ -17,6 +17,8 @@ export const skyUniforms = {
   uSkyMoonColor: { value: new THREE.Color() },
   uSkyMoonVis: { value: 0 },
   uSkyStars: { value: 0 },
+  /** 1 while the sky is drawn into the low-res target (SkyDome.prepare): stars are added at full res instead. */
+  uSkyLowRes: { value: 0 },
   uSkyClouds: { value: 0.4 },
   /** 0 = painted violet/gold clouds (dusk), 1 = Genshin white cumulus with soft blue-grey shading (day). */
   uSkyCloudWhite: { value: 0 },
@@ -54,7 +56,7 @@ float mistAmount(vec3 dir, float dist) {
 
 export const SKY_GLSL = /* glsl */ `
 uniform vec3 uSkyHorizon, uSkyZenith, uSkySunDir, uSkySunColor, uSkyMoonDir, uSkyMoonColor;
-uniform float uSkySunVis, uSkyMoonVis, uSkyStars, uSkyClouds, uSkyTime, uSkyBolt, uSkyCloudWhite, uSkyStorm;
+uniform float uSkySunVis, uSkyMoonVis, uSkyStars, uSkyClouds, uSkyTime, uSkyBolt, uSkyCloudWhite, uSkyStorm, uSkyLowRes;
 uniform vec3 uSkyBoltDir, uSkyBoltColor;
 uniform vec2 uSkyHaze;
 // Layered depth haze on top of the distance fog (refer/roads: trees 40–150 m soften into blue-violet air).
@@ -114,7 +116,7 @@ vec3 skyColor(vec3 d, bool full) {
   vec3 keyCol = uSkySunVis > 0.01 ? uSkySunColor * uSkySunVis : uSkyMoonColor * uSkyMoonVis * 0.4;
 
   if (full) {
-    if (uSkyStars > 0.001) {
+    if (uSkyStars > 0.001 && uSkyLowRes < 0.5) {
       float h = sky_h3(floor(d * 420.0));
       float star = step(0.9984, h) * smoothstep(0.02, 0.25, d.y) * (0.6 + 0.4 * sin(uSkyTime * (1.5 + h * 4.0) + h * 40.0));
       // Never over a bright sky: on a pale dawn/evening gradient twinkling stars read as blinking white specks.

@@ -40,7 +40,154 @@ export interface TruckModel {
   rear: number
   /** Body texture, or null for flat-coloured models (colour is in the vertices). */
   map: THREE.Texture | null
+  /** Per-pixel paint mask for textured models (R = 1 on the body paint, 0 on rims, glass, trim, lights, rust),
+   *  same UVs as `map`; null = the per-vertex `paintMask` alone decides (flat-coloured models). */
+  paintMap: THREE.Texture | null
+  /** Lamp lenses found on the model (right side; the left mirrors it): centre + half size (m, truck space). */
+  lamps: { head: Lamp | null; tail: Lamp | null }
 }
+
+export interface Lamp {
+  c: [number, number, number]
+  w: number
+  h: number
+}
+
+/** RGBA pixels of a texture image, downscaled to ≤ `max` px (CPU analysis at load). */
+function readPixels(tex: THREE.Texture, max = 512): { data: Uint8ClampedArray; w: number; h: number } | null {
+  const img = tex.image as (CanvasImageSource & { width: number; height: number }) | undefined
+  if (!img || !img.width || typeof document === 'undefined') return null
+  const k = Math.min(1, max / Math.max(img.width, img.height))
+  const w = Math.max(1, Math.round(img.width * k)), h = Math.max(1, Math.round(img.height * k))
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = h
+  const ctx = c.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  ctx.drawImage(img, 0, 0, w, h)
+  return { data: ctx.getImageData(0, 0, w, h).data, w, h }
+}
+
+function hsv(r: number, g: number, b: number): [number, number, number] {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn
+  let hh = 0
+  if (d > 1e-6) hh = mx === r ? ((g - b) / d + 6) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4
+  return [hh / 6, mx > 0 ? d / mx : 0, mx]
+}
+
+/**
+ * PAINT MASK from the texture: a vehicle's body colour is ONE dominant hue across the big panels (olive pickup,
+ * blue Żuk) while rims, tyres, glass, chrome, seats, lights and rust are greys, blacks, creams, reds. The most
+ * common saturated hue wins; pixels within ~25° of it (and saturated / bright enough) are paint. Soft edges.
+ */
+function buildPaintMap(tex: THREE.Texture): THREE.Texture | null {
+  const px = readPixels(tex)
+  if (!px) return null
+  const { data, w, h } = px
+  const bins = new Float32Array(48)
+  for (let i = 0; i < w * h; i++) {
+    const [hh, sat, val] = hsv(data[i * 4] / 255, data[i * 4 + 1] / 255, data[i * 4 + 2] / 255)
+    if (sat > 0.22 && val > 0.18) bins[Math.floor(hh * 48) % 48] += sat
+  }
+  let best = 0
+  for (let i = 1; i < 48; i++) if (bins[i] + bins[(i + 47) % 48] * 0.5 + bins[(i + 1) % 48] * 0.5 > bins[best] + bins[(best + 47) % 48] * 0.5 + bins[(best + 1) % 48] * 0.5) best = i
+  const h0 = (best + 0.5) / 48
+  const out = new Uint8Array(w * h * 4)
+  const ss = (a: number, b: number, x: number) => {
+    const t = Math.min(1, Math.max(0, (x - a) / (b - a)))
+    return t * t * (3 - 2 * t)
+  }
+  for (let i = 0; i < w * h; i++) {
+    const [hh, sat, val] = hsv(data[i * 4] / 255, data[i * 4 + 1] / 255, data[i * 4 + 2] / 255)
+    let dh = Math.abs(hh - h0)
+    dh = Math.min(dh, 1 - dh)
+    const m = (1 - ss(0.06, 0.1, dh)) * ss(0.1, 0.2, sat) * ss(0.06, 0.14, val)
+    out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = Math.round(m * 255)
+    out[i * 4 + 3] = 255
+  }
+  const t = new THREE.DataTexture(out, w, h)
+  t.flipY = false // canvas rows are top-down; DataTexture row 0 = v 0 — same orientation as a glTF map (flipY false)
+  if (tex.flipY) {
+    // A flipY map samples row 0 at v = 1: flip our rows to match.
+    const row = w * 4, tmp = new Uint8Array(row)
+    for (let y = 0; y < h >> 1; y++) {
+      tmp.set(out.subarray(y * row, y * row + row))
+      out.copyWithin(y * row, (h - 1 - y) * row, (h - y) * row)
+      out.set(tmp, (h - 1 - y) * row)
+    }
+  }
+  t.magFilter = t.minFilter = THREE.LinearFilter
+  t.generateMipmaps = false
+  t.wrapS = tex.wrapS
+  t.wrapT = tex.wrapT
+  t.needsUpdate = true
+  t.name = 'paintMask'
+  return t
+}
+
+/**
+ * LAMPS from the textured body. Headlights: among the faces in the front 18 % that look straight ahead at lamp
+ * height, the brightest texel marks a lens — the lens is that face plus its neighbours within 15 cm of similar
+ * brightness (a lens is often only light grey in the texture, as bright as the chrome bumper, so a fixed
+ * threshold fails; a local cluster doesn't). Tail lights: the reddest rear-facing face and its red neighbours.
+ * Both sides are folded onto +x; the area-weighted centre and extent give one lamp per side.
+ */
+function findLamps(body: THREE.BufferGeometry, tex: THREE.Texture, front: number, rear: number): { head: Lamp | null; tail: Lamp | null } {
+  const px = readPixels(tex, 1024)
+  const uv = body.getAttribute('uv')
+  if (!px || !uv) return { head: null, tail: null }
+  const pos = body.getAttribute('position')
+  const len = rear - front
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), n = new THREE.Vector3(), e1 = new THREE.Vector3(), e2 = new THREE.Vector3()
+  type Cand = { x: number; y: number; z: number; area: number; score: number; pts: number[] }
+  const heads: Cand[] = [], tails: Cand[] = []
+  const texel = (u: number, v: number): [number, number, number] => {
+    const fu = u - Math.floor(u), fv = v - Math.floor(v)
+    const ix = Math.min(px.w - 1, Math.floor(fu * px.w)), iy = Math.min(px.h - 1, Math.floor((tex.flipY ? 1 - fv : fv) * px.h))
+    const o = (iy * px.w + ix) * 4
+    return [px.data[o] / 255, px.data[o + 1] / 255, px.data[o + 2] / 255]
+  }
+  for (let t = 0; t < pos.count; t += 3) {
+    a.fromBufferAttribute(pos, t); b.fromBufferAttribute(pos, t + 1); c.fromBufferAttribute(pos, t + 2)
+    n.crossVectors(e1.subVectors(b, a), e2.subVectors(c, a))
+    const area = n.length() / 2
+    if (area < 1e-6) continue
+    n.normalize()
+    const cx = Math.abs((a.x + b.x + c.x) / 3), cy = (a.y + b.y + c.y) / 3, cz = (a.z + b.z + c.z) / 3
+    const isFront = cz < front + len * 0.18 && Math.abs(n.z) > 0.85
+    const isRear = cz > rear - len * 0.18 && Math.abs(n.z) > 0.6
+    if ((!isFront && !isRear) || cy < 0.35 || cy > 1.6) continue
+    // Texel at the centroid and 3 points toward the corners: the face's brightest / reddest sample.
+    let bright = 0, red = 0
+    for (const w of [[1 / 3, 1 / 3, 1 / 3], [0.6, 0.2, 0.2], [0.2, 0.6, 0.2], [0.2, 0.2, 0.6]]) {
+      const u = uv.getX(t) * w[0] + uv.getX(t + 1) * w[1] + uv.getX(t + 2) * w[2]
+      const v = uv.getY(t) * w[0] + uv.getY(t + 1) * w[1] + uv.getY(t + 2) * w[2]
+      const [r, g, bl] = texel(u, v)
+      const [, sat, val] = hsv(r, g, bl)
+      if (sat < 0.25) bright = Math.max(bright, val)
+      red = Math.max(red, r - Math.max(g, bl) * 1.4)
+    }
+    const pts = [a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z]
+    if (isFront && cx > 0.15) heads.push({ x: cx, y: cy, z: cz, area, score: bright, pts })
+    if (isRear && cx > 0.15 && red > 0.12) tails.push({ x: cx, y: cy, z: cz, area, score: red, pts })
+  }
+  const cluster = (list: Cand[], tol: number, sign: number): Lamp | null => {
+    if (!list.length) return null
+    const best = list.reduce((p, q) => (q.score > p.score ? q : p))
+    let W = 0, X = 0, Y = 0, Z = 0, x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9
+    for (const q of list) {
+      if (Math.hypot(q.x - best.x, q.y - best.y, q.z - best.z) > 0.15 || q.score < best.score - tol) continue
+      W += q.area; X += q.x * q.area; Y += q.y * q.area; Z += q.z * q.area
+      for (let k = 0; k < 9; k += 3) {
+        x0 = Math.min(x0, Math.abs(q.pts[k])); x1 = Math.max(x1, Math.abs(q.pts[k])); y0 = Math.min(y0, q.pts[k + 1]); y1 = Math.max(y1, q.pts[k + 1])
+      }
+    }
+    if (W < 0.002) return null // < ~20 cm² of lens: nothing reliable
+    return { c: [X / W, Y / W, Z / W + sign * 0.02], w: Math.min(0.3, Math.max(0.05, (x1 - x0) / 2)), h: Math.min(0.22, Math.max(0.04, (y1 - y0) / 2)) }
+  }
+  return { head: cluster(heads, 0.1, -1), tail: cluster(tails, 0.15, 1) }
+}
+
 export type VehicleModel = TruckModel
 
 export interface GameModels {
@@ -179,6 +326,51 @@ function paintGeometry(g: THREE.BufferGeometry, color: THREE.Color, keepUv: bool
 }
 
 /**
+ * LAMPS from named lamp parts (untextured models: lens glass and glow meshes, e.g. the G500's `glas_light` and
+ * `lights_brakes`): front-facing pale parts in the front 20 % → headlights; rear-facing red parts in the rear
+ * 20 % → tail lights. Seeded at the biggest qualifying face, clustered within 20 cm, both sides folded onto +x.
+ */
+function findLampsInParts(parts: { geo: THREE.BufferGeometry; color: THREE.Color }[], front: number, rear: number): { head: Lamp | null; tail: Lamp | null } {
+  const len = rear - front
+  type Cand = { x: number; y: number; z: number; area: number; pts: number[] }
+  const heads: Cand[] = [], tails: Cand[] = []
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), n = new THREE.Vector3(), e1 = new THREE.Vector3(), e2 = new THREE.Vector3()
+  for (const { geo, color } of parts) {
+    const pos = geo.getAttribute('position')
+    const [, sat, val] = hsv(color.r, color.g, color.b)
+    const red = color.r > 0.25 && color.g < color.r * 0.45 && color.b < color.r * 0.45
+    const pale = !red && (sat < 0.35 || val > 0.5)
+    for (let t = 0; t + 2 < pos.count; t += 3) {
+      a.fromBufferAttribute(pos, t); b.fromBufferAttribute(pos, t + 1); c.fromBufferAttribute(pos, t + 2)
+      n.crossVectors(e1.subVectors(b, a), e2.subVectors(c, a))
+      const area = n.length() / 2
+      if (area < 1e-7) continue
+      n.normalize()
+      const cz = (a.z + b.z + c.z) / 3
+      const cand = { x: Math.abs((a.x + b.x + c.x) / 3), y: (a.y + b.y + c.y) / 3, z: cz, area, pts: [a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z] }
+      if (cand.x < 0.15) continue
+      if (pale && cz < front + len * 0.2 && n.z < -0.4) heads.push(cand)
+      if (red && cz > rear - len * 0.2 && n.z > 0.4) tails.push(cand)
+    }
+  }
+  const cluster = (list: Cand[], sign: number): Lamp | null => {
+    if (!list.length) return null
+    const best = list.reduce((p, q) => (q.area > p.area ? q : p))
+    let W = 0, X = 0, Y = 0, Z = 0, x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9
+    for (const q of list) {
+      if (Math.hypot(q.x - best.x, q.y - best.y, q.z - best.z) > 0.2) continue
+      W += q.area; X += q.x * q.area; Y += q.y * q.area; Z += q.z * q.area
+      for (let k = 0; k < 9; k += 3) {
+        x0 = Math.min(x0, Math.abs(q.pts[k])); x1 = Math.max(x1, Math.abs(q.pts[k])); y0 = Math.min(y0, q.pts[k + 1]); y1 = Math.max(y1, q.pts[k + 1])
+      }
+    }
+    if (W < 1e-4) return null
+    return { c: [X / W, Y / W, Z / W + sign * 0.02], w: Math.min(0.3, Math.max(0.05, (x1 - x0) / 2)), h: Math.min(0.22, Math.max(0.04, (y1 - y0) / 2)) }
+  }
+  return { head: cluster(heads, -1), tail: cluster(tails, 1) }
+}
+
+/**
  * Bake ANY catalogue vehicle: every mesh gets its material colour in the vertices (flat-coloured models need no
  * texture at all), paint panels are masked, the glass is split off, the four wheels are found by name
  * (`def.wheelRegex`) or split out of the body by shape (parts touching the ground, round in side view), and the
@@ -189,8 +381,11 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
   const bodies: THREE.BufferGeometry[] = [], glasses: THREE.BufferGeometry[] = []
   const wheelParts: { geo: THREE.BufferGeometry; name: string }[] = []
   let map: THREE.Texture | null = null
+  // Lamp lenses / glows by name (untextured models place their lamps from these: findLampsInParts).
+  const lampParts: { geo: THREE.BufferGeometry; color: THREE.Color }[] = []
   for (const m of meshes) {
     const { color, map: mm, glass } = matColor(m.mat)
+    if (/light|lamp|glow/i.test(m.name) || /light|lamp|glow/i.test(m.mat.name)) lampParts.push({ geo: m.geo.clone(), color })
     if (glass) {
       glasses.push(paintGeometry(m.geo, new THREE.Color().setHex(0x1b2430, THREE.SRGBColorSpace), false, 0))
       continue
@@ -274,6 +469,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
   }
   body.applyMatrix4(norm)
   glass.applyMatrix4(norm)
+  for (const l of lampParts) l.geo.applyMatrix4(norm)
   for (const w of wheels) (w.c.applyMatrix4(norm), (w.r *= k), w.geo.applyMatrix4(norm))
   // Ground = wheel bottoms; origin = wheelbase centre.
   const groundY = Math.min(...wheels.map((w) => w.c.y - w.r))
@@ -281,6 +477,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
   const shift = new THREE.Matrix4().makeTranslation(-cx, -groundY, -cz)
   body.applyMatrix4(shift)
   glass.applyMatrix4(shift)
+  for (const l of lampParts) l.geo.applyMatrix4(shift)
   for (const w of wheels) (w.c.applyMatrix4(shift), w.geo.applyMatrix4(shift))
   if (steeringWheel) pivot.applyMatrix4(shift)
   const fl = wheels.reduce((a, b) => (b.c.x + b.c.z < a.c.x + a.c.z ? b : a)) // most −x (left) and −z (front)
@@ -290,6 +487,14 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
   for (const g of [body, wheel, glass, steeringWheel]) if (g) (g.computeBoundingBox(), g.computeBoundingSphere())
   const bb = body.boundingBox!
   if (map) map.colorSpace = THREE.SRGBColorSpace
+  const paintMap = map ? buildPaintMap(map) : null
+  const lamps = map ? findLamps(body, map, bb.min.z, bb.max.z) : { head: null, tail: null }
+  if (lampParts.length) {
+    const fromParts = findLampsInParts(lampParts.map((l) => ({ geo: l.geo.index ? l.geo.toNonIndexed() : l.geo, color: l.color })), bb.min.z, bb.max.z)
+    lamps.head ??= fromParts.head
+    lamps.tail ??= fromParts.tail
+  }
+  lampParts.forEach((l) => l.geo.dispose())
   meshes.forEach((m) => m.geo.dispose())
   all.dispose()
   return {
@@ -302,6 +507,8 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
     front: bb.min.z,
     rear: bb.max.z,
     map,
+    paintMap,
+    lamps,
   }
 }
 

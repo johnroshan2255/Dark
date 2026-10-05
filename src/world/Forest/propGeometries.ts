@@ -3,7 +3,7 @@ import { isOverland } from '../../rendering/artStyle'
 import { hash4 } from '../noise/rng'
 import { createFenceGeometry, createLampGlowGeometry, createPoleGeometry } from '../Road/propMeshes'
 import { createPoiGeometries } from '../POI/poiGeometry'
-import { createTreeLibrary, createUndergrowth, type SpeciesDef } from './treeFactory'
+import { createDesertUndergrowth, createTreeLibrary, createUndergrowth, type SpeciesDef } from './treeFactory'
 
 /**
  * Placeholder low-poly vegetation/prop geometry built in code, until AI-generated
@@ -15,13 +15,16 @@ const srgb = (hex: number) => new THREE.Color().setHex(hex, THREE.SRGBColorSpace
 
 
 export interface PropGeometries {
-  /** Tree species library (5 species × 3 detail levels). */
+  /** Tree species library (7 species × 3 detail levels; cactus + joshua are desert-only). */
   trees: SpeciesDef[]
   rock: THREE.BufferGeometry
   /** Mid-distance rock (LOD1 chunks): same shape family, 20 tris instead of 80. */
   rockFar: THREE.BufferGeometry
   fern: THREE.BufferGeometry
   bush: THREE.BufferGeometry
+  /** Desert undergrowth (replaces fern/bush on sand). */
+  agave: THREE.BufferGeometry
+  shrub: THREE.BufferGeometry
   pole: THREE.BufferGeometry
   /** Street-lamp glow + ground pool, instanced with the poles (MaterialLibrary.lampGlow). */
   lampGlow: THREE.BufferGeometry
@@ -104,6 +107,7 @@ export function createPropGeometries(): PropGeometries {
   const rock = makeRock()
   const rockFar = makeRock(0)
   const { fern, bush } = createUndergrowth()
+  const { agave, shrub } = createDesertUndergrowth()
   const pole = createPoleGeometry()
   const lampGlow = createLampGlowGeometry()
   const fence = createFenceGeometry()
@@ -121,6 +125,8 @@ export function createPropGeometries(): PropGeometries {
     rockFar,
     fern,
     bush,
+    agave,
+    shrub,
     pole,
     lampGlow,
     fence,
@@ -128,7 +134,7 @@ export function createPropGeometries(): PropGeometries {
     poi,
     dispose: () => {
       lib.dispose()
-      ;[rock, rockFar, fern, bush, pole, lampGlow, fence].forEach((g) => g.dispose())
+      ;[rock, rockFar, fern, bush, agave, shrub, pole, lampGlow, fence].forEach((g) => g.dispose())
       wire.dispose()
       poi.forEach((g) => g.dispose())
     },

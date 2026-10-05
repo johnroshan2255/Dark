@@ -23,6 +23,8 @@ export class CameraController {
   /** Garage turntable: orbit this point (the parked car) slowly; the player and look input are ignored. */
   garage: THREE.Vector3 | null = null
   private orbit = 0
+  /** Dev / screenshot vista: first-person eye raised this many metres above the player (0 = normal). */
+  lift = 0
   readonly flashOrigin = new THREE.Vector3()
   readonly flashTarget = new THREE.Vector3()
   private dist = TPP_DISTANCE
@@ -49,7 +51,7 @@ export class CameraController {
       // Turntable: 7 m out, 2.2 m up, a slow lap every ~40 s, looking at the car's roofline.
       this.orbit += dt * 0.16
       const g = this.garage
-      const ground = this.fields.height(g.x + Math.sin(this.orbit) * 7, g.z + Math.cos(this.orbit) * 7)
+      const ground = this.fields.surface(g.x + Math.sin(this.orbit) * 7, g.z + Math.cos(this.orbit) * 7)
       cam.position.set(g.x + Math.sin(this.orbit) * 7, Math.max(g.y + 2.2, ground + 1.2), g.z + Math.cos(this.orbit) * 7)
       // Look past the car's left so it sits in the open RIGHT half of the screen (the garage panel is on the left).
       const dx = g.x - cam.position.x, dz = g.z - cam.position.z, l = Math.hypot(dx, dz)
@@ -79,7 +81,7 @@ export class CameraController {
       const speed = p.grounded ? p.horizontalSpeed : 0
       this.bob += dt * speed * 1.9
       const bobY = Math.sin(this.bob * 2) * 0.035 * Math.min(1, speed / 3)
-      cam.position.set(pos.x, pos.y + EYE_HEIGHT * (1 - k * 0.8) + bobY, pos.z)
+      cam.position.set(pos.x, pos.y + EYE_HEIGHT * (1 - k * 0.8) + bobY + this.lift, pos.z)
       cam.rotation.set(p.pitch * (1 - k) + k * 0.25 + shy, p.yaw + shx, k * 1.2, 'YXZ')
       cam.updateMatrixWorld()
       this.flashOrigin.set(0.18, -0.2, 0).applyMatrix4(cam.matrixWorld)
@@ -102,7 +104,7 @@ export class CameraController {
       this.dist += (target - this.dist) * pull
       const t = this.dist / len
       cam.position.set(this.pivot.x + dx * t, this.pivot.y + dy * t, this.pivot.z + dz * t)
-      const ground = this.fields.height(cam.position.x, cam.position.z) + 0.3
+      const ground = this.fields.surface(cam.position.x, cam.position.z) + 0.3
       if (cam.position.y < ground) cam.position.y = ground
       cam.rotation.set(p.pitch + shy, p.yaw + shx, k * 0.15, 'YXZ')
       cam.updateMatrixWorld()
@@ -115,7 +117,7 @@ export class CameraController {
       const moving = p.horizontalSpeed > 0.4
       const targetYaw = flashlightOn || !moving ? (flashlightOn ? p.yaw : this.character.yaw) : Math.atan2(-p.velocity.x, -p.velocity.z)
       this.character.animate(dt, pos, targetYaw, p.horizontalSpeed, p.grounded, flashlightOn, p.pitch, p.velocity.y, k) // knockdown / get-up posed inside
-      this.blob.position.set(pos.x, this.fields.height(pos.x, pos.z) + 0.03, pos.z)
+      this.blob.position.set(pos.x, this.fields.surface(pos.x, pos.z) + 0.03, pos.z)
       this.character.handPosition(this.flashOrigin)
       this.flashTarget.copy(cam.position).addScaledVector(this.fwd, 28)
     }

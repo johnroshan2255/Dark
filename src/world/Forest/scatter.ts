@@ -16,6 +16,8 @@ const _bw: BiomeWeights = [0, 0]
 const TREE_CELL = 4
 const ROCK_CELL = 8
 const PLANT_CELL = 2
+/** Share of the grove density that grows trees (1 = the old, denser forest). */
+const TREE_SHARE = 0.6
 
 interface ScatterCtx {
   fields: WorldFields
@@ -54,6 +56,10 @@ function scatter(
       if (scale <= 0) continue
       if (layer !== Layer.Rocks && h < WorldFields.WATER + 0.9) continue // no trees/plants in water
       if (fields.pois.near(wx, wz, layer === Layer.Trees ? 4 : 0)) continue // places are cleared
+      // Rock formations stand clear (an arch over open ground, a cave hill, the pillars' feet).
+      if (fields.formations.near(wx, wz, layer === Layer.Trees ? 3 : 0)) continue
+      // Landmarks (giant trees, ruins, towers…) stand in a clearing — Genshin frames them, the forest doesn't hide them.
+      if (fields.landmarks.near(wx, wz, layer === Layer.Trees ? 24 : 1)) continue
       const edge = fields.anyRoadEdge(wx, wz)
       // Keep every road clear — a boulder's footprint grows with its scale (unit rock radius ≈ 1.4 m), so big
       // ones stand well back from the edge instead of overhanging the track.
@@ -82,8 +88,10 @@ function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: 
   const road = fields.roadDistance(wx, wz)
   const stand = fields.colorVariation(wx * 0.35, wz * 0.35) // low-frequency stand selector
   const w = fields.biome(wx, wz, _bw, h)
-  // Desert: dead snags and a few hardy pines. Snow: conifers only (frosted by the chunk's instance tint).
-  if (w[0] > 0.5) return r < 0.55 ? TreeSpecies.Dead : TreeSpecies.Pine
+  // Desert: saguaros, Joshua trees and the odd dead snag; the desert's rim keeps a few hardy pines.
+  // Snow: conifers only (snow on their shelves comes from the material's biome cover).
+  if (w[0] > 0.8) return r < 0.55 ? TreeSpecies.Cactus : r < 0.88 ? TreeSpecies.Joshua : TreeSpecies.Dead
+  if (w[0] > 0.5) return r < 0.35 ? TreeSpecies.Cactus : r < 0.6 ? TreeSpecies.Joshua : r < 0.8 ? TreeSpecies.Dead : TreeSpecies.Pine
   if (w[1] > 0.5) return r < 0.6 ? TreeSpecies.Spruce : r < 0.9 ? TreeSpecies.Fir : TreeSpecies.Dead
   if (r < 0.04) return TreeSpecies.Dead
   // Genshin-style mixed forest: colourful broadleaf groves between conifer stands.
@@ -107,7 +115,12 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
       const d = fields.roadDistance(wx, wz)
       if (d < clearRoad) return 0
       // Forest thickens with distance from the road (verge → treeline), instead of a wall at the kerb.
-      const density = fields.forestDensity(wx, wz, h) * Math.min(1, 0.3 + (d - clearRoad) / 45) * (fields.palette === 1 ? 0.55 : 1) // overland: big trees, spaced
+      // Desert (Sumeru): mostly BARE sand and rock — cacti and Joshua trees only in scattered clumps (~1/4 of
+      // the ground), a lone one now and then between them (forestDensity is ~0 on sand).
+      const sand = fields.biome(wx, wz, _bw, h)[0]
+      const clump = Math.min(1, Math.max(0, (fields.colorVariation(wx * 0.5 + 91, wz * 0.5 - 37) - 0.62) * 5))
+      // Trees: 60 % of the grove density (the player asked for fewer — more open meadow between thinner groves).
+      const density = Math.max(fields.forestDensity(wx, wz, h) * TREE_SHARE, sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - clearRoad) / 45) * (fields.palette === 1 ? 0.55 : 1) // overland: big trees, spaced
       if (r > density * 0.9) return 0
       return 1.0 + (r / Math.max(density, 1e-3)) * 0.65 // tall framing trees (refs)
     },
@@ -127,13 +140,16 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
 
   const plants = scatter(ctx, PLANT_CELL, Layer.Plants, PROP_STRIDE, (wx, wz, r, h) => {
     if (fields.roadDistance(wx, wz) < WorldFields.ROAD_HALF_WIDTH + 0.3) return 0
-    // Undergrowth: dense on the verges (refer/roads: ferns lining the road), sparse under canopy; none on sand or snow.
+    // Undergrowth: dense on the verges (refer/roads: ferns lining the road), sparse under canopy; none on snow.
     const rd = fields.roadDistance(wx, wz) - WorldFields.ROAD_HALF_WIDTH
     const verge = rd > 1.5 && rd < 12 ? 0.45 * (1 - Math.abs(rd - 5) / 7) : 0
     const w = fields.biome(wx, wz, _bw, h)
     // Overland palette: half the undergrowth — open straw meadows with a few bushes, not a carpet of dark spots.
-    const density = (0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1] * 0.85) * (fields.palette === 1 ? 0.45 : 1)
-    return r < density ? 0.7 + r * 2 : 0
+    // Desert: sparse agaves and dry shrubs instead (WorldChunk picks the desert meshes by the biome at the plant).
+    // SMALL bushes only, and ~40 % of the old count (the player asked for few, small ones): 0.45–0.8 scale
+    // (was 0.7–1.6 — the big leafy mounds), a lighter verge band.
+    const density = ((0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1]) * 0.4 + w[0] * 0.05) * (fields.palette === 1 ? 0.45 : 1)
+    return r < density ? 0.45 + (r / Math.max(density, 1e-3)) * 0.35 : 0
   })
 
   return { trees, rocks, plants }

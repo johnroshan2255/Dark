@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import type { MaterialLibrary } from '../rendering/materials/MaterialLibrary'
 import { buildInstanceAttributes, createInstancedMesh, type InstanceAttributes } from '../optimization/instancing/InstanceBuilder'
 import type { Cullable } from '../optimization/culling/ChunkVisibility'
-import { CHUNK_SIZE, LOD_COUNT } from './constants'
+import { CELL_SIZE, CHUNK_RES, CHUNK_SIZE, LOD_COUNT } from './constants'
 import type { PropGeometries } from './Forest/propGeometries'
 import { buildTerrainGeometry } from './Terrain/TerrainGeometry'
 import { PROP_STRIDE, TREE_STRIDE, TreeSpecies, type ChunkData } from './types'
@@ -13,13 +13,18 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { WorldFields } from './WorldFields'
 import type { BiomeWeights } from './Biomes'
 import { isOverland } from '../rendering/artStyle'
+import { LAYER_NO_REFLECT, LAYER_REFLECT_ONLY } from '../rendering/water/PlanarReflection'
 
 const _bw: BiomeWeights = [0, 0]
-/** Biome instance tints (linear multipliers): frosted canopies / snow-capped rocks, sun-dried desert foliage, sandstone. */
-const FROST_TREE = [1.55, 1.5, 1.7] as const
+/**
+ * Biome instance tints (linear multipliers): cold dark blue-green conifers under the snow (the snow itself is
+ * painted by the material's biome cover), sun-dried desert foliage, sandstone.
+ */
+const FROST_TREE = [0.55, 0.72, 0.85] as const
 const DRY_TREE = [1.2, 1.0, 0.62] as const
 const SNOW_ROCK = [1.6, 1.65, 1.85] as const
 const SAND_ROCK = [1.45, 1.2, 0.85] as const
+const NO_TINT = [1, 1, 1] as const
 function biomeTint(fields: WorldFields, origin: readonly [number, number], data: Float32Array, o: number, snowT: readonly number[], sandT: readonly number[], out: [number, number, number]): void {
   const w = fields.biome(origin[0] + data[o], origin[1] + data[o + 2], _bw, data[o + 1])
   const s = w[0], n = w[1]
@@ -43,6 +48,8 @@ const ORANGE = [2.5, 1.35, 0.4] as const
 const RED = [2.7, 0.75, 0.38] as const
 const PINK = [2.5, 1.35, 1.55] as const
 const BASE = [1, 1, 1] as const
+/** Desert flora: own colours (no sun-dried tint), slight per-plant variety — sage, olive, dusty. */
+const DESERT_HUES = [BASE, BASE, [0.9, 1.06, 0.98] as const, [1.08, 1.02, 0.86] as const, [0.95, 0.95, 1.0] as const]
 // OVERLAND stands (over the hill): saturated greens with golden-yellow larch stands and the odd orange one.
 const OVER_GREEN = [0.9, 1.1, 0.75] as const
 const OVER_DEEP = [0.75, 0.95, 0.8] as const
@@ -54,6 +61,8 @@ const OVER_HUES: Record<number, readonly (readonly [number, number, number])[]> 
   [TreeSpecies.Pine]: [OVER_GREEN, OVER_GREEN, OVER_LARCH, OVER_GOLD],
   [TreeSpecies.Birch]: [BASE, BASE, [1.15, 1.0, 0.8] as const, [0.95, 1.1, 0.6] as const, [1.2, 0.85, 0.6] as const],
   [TreeSpecies.Dead]: [BASE],
+  [TreeSpecies.Cactus]: DESERT_HUES,
+  [TreeSpecies.Joshua]: DESERT_HUES,
 }
 const GENSHIN_HUES: Record<number, readonly (readonly [number, number, number])[]> = {
   [TreeSpecies.Spruce]: [TEAL, TEAL, DEEP, FRESH, BRIGHT, OLIVE],
@@ -61,6 +70,8 @@ const GENSHIN_HUES: Record<number, readonly (readonly [number, number, number])[
   [TreeSpecies.Pine]: [FRESH, BRIGHT, LIME, OLIVE, ORANGE],
   [TreeSpecies.Birch]: [FRESH, BRIGHT, LIME, LIME, ORANGE, ORANGE, RED, PINK],
   [TreeSpecies.Dead]: [BASE],
+  [TreeSpecies.Cactus]: DESERT_HUES,
+  [TreeSpecies.Joshua]: DESERT_HUES,
 }
 const HUES = isOverland() ? OVER_HUES : GENSHIN_HUES
 const FAR_CONIFER_HUES = isOverland() ? ([OVER_GREEN, OVER_DEEP, OVER_GREEN, OVER_LARCH] as const) : ([TEAL, DEEP, FRESH, BRIGHT, LIME, ORANGE] as const)
@@ -113,7 +124,9 @@ export class WorldChunk implements Cullable {
 
   private terrain: (THREE.Mesh | null)[] = new Array(LOD_COUNT).fill(null)
   /** The chunk's ground crosses the water level (a lake or river shore): terrain stays at LOD0 (see setLod). */
-  private readonly shore: boolean
+  readonly shore: boolean
+  /** Submerged sample points (chunk-local x, z pairs) or null — WorldManager.waterInView. */
+  readonly waterPts: Float32Array | null = null
   private species: { id: number; m: SpeciesMeshes }[] = []
   private far: FarGroup[] = []
   private rocks: THREE.InstancedMesh | null = null
@@ -121,22 +134,47 @@ export class WorldChunk implements Cullable {
   private rocksFar: THREE.InstancedMesh | null = null
   private ferns: THREE.InstancedMesh | null = null
   private bushes: THREE.InstancedMesh | null = null
+  private agaves: THREE.InstancedMesh | null = null
+  private shrubs: THREE.InstancedMesh | null = null
   private poles: THREE.InstancedMesh | null = null
   private lamps: THREE.InstancedMesh | null = null
   private fences: THREE.InstancedMesh | null = null
   private wires: THREE.LineSegments | null = null
+  /** Voxel rock formations centred in this chunk (one mesh), or null. */
+  private formation: THREE.Mesh | null = null
   /** Place objects (houses, barns, crops, tents…), one InstancedMesh per type present. */
   private places: { mesh: THREE.Mesh; small: boolean }[] = []
   private detail: ChunkDetail = { plants: true, treeNear: 0, farRocks: true, lean: false }
+  /** Smashed prop records (gameplay/destruction) and the pole / fence instance slot of each record. */
+  private readonly broken = new Set<number>()
+  private readonly propSlot = new Map<number, { attr: THREE.InstancedBufferAttribute; k: number }>()
 
   constructor(
     readonly data: ChunkData,
     private readonly mats: MaterialLibrary,
-    geos: PropGeometries,
-    fields: WorldFields,
+    private readonly geos: PropGeometries,
+    private readonly fields: WorldFields,
   ) {
     this.key = `${data.cx},${data.cz}`
     this.shore = data.minY < WorldFields.WATER + 0.5 && data.maxY > WorldFields.WATER - 0.5
+    // Up to 4 submerged points (one per quadrant, chunk-local x, z) for the water line-of-sight test.
+    if (data.minY < WorldFields.WATER - 0.2) {
+      const pts: number[] = []
+      const V = CHUNK_RES + 1, half = CHUNK_RES / 2
+      for (let q = 0; q < 4; q++) {
+        const i0 = (q & 1) * half, j0 = (q >> 1) * half
+        search: for (let j = j0; j <= j0 + half; j += 2) {
+          for (let i = i0; i <= i0 + half; i += 2) {
+            // Real water only: not the desert (dry — no water drawn there). Ice in the snow still mirrors.
+            if (data.heights[j * V + i] < WorldFields.WATER - 0.2 && fields.biome(data.cx * CHUNK_SIZE + i * CELL_SIZE, data.cz * CHUNK_SIZE + j * CELL_SIZE, _bw)[0] < 0.4) {
+              pts.push(i * CELL_SIZE, j * CELL_SIZE)
+              break search
+            }
+          }
+        }
+      }
+      this.waterPts = new Float32Array(pts)
+    }
     this.origin = [data.cx * CHUNK_SIZE, data.cz * CHUNK_SIZE]
     this.group.name = `chunk ${this.key}`
     this.group.position.set(data.cx * CHUNK_SIZE, 0, data.cz * CHUNK_SIZE)
@@ -144,13 +182,29 @@ export class WorldChunk implements Cullable {
     this.group.matrixAutoUpdate = false
     this.bounds.min.set(data.cx * CHUNK_SIZE, data.minY - 8, data.cz * CHUNK_SIZE)
     this.bounds.max.set((data.cx + 1) * CHUNK_SIZE, data.maxY + 12, (data.cz + 1) * CHUNK_SIZE)
+    // Rock formations: their own mesh (stone material); the chunk's culling box grows to hold them.
+    if (data.fmIdx.length) {
+      const fb = data.fmBounds
+      this.bounds.min.set(Math.min(this.bounds.min.x, this.origin[0] + fb[0]), Math.min(this.bounds.min.y, fb[1]), Math.min(this.bounds.min.z, this.origin[1] + fb[2]))
+      this.bounds.max.set(Math.max(this.bounds.max.x, this.origin[0] + fb[3]), Math.max(this.bounds.max.y, fb[4]), Math.max(this.bounds.max.z, this.origin[1] + fb[5]))
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.BufferAttribute(data.fmPos, 3))
+      g.setAttribute('normal', new THREE.BufferAttribute(data.fmNor, 3))
+      g.setAttribute('color', new THREE.BufferAttribute(data.fmCol, 3))
+      g.setIndex(new THREE.BufferAttribute(data.fmIdx, 1))
+      g.computeBoundingSphere()
+      this.formation = this.add(new THREE.Mesh(g, mats.rock))
+      this.formation.name = 'formation'
+      this.formation.receiveShadow = true
+    }
 
-    const treeTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.trees, o, FROST_TREE, DRY_TREE, out)
+    const treeTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.trees, o, FROST_TREE, data.trees[o + 5] >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
     const rockTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.rocks, o, SNOW_ROCK, SAND_ROCK, out)
     for (const sp of geos.trees) {
       const attrs = buildInstanceAttributes(data.trees, TREE_STRIDE, (o) => data.trees[o + 5] === sp.id, 0.16, 0.22, HUES[sp.id] ?? HUES[0], this.origin, treeTint)
       if (!attrs) continue
       const levels = [0, 1].map((l) => this.add(createInstancedMesh(sp.levels[l], mats.vegetation, attrs, `${sp.name}.lod${l}`)))
+      levels.forEach((m) => m.layers.set(LAYER_NO_REFLECT)) // the reflection draws the merged far trees instead
       this.species.push({ id: sp.id, m: { levels } })
       this.instanceCount += attrs.count
     }
@@ -158,8 +212,13 @@ export class WorldChunk implements Cullable {
     const spruce = geos.trees.find((x) => x.id === TreeSpecies.Spruce)!
     const birch = geos.trees.find((x) => x.id === TreeSpecies.Birch)!
     const conifer = (o: number) => t[o + 5] === TreeSpecies.Spruce || t[o + 5] === TreeSpecies.Fir || t[o + 5] === TreeSpecies.Pine
-    for (const [filter, sp] of [[conifer, spruce], [(o: number) => t[o + 5] === TreeSpecies.Birch, birch]] as const) {
-      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === TreeSpecies.Birch ? HUES[TreeSpecies.Birch] : FAR_CONIFER_HUES, this.origin, treeTint)
+    const only = (id: number) => (o: number) => t[o + 5] === id
+    const byId = (id: number) => geos.trees.find((x) => x.id === id)!
+    // Desert species keep their own far meshes (a saguaro and a Joshua tree read differently on the skyline); a
+    // desert chunk has no conifers or birches, so its far draws stay at ≤ 2 like a forest chunk's.
+    const farSets = [[conifer, spruce], [only(TreeSpecies.Birch), birch], [only(TreeSpecies.Cactus), byId(TreeSpecies.Cactus)], [only(TreeSpecies.Joshua), byId(TreeSpecies.Joshua)]] as const
+    for (const [filter, sp] of farSets) {
+      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === spruce.id ? FAR_CONIFER_HUES : HUES[sp.id] ?? HUES[0], this.origin, treeTint)
       if (!attrs) continue
       this.far.push({
         lod1: this.add(createInstancedMesh(sp.levels[1], mats.vegetation, attrs, `far.${sp.name}.lod1`)),
@@ -173,16 +232,34 @@ export class WorldChunk implements Cullable {
       this.instanceCount += rockAttrs.count
     }
     // Undergrowth (refer/forest): ferns + leafy bushes, split deterministically by record (2 draws per near chunk).
+    // On sand the same two slots hold agaves + dry shrubs (desert flora), picked by the biome at each plant.
     const pl = data.plants
-    const isFern = (o: number) => ((pl[o] * 7.31 + pl[o + 2] * 3.17) % 1) < 0.58
-    const fernAttrs = buildInstanceAttributes(pl, PROP_STRIDE, isFern, 0.22, 0.2)
-    const bushAttrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => !isFern(o), 0.25, 0.25)
+    const sandy = new Uint8Array(pl.length / PROP_STRIDE)
+    for (let k = 0; k < sandy.length; k++) {
+      const o = k * PROP_STRIDE
+      sandy[k] = fields.biome(this.origin[0] + pl[o], this.origin[1] + pl[o + 2], _bw, pl[o + 1])[0] > 0.5 ? 1 : 0
+    }
+    // Mostly low ferns; the leafy bush mesh only for ~1 in 4 (small bushes — the big mounds were too many).
+    const isFern = (o: number) => ((pl[o] * 7.31 + pl[o + 2] * 3.17) % 1) < 0.75
+    const isDesert = (o: number) => sandy[o / PROP_STRIDE] === 1
+    const fernAttrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => isFern(o) && !isDesert(o), 0.22, 0.2)
+    const bushAttrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => !isFern(o) && !isDesert(o), 0.25, 0.25)
+    const agaveAttrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => isFern(o) && isDesert(o), 0.2, 0.25)
+    const shrubAttrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => !isFern(o) && isDesert(o), 0.2, 0.3)
     if (fernAttrs) this.ferns = this.addPlant(geos.fern, fernAttrs, 'ferns')
     if (bushAttrs) this.bushes = this.addPlant(geos.bush, bushAttrs, 'bushes')
+    if (agaveAttrs) this.agaves = this.addPlant(geos.agave, agaveAttrs, 'agaves')
+    if (shrubAttrs) this.shrubs = this.addPlant(geos.shrub, shrubAttrs, 'shrubs')
     // Roadside props (only chunks the road passes through have any).
     const pr = data.props
     const poleAttrs = buildInstanceAttributes(pr, 6, (o) => pr[o + 5] === RoadProp.Pole, 0.1)
     const fenceAttrs = buildInstanceAttributes(pr, 6, (o) => pr[o + 5] === RoadProp.Fence, 0.12)
+    // Record → instance slot of the pole / fence meshes (breakProp hides one; the lamp glow shares the poles').
+    let np = 0, nf = 0
+    for (let o = 0; o < pr.length; o += 6) {
+      if (pr[o + 5] === RoadProp.Pole && poleAttrs) this.propSlot.set(o / 6, { attr: poleAttrs.matrix, k: np++ })
+      else if (pr[o + 5] === RoadProp.Fence && fenceAttrs) this.propSlot.set(o / 6, { attr: fenceAttrs.matrix, k: nf++ })
+    }
     if (poleAttrs) {
       this.poles = this.add(createInstancedMesh(geos.pole, mats.vegetation, poleAttrs, 'poles'))
       // Street lamps on every post: glow halo + light pool, same instances (one additive draw per road chunk).
@@ -191,27 +268,69 @@ export class WorldChunk implements Cullable {
       this.lamps.renderOrder = 8
     }
     if (fenceAttrs) this.fences = this.add(createInstancedMesh(geos.fence, mats.vegetation, fenceAttrs, 'fences'))
-    // Places: every prop type baked into two static meshes per chunk (buildings, small crops) → 2 draws, not ~14.
+    this.buildPlaces()
+    const wires = buildWires(data, fields, geos.wire)
+    if (wires) this.wires = this.add(wires)
+    // Too small to read in the water's mirror: main camera only (PlanarReflection).
+    for (const m of [this.rocks, this.ferns, this.bushes, this.agaves, this.shrubs, this.poles, this.lamps, this.fences, this.wires]) m?.layers.set(LAYER_NO_REFLECT)
+  }
+
+
+  /**
+   * Places: every prop type baked into two static meshes per chunk (buildings, small crops) → 2 draws, not ~14.
+   * Rebuilt without the broken ones when a building / hay bale / tent is smashed (breakProp).
+   */
+  private buildPlaces(onlyBig = false): void {
+    // Crops (small) have no colliders and never break: a smash rebuilds only the buildings mesh.
+    for (const p of this.places) {
+      if (onlyBig && p.small) continue
+      p.mesh.removeFromParent()
+      p.mesh.geometry.dispose()
+    }
+    this.places = onlyBig ? this.places.filter((p) => p.small) : []
+    const pr = this.data.props
     const isSmall = (type: number) => type === PropType.Wheat || type === PropType.Cabbage || type === PropType.Corn || type === PropType.Campfire
-    for (const small of [false, true]) {
+    for (const small of onlyBig ? [false] : [false, true]) {
       const parts: THREE.BufferGeometry[] = []
-      for (const [type, geo] of geos.poi) {
+      for (const [type, geo] of this.geos.poi) {
         if (isSmall(type) !== small) continue
-        const a = buildInstanceAttributes(pr, 6, (o) => pr[o + 5] === type, small && type !== PropType.Campfire ? 0.18 : 0.05)
+        const a = buildInstanceAttributes(pr, 6, (o) => pr[o + 5] === type && !this.broken.has(o / 6), small && type !== PropType.Campfire ? 0.18 : 0.05)
         if (!a) continue
         for (let k = 0; k < a.count; k++) parts.push(bakeInstance(geo, a, k))
-        this.instanceCount += a.count
+        if (!onlyBig) this.instanceCount += a.count
       }
       if (!parts.length) continue
       const g = mergeGeometries(parts)
       parts.forEach((x) => x.dispose())
       if (!g) continue
-      const mesh = new THREE.Mesh(g, mats.vegetation)
+      const mesh = new THREE.Mesh(g, this.mats.vegetation)
       mesh.name = small ? 'place.small' : 'place.big'
       this.places.push({ mesh: this.add(mesh), small })
+      if (small) mesh.layers.set(LAYER_NO_REFLECT) // crops: too small for the water's mirror
     }
-    const wires = buildWires(data, fields, geos.wire)
-    if (wires) this.wires = this.add(wires)
+  }
+
+  /** A prop record was smashed (gameplay/destruction): hide it until this chunk is rebuilt (drive away and back). */
+  breakProp(index: number): void {
+    if (this.broken.has(index)) return
+    this.broken.add(index)
+    const slot = this.propSlot.get(index)
+    const type = this.data.props[index * 6 + 5]
+    if (slot) {
+      // Pole / fence instance: zero scale (the street-lamp glow shares the pole's matrices → it goes with it).
+      ;(slot.attr.array as Float32Array).fill(0, slot.k * 16, slot.k * 16 + 16)
+      slot.attr.needsUpdate = true
+      if (type === RoadProp.Pole && this.wires) {
+        this.wires.removeFromParent()
+        this.wires.geometry.dispose()
+        this.wires = null
+        const w = buildWires(this.data, this.fields, this.geos.wire, (i) => this.broken.has(i / 6))
+        if (w) this.wires = this.add(w)
+      }
+    } else this.buildPlaces(true)
+    const lod = this.lod
+    this.lod = -1
+    this.setLod(lod, this.detail)
   }
 
   private addPlant(g: THREE.BufferGeometry, attrs: InstanceAttributes, name: string): THREE.InstancedMesh {
@@ -259,7 +378,10 @@ export class WorldChunk implements Cullable {
       })
     }
     for (const f of this.far) {
-      f.lod1.visible = lod === 1
+      // Near chunks: the merged LOD1 trees stand in for the per-species near trees in the water's reflection
+      // only (≤ 2 draws, ~¼ of the triangles); the main camera and the shadow pass never see them there.
+      f.lod1.visible = lod <= 1
+      f.lod1.layers.set(lod === 0 ? LAYER_REFLECT_ONLY : 0)
       f.lod2.visible = lod === 2
       // LOD1 trees can sit inside the shadow box on LOW/MEDIUM (small LOD0 ring): let them cast so tree
       // shadows don't stop at a chunk border. The shadow frustum culls the far ones.
@@ -269,10 +391,16 @@ export class WorldChunk implements Cullable {
     if (this.rocksFar) this.rocksFar.visible = lod === 1 && detail.farRocks
     if (this.ferns) this.ferns.visible = near && detail.plants
     if (this.bushes) this.bushes.visible = near && detail.plants
+    if (this.agaves) this.agaves.visible = near && detail.plants
+    if (this.shrubs) this.shrubs.visible = near && detail.plants
     if (this.poles) (this.poles.visible = lod <= 1), (this.poles.castShadow = near)
     if (this.lamps) this.lamps.visible = lod <= 1
     if (this.fences) (this.fences.visible = lod <= 1), (this.fences.castShadow = near && !detail.lean)
     if (this.wires) this.wires.visible = lod <= 1
+    if (this.formation) {
+      this.formation.visible = true // landmarks: every LOD (they dither out at the streamed-detail edge)
+      this.formation.castShadow = lod <= 1
+    }
     for (const { mesh, small } of this.places) {
       mesh.visible = small ? lod <= 1 : lod <= 1 || !detail.lean // buildings are far landmarks (not on LOW: draw budget)
       mesh.castShadow = near && !small // crops are low and dense: their shadows cost a draw per chunk for little
@@ -290,7 +418,7 @@ export class WorldChunk implements Cullable {
     if (!this.isVisible) return 0
     let n = 0
     for (const m of this.group.children) {
-      if (m.visible && (m as THREE.InstancedMesh).isInstancedMesh) n += (m as THREE.InstancedMesh).count
+      if (m.visible && !m.layers.isEnabled(LAYER_REFLECT_ONLY) && (m as THREE.InstancedMesh).isInstancedMesh) n += (m as THREE.InstancedMesh).count
     }
     return n
   }
@@ -301,8 +429,9 @@ export class WorldChunk implements Cullable {
     // Shared geometries/materials belong to the libraries; only per-chunk buffers are freed.
     for (const { m } of this.species) m.levels.forEach((x) => x.dispose())
     for (const f of this.far) (f.lod1.dispose(), f.lod2.dispose())
-    for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.poles, this.lamps, this.fences]) m?.dispose()
+    for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.agaves, this.shrubs, this.poles, this.lamps, this.fences]) m?.dispose()
     for (const { mesh } of this.places) mesh.geometry.dispose()
+    this.formation?.geometry.dispose()
     this.wires?.geometry.dispose()
   }
 }

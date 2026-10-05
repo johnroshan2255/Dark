@@ -110,7 +110,7 @@ export class PlayerController {
     if (this.dead) this.knockTarget = 1
     // FALL: a short stagger, then the body accelerates over like a felled tree (0.4 s, ease-in) and overshoots
     // to 1.12 at impact (a bounce the pose reads as a thump), settling to 1. GET UP at a steady pace
-    // (~1.4 s: roll to the knees, push up, stand) — not an exponential crawl.
+    // (~1.8 s: sit up, rock onto the feet, stand) — not an exponential crawl.
     if (this.knockTarget > 0.5 && this.knock < 1.12 && !this.knockLanded) {
       this.knockT += dt
       const t = Math.min(1, (this.knockT - 0.12) / 0.4)
@@ -118,7 +118,7 @@ export class PlayerController {
       if (t >= 1) this.knockLanded = true
     } else if (this.knockTarget > 0.5) this.knock = Math.max(1, this.knock - dt * 0.6)
     else {
-      this.knock = Math.max(0, Math.min(1, this.knock) - dt * 0.7)
+      this.knock = Math.max(0, Math.min(1, this.knock) - dt * 0.55) // get up in ~1.8 s: sit up, squat, stand
       this.knockT = 0
       this.knockLanded = false
     }

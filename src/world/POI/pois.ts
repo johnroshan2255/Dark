@@ -29,6 +29,8 @@ export interface PoiHost {
   roadCenterX(z: number): number
   riverDistance(x: number, z: number): number
   water: number
+  /** Region biome weights [desert, snow] — places are only built in the green lands (none in snow or sand). */
+  biome?(x: number, z: number): [number, number]
 }
 
 const RADIUS = [48, 16, 18, 14]
@@ -62,6 +64,9 @@ export class PoiField {
 
   private flatEnough(x: number, z: number, r: number): number | null {
     const h = this.host
+    // No farms, cabins, camps or ruins in the desert or on the snowfields (their own places come later).
+    const b = h.biome?.(x, z)
+    if (b && (b[0] > 0.25 || b[1] > 0.25)) return null
     const samples = [h.baseHeight(x, z)]
     for (let i = 0; i < 6; i++) {
       const a = (i / 6) * Math.PI * 2

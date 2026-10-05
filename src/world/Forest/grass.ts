@@ -193,7 +193,12 @@ export function createGrassCardGeometry(tufts: number, tall = 1, wide = 1): THRE
   return g
 }
 
-export function createGrassMaterial(): THREE.MeshLambertMaterial {
+/**
+ * @param band this layer's distance band from the player (m): x→y the blades GROW in (far layer, crossfading from
+ *   the near one), z→w they shrink away (the field's edge). Each blade uses its own random threshold inside the
+ *   band, so the edge is ragged and the crossfade is a gradual thinning — no ring, no line, no pop (Genshin).
+ */
+export function createGrassMaterial(band = { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin = { value: new THREE.Vector2(1e4, 1e4 + 1) }): THREE.MeshLambertMaterial {
   // Opaque individual blades in every style (over the hill's meadow is single blades too; the card-clump variant
   // `createGrassCardGeometry` stays available but read as clumps).
   const m = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })
@@ -201,15 +206,15 @@ export function createGrassMaterial(): THREE.MeshLambertMaterial {
   m.onBeforeCompile = (shader) => {
     const u = globalUniforms
     Object.assign(shader.uniforms, {
-      uTime: u.uTime, uWind: u.uWind, uGrassFade: u.uGrassFade, uCameraPos: u.uCameraPos, uPlayerPos: u.uPlayerPos,
+      uTime: u.uTime, uWind: u.uWind, uGrassBand: band, uGrassThin: thin, uCameraPos: u.uCameraPos, uPlayerPos: u.uPlayerPos,
       uKeyDirView: u.uKeyDirView, uKeyColor: u.uKeyColor,
     })
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
         `#include <common>
-uniform float uTime; uniform vec2 uWind; uniform vec2 uGrassFade; uniform vec3 uCameraPos; uniform vec3 uPlayerPos;
-attribute float tip; attribute float flower; attribute vec2 bladeRoot; attribute float bladeId; varying float vTip;
+uniform float uTime; uniform vec2 uWind; uniform vec4 uGrassBand; uniform vec2 uGrassThin; uniform vec3 uCameraPos; uniform vec3 uPlayerPos;
+attribute float tip; attribute float flower; attribute vec2 bladeRoot; attribute float bladeId; attribute float iDensity; attribute vec2 iSlope; varying float vTip;
 ${GUST_GLSL}
 float gHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 vec4 gBW; float gGust;`,
@@ -225,14 +230,29 @@ vec4 gBW; float gGust;`,
           // orbits ~8 m around the player, so camera-relative thresholds swept through the meadow on every look
           // and whole tufts popped in and out — the "glitter" when moving the camera.
           float dist = distance(bw.xz, uPlayerPos.xz);
-          // Distance shrink + thinning: far blades collapse (fewer rasterised); thinning is a smooth shrink too.
-          float fade = 1.0 - smoothstep(uGrassFade.x, uGrassFade.y, dist);
-          // Thinning ${isOverland() ? 'starts late and stays mild (a short dense field must read solid to its edge)' : 'from a third of the radius'}.
-          float keep = 1.0 - smoothstep(uGrassFade.x * ${isOverland() ? '0.75' : '0.35'}, uGrassFade.y, dist) * ${isOverland() ? '0.4' : '0.65'};
-          fade *= 1.0 - smoothstep(keep - 0.12, keep, bladeId);
+          // EVERY BLADE ON ITS OWN: a random threshold per blade AND per patch (the patch origin re-shuffles which
+          // blades go first), so density, distance thinning and the field's edge never repeat patch to patch —
+          // no rows, no rings, no squares. All transitions are a smooth shrink (blades grow in / out, no pop).
+          vec3 patchO = (modelMatrix * vec4(instanceMatrix[3].xyz, 1.0)).xyz;
+          float h = fract(bladeId * 7.31 + gHash(patchO.xz) * 13.7);
+          float h2 = gHash(bw.xz + 5.3);
+          // Local density 0..1 (meadow vs forest floor vs verge, interpolated per patch — GrassField): a soft
+          // threshold, so a patch at 0.4 shows 40 % of its blades instead of all-or-nothing squares.
+          float fade = 1.0 - smoothstep(iDensity - 0.12, iDensity, h);
+          // Band: grow in (far layer) and shrink out (edge), each blade at its own distance (±18 % of the band).
+          float jit = (h2 - 0.5) * 0.36;
+          fade *= smoothstep(uGrassBand.x, uGrassBand.y, dist + jit * (uGrassBand.y - uGrassBand.x));
+          fade *= 1.0 - smoothstep(uGrassBand.z, uGrassBand.w, dist + jit * (uGrassBand.w - uGrassBand.z));
+          // Distance thinning toward the edge (fewer blades rasterised far away), random per blade.
+          float keep = 1.0 - smoothstep(uGrassThin.x, uGrassThin.y, dist) * ${isOverland() ? '0.45' : '0.6'};
+          fade *= 1.0 - smoothstep(keep - 0.15, keep, h);
           if (flower > 0.5 && gHash(bw.xz) > 0.1) fade = 0.0;
           vec2 rootL = bladeRoot;
           transformed = vec3(rootL.x, 0.0, rootL.y) + (transformed - vec3(rootL.x, 0.0, rootL.y)) * fade;
+          // ON THE SLOPE: each blade's root sits on the terrain under it (the patch's local height gradient,
+          // GrassField) — a flat 1 m patch on a hillside buried its uphill blades and floated its downhill ones,
+          // which stacked into terraced rows across every slope.
+          transformed.y += dot(iSlope, rootL);
           // Per-blade height variety.
           transformed.y *= 0.8 + 0.45 * gHash(bw.xz + 3.1);
           // Blades thicken with distance (base widens, tip stays a point) so a far blade never thins below a
@@ -288,6 +308,6 @@ vec4 gBW; float gGust;`,
         #include <opaque_fragment>`,
       )
   }
-  m.customProgramCacheKey = () => `grass-v6-blades${isOverland() ? '-over' : ''}`
+  m.customProgramCacheKey = () => `grass-v7-blades${isOverland() ? '-over' : ''}`
   return m
 }

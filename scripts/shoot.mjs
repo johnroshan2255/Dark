@@ -2,7 +2,8 @@
 //   npm run shot -- <outdir> <shots.json>        env: PORT (5173), W/H (1280×720)
 // shots.json: [{ name, seed, tier, hour, look, x, z, yaw, pitch, cam: 'fpp'|'tpp', drive, keys, keysMs, wait, eval }]
 //   x/z teleport the player (yaw/pitch aim; forward = (−sin yaw, −cos yaw)), `drive` parks the truck there and gets in,
-//   `keys` are held for keysMs (e.g. ["KeyW"] to drive), `eval` is a JS body run with `g` = the Game (returned as info.eval).
+//   `keys` are held for keysMs (e.g. ["KeyW"] to drive), `eval` is a JS body run with `g` = the Game (returned as info.eval),
+//   `pre` is a JS body run with `g` BEFORE the wait (e.g. toggle a feature, then measure it).
 // Prints per shot: position, ground height, chunks, tier, fps, GPU/CPU ms, draws, tris → use it to verify a
 // change at a spot AND to measure its cost per tier (see skills/profiling). Uses the local Google Chrome (Metal GPU).
 import puppeteer from 'puppeteer-core'
@@ -40,7 +41,7 @@ for (const s of shots) {
     if (s.hour !== undefined) { g.tod.hours = s.hour; g.tod.dayLengthMinutes = 0 }
     if (s.cam) g.updateSettings({ camera: s.cam })
     if (s.x !== undefined) {
-      const y = g.world.fields.height(s.x, s.z) + 0.2
+      const y = (g.world.fields.surface ?? g.world.fields.height).call(g.world.fields, s.x, s.z) + 0.2
       p.teleport(new (Object.getPrototypeOf(p.curr).constructor)(s.x, y, s.z))
     }
     if (s.yaw !== undefined) p.yaw = s.yaw
@@ -55,6 +56,7 @@ for (const s of shots) {
     }
     if (s.flashlight !== undefined) g.lighting.flashlightOn = s.flashlight
     if (s.nightmare) g.tod.setNightmare(true)
+    if (s.pre) new Function('g', s.pre)(g)
   }, s)
   // wait for streaming to settle at the new spot
   await page.waitForFunction(() => window.__game.worldReadiness() >= 1 && window.__game.world.stats.pending === 0, { timeout: 60_000, polling: 100 }).catch(() => console.log('  (readiness timeout)'))

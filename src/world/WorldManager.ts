@@ -3,21 +3,22 @@ import type { PhysicsWorld } from '../physics/PhysicsWorld'
 import type { MaterialLibrary } from '../rendering/materials/MaterialLibrary'
 import { ChunkVisibility } from '../optimization/culling/ChunkVisibility'
 import { chunkDistance, selectLod } from '../optimization/lod/LodSelector'
-import { CHUNK_DATA_CACHE, CHUNK_SIZE, RADIUS } from './constants'
+import { CELL_SIZE, CHUNK_DATA_CACHE, CHUNK_RES, CHUNK_SIZE, RADIUS } from './constants'
 import type { QualitySettings } from '../rendering/quality/QualityTiers'
 import { createPropGeometries, type PropGeometries } from './Forest/propGeometries'
 import { ChunkStreamer } from './Streaming/ChunkStreamer'
 import { LruCache } from './Streaming/LruCache'
-import { chunkKey, type ChunkData } from './types'
+import { chunkKey, ICE_SNOW, type ChunkData } from './types'
 import { WorldChunk, type ChunkDetail } from './WorldChunk'
 import { styledGrass, GrassField } from './Forest/GrassField'
 import { WorldFields } from './WorldFields'
 import { groundPalette } from '../rendering/artStyle'
+import { sampleHeight } from './Terrain/generateTerrain'
 
 /** Soft time budget for chunk mesh builds per frame (count limit comes from the tier). */
 const BUILD_BUDGET_MS = 3
 
-export type WorldQuality = Pick<QualitySettings, 'name' | 'renderRadius' | 'lodRings' | 'plants' | 'buildPerFrame' | 'grass' | 'trees'>
+export type WorldQuality = Pick<QualitySettings, 'name' | 'renderRadius' | 'lodRings' | 'plants' | 'buildPerFrame' | 'grass' | 'trees' | 'vegDetail'>
 
 /**
  * Owns chunk lifecycle: request (worker) → cache → build → LOD/cull → physics → unload.
@@ -36,7 +37,7 @@ export class WorldManager {
   private centerZ = Number.NaN
   private q: WorldQuality = {
     name: 'low', renderRadius: 2, lodRings: [1.5, 2.2], plants: false, buildPerFrame: 1,
-    grass: { radius: 16, density: 1.1, blades: 5 }, trees: { near: 1 },
+    grass: { radius: 16, density: 1.1, blades: 5 }, trees: { near: 1 }, vegDetail: { farRocks: false, lean: true },
   }
   private detail: ChunkDetail = { plants: false, treeNear: 1, farRocks: false, lean: true }
   /** Dense grass around the player (one draw call). */
@@ -44,7 +45,7 @@ export class WorldManager {
   /** Chebyshev radius (chunks) around the player inside which every chunk is built (see update). */
   builtRadius = 0
 
-  stats = { loaded: 0, visible: 0, culled: 0, instances: 0, drawnInstances: 0, pending: 0, buildMs: 0, genMs: 0, physicsChunks: 0 }
+  stats = { shoreVisible: 0, loaded: 0, visible: 0, culled: 0, instances: 0, drawnInstances: 0, pending: 0, buildMs: 0, genMs: 0, physicsChunks: 0 }
 
   constructor(
     readonly seed: number,
@@ -56,7 +57,7 @@ export class WorldManager {
     this.fields = new WorldFields(seed)
     this.fields.palette = groundPalette() // main-thread copy (grass, HUD); the workers get it per request
     this.geos = createPropGeometries()
-    this.grass = new GrassField(mats.grass, this.fields, this.chunks)
+    this.grass = new GrassField(mats.grass, mats.grassFar, mats.grassNearU, mats.grassFarU, this.fields, this.chunks)
     this.root.add(this.grass.root)
     this.streamer = new ChunkStreamer(seed, (d) => {
       const key = chunkKey(d.cx, d.cz)
@@ -68,8 +69,8 @@ export class WorldManager {
   /** Apply tier settings. A radius change re-evaluates the ring on the next update. */
   setQuality(q: WorldQuality): void {
     const radiusChanged = q.renderRadius !== this.q.renderRadius
-    this.q = { ...q, lodRings: [...q.lodRings] as [number, number] }
-    this.detail = { plants: q.plants, treeNear: q.trees.near, farRocks: q.name !== 'low', lean: q.name === 'low' }
+    this.q = { ...q, lodRings: [...q.lodRings] as [number, number], vegDetail: { ...q.vegDetail } }
+    this.detail = { plants: q.plants, treeNear: q.trees.near, farRocks: q.vegDetail.farRocks, lean: q.vegDetail.lean }
     this.grass.configure(styledGrass(q.grass))
     if (radiusChanged) this.centerX = this.centerZ = Number.NaN
   }
@@ -80,6 +81,53 @@ export class WorldManager {
 
   private inRing(cx: number, cz: number, r: number): boolean {
     return Math.max(Math.abs(cx - this.centerX), Math.abs(cz - this.centerZ)) <= r
+  }
+
+  private frame = 0
+
+  /** Terrain height from the loaded chunk data (null where no chunk is loaded) — the rendered surface, and far
+   *  cheaper than `fields.height` (no noise / road-network queries): per-frame consumers should use this. */
+  groundAt(x: number, z: number): number | null {
+    const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE)
+    const c = this.chunks.get(chunkKey(cx, cz))
+    if (!c) return null
+    const lx = x - cx * CHUNK_SIZE, lz = z - cz * CHUNK_SIZE
+    const h = sampleHeight(c.data.heights, lx, lz)
+    if (h >= WorldFields.WATER) return h
+    // Frozen water in the snow: the surface is the ice (same rule as the physics heightfield).
+    const vi = Math.min(CHUNK_RES, Math.round(lz / CELL_SIZE)) * (CHUNK_RES + 1) + Math.min(CHUNK_RES, Math.round(lx / CELL_SIZE))
+    return c.data.biome[vi * 2 + 1] > ICE_SNOW ? WorldFields.WATER : h
+  }
+
+  /**
+   * How many visible chunks have water the camera can actually see: each submerged sample point of a visible
+   * shore chunk is tested for line of sight over the loaded terrain (10 height lookups along the ray). A river
+   * hidden behind a hill doesn't trigger the planar reflection. ≤ ~40 rays, chunk-array lookups only (~0.05 ms).
+   */
+  private waterInView(cam: THREE.Vector3): number {
+    let n = 0
+    for (const chunk of this.chunks.values()) {
+      const pts = chunk.waterPts
+      if (!pts || !chunk.isVisible) continue
+      const ox = chunk.data.cx * CHUNK_SIZE, oz = chunk.data.cz * CHUNK_SIZE
+      for (let k = 0; k < pts.length; k += 2) {
+        const px = ox + pts[k], pz = oz + pts[k + 1], py = WorldFields.WATER
+        let clear = true
+        for (let t = 0.1; t < 0.95; t += 0.09) {
+          const x = cam.x + (px - cam.x) * t, z = cam.z + (pz - cam.z) * t, y = cam.y + (py - cam.y) * t
+          const g = this.groundAt(x, z)
+          if (g !== null && g > y + 0.3) {
+            clear = false
+            break
+          }
+        }
+        if (clear) {
+          n++
+          break
+        }
+      }
+    }
+    return n
   }
 
   /** True once the chunk under (x, z) has both a mesh and colliders. */
@@ -119,6 +167,8 @@ export class WorldManager {
       if (this.physics.hasChunk(chunk.key)) physicsChunks++
     }
     this.visibility.update(camera, this.chunks.values())
+    // Water in view (planar reflections render only then), re-tested every 4th frame.
+    if ((this.frame++ & 3) === 0) this.stats.shoreVisible = this.waterInView(camera.position)
     this.grass.update(focus)
 
     // Largest ring around the player whose chunks are ALL built: the horizon terrain only discards inside it,
@@ -165,6 +215,7 @@ export class WorldManager {
     for (const [key, chunk] of this.chunks) {
       if (!this.inRing(chunk.data.cx, chunk.data.cz, keepR)) {
         this.physics.removeChunk(key)
+        this.physics.broken.delete(key) // smashed props are rebuilt when you come back
         chunk.dispose()
         this.chunks.delete(key)
       }

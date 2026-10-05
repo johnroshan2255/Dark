@@ -31,7 +31,7 @@ self.onmessage = (e: MessageEvent<ChunkRequest | FarRequest>) => {
   const post = (self as unknown as DedicatedWorkerGlobalScope).postMessage.bind(self)
   if ('type' in msg && msg.type === 'far') {
     const far = generateFarTerrain(gen.fields, msg.cx, msg.cz, msg.size, msg.res)
-    post({ id: msg.id, far }, [far.heights.buffer, far.colors.buffer])
+    post({ id: msg.id, far }, [far.heights.buffer, far.colors.buffer, far.canopy.buffer])
     return
   }
   const data = gen.generateChunk(msg.cx, msg.cz)

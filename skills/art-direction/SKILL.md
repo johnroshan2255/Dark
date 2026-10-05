@@ -15,7 +15,9 @@ roadside props. This skill lists the real-time techniques that get us there with
 | Reference trait | Technique | Where |
 |---|---|---|
 | **GENSHIN DAY (default start 10:30)** | Saturated blue zenith, white cumulus (`uSkyCloudWhite`), bright sky-blue hemi fill (light cool shadows), low haze, sat 1.2, no vignette/grain; vivid green ground palette; warm-grey mossy rocks. Night/dusk/nightmare keep the horror mood | `TimeOfDay.ts` DAY, `skyShader.ts`, `groundColor.ts` |
-| BIOMES (Genshin regions) | 900 m forest / desert / snowfield cells, 260 m warped blends, altitude snow line; dune-gold ground with ripples, blue-white snow with sparkle, frosted conifers / sun-dried snags, stonier ground, no grass on snow, biome-tinted fog; HUD shows the biome name | `world/Biomes.ts`, `groundColor.ts`, `scatter.ts`, `WorldChunk.ts`, `stylize.ts` (terrain) |
+| BIOMES (Genshin regions) | 900 m forest / desert / snowfield cells, 260 m warped blends, altitude snow line; dune-gold ground with ripples, blue-white snow with sparkle, stonier ground, no grass on snow; HUD shows the biome name | `world/Biomes.ts`, `groundColor.ts`, `scatter.ts`, `WorldChunk.ts`, `stylize.ts` (terrain) |
+| A biome is a PLACE, not a tint | DESERT: saguaros + Joshua trees (own species, replace the forest ones → no extra draws), agaves + dry shrubs, flat-topped mesas (noise threshold → ~50° cliffs) with red/cream sandstone strata on steep terrain and rocks, sand-drifted road, hot bleached air (pale haze, deep zenith, orange bounce, no mist, no rain). SNOW: snow on up-facing tree shelves / rock tops / roofs (biome cover, front faces only so undersides stay dark green), cold blue-green conifers under it, packed-snow road with icy ruts, falling snow, frozen water (still mirror, dark clear ice, broken crack network, drifted snow), cold air with strong blue bounce light (light blue shadows) | `Forest/desertFlora.ts`, `WorldFields.naturalHeight` (mesas), `stylize.ts` `biomeCover` + terrain, `biome/BiomeMap.ts`, `weather/BiomeAir.ts`, `particles/RainParticles.ts` (snow), `water/Water.ts` (ice) |
+| Reflections in lakes | Planar reflection (HIGH): trees, hills, clouds and sun mirrored in water and ice; ripple-distorted on water, crisp on ice. LOW/MEDIUM mirror the sky colour | `water/PlanarReflection.ts` |
 | Valley road, no walls | Slope-limited valley banks, places flattened on the valley floor, secondary roads graded within ±3 m of the ground on embankments (before: 25 m walls at the shoulder, trails on walls, trenches through farms) | `WorldFields.ts`, `RoadNetwork.ts` (skills/terrain §2) |
 | Volumetric ground mist | Analytic height fog in every material/sky/water (all tiers) + drifting noise fog banks in the shafts pass (MED/HIGH); dawn valleys fill with mist, hilltops stay clear | `skyShader.ts` `MIST_GLSL`, `GodRaysShader.ts`, `TimeOfDay.ts` (skills/fog) |
 | Tall bare trunks | Canopies start ≥ 4 m up (spruce 4.4, fir 4.1, pine pads 5.2, birch crown 6.9); foliage cards within 1.4–3 m of the eye (2.5–7 m in the driving view) dither out — the view through a forest is trunks and undergrowth, never a wall of leaves | `treeFactory.ts`, `stylize` `nearFade`, `Game.ts` |
@@ -79,6 +81,14 @@ anything vegetation/wood-like (no new program), take colours from the reference 
 - Road paint: ~40 ALU on terrain fragments; zero geometry.
 - Props: +2–3 draws per road chunk (poles, fence, wires).
 - Atlas: 1024² RGBA8 + mips ≈ 5.6 MB.
+- Biome map: 8 KB texture + 8 KB staging; rebuilt in 8-row slices (~0.1 ms/frame for 8 frames) every 256 m of
+  travel; one vertex texture fetch per foliage/rock vertex, one fetch per water fragment.
+- Biome cover (snow/strata): ~15 ALU per foliage/rock fragment, 0 draws. Desert flora: saguaro L0 ≈ 400 tris,
+  Joshua ≈ 450 (vs ~600 for an overland spruce); agave 22, dry shrub 80. Snowfall: the rain draw, same budget.
+- SSAO (`postprocessing/AOShader.ts`, `QualitySettings.ao`; HIGH ½ res 10 taps, ULTRA full res 16): ≈ +0.3 ms GPU
+  on HIGH, +2 draws; debug view: `post.material.uniforms.uDebugView.value = 2` shows the AO buffer.
+- Planar reflection (MEDIUM ¼ res every 2nd frame, HIGH ½, ULTRA ¾; off on LOW; only while water is visible): +62–75 draws, +80–120 k tris, ≈ +1.5 ms GPU,
+  +0.5 ms CPU (M4, 1280×720). Its cost is draws/vertices, not pixels: target scale 0.35 vs 0.5 measured the same.
 
 ## 6. WebGL limitations
 - alphaToCoverage only with MSAA (HIGH) — elsewhere cards have hard alpha-tested edges (FXAA softens).

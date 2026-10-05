@@ -3,9 +3,11 @@ import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
 import type { Settings } from '../game/Settings'
 import { Garage } from './Garage'
+import { FEATURE_LABELS, FEATURE_LEVELS, FEATURES, PRESETS, type Level } from '../rendering/quality/QualityTiers'
 import { bigButton, FONT, fullscreen, glass, heading, label, tabButton } from './theme'
 
 type Opt<T> = { label: string; value: T }
+const LEVEL_LABEL: Record<Level, string> = { off: 'Off', low: 'Low', medium: 'Medium', high: 'High', ultra: 'Ultra' }
 
 /**
  * Settings overlay (O key, ⚙ button). Changes apply immediately and persist (Game.updateSettings).
@@ -29,21 +31,45 @@ export function SettingsPanel({ game }: { game: Game }) {
   const open = useStore(game.store, (s) => s.settingsOpen)
   const st = useStore(game.store, (s) => s.settings)
   const tier = useStore(game.store, (s) => s.tier)
+  const held = useStore(game.store, (s) => s.held)
+  const fpsCap = useStore(game.store, (s) => s.fpsCap)
   const phase = useStore(game.store, (s) => s.phase)
   const nightmare = useStore(game.store, (s) => s.nightmare)
   const touch = useStore(game.store, (s) => s.touch)
   const [tab, setTab] = useState<Tab>('garage')
   if (!open) return null
   const set = (patch: Partial<Settings>) => game.updateSettings(patch)
+  const custom = FEATURES.some((f) => st.gfx[f] !== undefined && st.gfx[f] !== 'auto')
 
   const page =
     tab === 'garage' ? (
       <Garage game={game} embedded />
     ) : tab === 'graphics' ? (
       <>
-        <Row label={`Quality (now: ${tier})`}>
-          <Seg value={st.quality} onChange={(v) => set({ quality: v })} opts={[{ label: 'Auto', value: 'auto' }, { label: 'Low', value: 'low' }, { label: 'Medium', value: 'medium' }, { label: 'High', value: 'high' }]} />
+        <Row label={`Preset (now: ${tier}${custom ? ', custom' : ''})`}>
+          <Seg testid="preset" value={st.quality} onChange={(v) => set({ quality: v, gfx: {} })} opts={[{ label: 'Auto', value: 'auto' }, { label: 'Low', value: 'low' }, { label: 'Medium', value: 'medium' }, { label: 'High', value: 'high' }, { label: 'Ultra', value: 'ultra' }]} />
         </Row>
+        <div style={{ ...label, margin: '-4px 0 12px 182px', textTransform: 'none', letterSpacing: 0.3, fontSize: 11, lineHeight: 1.5, maxWidth: 560 }}>
+          A preset sets every feature below; change any of them to make it your own. Auto picks Low–High for this device and adapts to keep 60 fps — Ultra is only used when you choose it.
+          {custom && <button style={{ ...segBtn(false), marginLeft: 8, padding: '3px 10px' }} onClick={() => set({ gfx: {} })} data-testid="gfx-reset">Reset to preset</button>}
+        </div>
+        <Row label="Hold 60 fps">
+          <Seg testid="hold60" value={st.hold60} onChange={(v) => set({ hold60: v })} opts={[{ label: 'On', value: true }, { label: 'Off', value: false }]} />
+        </Row>
+        <div style={{ ...label, margin: '-4px 0 12px 182px', textTransform: 'none', letterSpacing: 0.3, fontSize: 11, lineHeight: 1.5, maxWidth: 560, color: held || fpsCap ? '#ffd9a0' : undefined }}>
+          {fpsCap
+            ? 'Your browser is limiting the game to 30 fps (iPhone Low Power Mode or Android battery saver). Turn that off for 60 fps — lowering graphics will not help.'
+            : held
+              ? `Holding 60 fps — lowered for now: ${held}. They come back when the device has headroom.`
+              : 'On: if frames run long, the resolution drops a little first, then the costliest features step down one level (reflections, ambient occlusion, shadows…) and return when there is headroom. Your preset is the ceiling.'}
+        </div>
+        {FEATURES.map((f) => (
+          <Row key={f} label={FEATURE_LABELS[f]}>
+            <Seg testid={`gfx-${f}`} value={st.gfx[f] ?? 'auto'} onChange={(v) => set({ gfx: { ...st.gfx, [f]: v } })}
+              opts={[{ label: `Auto · ${LEVEL_LABEL[PRESETS[tier].features[f]]}`, value: 'auto' as Level | 'auto' }, ...FEATURE_LEVELS[f].map((l) => ({ label: LEVEL_LABEL[l], value: l as Level | 'auto' }))]} />
+          </Row>
+        ))}
+        <div style={{ height: 8 }} />
         <Row label="Anti-aliasing">
           <Seg testid="aa" value={st.aa} onChange={(v) => set({ aa: v })} opts={[{ label: 'Auto', value: 'auto' }, { label: 'Off', value: 'off' }, { label: 'FXAA', value: 'fxaa' }, { label: 'MSAA 2×', value: 'msaa2' }, { label: 'MSAA 4×', value: 'msaa4' }]} />
         </Row>
@@ -86,12 +112,18 @@ export function SettingsPanel({ game }: { game: Game }) {
         <Row label="View">
           <Seg testid="cam" value={st.camera} onChange={(v) => set({ camera: v })} opts={[{ label: 'First person', value: 'fpp' }, { label: 'Third person', value: 'tpp' }]} />
         </Row>
+        <Row label="Driving">
+          <Seg testid="handling" value={st.handling} onChange={(v) => set({ handling: v })} opts={[{ label: 'Arcade (Asphalt-style)', value: 'arcade' }, { label: 'Realistic', value: 'sim' }]} />
+        </Row>
+        <Row label="Auto accelerate (touch)">
+          <Seg value={st.autoAccelerate} onChange={(v) => set({ autoAccelerate: v })} opts={[{ label: 'On', value: true }, { label: 'Off', value: false }]} />
+        </Row>
         <Row label="Look sensitivity">
           <Seg value={st.lookSensitivity} onChange={(v) => set({ lookSensitivity: v })} opts={[0.5, 0.75, 1, 1.5, 2].map((v) => ({ label: `${v}×`, value: v }))} />
         </Row>
         <div style={{ ...label, marginTop: 18, marginBottom: 8 }}>Keys</div>
         <div style={keys}>
-          {[['W A S D', 'Drive / walk'], ['Shift', 'Boost · sprint'], ['Space', 'Drift (truck) · jump'], ['E', 'Get in / out'], ['F', 'Headlights · torch'], ['V', 'Camera'], ['T · G', 'Day / night · next time'], ['N', 'Nightmare'], ['O', 'Settings'], ['R', 'Weather'], ['F3', 'FPS overlay']].map(([k, v]) => (
+          {[['W A S D', 'Drive / walk'], ['S + steer', 'Drift (tap at speed)'], ['Shift', 'Nitro · sprint'], ['Space', 'Drift (truck) · jump'], ['E', 'Get in / out'], ['F', 'Headlights · torch'], ['V', 'Camera'], ['T · G', 'Day / night · next time'], ['N', 'Nightmare'], ['O', 'Settings'], ['R', 'Weather'], ['F3', 'FPS overlay']].map(([k, v]) => (
             <div key={k} style={keyRow}><span style={keyCap}>{k}</span><span>{v}</span></div>
           ))}
         </div>

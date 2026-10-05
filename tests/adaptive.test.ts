@@ -1,5 +1,6 @@
 /** AdaptiveQuality decision logic (run: npm test). Simulates frame streams; no browser needed. */
 import { AdaptiveQuality, type AdaptiveDecision } from '../src/rendering/quality/AdaptiveQuality'
+import { heldLevels, nextHoldStep, PRESETS, resolveQuality, type Feature } from '../src/rendering/quality/QualityTiers'
 
 let failures = 0
 const check = (name: string, ok: boolean, detail = '') => {
@@ -68,5 +69,42 @@ function run(opts: { seconds: number; frameMs: (scale: number, tier: number) => 
   let changes = 0
   for (let i = 0; i < 600; i++) if (a.sample(i % 100 === 99 ? 2000 : 16.67, NaN, 4, { canScaleDown: true, canScaleUp: false, canTierDown: true, canTierUp: false })) changes++
   check('ignores >250 ms hitches (tab switch)', changes === 0)
+}
+// 7. HOLD 60 on a chosen ULTRA preset: features step down costliest-first, never below their floors, and a device
+//    whose frame time depends on the features settles at 60 fps with as much kept as it can afford.
+{
+  const base = PRESETS.ultra.features
+  const steps: Feature[] = []
+  let f: Feature | null
+  while ((f = nextHoldStep(base, steps))) steps.push(f)
+  const floor = heldLevels(base, steps)
+  check('hold 60: costliest first, effects lowered evenly', steps[0] === 'reflections' && steps.slice(0, 5).join() === 'reflections,ao,shadows,volumetrics,grass', steps.slice(0, 8).join(' → '))
+  check('hold 60: floors respected (small-phone bottom)', floor.reflections === 'off' && floor.ao === 'off' && floor.shadows === 'off' && floor.view === 'low' && floor.vegetation === 'low' && floor.grass === 'off' && floor.effects === 'off', JSON.stringify(floor))
+  check('hold 60: shadows switch off last', steps[steps.length - 1] === 'shadows', steps.slice(-4).join(' → '))
+  check('hold 60: reductions resolve to real budgets', resolveQuality('ultra', heldLevels(base, ['reflections'])).reflections < resolveQuality('ultra').reflections)
+  // Simulated phone GPU: ms per feature level (rough relative costs); no GPU timer (NaN) like mobile browsers.
+  const cost = (lv: Record<Feature, string>, scale: number) => {
+    const L = (x: string) => ['off', 'low', 'medium', 'high', 'ultra'].indexOf(x)
+    return (6 + L(lv.view) * 1.2 + L(lv.vegetation) * 0.8) * scale * scale + L(lv.reflections) * 2.2 + L(lv.ao) * 1.6 + L(lv.shadows) * 1.4 + L(lv.volumetrics) * 0.6 + L(lv.grass) * 1.2
+  }
+  const a = new AdaptiveQuality()
+  const held: Feature[] = []
+  let scale = 1
+  const vsync = (ms: number) => Math.ceil(ms / 16.67 - 0.02) * 16.67 // a 60 Hz phone: 17–33 ms frames show as 33
+  let last = 0
+  for (let i = 0; i < 60 * 90; i++) {
+    const lv = heldLevels(base, held)
+    const ms = vsync(cost(lv, scale))
+    last = ms
+    const d = a.sample(ms, NaN, 4, { canScaleDown: scale > 0.65 + 1e-6, canScaleUp: scale < 1 - 1e-6, canTierDown: nextHoldStep(base, held) !== null, canTierUp: held.length > 0, canProbeTierUp: true })
+    if (!d) continue
+    if (d.kind === 'scaleDown') scale = Math.max(0.65, scale - 0.1)
+    if (d.kind === 'scaleUp') scale = Math.min(1, scale + 0.1)
+    if (d.kind === 'tierDown') { const n = nextHoldStep(base, held); if (n) held.push(n) }
+    if (d.kind === 'tierUp') held.pop()
+  }
+  const lv = heldLevels(base, held)
+  check('hold 60: simulated phone on ULTRA settles at 60 fps', last <= 16.7, `${last.toFixed(1)} ms, scale ${scale.toFixed(2)}, kept ${JSON.stringify(lv)}`)
+  check('hold 60: keeps what it can afford (not everything at the floor)', nextHoldStep(base, held) !== null)
 }
 process.exit(failures ? 1 : 0)

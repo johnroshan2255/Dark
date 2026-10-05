@@ -13,8 +13,9 @@ import { hashFloat } from './noise/rng'
 export const Biome = { Forest: 0, Desert: 1, Snow: 2 } as const
 export const BIOME_CELL = 900
 export const BIOME_BLEND = 260
-/** Altitude where snow starts / is complete (m). */
-export const SNOW_LINE = [78, 112] as const
+/** Altitude where snow starts / is complete (m). Only the big massifs (up to ~260 m) wear snow caps — Genshin's
+ *  green lands keep their hilltops green (snow belongs to the snow regions, Dragonspine). */
+export const SNOW_LINE = [135, 175] as const
 
 /** Weights (sum ≤ 1 for the named types; the rest is forest): [desert, snow]. */
 export type BiomeWeights = [number, number]

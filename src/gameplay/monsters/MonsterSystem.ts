@@ -88,7 +88,7 @@ export class MonsterSystem {
   }
 
   private ground(x: number, z: number): number {
-    return this.fields.height(x, z)
+    return this.fields.surface(x, z)
   }
 
   /** Point `dist` from the player, avoiding the camera's forward cone (spawn out of view). */

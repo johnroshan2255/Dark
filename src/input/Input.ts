@@ -15,6 +15,10 @@ export class Input {
   readonly touchMove = { x: 0, y: 0 }
   /** Touch look speed relative to mouse pixels. */
   touchLookScale = 2.4
+  /** The touch controls are in use (set by TouchControls) — arcade driving auto-accelerates then. */
+  touch = false
+  /** performance.now() of the last look input (mouse / touch drag): the chase camera waits before re-centring. */
+  lastLook = -1e9
 
   onPress(code: string, fn: () => void): void {
     this.press.set(code, fn)
@@ -42,6 +46,7 @@ export class Input {
 
   /** Returns and clears accumulated mouse movement. */
   consumeMouse(out: { x: number; y: number }): void {
+    if (Math.abs(this.dx) + Math.abs(this.dy) > 0.5) this.lastLook = performance.now()
     out.x = this.dx
     out.y = this.dy
     this.dx = this.dy = 0

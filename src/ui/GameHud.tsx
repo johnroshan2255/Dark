@@ -1,11 +1,14 @@
 import { useEffect, useRef, type CSSProperties } from 'react'
 import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
-import { POI_ICONS, poiName, type Poi } from '../world/POI/pois'
+import { POI_ICONS, poiName } from '../world/POI/pois'
+import { LANDMARK_ICONS, landmarkName } from '../world/Landmarks/landmarks'
 import { BIOME_NAMES } from '../world/Biomes'
 
 const MAP_RANGE = 600 // m shown inside the compass ring; farther places sit on the rim
-const MAX_PLACES = 6
+const MAX_PLACES = 8
+/** A compass entry: a place (farm, camp…) or a landmark (giant tree, ruins, tower…). */
+interface Mark { x: number; z: number; radius: number; icon: string; name: string }
 
 /**
  * In-game HUD in the reference's style (refer/ui): party list with colour-coded health bars (top-left)
@@ -19,13 +22,17 @@ export function GameHud({ game }: { game: Game }) {
   const marks = useRef<(HTMLSpanElement | null)[]>([])
   const nearest = useRef<HTMLDivElement>(null)
   const banner = useRef<HTMLDivElement>(null)
+  const speedo = useRef<HTMLDivElement>(null)
+  const speedNum = useRef<HTMLSpanElement>(null)
+  const nitroBar = useRef<HTMLDivElement>(null)
   const dead = useStore(game.store, (st) => st.dead)
+  const fpsCap = useStore(game.store, (st) => st.fpsCap)
   useEffect(() => {
     let id = 0
-    let places: Poi[] = []
+    let places: Mark[] = []
     let lastQuery = -1e9
     let bannerUntil = 0
-    const seen = new Set<Poi>()
+    const seen = new Set<string>()
     // Heading-up ring position of a world point (yaw 0 faces −Z = north; +X = east).
     const place = (el: HTMLSpanElement | null, dx: number, dz: number, icon?: string) => {
       if (!el) return
@@ -42,28 +49,47 @@ export function GameHud({ game }: { game: Game }) {
       const pp = game.player.curr
       if (now - lastQuery > 500) {
         lastQuery = now
-        places = game.world.fields.pois
-          .inBox(pp.x - 1500, pp.z - 1500, pp.x + 1500, pp.z + 1500)
+        const f = game.world.fields
+        const box = [pp.x - 1500, pp.z - 1500, pp.x + 1500, pp.z + 1500] as const
+        places = [
+          ...f.pois.inBox(...box).map((p) => ({ x: p.x, z: p.z, radius: p.radius, icon: POI_ICONS[p.type], name: poiName(p) })),
+          ...f.landmarks.inBox(...box).map((l) => ({ x: l.x, z: l.z, radius: l.radius + 12, icon: LANDMARK_ICONS[l.kind], name: landmarkName(l) })),
+        ]
           .sort((a, b) => Math.hypot(a.x - pp.x, a.z - pp.z) - Math.hypot(b.x - pp.x, b.z - pp.z))
           .slice(0, MAX_PLACES)
         const n = places[0]
         if (nearest.current) {
-          const biome = BIOME_NAMES[game.world.fields.biomes.dominant(pp.x, pp.z, pp.y)]
-          nearest.current.textContent = `${biome}${n ? ` · ${POI_ICONS[n.type]} ${poiName(n)} · ${Math.round(Math.hypot(n.x - pp.x, n.z - pp.z))} m` : ''}`
+          const biome = BIOME_NAMES[f.biomes.dominant(pp.x, pp.z, pp.y)]
+          nearest.current.textContent = `${biome}${n ? ` · ${n.icon} ${n.name} · ${Math.round(Math.hypot(n.x - pp.x, n.z - pp.z))} m` : ''}`
         }
-        // Arrival banner (Genshin-style area name) the first time you walk into a place.
+        // Arrival banner (Genshin-style area name) the first time you reach a place or a landmark.
         const inside = places.find((p) => Math.hypot(p.x - pp.x, p.z - pp.z) < p.radius + 10)
-        if (inside && !seen.has(inside) && banner.current) {
-          seen.add(inside)
-          banner.current.textContent = poiName(inside)
+        const id = inside && `${inside.x | 0},${inside.z | 0}`
+        if (inside && id && !seen.has(id) && banner.current) {
+          seen.add(id)
+          banner.current.textContent = inside.name
           bannerUntil = now + 3500
         }
       }
       if (banner.current) banner.current.style.opacity = now < bannerUntil ? '1' : '0'
+      // Speedometer + nitro (Asphalt-style, bottom centre) while driving.
+      const sim = game.car.sim
+      if (speedo.current) {
+        const on = game.car.driving
+        if (speedo.current.style.display !== (on ? 'flex' : 'none')) speedo.current.style.display = on ? 'flex' : 'none'
+        if (on) {
+          const kmh = `${Math.round(Math.abs(sim.speed) * 3.6)}`
+          if (speedNum.current && speedNum.current.textContent !== kmh) speedNum.current.textContent = kmh
+          if (nitroBar.current) {
+            nitroBar.current.style.transform = `scaleX(${sim.arcade ? sim.nitro.toFixed(3) : '0'})`
+            nitroBar.current.style.background = sim.nitroOn ? '#ffd24a' : sim.drifting ? '#7fe8ff' : '#3fb8ff'
+          }
+        }
+      }
       for (let i = 0; i < MAX_PLACES; i++) {
         const p = places[i], el = marks.current[i]
         if (!p) { if (el) el.style.display = 'none'; continue }
-        place(el, p.x - pp.x, p.z - pp.z, POI_ICONS[p.type])
+        place(el, p.x - pp.x, p.z - pp.z, p.icon)
       }
       const car = game.car.pos, bike = game.bike.root.position
       const ci = MAX_PLACES, bi = MAX_PLACES + 1
@@ -137,10 +163,20 @@ export function GameHud({ game }: { game: Game }) {
         <div ref={nearest} style={nearestStyle} />
       </div>
       <div ref={banner} style={bannerStyle} />
+      <div ref={speedo} style={speedoStyle}>
+        <div><span ref={speedNum} style={speedNumStyle}>0</span><span style={speedUnit}>km/h</span></div>
+        <div style={nitroTrack}><div ref={nitroBar} style={nitroFill} /></div>
+      </div>
+      {fpsCap && <div style={capStyle} data-testid="fps-cap">⚠ Your browser is limiting the game to 30 fps — turn off Low Power Mode / battery saver for 60 fps.</div>}
     </>
   )
 }
 
+const speedoStyle: CSSProperties = { position: 'fixed', left: '50%', bottom: 18, transform: 'translateX(-50%)', display: 'none', flexDirection: 'column', alignItems: 'center', gap: 4, zIndex: 9, pointerEvents: 'none', color: '#fff', textShadow: '0 2px 6px rgba(0,0,0,0.7)', font: '800 13px system-ui, sans-serif' }
+const speedNumStyle: CSSProperties = { fontSize: 34, fontStyle: 'italic', letterSpacing: -1, fontVariantNumeric: 'tabular-nums' }
+const speedUnit: CSSProperties = { marginLeft: 4, opacity: 0.8 }
+const nitroTrack: CSSProperties = { width: 180, height: 8, borderRadius: 4, background: 'rgba(0,0,0,0.45)', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.35)' }
+const nitroFill: CSSProperties = { width: '100%', height: '100%', transformOrigin: 'left center', background: '#3fb8ff', transform: 'scaleX(1)' }
 const deathStyle: CSSProperties = { position: 'fixed', inset: 0, zIndex: 20, display: 'grid', placeContent: 'center', textAlign: 'center', color: '#f2d0d0', font: '600 14px system-ui, sans-serif', background: 'radial-gradient(rgba(60,0,0,0.35), rgba(10,0,0,0.85))', pointerEvents: 'none' }
 const promptStyle: CSSProperties = { position: 'fixed', left: '50%', bottom: '22%', transform: 'translateX(-50%)', display: 'none', alignItems: 'center', gap: 8, padding: '6px 12px', borderRadius: 18, background: 'rgba(10,12,16,0.6)', color: '#fff', font: '600 13px system-ui, sans-serif', zIndex: 9, pointerEvents: 'none' }
 const keyCap: CSSProperties = { display: 'inline-grid', placeItems: 'center', width: 22, height: 22, borderRadius: 5, background: '#f1f1f1', color: '#111', fontWeight: 800 }
@@ -156,5 +192,6 @@ const placeMark: CSSProperties = { position: 'absolute', left: '50%', top: '50%'
 const carMark: CSSProperties = { ...placeMark, fontSize: 14 }
 const bikeMark: CSSProperties = { ...placeMark, fontSize: 12 }
 const nearestStyle: CSSProperties = { position: 'absolute', top: '100%', right: 0, marginTop: 6, whiteSpace: 'nowrap', font: '600 12px system-ui, sans-serif', color: '#fff', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }
+const capStyle: CSSProperties = { position: 'fixed', bottom: 64, left: '50%', transform: 'translateX(-50%)', maxWidth: '90vw', padding: '8px 14px', borderRadius: 8, background: 'rgba(20,12,4,0.78)', border: '1px solid rgba(255,190,110,0.5)', color: '#ffe2b8', font: '600 13px system-ui, sans-serif', textAlign: 'center', pointerEvents: 'none', zIndex: 9 }
 const bannerStyle: CSSProperties = { position: 'fixed', top: '16%', left: 0, right: 0, textAlign: 'center', font: '700 30px Georgia, serif', letterSpacing: 3, color: '#fff8e6', textShadow: '0 2px 10px rgba(0,0,0,0.6)', opacity: 0, transition: 'opacity 600ms', pointerEvents: 'none', zIndex: 9 }
 const arrow: CSSProperties = { position: 'absolute', left: 0, right: 0, top: '42%', textAlign: 'center', color: '#fff', fontSize: 14 }

@@ -3,6 +3,7 @@ import type { LightingParams } from '../lighting/TimeOfDay'
 import { createGodRaysMaterial, GOD_RAYS_MAX_SAMPLES, VOLUME_MAX_STEPS } from './GodRaysShader'
 import { createGradingMaterial } from './GradingShader'
 import { createBloomMaterials, createPaintMaterial } from './PaintShader'
+import { AO_MAX_SAMPLES, createAOBlurMaterial, createAOMaterial } from './AOShader'
 
 export type AAMode = 'off' | 'fxaa' | 'msaa2' | 'msaa4'
 
@@ -61,6 +62,12 @@ export class PostPipeline {
    * sampler makes WebGL reject the draw (GL_INVALID_OPERATION: sampler type mismatch).
    */
   private readonly dummyShadow: THREE.WebGLRenderTarget
+  /** SSAO (AOShader.ts): R8 targets at `aoScale` × scene RT; scale 0 = off (both passes skipped). */
+  private readonly aoMaterial = createAOMaterial()
+  private readonly aoBlurMaterial = createAOBlurMaterial()
+  private readonly aoA: THREE.WebGLRenderTarget
+  private readonly aoB: THREE.WebGLRenderTarget
+  aoScale = 0
 
   constructor() {
     this.target = new THREE.WebGLRenderTarget(1, 1, {
@@ -91,6 +98,24 @@ export class PostPipeline {
     this.dummyShadow.depthTexture.compareFunction = THREE.LessEqualCompare
     this.raysMaterial.uniforms.tShadow.value = this.dummyShadow.depthTexture
     this.material.uniforms.tDepth.value = this.target.depthTexture
+    const ao = { format: THREE.RedFormat, type: THREE.UnsignedByteType, depthBuffer: false } as const
+    this.aoA = new THREE.WebGLRenderTarget(1, 1, ao)
+    this.aoB = new THREE.WebGLRenderTarget(1, 1, ao)
+    this.aoA.texture.name = 'SSAO'
+    this.aoB.texture.name = 'SSAOBlur'
+    this.aoMaterial.uniforms.tDepth.value = this.target.depthTexture
+    this.aoBlurMaterial.uniforms.tDepth.value = this.target.depthTexture
+    this.aoBlurMaterial.uniforms.tAO.value = this.aoA.texture
+    this.material.uniforms.tAO.value = this.aoB.texture
+  }
+
+  /** Ambient occlusion budget (QualitySettings.ao): RT scale (0 = off), hemisphere samples, radius (m). */
+  setAO(scale: number, samples: number, radius: number): void {
+    this.aoScale = Math.max(0, Math.min(1, scale))
+    this.aoMaterial.uniforms.uSamples.value = Math.max(1, Math.min(AO_MAX_SAMPLES, samples))
+    this.aoMaterial.uniforms.uRadius.value = radius
+    this.material.uniforms.uAO.value = this.aoScale > 0 ? 1 : 0
+    this.applySize()
   }
 
   /** Pick the render-target format the device can actually render to. Call once after renderer creation. */
@@ -174,6 +199,14 @@ export class PostPipeline {
     this.bloomB.setSize(bw, bh)
     ;(this.bloomMats.bright.uniforms.uTexel.value as THREE.Vector2).set(1.5 / w, 1.5 / h)
     this.bloomTexel.set(1 / bw, 1 / bh)
+    const aw = Math.max(1, Math.round(w * (this.aoScale || 0.25))), ah = Math.max(1, Math.round(h * (this.aoScale || 0.25)))
+    if (this.aoScale > 0 || this.aoA.width !== 1) {
+      const sz = this.aoScale > 0 ? [aw, ah] : [1, 1]
+      this.aoA.setSize(sz[0], sz[1])
+      this.aoB.setSize(sz[0], sz[1])
+    }
+    ;(this.aoMaterial.uniforms.uTexel.value as THREE.Vector2).set(1 / aw, 1 / ah)
+    ;(this.aoBlurMaterial.uniforms.uTexel.value as THREE.Vector2).set(1 / aw, 1 / ah)
     this.material.uniforms.uAspect.value = w / h
     this.raysMaterial.uniforms.uAspect.value = w / h
   }
@@ -291,6 +324,16 @@ export class PostPipeline {
     renderer.setRenderTarget(this.target)
     renderer.render(scene, camera)
     const g = this.material.uniforms
+    if (this.aoScale > 0) {
+      const cam = camera as THREE.PerspectiveCamera
+      const a = this.aoMaterial.uniforms
+      ;(a.uProj.value as THREE.Matrix4).copy(cam.projectionMatrix)
+      ;(a.uInvProj.value as THREE.Matrix4).copy(cam.projectionMatrixInverse)
+      this.aoBlurMaterial.uniforms.uNear.value = cam.near
+      this.aoBlurMaterial.uniforms.uFar.value = cam.far
+      this.pass(renderer, this.aoMaterial, this.aoA)
+      this.pass(renderer, this.aoBlurMaterial, this.aoB)
+    }
     // Painterly filter → the grading pass reads the painted image instead of the raw render.
     let src: THREE.Texture = this.target.texture
     if (this.paintStride > 0) {
@@ -326,6 +369,10 @@ export class PostPipeline {
   }
 
   dispose(): void {
+    this.aoA.dispose()
+    this.aoB.dispose()
+    this.aoMaterial.dispose()
+    this.aoBlurMaterial.dispose()
     this.target.depthTexture?.dispose()
     this.target.dispose()
     this.raysTarget.dispose()

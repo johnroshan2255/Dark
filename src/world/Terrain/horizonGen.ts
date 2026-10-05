@@ -13,6 +13,8 @@ export interface FarTerrainData {
   res: number
   heights: Float32Array
   colors: Float32Array
+  /** Per vertex: canopy colour (rgb, linear) + forest density (a) — the shader draws tree crowns from it. */
+  canopy: Float32Array
 }
 
 /**
@@ -31,18 +33,15 @@ const TEAL = [0.02, 0.045, 0.045]
 const OLIVE_C = [0.07, 0.085, 0.03]
 const GOLD_C = [0.16, 0.13, 0.035]
 const AUTUMN = [0.22, 0.08, 0.025]
+const BW: [number, number] = [0, 0]
 
 export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, size: number, res: number): FarTerrainData {
   const n = res + 1
   const off = Array.from({ length: n }, (_, i) => farOffset(i, res, size))
   const heights = new Float32Array(n * n)
   const colors = new Float32Array(n * n * 3)
+  const canopyOut = new Float32Array(n * n * 4)
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) heights[j * n + i] = fields.height(cx + off[i], cz + off[j])
-  const mix = (c: number[], t: [number, number, number] | readonly number[], k: number) => {
-    c[0] += (t[0] - c[0]) * k
-    c[1] += (t[1] - c[1]) * k
-    c[2] += (t[2] - c[2]) * k
-  }
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
       const k = j * n + i
@@ -59,11 +58,19 @@ export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, 
       const forest = h > WorldFields.WATER + 1 ? fields.forestDensity(x, z, h) : 0
       const stand = fields.colorVariation(x * 0.4 + 57, z * 0.4 - 13)
       const canopy = stand < 0.3 ? TEAL : stand < 0.55 ? FOREST : stand < 0.75 ? OLIVE_C : stand < 0.9 ? GOLD_C : AUTUMN
-      mix(c, canopy, Math.min(1, forest * 1.4))
+      // The ground stays ground-coloured: the shader draws individual crowns (canopy colour) at this density
+      // and only blends to the mean where crowns are smaller than a pixel (HorizonTerrain).
+      canopyOut[k * 4] = canopy[0]
+      canopyOut[k * 4 + 1] = canopy[1]
+      canopyOut[k * 4 + 2] = canopy[2]
+      // Plus Genshin's lone trees scattered over every green meadow (~1 crown per 10 cells), not only groves.
+      const bw = fields.biomes.weights(x, z, BW)
+      const meadow = h > WorldFields.WATER + 1 && slope < 0.5 ? 0.1 * (1 - bw[0]) * (1 - bw[1] * 0.6) : 0
+      canopyOut[k * 4 + 3] = Math.min(1, Math.max(forest * 0.85, meadow)) // matches the thinner groves (scatter TREE_SHARE)
       colors[k * 3] = c[0]
       colors[k * 3 + 1] = c[1]
       colors[k * 3 + 2] = c[2]
     }
   }
-  return { cx, cz, size, res, heights, colors }
+  return { cx, cz, size, res, heights, colors, canopy: canopyOut }
 }

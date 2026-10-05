@@ -29,6 +29,9 @@ export interface Controls {
   steer: number
   handbrake: boolean
   boost: boolean
+  /** The brake (S / stick back) is pressed, even while the throttle is held too — arcade: a tap while steering
+   *  at speed starts a drift (Asphalt). */
+  brake?: boolean
 }
 
 export interface WheelState {
@@ -65,6 +68,11 @@ abstract class VehicleBase {
   readonly wheels: WheelState[]
   /** Signed forward speed (m/s, + = forward). */
   speed = 0
+  /** Signed rim speed of the wheels (m/s, + = rolling forward): the spin rate × radius averaged over the wheels —
+   *  faster than `speed` in a burnout or a drift, slower on locked brakes. The engine note follows it. */
+  wheelSpeed = 0
+  /** Chassis velocity at the start of the last step (before contacts) — a smashed prop gives most of it back. */
+  readonly preVel = { x: 0, y: 0, z: 0 }
   protected steerAngle = 0
   protected readonly R: typeof RAPIER
   private readonly sag: number
@@ -148,6 +156,7 @@ abstract class VehicleBase {
   step(dt: number): void {
     if (!this.enabled) return
     const lv = this.body.linvel()
+    this.preVel.x = lv.x; this.preVel.y = lv.y; this.preVel.z = lv.z
     const { f } = this.axes()
     this.speed = lv.x * f[0] + lv.y * f[1] + lv.z * f[2]
     this.body.resetForces(false)
@@ -166,14 +175,19 @@ abstract class VehicleBase {
       const w = this.body.angvel()
       this.body.setAngvel({ x: w.x * 0.5, y: 0, z: w.z * 0.5 }, false)
     }
+    let rim = 0
     for (let i = 0; i < this.wheels.length; i++) {
       const w = this.wheels[i]
       const len = this.vc.wheelSuspensionLength(i) ?? this.spec.suspension.rest
       w.lift = this.spec.suspension.rest - this.sag - len
-      w.spin = this.vc.wheelRotation(i) ?? 0
+      const spin = this.vc.wheelRotation(i) ?? 0
+      rim += ((spin - w.spin) / dt) * this.spec.wheels[i].radius
+      w.spin = spin
       w.steer = -(this.vc.wheelSteering(i) ?? 0)
       w.contact = this.vc.wheelIsInContact(i)
     }
+    const ws = rim / Math.max(1, this.wheels.length)
+    this.wheelSpeed = Number.isFinite(ws) ? ws : this.speed
   }
 
   private holding = false
@@ -246,6 +260,25 @@ export class TruckSim extends VehicleBase {
   drifting = false
   readonly wheelSlip = [0, 0, 0, 0]
   private driftHold = 0
+  /**
+   * ARCADE handling (Asphalt-style; the game's default, Settings → Handling): Rapier still does suspension,
+   * contacts and crashes, but the feel is scripted — punchy acceleration to a high top speed, the car goes where
+   * it points (no understeer), DRIFT by tapping the brake (or the handbrake) while steering at speed: the slide
+   * holds a 20–45° angle, keeps its speed and fills the NITRO bar; nitro (Shift / BOOST) burns it for a big kick;
+   * in the air the car levels itself and lands on its wheels; it practically never rolls. Off = the realistic
+   * model above (power-limited, real tyre grip) — tests cover both.
+   */
+  arcade = false
+  /** Nitro bar 0..1 (arcade): filled by drifting, air time and smashing props; burnt by the boost. */
+  nitro = 1
+  /** Nitro burning this step (arcade). */
+  nitroOn = false
+  /** Seconds airborne (all wheels off the ground). */
+  airTime = 0
+  /** Arcade drift direction: −1 sliding into a left turn, +1 right, 0 gripping. */
+  private driftDir = 0
+  private driftExit = 0
+  private steerIn = 0
 
   constructor(physics: PhysicsWorld, d: TruckDims, tune: TruckTune = STOCK_TRUCK) {
     const h = d.half
@@ -272,6 +305,139 @@ export class TruckSim extends VehicleBase {
     for (let i = 0; i < this.body.numColliders(); i++) this.colliders.push(this.body.collider(i))
   }
 
+  /** ARCADE drive (see `arcade`): longitudinal force, drift state, nitro; the wheels roll free (visuals, contacts). */
+  private driveArcade(dt: number, v: number): void {
+    const c = this.controls, vc = this.vc, T = this.tune, m = T.mass
+    const { f, u, r } = this.axes()
+    const lv = this.body.linvel()
+    const vf = v
+    const vr = lv.x * r[0] + lv.y * r[1] + lv.z * r[2]
+    const sp = Math.hypot(vf, vr)
+    this.lateral = vr
+      const contacts = this.wheels.filter((w) => w.contact).length
+    // Arcade control only on ground that is ground (not a wall or a cliff the truck has run up).
+    const grounded = contacts >= 2 && u[1] > 0.6
+    this.airTime = contacts === 0 ? this.airTime + dt : 0
+    this.steerIn += (c.steer - this.steerIn) * Math.min(1, dt * 12)
+    // ---- drift state (Asphalt: tap the brake while steering at speed; or the handbrake) ----
+    const steering = Math.abs(c.steer) > 0.3
+    if (!this.driftDir && grounded && vf > 11 && steering && (c.handbrake || c.brake || c.throttle < -0.1)) {
+      this.driftDir = Math.sign(c.steer)
+      this.driftExit = 0
+    }
+    if (this.driftDir) {
+      // Ends when the steer is released or turned the other way for a moment, or the speed is gone.
+      const holding = c.steer * this.driftDir > 0.15
+      this.driftExit = holding ? 0 : this.driftExit + dt
+      if (this.driftExit > (c.steer * this.driftDir < -0.3 ? 0.12 : 0.3) || vf < 6) this.driftDir = 0
+    }
+    const drifting = (this.drifting = this.driftDir !== 0)
+    const slip = Math.atan2(Math.abs(vr), Math.max(Math.abs(vf), 0.5))
+    this.drift += ((drifting ? Math.min(1, slip / 0.5) : 0) - this.drift) * Math.min(1, dt * 8)
+    // ---- nitro ----
+    this.nitroOn = c.boost && this.nitro > 0.01 && c.throttle > -0.1 && vf > -1
+    if (this.nitroOn) this.nitro = Math.max(0, this.nitro - dt * 0.28) // a full bar ≈ 3.6 s
+    if (drifting && grounded) this.nitro = Math.min(1, this.nitro + dt * 0.24 * Math.min(1, slip / 0.35))
+    if (this.airTime > 0.35) this.nitro = Math.min(1, this.nitro + dt * 0.15)
+    // ---- longitudinal ----
+    const top = arcadeTopSpeed(T) * (this.nitroOn ? 1.32 : 1)
+    const A = (6 + 3 * (T.force / 12)) * Math.pow(1750 / m, 0.35) * (this.nitroOn ? 1.7 : 1)
+    let a = 0
+    const thr = this.nitroOn ? Math.max(1, c.throttle) : c.throttle
+    if (c.parked || (Math.abs(thr) < 0.01 && Math.abs(vf) < 1.2 && !drifting)) {
+      this.hold()
+    } else if (thr > 0.01) {
+      a = vf < -1 ? 22 * thr : A * thr * (1 - Math.min(1.2, (vf / top) ** 2))
+    } else if (thr < -0.01) {
+      if (vf > 1) a = drifting ? -3 * -thr : -22 * -thr // braking (a tap in a corner starts a drift instead)
+      else a = vf > -9 ? -7 * -thr : 0 // reverse, ≤ 32 km/h
+    } else {
+      a = -Math.sign(vf) * (1.4 + 0.0006 * vf * vf) // coasting: engine braking + drag
+    }
+    if (drifting) a -= 0.03 * vf * (c.throttle > 0.1 ? 0.3 : 1) // a slide scrubs a little speed
+    // Gentle hills matter less than in the sim (half of gravity's pull along the slope is cancelled) — never on
+    // steep ground: no driving up walls.
+    if (Math.abs(f[1]) < 0.3) a += 0.5 * 20 * f[1]
+    if (grounded) {
+      const F = m * a
+      this.body.addForce({ x: f[0] * F, y: f[1] * F, z: f[2] * F }, true)
+      // Downforce at speed, straight DOWN (along the chassis it glued the truck to walls): planted over crests
+      // instead of floating (≈ +0.4 g at 50 m/s).
+      this.body.addForce({ x: 0, y: -m * 0.0032 * sp * sp, z: 0 }, true)
+    }
+    // Wheels: rolling free (the force above drives the chassis), brakes only to hold still, steering for show.
+    const lock = 0.55 / (1 + Math.abs(vf) * 0.04)
+    this.steerAngle += ((drifting ? -this.driftDir * 0.35 + c.steer * 0.25 : c.steer * lock) - this.steerAngle) * Math.min(1, dt * 10)
+    for (let i = 0; i < 4; i++) {
+      const front = i < 2
+      vc.setWheelEngineForce(i, 0)
+      vc.setWheelBrake(i, c.parked || (Math.abs(thr) < 0.01 && Math.abs(vf) < 1.2 && !drifting) ? (m * 20 * 0.5 * dt) / 4 : 0)
+      // Side grip is applied by afterWheels (velocity alignment); the tyres keep almost none of their own (0.12
+      // per step killed every slide: time constant 0.14 s) — none at all in a drift.
+      vc.setWheelSideFrictionStiffness(i, drifting ? 0 : 0.02)
+      if (front) vc.setWheelSteering(i, -this.steerAngle)
+      const w = this.wheels[i]
+      const target = w.contact ? Math.max(drifting ? Math.min(1, slip / 0.35) * (front ? 0.45 : 1) : 0, thr > 0.9 && vf < 3 ? 0.5 : 0) : 0
+      this.wheelSlip[i] += (target - this.wheelSlip[i]) * Math.min(1, dt * 10)
+    }
+  }
+
+  /**
+   * ARCADE grip, steering and air control at the velocity level, after the tyre impulses: the yaw rate is SET
+   * from the stick (turn radius 5.5 m + 0.32 s × speed — tight and never understeering), the horizontal velocity
+   * is ROTATED toward the nose keeping its length (grip without scrubbing speed: ~9 rad/s gripping, ~1.6 rad/s
+   * in a drift so the slide holds its angle, capped at ~45°), roll is damped hard; airborne, the chassis levels
+   * toward upright and the stick yaws it a little.
+   */
+  protected afterWheels(dt: number, v: number): void {
+    if (!this.arcade) return
+    const { f, u, r } = this.axes()
+    const lv = this.body.linvel(), w = this.body.angvel()
+    const contacts = this.wheels.filter((x) => x.contact).length
+    const st = this.steerIn
+    const dd = this.driftDir
+    if (contacts >= 2 && u[1] > 0.6) {
+      const vf = lv.x * f[0] + lv.y * f[1] + lv.z * f[2]
+      const vr = lv.x * r[0] + lv.y * r[1] + lv.z * r[2]
+      const vu = lv.x * u[0] + lv.y * u[1] + lv.z * u[2]
+      const dir = vf >= -0.5 ? 1 : -1
+      // Turn radius grows with speed (9 m at 36 km/h, 40 m at 135, 60 m at 170): quick in town, carving at speed.
+      const av = Math.abs(vf)
+      const R = 5.5 + 0.2 * av + 0.02 * av * av
+      let yawT = (-st * dir * av) / R
+      const into = st * dd
+      // In a drift the nose swings ~1.35× faster into the corner; counter-steer straightens it.
+      if (dd) yawT = ((-dd * av) / R) * (into > 0 ? 1.1 + 0.35 * into : 0.3)
+      yawT = Math.max(-2.2, Math.min(2.2, yawT))
+      const wu = w.x * u[0] + w.y * u[1] + w.z * u[2]
+      const wf = w.x * f[0] + w.y * f[1] + w.z * f[2]
+      const dwu = (yawT - wu) * Math.min(1, dt * (dd ? 7 : 11))
+      const dwf = -wf * Math.min(1, dt * 6) // roll damping
+      this.body.setAngvel({ x: w.x + u[0] * dwu + f[0] * dwf, y: w.y + u[1] * dwu + f[1] * dwf, z: w.z + u[2] * dwu + f[2] * dwf }, true)
+      // Velocity toward the nose (or the tail when reversing), keeping its length. In a drift it follows the nose
+      // at the nose's own yaw rate, corrected toward a 30–40° slide (more with the stick held into the turn).
+      // Error = the velocity's angle from the nose (forward) or from the tail (reversing), wrapped to ±π; the
+      // velocity turns toward it. (Reversing used to turn it the WRONG way — the error doubled each step and
+      // the truck stalled, rocking, instead of backing up.)
+      const theta = Math.atan2(vr, vf)
+      const slip = dir > 0 ? theta : Math.atan2(Math.sin(theta - Math.PI), Math.cos(theta - Math.PI))
+      const target = 0.52 + 0.13 * Math.max(0, into)
+      const rate = dd ? Math.max(0, Math.abs(wu) + 3 * (Math.abs(slip) - target)) : 9
+      const turn = Math.sign(slip) * Math.min(Math.abs(slip), rate * dt)
+      const ang = theta - turn
+      const len = Math.hypot(vf, vr) * (dd ? 1 : 1 - 0.08 * Math.abs(turn))
+      const nf = Math.cos(ang) * len, nr = Math.sin(ang) * len
+      this.body.setLinvel({ x: f[0] * nf + r[0] * nr + u[0] * vu, y: f[1] * nf + r[1] * nr + u[1] * vu, z: f[2] * nf + r[2] * nr + u[2] * vu }, true)
+    } else if (contacts === 0) {
+      // Air: level out (pitch / roll toward upright), keep the yaw under the stick.
+      const ex = -u[2], ez = u[0] // ω = u × worldUp = (−u.z, 0, u.x): rotates u toward up
+      const k = Math.min(1, dt * 2.5)
+      const yaw = -st * 1.4
+      this.body.setAngvel({ x: w.x * (1 - k) + ex * 3 * k, y: w.y + (yaw - w.y) * Math.min(1, dt * 3), z: w.z * (1 - k) + ez * 3 * k }, true)
+    }
+    void v
+  }
+
   /** Change the setup live (garage sliders): mass, springs, grip and tyre size go straight to Rapier. */
   retune(t: Partial<TruckTune>): void {
     Object.assign(this.tune, t)
@@ -295,6 +461,7 @@ export class TruckSim extends VehicleBase {
   }
 
   protected drive(dt: number, v: number): void {
+    if (this.arcade) return this.driveArcade(dt, v)
     const c = this.controls
     const vc = this.vc
     const T = this.tune
@@ -407,6 +574,12 @@ export class TruckSim extends VehicleBase {
     }
   }
 }
+
+/** Arcade top speed (m/s) for a setup: stock 120 kW ≈ 48 m/s (173 km/h), nitro × 1.32. */
+export function arcadeTopSpeed(t: TruckTune): number {
+  return Math.min(85, 30 + t.power * 0.15)
+}
+
 
 /** BMX dimensions (scaled bike space, gameplay/bmx/Bike). */
 export interface BikeDims {

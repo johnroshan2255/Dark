@@ -55,6 +55,8 @@ export class Car {
   private readonly lampMat: THREE.ShaderMaterial
   /** Headlamp centre and aim in car space (the spot light + beam). */
   private readonly headPos = new THREE.Vector3()
+  /** Arcade + touch screen: accelerate automatically (Settings → Auto accelerate, off by default). */
+  autoAccel = false
   /** Driver's hands on the wheel, −1 … 1 (smoothed steer input). */
   hands = 0
   readonly sim: TruckSim
@@ -87,21 +89,26 @@ export class Car {
     // the masked panels only (`paintMask` attribute) — the garage's colour picker.
     const mat = new THREE.MeshLambertMaterial({ ...(truck.map ? { map: truck.map } : {}), vertexColors: true })
     const paint = this.paint
+    const paintMask = { value: truck.paintMap }
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uPaint = paint
+      shader.uniforms.uPaintMask = paintMask
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nattribute float paintMask; varying float vPaint;')
         .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPaint = paintMask;')
       // Paint REPLACES the panel's hue (keeps its shading/luminance) so a red coat on a blue textured van is red,
       // not black; white = the model's own colours (stock look).
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\nuniform vec3 uPaint; varying float vPaint;')
+        .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint;${truck.paintMap ? '\nuniform sampler2D uPaintMask;' : ''}`)
         .replace('#include <color_fragment>', `#include <color_fragment>
         { float lum = dot(diffuseColor.rgb, vec3(0.3, 0.59, 0.11));
           float isWhite = step(2.95, uPaint.r + uPaint.g + uPaint.b);
-          diffuseColor.rgb = mix(diffuseColor.rgb, uPaint * (lum * 1.3 + 0.08), vPaint * (1.0 - isWhite)); }`)
+          // Textured models: only the body-paint texels (paint mask from the texture's dominant body hue) — rims,
+          // tyres, glass, chrome, lights, seats and rust keep their own colours.
+          float m = vPaint${truck.paintMap ? ' * texture2D(uPaintMask, vMapUv).r' : ''};
+          diffuseColor.rgb = mix(diffuseColor.rgb, uPaint * (lum * 1.3 + 0.08), m * (1.0 - isWhite)); }`)
     }
-    mat.customProgramCacheKey = () => `truck-paint-${truck.map ? 'tex' : 'flat'}`
+    mat.customProgramCacheKey = () => `truck-paint-${truck.map ? 'tex' : 'flat'}${truck.paintMap ? '-mask' : ''}`
     this.bodyMat = stylize(mat, { key: 'truck', rim: 0.45 })
     this.bodyMat.name = 'lib/truck'
     // Body as a 1-instance InstancedMesh: it then shares the wheels' (instanced) program → 1 truck program, not 2.
@@ -129,12 +136,16 @@ export class Car {
     const t = tuning ?? { ...STOCK_TRUCK, paint: '#ffffff' }
     this.sim = new TruckSim(physics, truck, t)
     this.applyLook(t)
-    // LAMPS: two head + two tail quads (additive, HDR when lit → bloom), positions from the catalogue or the body box.
+    // LAMPS: two head + two tail quads (additive, HDR when lit → bloom) ON the model's own lenses: found in the
+    // texture at load (loadModels findLamps: pale lenses facing forward, red ones facing back), else the catalogue,
+    // else a guess from the body box. Each quad sits 2 cm proud of its lens (so it passes the depth test).
     const def = vehicleDef(truck.id)
     const h = truck.half, b = truck.bottom
-    // Just OUTSIDE the body box (a lamp inside the bumper geometry fails the depth test and never shows).
-    const head = def.lamps?.head ?? [h.x * 0.62, b + h.y * 0.62, truck.front - 0.03]
-    const tail = def.lamps?.tail ?? [h.x * 0.66, b + h.y * 0.62, truck.rear + 0.03]
+    const found = truck.lamps
+    const head = found.head?.c ?? def.lamps?.head ?? [h.x * 0.62, b + h.y * 0.62, truck.front - 0.03]
+    const tail = found.tail?.c ?? def.lamps?.tail ?? [h.x * 0.66, b + h.y * 0.62, truck.rear + 0.03]
+    const headSize = found.head ? [found.head.w, found.head.h] : [0.17, 0.11]
+    const tailSize = found.tail ? [found.tail.w, found.tail.h] : [0.2, 0.08]
     this.headPos.set(0, head[1], head[2])
     const pos: number[] = [], id: number[] = [], corner: number[] = [], idx: number[] = []
     const quad = (cx: number, cy: number, cz: number, w: number, hh: number, back: boolean, lamp: number) => {
@@ -147,8 +158,8 @@ export class Car {
       idx.push(base, base + 1, base + 2, base, base + 2, base + 3)
     }
     for (const side of [-1, 1]) {
-      quad(side * head[0], head[1], head[2], 0.17, 0.11, false, 0)
-      quad(side * tail[0], tail[1], tail[2], 0.2, 0.08, true, 1)
+      quad(side * head[0], head[1], head[2], headSize[0] * 1.15, headSize[1] * 1.15, false, 0)
+      quad(side * tail[0], tail[1], tail[2], tailSize[0] * 1.1, tailSize[1] * 1.1, true, 1)
     }
     const g = new THREE.BufferGeometry()
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
@@ -254,7 +265,7 @@ export class Car {
   }
 
   park(x: number, z: number, heading: number): void {
-    this.sim.place(x, this.fields.height(x, z), z, heading)
+    this.sim.place(x, this.fields.surface(x, z), z, heading)
     this.readPose(this.curP, this.curQ)
     this.prevP.copy(this.curP)
     this.prevQ.copy(this.curQ)
@@ -277,7 +288,7 @@ export class Car {
       const x = this.pos.x - c * (this.track * 0.5 + 1.2), z = this.pos.z + s * (this.track * 0.5 + 1.2)
       p.collider.setEnabled(true)
       p.inVehicle = false
-      p.teleport(new THREE.Vector3(x, this.fields.height(x, z) + 0.2, z))
+      p.teleport(new THREE.Vector3(x, this.fields.surface(x, z) + 0.2, z))
       this.character.root.visible = true
       return true
     }
@@ -295,8 +306,12 @@ export class Car {
     const drive = this.driving && !this.player.dead
     const c = this.sim.controls
     c.throttle = drive ? Math.max(-1, Math.min(1, (i.down('KeyW') ? 1 : 0) - (i.down('KeyS') ? 1 : 0) + i.touchMove.y)) : 0
+    // Arcade on a touch screen (Asphalt): the car accelerates by itself; pulling the stick back brakes (a pull
+    // while steering at speed = drift).
+    if (drive && this.autoAccel && this.sim.arcade && i.touch && i.touchMove.y > -0.35) c.throttle = 1
     c.steer = drive ? Math.max(-1, Math.min(1, (i.down('KeyD') ? 1 : 0) - (i.down('KeyA') ? 1 : 0) + i.touchMove.x)) : 0
     c.handbrake = drive && i.down('Space')
+    c.brake = drive && (i.down('KeyS') || i.touchMove.y < -0.35)
     c.boost = drive && (i.down('ShiftLeft') || i.down('ShiftRight'))
     c.parked = !drive
     // Only simulate where the ground has colliders (the physics ring follows the player AND runs ahead of a
@@ -307,7 +322,7 @@ export class Car {
     this.sim.enabled = this.physics.hasChunk(key)
     this.readPose(this.prevP, this.prevQ)
     this.sim.step(dt)
-    this.sim.keepAbove(this.fields.height(t.x, t.z))
+    this.sim.keepAbove(this.fields.surface(t.x, t.z))
     if (this.driving) this.player.carryTo(this.seatWorld(0)) // streaming, grass, monsters follow the truck
   }
 

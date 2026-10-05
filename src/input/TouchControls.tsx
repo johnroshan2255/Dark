@@ -25,7 +25,13 @@ export function TouchControls({ game }: { game: Game }) {
   const lookId = useRef<number | null>(null)
   const last = useRef({ x: 0, y: 0 })
 
-  useEffect(() => () => void (input.touchMove.x = input.touchMove.y = 0), [input])
+  useEffect(() => {
+    input.touch = true // touch controls on screen: arcade driving auto-accelerates (Settings → Auto accelerate)
+    return () => {
+      input.touch = false
+      input.touchMove.x = input.touchMove.y = 0
+    }
+  }, [input])
 
   const showStick = (x: number, y: number, visible: boolean) => {
     if (!base.current || !knob.current) return
@@ -124,12 +130,19 @@ export function TouchControls({ game }: { game: Game }) {
         </button>
         {driving && (
           <button style={{ ...btn, background: 'rgba(232,162,58,0.35)' }} data-testid="btn-boost" {...hold('ShiftLeft')}>
-            BOOST
+            NITRO
           </button>
         )}
-        <button style={{ ...btn, width: 76, height: 76 }} data-testid="btn-jump" onPointerDown={tap('Space')}>
-          {driving ? 'DRIFT' : 'JUMP'}
-        </button>
+        {driving ? (
+          // Held like the handbrake (Space): steer + hold = drift (or pull the stick back while steering).
+          <button style={{ ...btn, width: 76, height: 76 }} data-testid="btn-jump" {...hold('Space')}>
+            DRIFT
+          </button>
+        ) : (
+          <button style={{ ...btn, width: 76, height: 76 }} data-testid="btn-jump" onPointerDown={tap('Space')}>
+            JUMP
+          </button>
+        )}
       </div>
       <div style={topRight}>
         <button style={small} onPointerDown={tap('F3')}>FPS</button>

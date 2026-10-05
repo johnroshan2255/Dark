@@ -34,10 +34,11 @@ const PALETTES: Palette[] = [
     litter: hex(0x6a9a3c), alpine: hex(0xc4b868), rock: hex(0x5c667c), sand: hex(0xd8bc7c), silt: hex(0x585e50), forest: 0.85,
   },
 ]
-// Desert (Genshin Sumeru sands): pale gold dunes, warmer ochre in the dips, red-brown rock on the slopes.
-const DUNE_L = hex(0xe6cf92)
-const DUNE_D = hex(0xc4a460)
-const DUNE_RED = hex(0xb8804e)
+// Desert (Genshin Sumeru sands): warm golden dunes, orange-ochre in the dips, red-orange rock on the slopes.
+const DUNE_L = hex(0xf0c27a)
+const DUNE_D = hex(0xd69a55)
+const DUNE_RED = hex(0xc06a38)
+const PLAYA = hex(0xdcc9a2)
 // Snowfields (Dragonspine): bright blue-white snow, cooler shaded drifts, grey-blue rock where it's steep, ice at the water.
 const SNOW = hex(0xf4f7fc)
 const SNOW_SHADE = hex(0xcbd8ea)
@@ -84,7 +85,8 @@ export function groundColor(fields: WorldFields, x: number, z: number, h: number
     const kk = 0.92 + 0.16 * fine
     d[0] *= kk; d[1] *= kk; d[2] *= kk
     if (slope > 0.25) lerp(d, DUNE_RED, Math.min(1, (slope - 0.25) * 2.5) * 0.7)
-    if (wl < 1.5) lerp(d, P.silt, Math.min(1, (1.5 - wl) / 1.5) * 0.6)
+    // Below the water line the desert is DRY: a pale cracked clay pan (playa) in basins and the river's bed.
+    if (wl < 1.5) lerp(d, PLAYA, Math.min(1, (1.5 - wl) / 1.5) * 0.85)
     lerp(out, d, w[0])
   }
   if (w[1] > 0.002) {

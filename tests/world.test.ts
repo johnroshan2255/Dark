@@ -5,12 +5,13 @@
  *  3. Physics: Rapier heightfield built by PhysicsWorld matches the render mesh (raycasts); rock hulls
  *     contain every vertex of the rendered boulder.
  *  4. Terrain layering: no cliffs at the main road's shoulder, places are flat, secondary roads sit on banks.
- *  5. Biomes: forest at the spawn, desert + snow reachable along the road, weights well-formed.
+ *  5. Biomes: forest at the spawn, desert + snow reachable along the road, weights well-formed; desert chunks
+ *     grow desert flora (saguaro / Joshua, no forest conifers), snowfields (almost) no undergrowth.
  */
 import * as THREE from 'three'
 import { group, Groups, PhysicsWorld } from '../src/physics/PhysicsWorld'
 import { CHUNK_SIZE, CHUNK_VERTS } from '../src/world/constants'
-import { PROP_STRIDE } from '../src/world/types'
+import { PROP_STRIDE, TREE_STRIDE, TreeSpecies } from '../src/world/types'
 import { Rng } from '../src/world/noise/rng'
 import { sampleHeight } from '../src/world/Terrain/generateTerrain'
 import { WorldGenerator } from '../src/world/WorldGenerator'
@@ -153,6 +154,37 @@ for (const seed of [7, 1337, 42]) {
     if (w[0] < 0 || w[1] < 0 || w[0] + w[1] > 1 + 1e-6 || Number.isNaN(w[0] + w[1])) bad++
   }
   check(`seed ${seed}: biome weights well-formed`, bad === 0, `${bad} bad`)
+  // Biome flora: chunks deep inside the desert / snow cells along the road.
+  const gen = new WorldGenerator(seed)
+  const deep = (want: number) => {
+    const out: [number, number][] = []
+    for (let z = -2900; z <= 2900 && out.length < 6; z += 64) {
+      const x = f.roadCenterX(z) + 40
+      if (f.biome(x, z, [0, 0])[want] > 0.97) out.push([Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE)])
+    }
+    return out
+  }
+  let desertTrees = 0, forestInDesert = 0, snowPlants = 0
+  const sp = new Set<number>()
+  for (const [cx, cz] of deep(0)) {
+    const t = gen.generateChunk(cx, cz).trees
+    for (let i = 0; i < t.length; i += TREE_STRIDE) {
+      const id = t[i + 5]
+      sp.add(id)
+      if (id === TreeSpecies.Cactus || id === TreeSpecies.Joshua) desertTrees++
+      if (id === TreeSpecies.Spruce || id === TreeSpecies.Fir || id === TreeSpecies.Birch) forestInDesert++
+    }
+  }
+  const snowChunks = deep(1)
+  for (const [cx, cz] of snowChunks) snowPlants += gen.generateChunk(cx, cz).plants.length / PROP_STRIDE
+  check(`seed ${seed}: desert grows saguaros + Joshua trees, no forest conifers`, desertTrees > 10 && forestInDesert === 0 && sp.has(TreeSpecies.Cactus) && sp.has(TreeSpecies.Joshua), `${desertTrees} desert trees, ${forestInDesert} forest`)
+  // (a chunk's far corners may sit just outside full snow: a stray bush there is fine; forest chunks have hundreds)
+  // Places (farms, cabins, camps, ruins) only in the green lands.
+  let badPlaces = 0
+  const allPlaces = f.pois.inBox(-3000, -4000, 3000, 4000)
+  for (const q of allPlaces) { const w = f.biomes.weights(q.x, q.z, [0, 0]); if (w[0] > 0.25 || w[1] > 0.25) badPlaces++ }
+  check(`seed ${seed}: no places in the desert or the snow (${allPlaces.length} places)`, badPlaces === 0, `${badPlaces} misplaced`)
+  check(`seed ${seed}: (almost) no undergrowth on the snowfields`, snowChunks.length > 0 && snowPlants <= 3 * snowChunks.length, `${snowPlants} plants in ${snowChunks.length} chunks`)
 }
 
 // Secondary roads never CROSS each other or cut across the main road's corridor (junctions at shared ends are
@@ -181,6 +213,28 @@ for (const seed of [7, 1337, 42]) {
   }
   check(`secondary roads never cross each other (${roads} roads, 3 seeds)`, roads > 50 && crossings === 0, `${crossings} crossings`)
   check('grid links stay out of the main road corridor', corridor === 0, `${corridor} in the corridor`)
+}
+
+// Landmarks (giant trees, windmills, ruins, towers…): deterministic, dry, off the road; the home one in view.
+{
+  let total = 0, bad = 0, same = true, homeSeen = 0
+  for (const seed of [7, 1337, 42]) {
+    const fa = new WorldGenerator(seed).fields, fb = new WorldGenerator(seed).fields
+    const la = fa.landmarks.inBox(-2000, -2000, 2000, 2000), lb = fb.landmarks.inBox(-2000, -2000, 2000, 2000)
+    same &&= JSON.stringify(la) === JSON.stringify(lb)
+    total += la.length
+    for (const l of la) if (l.y < -6 + 1 || fa.roadDistance(l.x, l.z) < l.radius + 10) bad++
+    const h = fa.landmarks.home()
+    if (h) {
+      const sx = fa.roadCenterX(8), sy = fa.height(sx, 8) + 1.7, n = Math.ceil(Math.hypot(h.x - sx, h.z - 8) / 10)
+      let ok = true
+      for (let i = 1; i < n; i++) { const t = i / n; if (fa.height(sx + (h.x - sx) * t, 8 + (h.z - 8) * t) > sy + (h.y + 50 - sy) * t - 2) ok = false }
+      if (ok) homeSeen++
+    }
+  }
+  check('landmarks are deterministic', same)
+  check(`landmarks stand on dry ground off the road (${total} in 3 × 16 km²)`, total > 40 && bad === 0, `${bad} misplaced`)
+  check('the home landmark is in view of the spawn (3 seeds)', homeSeen === 3, `${homeSeen}/3`)
 }
 
 process.exit(failures ? 1 : 0)

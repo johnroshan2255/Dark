@@ -20,6 +20,11 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
       tBloom: { value: null },
       uBloom: { value: 0 },
       tDepth: { value: null },
+      /** Ambient occlusion (AOShader.ts) and on/off. */
+      tAO: { value: null },
+      uAO: { value: 0 },
+      /** Heat shimmer 0..1 (desert, sun high): distant ground wavers. */
+      uHeat: { value: 0 },
       uNear: { value: 0.1 },
       uFar: { value: 300 },
       uFog: { value: new THREE.Vector2(50, 200) },
@@ -56,8 +61,8 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
     `,
     fragmentShader: /* glsl */ `
       #include <packing>
-      uniform sampler2D tScene, tRays, tDepth, tBloom;
-      uniform float uBloom;
+      uniform sampler2D tScene, tRays, tDepth, tBloom, tAO;
+      uniform float uBloom, uAO, uHeat;
       uniform float uNear, uFar;
       uniform vec2 uFog;
       uniform vec3 uRaysColor, uVolColor, uMistColor, uTint, uLift;
@@ -105,6 +110,13 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
       void main() {
         vec2 uv = vUv;
         vec3 col;
+        // HEAT SHIMMER: distant (40–250 m) solid ground wavers in rising hot air; the sky and the near field don't.
+        if (uHeat > 0.01) {
+          float hz = texture2D(tDepth, uv).x;
+          float hd = hz >= 0.9999 ? 0.0 : smoothstep(40.0, 160.0, -perspectiveDepthToViewZ(hz, uNear, uFar));
+          vec2 wob = vec2(sin(uv.y * 260.0 + uTime * 5.0 + sin(uv.x * 40.0 + uTime) * 2.0), sin(uv.x * 190.0 - uTime * 3.7)) * vec2(0.0011, 0.0007);
+          uv += wob * hd * uHeat;
+        }
         if (uDistortion > 0.001) {
           vec2 d = uv - 0.5;
           float r2 = dot(d, d);
@@ -115,6 +127,9 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
         } else {
           col = antialias(uv);
         }
+        // Ambient occlusion: contact shadows in creases, under trees and rocks (before the light added on top).
+        if (uAO > 0.5) col *= mix(1.0, texture2D(tAO, uv).r, 0.85);
+        if (uDebugView == 2) { gl_FragColor = vec4(vec3(uAO > 0.5 ? texture2D(tAO, uv).r : 1.0), 1.0); return; } // AO buffer only
         // Shafts live in the air: full strength over sky / fogged distance, faded over nearby solid
         // geometry (otherwise a backlit tree gets striped by its own rays).
         float z = texture2D(tDepth, uv).x;

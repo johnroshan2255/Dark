@@ -21,6 +21,8 @@ export interface AdaptiveInput {
   canScaleUp: boolean
   canTierDown: boolean
   canTierUp: boolean
+  /** Allow a blind (no GPU timer) probe of tierUp once the render scale is at its max (Hold 60 restoring features). */
+  canProbeTierUp?: boolean
 }
 
 const BUDGET_MS = 1000 / 60
@@ -138,13 +140,15 @@ export class AdaptiveQuality {
         return { kind: 'tierUp', reason: 'measured headroom' }
       }
     }
-    // Blind probe (no GPU timer, 60 Hz display): one render-scale step at a time, never a tier.
-    if (!Number.isFinite(gpuMs) && this.goodSeconds >= 10 && this.probeBlockedS <= 0 && can.canScaleUp) {
+    // Blind probe (no GPU timer, 60 Hz display): one render-scale step at a time; a tier (feature) step only when
+    // the caller allows it — every probe is watched for 3 s and reverted if it costs frames.
+    if (!Number.isFinite(gpuMs) && this.goodSeconds >= 10 && this.probeBlockedS <= 0 && (can.canScaleUp || (can.canProbeTierUp && can.canTierUp))) {
       this.goodSeconds = 0
       this.cooldownS = 2
-      this.lastProbe = 'scaleUp'
+      this.lastProbe = can.canScaleUp ? 'scaleUp' : 'tierUp'
       this.probeWatchS = 3
-      return { kind: 'scaleUp', reason: 'probe' }
+      if (this.lastProbe === 'tierUp') this.settle(1)
+      return { kind: this.lastProbe, reason: 'probe' }
     }
     return null
   }

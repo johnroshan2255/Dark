@@ -98,7 +98,9 @@ const DAY = key({
   sunColor: c(0xfff2dc), sunIntensity: 2.9, hemiSky: c(0xb4d6ff), hemiGround: c(0x6f8f4c), hemiIntensity: 1.75,
   fogColor: c(0xcfe5f8), skyZenith: c(0x2a78e4), fogStart: 140, fogEnd: 1900, exposure: 1.0, rays: 0.35, shafts: 0.2,
   clouds: 0.5, split: 0.12, saturation: 1.2, contrast: 1.02, vignette: 0.05, grain: 0,
-  haze: 0.16, cloudWhite: 1, toon: 1, fogMax: 0.62, landHaze: c(0xa8c4cc), mistDensity: 0.0035, mistBase: -3, mistFalloff: 0.1,
+  // Genshin's distance stays green under a light sky-blue veil (Windwail / Starfell vistas) — not grey-teal, and
+  // almost no ground mist by day (it pooled ~1 optical depth over every lowland: vistas read as a grey sea).
+  haze: 0.12, cloudWhite: 1, toon: 1, fogMax: 0.5, landHaze: c(0xbcd8f2), mistDensity: 0.0004, mistBase: -6, mistFalloff: 0.12,
 })
 const EVENING = key({
   // refer/roads hero: strong warm key, COOL blue-violet fill (shadows read blue), peach horizon toward the sun

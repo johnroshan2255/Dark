@@ -24,10 +24,10 @@ const TRUCK = {
 }
 const BIKE = { front: [0, 0.28, -0.476] as [number, number, number], rear: [0, 0.28, 0.442] as [number, number, number], wheelRadius: 0.28 }
 
-function world(rampDeg = 0): PhysicsWorld {
+function world(rampDeg = 0, half = 400): PhysicsWorld {
   const p = new PhysicsWorld(R)
   const ground = p.world.createRigidBody(R.RigidBodyDesc.fixed())
-  p.world.createCollider(R.ColliderDesc.cuboid(400, 0.5, 400).setTranslation(0, -0.5, 0).setCollisionGroups(group(Groups.Terrain, 0xffff)).setFriction(0.9), ground)
+  p.world.createCollider(R.ColliderDesc.cuboid(half, 0.5, half).setTranslation(0, -0.5, 0).setCollisionGroups(group(Groups.Terrain, 0xffff)).setFriction(0.9), ground)
   if (rampDeg > 0) {
     // Ramp surface starts at z = −4 on the ground and rises toward −Z.
     const t = (rampDeg * Math.PI) / 180, L = 60
@@ -160,6 +160,78 @@ for (const deg of [20, 35, 45, 55, 60]) {
   log(`truck ramp ${deg}°: height ${y.toFixed(1)} m, speed ${t.speed.toFixed(1)}`)
   check(`truck climbs a ${deg}° slope from standstill`, y > 8 && t.axesUp() > 0.3, `+${y.toFixed(1)} m in 10 s, ${t.speed.toFixed(1)} m/s`)
   p.dispose()
+}
+
+// ---------------- ARCADE (Asphalt-style handling: the game's default) ----------------
+const arcadeTruck = (p: PhysicsWorld) => /* long runs: a 6 km ground (world(0, 3000)) */ { const t = new TruckSim(p, TRUCK); t.arcade = true; t.place(0, 0, 0, 0); run(p, t, 1, {}); return t }
+{
+  const p = world(0, 3000)
+  const t = arcadeTruck(p)
+  let t100 = NaN
+  run(p, t, 14, { throttle: 1 }, (s) => { if (Number.isNaN(t100) && t.speed > 27.8) t100 = s })
+  const top = t.speed
+  check('arcade: 0→100 km/h in ~2.5–4.5 s', t100 > 2.5 && t100 < 4.5, `${t100.toFixed(1)} s`)
+  check('arcade: top speed ~160–185 km/h', top * 3.6 > 160 && top * 3.6 < 185 && t.axesUp() > 0.95, `${(top * 3.6).toFixed(0)} km/h`)
+  run(p, t, 3, { throttle: 1, boost: true })
+  check('arcade: nitro pushes past 200 km/h and burns the bar', t.speed * 3.6 > 200 && t.nitro < 0.3, `${(t.speed * 3.6).toFixed(0)} km/h, nitro ${t.nitro.toFixed(2)}`)
+  let stop = NaN
+  const z0 = pos(t).z
+  run(p, t, 6, { throttle: -1 }, () => { if (Number.isNaN(stop) && t.speed < 0.5) stop = Math.abs(pos(t).z - z0) })
+  check('arcade: hard brakes (stops from 200+ km/h in < 110 m)', stop < 110, `${stop.toFixed(0)} m`)
+}
+{
+  // Grip: full lock at 30 m/s turns hard without sliding wide, and stays on its wheels.
+  const p = world(0, 3000)
+  const t = arcadeTruck(p)
+  run(p, t, 6, { throttle: 1 })
+  run(p, t, 0.1, { throttle: 0.6 })
+  const v0 = t.speed, h = turned(t)
+  let maxLat = 0, maxRoll = 0
+  run(p, t, 2, { throttle: 0.6, steer: 1 }, () => { h.step(); maxLat = Math.max(maxLat, Math.abs(t.lateral)); maxRoll = Math.max(maxRoll, Math.abs(t.attitude().roll)) })
+  check('arcade: corners hard with no understeer (75–150° in 2 s at speed)', -h.total() > 1.3 && -h.total() < 2.6 && maxLat < 4, `${(-h.total() * 57.3).toFixed(0)}° from ${(v0 * 3.6).toFixed(0)} km/h, lateral ≤ ${maxLat.toFixed(1)} m/s`)
+  check('arcade: never rolls in a hard corner', maxRoll < 0.2 && t.axesUp() > 0.95 && !t.drifting, `max roll ${(maxRoll * 57.3).toFixed(1)}°`)
+}
+{
+  // Drift: a brake tap while steering at speed → a held slide at 20–50°, speed kept, nitro filling; then recovers.
+  const p = world(0, 3000)
+  const t = arcadeTruck(p)
+  t.nitro = 0
+  run(p, t, 5, { throttle: 1 })
+  const v0 = t.speed
+  run(p, t, 0.15, { throttle: -1, steer: 1 })
+  let frames = 0, maxSlip = 0
+  const h = turned(t)
+  run(p, t, 2.5, { throttle: 1, steer: 1 }, () => { h.step(); if (t.drifting) frames++; maxSlip = Math.max(maxSlip, Math.atan2(Math.abs(t.lateral), Math.abs(t.speed))) })
+  check('arcade: brake-tap drift holds a 25–45° slide, turning 90–270°', frames > 120 && maxSlip > 0.43 && maxSlip < 0.8 && -h.total() > 1.57 && -h.total() < 4.7, `${frames} drift frames, slide ${(maxSlip * 57.3).toFixed(0)}°, turned ${(-h.total() * 57.3).toFixed(0)}°`)
+  const vd = Math.hypot(t.speed, t.lateral)
+  check('arcade: a drift keeps its speed and fills nitro', vd > v0 * 0.75 && t.nitro > 0.3 && t.axesUp() > 0.95, `${(v0 * 3.6).toFixed(0)} → ${(vd * 3.6).toFixed(0)} km/h, nitro ${t.nitro.toFixed(2)}`)
+  run(p, t, 1.2, { throttle: 1 })
+  check('arcade: lets go of the drift cleanly', !t.drifting && Math.abs(t.lateral) < 1.5 && t.axesUp() > 0.95, `lateral ${t.lateral.toFixed(2)} m/s`)
+}
+{
+  // Reverse: S from a standstill backs up steadily (it used to stall, rocking — the grip turned the velocity the
+  // wrong way when moving backwards), steering still works, it stays straight with the stick centred.
+  const p = world()
+  const t = arcadeTruck(p)
+  const z0 = pos(t).z
+  let minV = 0
+  run(p, t, 3, { throttle: -1, brake: true }, () => { minV = Math.min(minV, t.speed) })
+  const back = pos(t).z - z0
+  check('arcade: reverses (≈ 30 km/h, steadily backwards)', t.speed < -7.5 && t.speed > -9.6 && back > 12 && Math.abs(t.lateral) < 0.5, `${(t.speed * 3.6).toFixed(0)} km/h, ${back.toFixed(1)} m back`)
+  const h = turned(t)
+  run(p, t, 2, { throttle: -1, brake: true, steer: 1 }, h.step)
+  check('arcade: steers while reversing (nose swings like a real car)', Math.abs(h.total()) > 0.6 && t.speed < -5 && t.axesUp() > 0.95, `${(h.total() * 57.3).toFixed(0)}° at ${(t.speed * 3.6).toFixed(0)} km/h`)
+}
+{
+  // Air: launched with a nose-down pitch and a roll, it levels out and lands on its wheels.
+  const p = world()
+  const t = arcadeTruck(p)
+  t.body.setTranslation({ x: 0, y: 12, z: 0 }, true)
+  t.body.setRotation({ x: 0.26, y: 0, z: 0.17, w: 0.95 }, true)
+  t.body.setLinvel({ x: 0, y: 4, z: -20 }, true)
+  let landedUp = 0
+  run(p, t, 3, { throttle: 0.5 }, () => { if (t.wheels.every((w) => w.contact)) landedUp = t.axesUp() })
+  check('arcade: levels out in the air and lands on its wheels', landedUp > 0.95 && t.axesUp() > 0.95, `up ${t.axesUp().toFixed(2)}`)
 }
 
 // ---------------- BIKE ----------------

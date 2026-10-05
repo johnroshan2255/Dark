@@ -33,6 +33,18 @@ deltas (looted/destroyed/opened).
 > dry tufts on sand), the terrain shader (`biome` attribute: ripples / sparkle) and the fog colour under the
 > player. Chunk data carries `biome` (33² × 2). Cost: generation 2.5 → ~3.3 ms/chunk (worker), mostly the wider
 > secondary-road blend. Test: spawn is forest, desert + snow on the road, weights well-formed.
+>
+> **Biome places (implemented):** the desert grows `TreeSpecies.Cactus` / `Joshua` (`Forest/desertFlora.ts`;
+> `pickSpecies` above 0.8 desert weight, a pine-and-snag rim at 0.5–0.8, density floor `0.1 × sand` because
+> forestDensity is ~0 there) and agaves / dry shrubs in the plant layer (WorldChunk picks the desert meshes by the
+> biome at each plant — the record format is unchanged). `naturalHeight` adds MESAS in the desert:
+> `sstep(0.3, 0.38, n) × 26 + sstep(0.5, 0.55, n) × 16` of a 2-octave fbm at 0.0045 — flat tops, ~50° sides. These
+> change the generated world for existing seeds (no `WORLD_GEN_VERSION` yet). Snow cover, ice and strata are
+> rendering-only (biome map texture), never gameplay. Tests: desert chunks hold saguaros + Joshua trees and no
+> forest conifers; snowfields have (almost) no undergrowth. Generation cost unchanged (~4.1 ms/chunk in the test).
+> Desert relief = `WorldFields.dunes` (transverse dunes across a SW wind: concave windward slope, sharp crest at 78 %
+> of the 72 m spacing, slip face at ~34°, crest height 4–15 m, warped crest lines) + mesas; snow relief adds
+> `drifts` (soft 1–3 m mounds) and the main road gets 0.7 m plough banks just outside its edges in the snow.
 
 ```
 seed (uint32)
@@ -185,3 +197,24 @@ a grid link, a main link, or the driveway of a place earlier in (z, x) order. Th
 driveway (+ the strict place order) keeps every decision independent of build order → identical on all
 clients. `RoadNetwork.crosses` (junctions within 28 m of an end are allowed) is tested over 348 roads / 3 seeds
 in `tests/world.test.ts`.
+
+
+## Landscape & voxel formations (2026-10-05)
+Genshin-like relief: `WorldFields.naturalHeight` adds terraced plateaus (`pn` fbm at 0.0022, three smoothstep tiers
+of 16/14/12 m, transitions wide enough that secondary-road banks stay ≤ 2.2 m/m — tested). Trees in groves:
+`forestDensity = clamp((n − 0.5) × 3.2)`. Rock formations: `FormationField` (region 340 m, ≤ 2 per region, kinds
+by biome, hash-chosen, rejected near roads / rivers / places / water); `formationSdf` (value noise3 + ellipsoid /
+capsule / torus SDFs) → `surfaceNets` (naive surface nets, winding verified: 100 % outward on a sphere) in the
+worker that owns the formation's centre (`ChunkData.fm*`, chunk-local; the chunk's culling box grows to hold it).
+Build cost 1.5–33 ms per formation (worker), 1.6–7.9 k tris. Physics: `ColliderDesc.trimesh` on the chunk body.
+
+## Landmarks & places, not a road (2026-10-05)
+The user compares against real Genshin screenshots (Windrise, Springvale, Windwail, Cider Lake, Sumeru desert,
+Dragonspine) — the world must read as PLACES to travel to. `LandmarkField` (`world/Landmarks/landmarks.ts`): region
+700 m, p 0.8, the highest of 16 candidates that fits (dry, 6 m relief, off road / river / places / formations),
+kind from the biome AT the chosen spot; `home()` = giant oak 180–800 m ahead, visible from the spawn eye (tested).
+Meshes are primitives in `landmarkGeometry.ts` (same vertex format as places), scaled per kind (`LANDMARK_SCALE`).
+Never draw far content with `materials.vegetation`: its `cullFade` dither removes everything past the chunk ring.
+Scatter clears trees within radius + 24 m (landmarks stand in clearings); grass skips stone footprints.
+Horizon terrain: dry land never sinks under the water plane (it flooded every lowland → "grey sea"), and the shader
+draws distant tree crowns from a per-vertex canopy colour + density. Daytime mist is ~0 in the Genshin style.

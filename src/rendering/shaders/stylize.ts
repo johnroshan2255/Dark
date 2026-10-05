@@ -4,6 +4,7 @@ import { globalUniforms, GUST_GLSL, SWAY_GLSL } from './uniforms'
 import { isOverland, isStorybook } from '../artStyle'
 import { ATLAS_SURF, PAINT_FRAG_PARS, PAINT_VERT_PARS, paintVert } from './paint'
 import { WorldFields } from '../../world/WorldFields'
+import { BIOME_GLSL } from '../biome/BiomeMap'
 
 const WATER_LEVEL = WorldFields.WATER
 
@@ -43,6 +44,12 @@ export interface StylizeOptions {
   sway?: boolean
   /** Darken with ground wetness (uWet): rain-soaked grass, bark, rocks. */
   wet?: boolean
+  /**
+   * BIOME COVER from the biome map (rendering/biome/BiomeMap.ts, 1 vertex texture fetch): in the snow, up-facing
+   * surfaces (tree shelves, rock tops, roofs) carry snow broken up by noise; 'rock' also gets layered sandstone
+   * STRATA in the desert. Per instance (keyed by its origin) for instanced meshes, per vertex for merged ones.
+   */
+  biomeCover?: 'foliage' | 'rock'
 }
 
 /**
@@ -71,6 +78,50 @@ vec3 overlandPalette(vec3 c) {
   c = mix(vec3(l), c, 0.88);
   return c * 0.94 + 0.012;
 }`
+
+/**
+ * SNOW & SAND surface (terrain): footprints / tyre tracks from the trail map (rendering/trails/TrailMap.ts) and
+ * the micro-relief that makes the ground read as a material, not a colour — sand WIND RIPPLES and snow SASTRUGI
+ * (wind-carved ridges) as normal perturbations, plus sun GLINTS. World-space, faded with distance (no aliasing).
+ */
+const TRAIL_GLSL = /* glsl */ `
+uniform sampler2D uTrailMap; uniform vec4 uTrailRect; uniform float uTrailOn, uSurfaceDetail;
+float trailAt(vec2 xz) {
+  if (uTrailOn < 0.5) return 0.0;
+  vec2 uv = (xz - uTrailRect.xy) * uTrailRect.zw;
+  if (uv.x <= 0.002 || uv.y <= 0.002 || uv.x >= 0.998 || uv.y >= 0.998) return 0.0;
+  return texture2D(uTrailMap, uv).r;
+}
+// Ground micro-relief gradient (world xz) for sand ripples + snow sastrugi + track imprints.
+vec2 softGroundGrad(vec2 wp, vec2 biome, float dist) {
+  vec2 g = vec2(0.0);
+  if (uSurfaceDetail < 0.5) return g; // LOW: no micro-relief, glints or imprints (uniform branch → skipped)
+  float near = 1.0 - smoothstep(18.0, 55.0, dist);
+  if (biome.x > 0.02 && near > 0.0) {
+    vec2 dir = vec2(0.8, 0.6);
+    float ph = dot(wp, dir) * 2.6 + st_noise(wp * 0.3) * 4.0;
+    // Asymmetric ripple (steeper lee side): derivative of sin + a little second harmonic.
+    g += dir * (cos(ph) + 0.45 * cos(2.0 * ph + 0.6)) * 2.6 * 0.035 * biome.x * near;
+  }
+  if (biome.y > 0.02 && near > 0.0) {
+    vec2 q = vec2(dot(wp, vec2(0.8, 0.6)), dot(wp, vec2(-0.6, 0.8)));
+    float e = 0.15;
+    float n0 = st_noise(q * vec2(0.9, 3.2));
+    float nx = st_noise((q + vec2(e, 0.0)) * vec2(0.9, 3.2)), nz = st_noise((q + vec2(0.0, e)) * vec2(0.9, 3.2));
+    vec2 gq = vec2(nx - n0, nz - n0) / e * 0.025; // soft: the cel-shading ramp turns strong bumps into hard stripes
+    g += vec2(gq.x * 0.8 - gq.y * 0.6, gq.x * 0.6 + gq.y * 0.8) * biome.y * near;
+  }
+  // Tracks: pressed-in imprints (height −0.08 m × depth) → their walls catch the light.
+  float soft = clamp(biome.x + biome.y, 0.0, 1.0);
+  if (soft > 0.02 && dist < 30.0) {
+    float te = 0.11;
+    float tx = trailAt(wp + vec2(te, 0.0)) - trailAt(wp - vec2(te, 0.0));
+    float tz = trailAt(wp + vec2(0.0, te)) - trailAt(wp - vec2(0.0, te));
+    g -= vec2(tx, tz) / (2.0 * te) * (0.08 + 0.06 * biome.y) * soft;
+  }
+  return g;
+}
+`
 
 const NOISE = /* glsl */ `
 float st_hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -108,6 +159,13 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       uCullFade: u.uCullFade,
       uNearFade: u.uNearFade,
       uWet: u.uWet,
+      uBiomeMap: u.uBiomeMap,
+      uBiomeRect: u.uBiomeRect,
+      uTrailMap: u.uTrailMap,
+      uTrailRect: u.uTrailRect,
+      uTrailOn: u.uTrailOn,
+      uSurfaceDetail: u.uSurfaceDetail,
+      uBiomeActive: u.uBiomeActive,
       ...skyUniforms,
     })
     let vs = shader.vertexShader
@@ -126,6 +184,25 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
           vWPos = (modelMatrix * wp4).xyz; }
         ${o.cheapFog ? 'vFogSky = vec3(-1.0);' : 'vFogSky = skyColor(normalize((vec4(normalize(mvPosition.xyz), 0.0) * viewMatrix).xyz), false);'}`,
       )
+    if (o.biomeCover) {
+      vs = vs
+        .replace('#include <common>', `#include <common>\n${BIOME_GLSL}\nvarying vec2 vBiomeW; varying float vSnowUp;`)
+        .replace(
+          '#include <fog_vertex>',
+          `#include <fog_vertex>
+        {
+          #ifdef USE_INSTANCING
+            vec3 bOrigin = (modelMatrix * vec4(instanceMatrix[3].xyz, 1.0)).xyz;
+            vec3 bN = mat3(modelMatrix) * mat3(instanceMatrix) * objectNormal;
+          #else
+            vec3 bOrigin = (modelMatrix * vec4(transformed, 1.0)).xyz;
+            vec3 bN = mat3(modelMatrix) * objectNormal;
+          #endif
+          vBiomeW = biomeWithSnowLine(bOrigin.xz, bOrigin.y);
+          vSnowUp = normalize(bN).y;
+        }`,
+        )
+    }
     if (o.nearFade) {
       // Canopy parts of an instance within uNearFade of the eye COLLAPSE toward the trunk (cards, tufts and the
       // overland solid shelves; trunks/props keep their shape) — a smooth shrink instead of a dither, which read
@@ -172,7 +249,8 @@ float skyHaze(float d) { return uSkyHaze.x * (1.0 - exp(-max(d - 12.0, 0.0) / uS
 varying vec3 vFogSky; varying vec3 vWPos;
 ${fs.includes('uSkyMist') ? '' : MIST_GLSL}
 ${o.terrain || o.surface !== undefined ? 'uniform sampler2D uBrush;\n' : ''}${o.surface !== undefined ? PAINT_FRAG_PARS.replace('uniform sampler2D uBrush;', '') : ''}
-${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying vec3 vWorldPos; varying float vUpN;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\n' + NOISE + GUST_GLSL : ''}
+${o.biomeCover ? 'varying vec2 vBiomeW; varying float vSnowUp;\n' + (o.terrain ? '' : NOISE) : ''}
+${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying vec3 vWorldPos; varying float vUpN;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\n' + NOISE + GUST_GLSL + TRAIL_GLSL : ''}
 ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
     )
     // Genshin CEL SHADING: N·L through a narrow ramp → lit / shadow sides with a crisp soft-edged terminator
@@ -194,6 +272,34 @@ ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
     if (cf > 0.0 && cf >= fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))) discard; }
 #endif
 #include <alphatest_fragment>`,
+      )
+    }
+    if (o.terrain) {
+      fs = fs.replace(
+        '#include <normal_fragment_maps>',
+        `#include <normal_fragment_maps>
+  { // Snow / sand micro-relief + track imprints (world-space gradient → view-space normal).
+    vec2 sg = softGroundGrad(vWorldPos.xz, vBiome, length(vWorldPos - cameraPosition));
+    if (dot(sg, sg) > 1e-8) normal = normalize(normal + mat3(viewMatrix) * vec3(-sg.x, 0.0, -sg.y));
+  }
+  { // FACETED CLIFFS (Genshin's angular rock): steep faces break into ~7 m blocks (Voronoi on the face,
+    // flattened vertically → stacked slabs), each lit by its own tilted normal → planes of light and shade
+    // without extra geometry. Cliffs only (~40 ALU); fades in with steepness.
+    float cliffN = 1.0 - smoothstep(0.55, 0.78, vUpN);
+    if (cliffN > 0.01) {
+      vec2 fp = vec2(vWorldPos.x + vWorldPos.z * 0.7, vWorldPos.y * 1.7) / 7.0;
+      vec2 ip = floor(fp), best = ip;
+      float bd = 9.0;
+      for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+        vec2 c = ip + vec2(float(i), float(j));
+        vec2 d = c + vec2(st_hash(c), st_hash(c + 17.3)) - fp;
+        float dd = dot(d, d);
+        if (dd < bd) { bd = dd; best = c; }
+      }
+      vec3 tilt = vec3(st_hash(best + 3.1) - 0.5, (st_hash(best + 5.7) - 0.25) * 0.9, st_hash(best + 9.2) - 0.5);
+      normal = normalize(normal + mat3(viewMatrix) * tilt * 1.1 * cliffN);
+    }
+  }`,
       )
     }
     if (o.noFlip) {
@@ -226,7 +332,43 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   // BIOMES (per-vertex weights): sand = wind ripples + fine grain; snow = sparkle + soft drifts (blue-white shading).
   if (vBiome.x > 0.01) {
     float rip = sin((wp.x * 0.9 + wp.y * 0.35) * 2.2 + st_noise(wp * 0.3) * 4.0) * 0.5 + 0.5;
-    diffuseColor.rgb *= 1.0 + vBiome.x * ((rip - 0.5) * 0.16 + (st_hash(floor(wp * 14.0)) - 0.5) * 0.06);
+    float steep = 1.0 - smoothstep(0.55, 0.85, vUpN);
+    diffuseColor.rgb *= 1.0 + vBiome.x * ((rip - 0.5) * 0.16 * (1.0 - steep) + (st_hash(floor(wp * 14.0)) - 0.5) * 0.06);
+    // Mesa cliffs (Sumeru): broad, soft red-orange sandstone bands with faint fine layering — not zebra stripes.
+    float band = smoothstep(0.15, 0.85, sin(vWorldPos.y * 0.42 + st_noise(wp * 0.05) * 3.0) * 0.5 + 0.5);
+    float band2 = sin(vWorldPos.y * 2.6 + n1 * 2.0) * 0.5 + 0.5;
+    vec3 strata = mix(vec3(0.62, 0.3, 0.15), vec3(0.78, 0.47, 0.27), band) * (0.93 + 0.1 * band2) * (0.9 + 0.2 * st_noise(wp * 0.11));
+    diffuseColor.rgb = mix(diffuseColor.rgb, strata, steep * vBiome.x * 0.85);
+  }
+  // CLIFFS (green lands + snow; the desert has its own strata above): Genshin's layered stone — horizontal ledges
+  // of warm grey / tan rock, wavy, with darker seams, a blue cast in the snow. Steep faces only.
+  {
+    float cliff = (1.0 - smoothstep(0.55, 0.78, vUpN)) * (1.0 - vBiome.x);
+    if (cliff > 0.01) {
+      // Genshin's slate-blue cliff rock (Mondstadt / Liyue): big flat FACETS (quantised noise on the face →
+      // angular blocks), a few thin lit LEDGES with a dark undercut, sparse vertical CRACKS; cool grey, never
+      // zebra stripes. The face is projected on a diagonal (x + 0.7 z, y) — fine for all but faces along it.
+      float u = wp.x + wp.y * 0.7;
+      float y = vWorldPos.y;
+      float f = st_noise(vec2(u * 0.11, y * 0.06)) * 0.65 + st_noise(vec2(u * 0.31, y * 0.17)) * 0.35;
+      float facet = floor(f * 5.0) / 4.0;
+      float lay = y * 0.16 + st_noise(vec2(u * 0.03, 1.7)) * 1.5;
+      float lf = fract(lay);
+      // Ledges are BROKEN (each layer shows only along part of the face) and cracks follow noise contours
+      // (irregular, mostly vertical) — a regular grid of lines read as tiles.
+      float keepL = smoothstep(0.5, 0.65, st_noise(vec2(u * 0.025, floor(lay) * 7.3)));
+      float ledge = smoothstep(0.0, 0.04, lf) * (1.0 - smoothstep(0.04, 0.12, lf)) * keepL;
+      float under = smoothstep(0.86, 0.99, lf) * keepL;
+      float crack = (1.0 - smoothstep(0.0, 0.025, abs(st_noise(vec2(u * 0.07, y * 0.012)) - 0.5)));
+      crack *= smoothstep(0.45, 0.7, st_noise(vec2(u * 0.03 + 5.0, y * 0.04)));
+      vec3 stone = mix(vec3(0.27, 0.29, 0.33), vec3(0.45, 0.46, 0.48), facet);
+      stone *= (1.0 + 0.35 * ledge) * (1.0 - 0.35 * under) * (1.0 - 0.45 * crack);
+      float blotch = st_noise(wp * 0.09 + vec2(y * 0.07));
+      stone *= mix(vec3(1.0), vec3(0.88, 0.94, 1.06), vBiome.y);
+      float moss = smoothstep(0.62, 0.74, vUpN + (blotch - 0.5) * 0.25) * (1.0 - vBiome.y);
+      stone = mix(stone, vec3(0.18, 0.3, 0.1) * (0.8 + 0.4 * blotch), moss * 0.85);
+      diffuseColor.rgb = mix(diffuseColor.rgb, stone, cliff);
+    }
   }
   if (vBiome.y > 0.01) {
     float sparkle = step(0.988, st_hash(floor(wp * 22.0))) * 0.5;
@@ -235,10 +377,22 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   }
   // Under water: the bed darkens and turns blue-green with depth (seen through the semi-clear water);
   // a soft foam/wet line right at the shore.
-  float wd = ${WATER_LEVEL.toFixed(2)} - vWorldPos.y;
-  diffuseColor.rgb *= 1.0 - 0.35 * smoothstep(-0.8, 0.0, wd) * step(wd, 0.0) * 0.5; // wet dark band above
-  if (wd > 0.0) diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.5, 0.66, 0.7), vec3(0.015, 0.045, 0.055), smoothstep(0.0, 3.5, wd));
+  // (In the desert there is no water: basins and the river's bed are dry sand / clay pans — no wet tint there.
+  //  In the snow the water is frozen: no wet band or foam at the ice edge either.)
+  float wetZone = 1.0 - smoothstep(0.35, 0.6, vBiome.x + vBiome.y);
+  float wd = (${WATER_LEVEL.toFixed(2)} - vWorldPos.y);
+  diffuseColor.rgb *= 1.0 - 0.35 * smoothstep(-0.8, 0.0, wd) * step(wd, 0.0) * 0.5 * wetZone; // wet dark band above
+  ${!over && !story ? '// Genshin: the lake bed glows turquoise through clear shallows, deepening to teal.\n  ' : ''}if (wd > 0.0) diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * ${!over && !story ? 'vec3(0.45, 0.9, 0.88)' : 'vec3(0.5, 0.66, 0.7)'}, ${!over && !story ? 'vec3(0.01, 0.12, 0.14)' : 'vec3(0.015, 0.045, 0.055)'}, smoothstep(0.0, ${!over && !story ? '5.0' : '3.5'}, wd)), 1.0 - smoothstep(0.35, 0.6, vBiome.x));
+  wd = mix(-10.0, wd, wetZone); // kills the shore foam line below outside the wet zone
   diffuseColor.rgb += vec3(0.25, 0.27, 0.27) * (1.0 - smoothstep(0.0, 0.18, abs(wd - 0.04))) * (0.5 + 0.5 * st_noise(wp * 3.0 + vec2(uTimeS * 0.3)));
+  // TRACKS in the snow (compacted blue-grey) and on sand (darker, disturbed): footprints and tyre ruts.
+  {
+    float tk = vBiome.x + vBiome.y > 0.02 ? trailAt(wp) * clamp(vBiome.x + vBiome.y, 0.0, 1.0) : 0.0;
+    if (tk > 0.003) {
+      diffuseColor.rgb *= mix(vec3(1.0), vec3(0.58, 0.68, 0.86), tk * vBiome.y); // compacted snow: blue-grey
+      diffuseColor.rgb *= mix(vec3(1.0), vec3(0.8, 0.7, 0.58), tk * vBiome.x * 0.8);
+    }
+  }
   // WET GROUND (weather): darker, saturated soil; puddles in the dips of flat ground (noise mask) that mirror the
   // sky (vFogSky = the sky colour in the view direction, already per vertex); a sheen toward the key light
   // is added after lighting below. Puddles collect on the road and flat meadow, never on slopes.
@@ -264,11 +418,24 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     asphalt = mix(asphalt, vec3(0.55, 0.45, 0.2), dash * (0.3 + 0.35 * a3) * (1.0 - worn * 0.5));
     float g1 = st_noise(wp * 9.0), g2 = st_noise(wp * 23.0);
     vec3 gravel = vec3(0.27, 0.23, 0.18) * (0.72 + 0.28 * g1 + 0.22 * g2 + 0.1 * n2);
-    ${over ? `// OVERLAND: the main road is a pale DIRT TRACK with two darker wheel ruts (over the hill has no asphalt).
-    vec3 dirt = vec3(0.58, 0.47, 0.32) * (0.84 + 0.2 * n2 + 0.1 * a3 + 0.08 * st_noise(wp * 2.3));
+    ${!story ? `// DIRT TRACK with two darker wheel ruts — over the hill and Genshin both have earth paths, never asphalt.
+    vec3 dirt = ${over ? 'vec3(0.58, 0.47, 0.32)' : 'vec3(0.66, 0.52, 0.34)'} * (0.84 + 0.2 * n2 + 0.1 * a3 + 0.08 * st_noise(wp * 2.3));
     float ruts = (1.0 - smoothstep(0.25, 0.55, abs(lat - 1.35)));
     dirt *= 1.0 - ruts * 0.18;
-    vec3 road = mix(dirt, gravel * 1.5, smoothstep(HALF - 0.1, HALF + 0.25, lat));` : `vec3 road = mix(asphalt, gravel, smoothstep(HALF - 0.1, HALF + 0.25, lat));`}
+    vec3 road = mix(dirt, gravel * 1.5, smoothstep(HALF - 0.1, HALF + 0.25, lat));${over ? '' : `
+    // GENSHIN PATH (Windrise / Starfell): a worn earth track, not a lane — the bare dirt is narrower than the
+    // drivable bed with soft WAVY grassy edges (1.2–2.8 m half-width), and along some stretches a grass strip
+    // grows down the middle between the wheel tracks. The ground beyond stays the meadow's colour.
+    float edgeN = st_noise(wp * 0.11 + 4.0) * 0.65 + st_noise(wp * 0.6 + 2.0) * 0.35;
+    float edge = 2.0 + (edgeN - 0.5) * 1.8;
+    float median = (1.0 - smoothstep(0.3, 0.55, lat + (st_noise(wp * 0.9) - 0.5) * 0.3)) * smoothstep(0.5, 0.62, st_noise(vec2(vWorldPos.z * 0.012, 1.3)));
+    float bare = (1.0 - smoothstep(edge - 0.45, edge + 0.3, lat)) * (1.0 - median * 0.85);
+    road = mix(diffuseColor.rgb * (0.9 + 0.1 * a3), dirt * (1.0 + 0.06 * (1.0 - ruts)), bare);`}` : `vec3 road = mix(asphalt, gravel, smoothstep(HALF - 0.1, HALF + 0.25, lat));`}
+    // Biomes: packed snow with darker icy wheel ruts on the snowfields; drifts of sand over the desert track.
+    float rutS = 1.0 - smoothstep(0.2, 0.6, abs(lat - 1.35));
+    vec3 packedSnow = vec3(0.68, 0.73, 0.82) * (0.9 + 0.12 * n2) * (1.0 - rutS * 0.25);
+    road = mix(road, packedSnow, vBiome.y * 0.85);
+    road = mix(road, diffuseColor.rgb, vBiome.x * 0.4 * smoothstep(0.35, 0.75, st_noise(wp * 0.45 + 3.0)));
     diffuseColor.rgb = mix(diffuseColor.rgb, road, 1.0 - smoothstep(HALF + 0.9, HALF + 1.6, lat));
   }
   // Secondary roads: GRAVEL (type 0: grey-brown stones, two darker wheel ruts) / TRAIL (type 1: packed dirt,
@@ -286,9 +453,32 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
       float mid = 1.0 - smoothstep(0.0, 0.35, abs(-e - 1.35));                 // centre of a 2.7 m track
       surf = mix(surf, diffuseColor.rgb * 1.1, mid * 0.75 * step(0.35, s3));   // grass strip
     }
+    surf = mix(surf, vec3(0.7, 0.75, 0.84) * (0.88 + 0.15 * s1), vBiome.y * 0.8);
     diffuseColor.rgb = mix(diffuseColor.rgb, surf, 1.0 - smoothstep(-0.2, 1.2 + 0.5 * s1, e));
   }
 }`,
+      )
+    }
+    if (o.biomeCover) {
+      // After every albedo patch (vertex colour, painted surface, gold caps) so the snow sits on top of them.
+      fs = fs.replace(
+        '#include <alphamap_fragment>',
+        /* glsl */ `{
+  float bn = st_noise(vWPos.xz * 1.4 + vec2(vWPos.y * 0.9));
+  ${o.biomeCover === 'rock' ? `// Desert sandstone: wavy horizontal strata in warm reds and creams.
+  if (vBiomeW.x > 0.02) {
+    float band = sin(vWPos.y * 3.3 + bn * 2.4) * 0.5 + 0.5;
+    vec3 strata = mix(vec3(0.62, 0.3, 0.16), vec3(0.86, 0.62, 0.4), band) * (0.8 + 0.3 * bn);
+    diffuseColor.rgb = mix(diffuseColor.rgb, strata, vBiomeW.x * 0.75);
+  }` : ''}
+  // Snow cover: up-facing surfaces whiten (tops of shelves, not the undersides seen from below the canopy).
+  float up = vSnowUp + (bn - 0.5) * 0.55;
+  // (Card canopies — Genshin / storybook — carry snow on both faces of every upward-facing card: Dragonspine's
+  //  conifers are heavy with it; the overland solid shelves only on their top faces.)
+  float cover = vBiomeW.y * smoothstep(${o.biomeCover === 'rock' ? '0.05, 0.4' : over ? '0.45, 0.85' : '-0.25, 0.3'}, up) * (gl_FrontFacing ? 1.0 : ${over ? '0.3' : '1.0'});
+  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.8, 0.85, 0.93) * (0.92 + 0.12 * bn), cover);
+}
+#include <alphamap_fragment>`,
       )
     }
     if (over) fs = fs.replace('#include <alphamap_fragment>', 'diffuseColor.rgb = overlandPalette(diffuseColor.rgb);\n#include <alphamap_fragment>')
@@ -316,7 +506,17 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   float ndv = clamp(dot(normal, V), 0.0, 1.0);
   float back = pow(clamp(dot(-V, uKeyDirView), 0.0, 1.0), 2.0);
   outgoingLight += uKeyColor * diffuseColor.rgb * pow(1.0 - ndv, 3.0) * (0.3 + back * 1.4) * uRim${story ? ' * (1.0 - uStoryAmt)' : ''};
-  ${o.terrain ? `if (uWet > 0.01) {
+  ${o.terrain ? `{ // Sun glints on snow and sand: sparse cells that flash toward the key light (view dependent).
+    float gd = length(vWorldPos - cameraPosition);
+    float soft = (vBiome.y + vBiome.x * 0.55) * uSurfaceDetail;
+    if (soft > 0.02 && gd < 45.0) {
+      vec3 Hg = normalize(V + uKeyDirView);
+      float cell = st_hash(floor(vWorldPos.xz * 24.0 + floor(vWorldPos.y * 24.0)));
+      float glint = step(0.985, cell) * pow(clamp(dot(normal, Hg), 0.0, 1.0), 30.0) * soft * (1.0 - smoothstep(12.0, 45.0, gd));
+      outgoingLight += uKeyColor * glint * 3.0;
+    }
+  }
+  if (uWet > 0.01) {
     // Sheen: a broad specular lobe toward the key light on wet ground; puddles mirror the sky (Fresnel-ish).
     vec3 H = normalize(V + uKeyDirView);
     float sheen = pow(clamp(dot(normal, H), 0.0, 1.0), 24.0) * uWet * 0.5;
@@ -352,6 +552,6 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     shader.fragmentShader = fs
   }
   const prevKey = material.customProgramCacheKey.bind(material)
-  material.customProgramCacheKey = () => `${prevKey()}|stylize2-${o.key}${story ? '-story' : ''}${over ? '-over' : ''}`
+  material.customProgramCacheKey = () => `${prevKey()}|stylize2-${o.key}${o.biomeCover ? '-bc' : ''}${story ? '-story' : ''}${over ? '-over' : ''}`
   return material
 }

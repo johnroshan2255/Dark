@@ -235,6 +235,14 @@ export class RoadNetwork {
         if (p && Math.hypot(xs[i] - p.x, zs[i] - p.z) < p.radius * 0.6) hs[i] = p.baseH
       }
     }
+    // A road can't climb a cliff: links whose graded profile still exceeds ~90 % (42°) anywhere (plateau edges, karst
+    // walls) are not built — the network routes around the uplands instead of painting a track up a rock face.
+    for (let i = 1; i < SAMPLES; i++) {
+      if (Math.abs(hs[i] - hs[i - 1]) > segLen * 0.9) {
+        this.built.set(key, null)
+        return null
+      }
+    }
     let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity
     for (let i = 0; i < SAMPLES; i++) {
       minX = Math.min(minX, xs[i]); maxX = Math.max(maxX, xs[i]); minZ = Math.min(minZ, zs[i]); maxZ = Math.max(maxZ, zs[i])

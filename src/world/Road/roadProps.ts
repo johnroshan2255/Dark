@@ -34,13 +34,18 @@ export function scatterRoadProps(fields: WorldFields, cx: number, cz: number, he
   for (let k = Math.ceil(z0 / POLE_SPACING); k * POLE_SPACING < z0 + CHUNK_SIZE; k++) {
     const z = k * POLE_SPACING
     const x = fields.roadCenterX(z) + POLE_LATERAL
+    // Genshin style (palette 0): NO power lines — Teyvat has none; a dirt road between landmarks. Over the hill
+    // (1) keeps them all. Never through a rock formation.
+    if (fields.palette === 0) continue
+    if (fields.formations.near(x, z, 3)) continue
     emit(x, z, roadYaw(fields, z) + (hashFloat(fields.seed, k, 3, Layer.POI) - 0.5) * 0.08, 1, RoadProp.Pole)
   }
   // Fences: 4 m segments where a low-frequency mask says "fenced stretch" (≈ 40% of the road).
   for (let k = Math.ceil(z0 / FENCE_SEGMENT); k * FENCE_SEGMENT < z0 + CHUNK_SIZE; k++) {
     const z = (k + 0.5) * FENCE_SEGMENT
     const stretch = hashFloat(fields.seed, Math.floor(z / 60), 5, Layer.POI)
-    if (stretch < 0.6) continue
+    if (stretch < (fields.palette === 0 ? 0.82 : 0.6)) continue
+    if (fields.formations.near(fields.roadCenterX(z) + FENCE_LATERAL, z, 2)) continue
     if (hashFloat(fields.seed, k, 9, Layer.POI) < 0.08) continue // a missing/broken segment here and there
     const x = fields.roadCenterX(z) + FENCE_LATERAL
     emit(x, z, roadYaw(fields, z), 1, RoadProp.Fence)

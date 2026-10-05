@@ -3,6 +3,15 @@ import { createNoise2D, fbm, ridged, type Noise2D } from './noise/simplex'
 import { RoadNetwork, type RoadHit } from './Road/RoadNetwork'
 import { PoiField } from './POI/pois'
 import { BiomeField, type BiomeWeights } from './Biomes'
+import { ICE_SNOW } from './types'
+import { FormationField } from './Formations/formations'
+import { LandmarkField } from './Landmarks/landmarks'
+
+const poiBw: BiomeWeights = [0, 0]
+const sstep = (a: number, b: number, x: number): number => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)))
+  return t * t * (3 - 2 * t)
+}
 
 /**
  * Global analytic fields for a seed. Any chunk can evaluate any point without its
@@ -40,6 +49,10 @@ export class WorldFields {
   readonly pois: PoiField
   /** Biome regions (forest / desert / snow) + the snow line. */
   readonly biomes: BiomeField
+  /** Voxel rock formations (arches, caves, karst pillars, outcrops). */
+  readonly formations: FormationField
+  /** Big landmarks on the high ground (giant trees, windmills, ruins, statues, towers, obelisks, ice spires). */
+  readonly landmarks: LandmarkField
   private readonly hit: RoadHit = { dist: 0, height: 0, type: 0, halfWidth: 0 }
   private readonly bw: BiomeWeights = [0, 0]
   static readonly NET_SHOULDER = 4
@@ -74,6 +87,31 @@ export class WorldFields {
       baseHeight: (x, z) => this.groundBeforePlaces(x, z),
       roadCenterX: (z) => this.roadCenterX(z),
       riverDistance: (x, z) => this.riverDistance(x, z),
+      water: WorldFields.WATER,
+      biome: (x, z) => this.biomes.weights(x, z, poiBw),
+    })
+    const fmBw: BiomeWeights = [0, 0]
+    this.formations = new FormationField({
+      seed: this.seed,
+      height: (x, z) => this.groundBeforePlaces(x, z),
+      roadDistance: (x, z) => this.roadDistance(x, z),
+      riverDistance: (x, z) => this.riverDistance(x, z),
+      placeNear: (x, z, m) => this.pois.near(x, z, m) !== null,
+      biome: (x, z) => this.biomes.weights(x, z, fmBw),
+      roadCenterX: (z) => this.roadCenterX(z),
+      roadHeight: (z) => this.roadHeight(z),
+      water: WorldFields.WATER,
+    })
+    const lmBw: BiomeWeights = [0, 0]
+    this.landmarks = new LandmarkField({
+      seed: this.seed,
+      height: (x, z) => this.height(x, z),
+      roadDistance: (x, z) => this.roadDistance(x, z),
+      riverDistance: (x, z) => this.riverDistance(x, z),
+      placeNear: (x, z, m) => this.pois.near(x, z, m) !== null,
+      formationNear: (x, z, m) => this.formations.near(x, z, m) !== null,
+      biome: (x, z) => this.biomes.weights(x, z, lmBw),
+      roadCenterX: (z) => this.roadCenterX(z),
       water: WorldFields.WATER,
     })
     this.network = new RoadNetwork({
@@ -110,13 +148,54 @@ export class WorldFields {
     let h = base + mountains + ridge + bumps
     const w = this.biomes.weights(x, z, this.bw)
     const sand = w[0], snow = w[1]
+    // GENSHIN UPLANDS (Mondstadt / Liyue): terraced PLATEAUS — up to three grassy tiers of 12–16 m with sheer
+    // layered-rock cliffs between them (a threshold of low-frequency noise: ~45–55° faces), wandering across the
+    // land, so the world reads as cliffs, shelves and valleys, not a uniform hillside. Snow keeps half of it
+    // (Dragonspine's ledges); the desert has its own mesas. The road's valley shaping still levels the corridor.
+    const pn = fbm(this.mountN, x * 0.0022 + 31.7, z * 0.0022 - 8.3, 3)
+    const tiers = sstep(0.1, 0.165, pn) * 16 + sstep(0.28, 0.335, pn) * 14 + sstep(0.46, 0.505, pn) * 12
+    h += tiers * (1 - sand) * (1 - snow * 0.5)
     if (sand > 0.001) {
-      const dunes = ridged(this.detail, x * 0.0035 + 7.1, z * 0.0035 - 3.3, 2) * 9 + this.detail(x * 0.02, z * 0.02) * 1.2
-      h += (base * 0.5 + mountains * 0.55 + dunes + bumps * 0.5 - h) * sand
+      const dunes = this.dunes(x, z) + this.detail(x * 0.02, z * 0.02) * 0.6
+      // MESAS & BUTTES: flat-topped tables with sheer sides (a threshold of low-frequency noise → cliffs ~50°),
+      // some with a second, smaller tier on top. The steep sides take the red-rock ground colour and the
+      // terrain shader's sandstone strata.
+      const mn = fbm(this.mountN, x * 0.0045 + 13.7, z * 0.0045 - 4.2, 2)
+      const mesa = sstep(0.3, 0.38, mn) * 26 + sstep(0.5, 0.55, mn) * 16
+      h += (base * 0.5 + mountains * 0.55 + dunes + mesa + bumps * 0.5 - h) * sand
     }
-    if (snow > 0.001) h += (base * 1.1 + mountains * 1.3 + ridge * 0.6 + bumps - h) * snow
+    if (snow > 0.001) h += (base * 1.1 + mountains * 1.3 + ridge * 0.6 + bumps + this.drifts(x, z) - h) * snow
+    this.lastSnow = snow
     return h
   }
+
+  /**
+   * DESERT DUNES (Sumeru-like transverse dunes): crest lines run across a prevailing wind (from the south-west),
+   * wandering with low-frequency warp. Each dune has a long gentle WINDWARD slope (concave, steepening toward
+   * the top), a SHARP crest and a short steep SLIP FACE at sand's angle of repose (~34°); crest height varies along
+   * the line (4–15 m). Pure arithmetic + noise → deterministic; the colliders follow the same heights.
+   */
+  private dunes(x: number, z: number): number {
+    const along = x * 0.8 + z * 0.6, across = -x * 0.6 + z * 0.8
+    const warp = this.detail(x * 0.0035 + 2.1, z * 0.0035 - 7.7) * 55 + this.detail(across * 0.011, 4.4) * 18
+    const spacing = 72
+    const u = (along + warp) / spacing
+    const f = u - Math.floor(u)
+    const crest = 0.78
+    const prof = f < crest ? Math.pow(f / crest, 1.5) : Math.pow(1 - (f - crest) / (1 - crest), 2)
+    const height = 9.5 + this.detail(x * 0.0042 - 5.2, z * 0.0042 + 1.9) * 5.5
+    return prof * Math.max(3.5, height)
+  }
+
+  /** SNOW DRIFTS: soft, rounded wind-blown mounds (no sharp crests), 1–3 m, elongated along the wind. */
+  private drifts(x: number, z: number): number {
+    const along = x * 0.8 + z * 0.6, across = -x * 0.6 + z * 0.8
+    const n = this.detail(along * 0.022 + 9.3, across * 0.008 - 1.7)
+    return Math.max(0, n) * Math.max(0, n) * 6 + this.detail(x * 0.05 + 3.3, z * 0.05) * 0.35
+  }
+
+  /** Snow weight (region) at the last naturalHeight(x, z) call — the road's snow banks reuse it. */
+  private lastSnow = 0
 
   /** River: winds alongside the road through its own valley, 40–100 m to one side. */
   riverCenterX(z: number): number {
@@ -135,7 +214,7 @@ export class WorldFields {
   }
 
   /** Width of the valley corridor the road runs through (m beyond the shoulder). */
-  static readonly VALLEY = 150
+  static readonly VALLEY = 110
 
   /** 0 = natural terrain, 1 = fully on the road bed. */
   roadInfluence(x: number, z: number): number {
@@ -148,16 +227,55 @@ export class WorldFields {
 
   /** Final terrain height (see the class comment for the layering). */
   height(x: number, z: number): number {
-    const g = this.groundBeforePlaces(x, z)
+    const g = this.gorge(x, z, this.groundBeforePlaces(x, z))
+    const snow = this.lastSnow // naturalHeight(x, z) ran inside groundBeforePlaces
     const s = this.poiWeight(x, z)
     const h = s > 0 ? g + (this.pois.near(x, z)!.baseH - g) * s : g
     // Road embankments fade out inside a place's flattened disc (the roads there lie on its base anyway).
-    return this.roadBed(x, z, this.netShape(x, z, h, 1 - s))
+    const out = this.roadBed(x, z, this.netShape(x, z, h, 1 - s))
+    // SNOW BANKS: the plough leaves a soft ridge of snow (~0.7 m) just outside each edge of the main road.
+    if (snow > 0.05) {
+      const d = this.roadDistance(x, z) - WorldFields.ROAD_HALF_WIDTH
+      if (d > 0.3 && d < 4.5) {
+        const t = (d - 0.3) / 4.2
+        return out + Math.sin(Math.PI * Math.pow(t, 0.7)) * 0.7 * snow * (0.8 + 0.2 * this.detail(x * 0.3, z * 0.3))
+      }
+    }
+    return out
+  }
+
+  /**
+   * The SOLID surface at (x, z): the terrain, or the ice at the water level where the water is frozen (snow
+   * region — the same rule as the physics heightfield, `types.solidHeight`). Use it to place / respawn things.
+   */
+  surface(x: number, z: number): number {
+    const h = this.height(x, z)
+    return h < WorldFields.WATER && this.biomes.weights(x, z, this.bw)[1] > ICE_SNOW ? WorldFields.WATER : h
   }
 
   /** Valley + river on the natural relief: what places and secondary roads are measured against. */
   private groundBeforePlaces(x: number, z: number): number {
     return this.riverShape(x, z, this.valleyShape(x, z, this.naturalHeight(x, z)))
+  }
+
+  /**
+   * GORGES: on ~a quarter of the main road, steep rock walls (10–20 m, layered-stone cliffs in the shader) rise
+   * 12–22 m off each side — the road runs through a canyon instead of an open valley (Genshin's passes; red rock
+   * in the desert, icy in the snow). Added AFTER the valley's slope limit (so they can be walls), but only beyond
+   * 10 m past the road's edge: the verge stays gentle (the shoulder-step test), and they fall away by ~60 m.
+   * Applied in `height()` on top of the places' / secondary roads' reference ground, so a joining road's
+   * embankment cuts a pass through the wall and a place's flat disc overrides it; rivers keep a clear channel.
+   */
+  private gorge(x: number, z: number, h: number): number {
+    // Never around the spawn: the game opens on an open valley with the home landmark in view (landmarks.ts).
+    const m = sstep(0.56, 0.68, this.roadN(z * 0.0011, 50.5) * 0.5 + 0.5) * sstep(450, 750, Math.abs(z))
+    if (m <= 0) return h
+    const d = this.roadDistance(x, z) - WorldFields.ROAD_HALF_WIDTH
+    if (d < 10 || d > 70) return h
+    const r = this.riverDistance(x, z) - WorldFields.RIVER_HALF_WIDTH - WorldFields.RIVER_BANK
+    const wall = sstep(10, 19, d) * (1 - sstep(38, 70, d)) * sstep(0, 30, r)
+    const height = 10 + 10 * (this.detail(z * 0.01, x > this.roadCenterX(z) ? 3.3 : 7.7) * 0.5 + 0.5)
+    return h + wall * height * m
   }
 
   /**
@@ -170,12 +288,14 @@ export class WorldFields {
     const d = Math.max(0, this.roadDistance(x, z) - WorldFields.ROAD_HALF_WIDTH)
     const rh = this.roadHeight(z)
     const relief0 = natural - rh
-    const limit = 1 + d * 0.35
+    // Gentle for the first 10 m past the edge (a verge, never a wall at the shoulder), then up to ~39°: banks,
+    // cliffs and plateau edges rise close beside the road (Genshin roads run between them).
+    const limit = 1 + Math.min(d, 10) * 0.3 + Math.max(0, d - 10) * 0.8
     const a = Math.abs(relief0) / limit
     if (a <= 0.5 && d >= WorldFields.VALLEY + WorldFields.ROAD_SHOULDER) return natural // gentle ground far out: untouched
     const span = WorldFields.VALLEY + WorldFields.ROAD_SHOULDER
     const t = Math.min(1, d / span)
-    const keep = 0.12 + 0.88 * t * t * (3 - 2 * t) // wide valley floor; big hills rise beyond it
+    const keep = 0.25 + 0.75 * t * t * (3 - 2 * t) // a narrower valley floor; the land's relief returns closer to the road
     const relief = relief0 * keep
     const ar = Math.abs(relief) / limit
     // Soft cap: identity below half the limit, then eases toward the limit (C1 continuous at the join).
@@ -261,8 +381,10 @@ export class WorldFields {
    * grows above the treeline (~95–125 m) — pass the terrain height when known.
    */
   forestDensity(x: number, z: number, h?: number): number {
+    // GROVES, not a forest wall: only the top third of the noise grows trees (dense at the heart, thinning at the
+    // edge), leaving open meadows between them — Genshin's lands are mostly open grass and flowers.
     const n = fbm(this.forestN, x * 0.006, z * 0.006, 3) * 0.5 + 0.5
-    let d = Math.min(1, Math.max(0, (n - 0.28) * 1.9))
+    let d = Math.min(1, Math.max(0, (n - 0.5) * 3.2))
     const w = this.biomes.weights(x, z, this.bw, h)
     d *= 1 - w[0] * 0.94 - w[1] * 0.7
     if (h !== undefined && h > 95) d *= 1 - Math.min(1, (h - 95) / 30)

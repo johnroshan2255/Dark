@@ -47,7 +47,9 @@ export interface SoundFrame {
   /** Front end open (menu / garage): the theme a little louder, no game sounds. */
   menu: boolean
   rain: number
-  car: { engineOn: boolean; distance: number; pan: number; speed: number; throttle: number; boost: boolean; slip: number }
+  /** `throttle` signed (−1 = full reverse / brake); `wheelSpeed` = rim speed of the wheels (burnouts, drifts);
+   *  `engine` = the car's voice (catalogue: pitch, gearbox shift speeds). */
+  car: { engineOn: boolean; distance: number; pan: number; speed: number; wheelSpeed: number; throttle: number; boost: boolean; slip: number; engine: { pitch: number; gears: number[] } }
   bike: { riding: boolean; distance: number; pan: number; speed: number; throttle: number }
 }
 
@@ -62,8 +64,6 @@ const sstep = (a: number, b: number, x: number) => {
   const t = clamp01((x - a) / (b - a))
   return t * t * (3 - 2 * t)
 }
-/** Automatic gearbox for the engine note: shift points (m/s) — the pitch climbs through each gear, drops at a shift. */
-const GEARS = [0, 5.5, 11, 17.5, 25, 34, 60]
 
 export class AudioSystem {
   private ctx: AudioContext | null = null
@@ -79,7 +79,12 @@ export class AudioSystem {
   private enabled = true
   private musicOn = true
   private rpm = 0.2
+  private gear = 0
+  /** Seconds left of the current gear change (clutch in: the note dips, then picks up in the next gear). */
+  private shiftT = 0
   private lastStep = -1
+  /** Last engine mix (debug / headless verification). */
+  readonly debug = { rpm: 0, gear: 0, idle: 0, drive: 0, driveRate: 0, load: 0, shifting: false }
 
   constructor() {
     const unlock = () => {
@@ -205,25 +210,50 @@ export class AudioSystem {
     this.set('music', 0.34 * (f.menu ? 1.2 : 1) * (1 - 0.8 * f.darkness) * (1 - f.nightmare), 1, 0, 1.2)
     this.set('rain', f.menu ? 0 : 0.7 * f.rain, 1, 0, 0.8)
     const c = f.car, att = (d: number) => 1 / (1 + Math.max(0, d - 5) / 9)
-    // ENGINE: an automatic gearbox — rpm climbs through each gear with speed, drops at the shift; throttle adds
-    // load; revving on the spot when stopped. Two layers: idle (low rpm) crossfading into the drive loop.
+    // ENGINE: an automatic gearbox driven by the WHEELS (rim speed: a burnout or a drift revs it up, locked brakes
+    // drop it), each car's own shift points and pitch; a reverse gear; the load (throttle) sets how hard it
+    // sounds — coasting is quieter and lower than pulling at the same speed. Gear changes dip the note for
+    // ~0.15 s (the clutch), then it picks up lower in the next gear. Two layers: idle crossfading into drive.
     if (c.engineOn && !f.menu) {
-      const v = Math.abs(c.speed)
-      let g = 0
-      while (g < GEARS.length - 2 && v > GEARS[g + 1]) g++
-      const inGear = (v - GEARS[g]) / (GEARS[g + 1] - GEARS[g])
-      const target = v < 1 ? 0.18 + 0.55 * c.throttle : 0.3 + 0.62 * clamp01(inGear) + 0.1 * c.throttle
-      this.rpm += (target - this.rpm) * Math.min(1, f.dt * (target > this.rpm ? 6 : 10))
+      const G = c.engine.gears
+      const v = Math.min(Math.abs(c.wheelSpeed), Math.abs(c.speed) + 25)
+      const reversing = c.speed < -0.3 || (c.throttle < -0.05 && c.speed < 0.5)
+      const load = reversing ? clamp01(-c.throttle) : clamp01(c.throttle)
+      let target: number
+      if (reversing) {
+        this.gear = -1
+        target = 0.2 + 0.7 * clamp01(v / 9) + 0.12 * load
+      } else {
+        let g = 0
+        while (g < G.length - 2 && v > G[g + 1]) g++
+        if (this.gear >= 0 && g !== this.gear && v > 1) this.shiftT = 0.15
+        this.gear = g
+        const inGear = clamp01((v - G[g]) / (G[g + 1] - G[g]))
+        // In first from a standstill the clutch slips: throttle alone raises the revs.
+        target = v < 1 ? 0.18 + 0.5 * load : 0.28 + 0.6 * inGear + 0.12 * load
+      }
+      this.shiftT = Math.max(0, this.shiftT - f.dt)
+      if (this.shiftT > 0) target = Math.min(target, this.rpm) - 0.02
+      this.rpm += (target - this.rpm) * Math.min(1, f.dt * (target > this.rpm ? 5 : 9))
       const a = att(c.distance)
-      const boost = c.boost && c.throttle > 0.1 ? 1 : 0
+      const boost = c.boost && load > 0.1 ? 1 : 0
       const drive = sstep(0.12, 0.4, this.rpm)
-      this.set('engineIdle', (1 - drive) * 0.55 * a, 0.9 + this.rpm * 0.6, c.pan)
-      this.set('engineDrive', (0.18 + 0.5 * this.rpm + 0.15 * c.throttle) * drive * a * (boost ? 1.25 : 1), 0.45 + this.rpm * 0.85 + boost * 0.08, c.pan)
-      this.set('boost', boost * 0.6 * clamp01(v / 10) * a, 0.9 + clamp01(v / 30) * 0.4, c.pan, 0.15)
+      const P = c.engine.pitch
+      const clutch = this.shiftT > 0 ? 0.6 : 1
+      const idleG = (1 - drive) * 0.55 * a
+      const driveG = (0.12 + 0.36 * this.rpm + 0.32 * load) * drive * a * clutch * (boost ? 1.2 : 1)
+      const driveRate = P * (0.45 + this.rpm * 0.85 + boost * 0.06)
+      this.set('engineIdle', idleG, P * (0.9 + this.rpm * 0.6), c.pan)
+      this.set('engineDrive', driveG, driveRate, c.pan)
+      this.set('boost', boost * 0.6 * clamp01(Math.abs(c.speed) / 10) * a, 0.9 + clamp01(Math.abs(c.speed) / 30) * 0.4, c.pan, 0.15)
       this.set('skid', sstep(0.18, 0.75, c.slip) * 0.75 * a, 0.9 + 0.2 * c.slip, c.pan, 0.05)
+      const d = this.debug
+      d.rpm = this.rpm; d.gear = this.gear; d.idle = idleG; d.drive = driveG; d.driveRate = driveRate; d.load = load; d.shifting = this.shiftT > 0
     } else {
       for (const n of ['engineIdle', 'engineDrive', 'boost', 'skid'] as const) this.set(n, 0, 1, 0, 0.25)
       this.rpm = 0.2
+      this.gear = 0
+      this.debug.idle = this.debug.drive = 0
     }
     // BIKE: tyres rolling on the ground (level with speed) + the freewheel ticking when coasting.
     const b = f.bike
@@ -308,6 +338,40 @@ export class AudioSystem {
     ng.gain.exponentialRampToValueAtTime(0.001, t + dur)
     n.connect(lp)
     n.stop(t + dur)
+  }
+
+  /**
+   * A smashed prop: a low THUMP (the hit) + a bright crack of splintering wood / crumbling stone / a soft straw
+   * puff, louder with the impact speed, quieter with distance. Synthesized from the shared noise (no files).
+   * @param type prop type (0 pole, 1 fence, 4 hay, 10/11 stone…)
+   */
+  crash(type: number, speed: number, distance: number): void {
+    const ctx = this.ctx
+    if (!ctx || !this.sfx || ctx.state !== 'running') return
+    const t = ctx.currentTime
+    const vol = Math.min(1.2, 0.35 + speed / 25) / (1 + Math.max(0, distance - 6) / 10)
+    const stone = type === 10 || type === 11, soft = type === 4 || type === 8
+    const thump = ctx.createOscillator()
+    thump.frequency.setValueAtTime(stone ? 70 : 95, t)
+    thump.frequency.exponentialRampToValueAtTime(40, t + 0.18)
+    const tg = ctx.createGain()
+    tg.gain.setValueAtTime(vol * (soft ? 0.4 : 0.9), t)
+    tg.gain.exponentialRampToValueAtTime(0.001, t + 0.25)
+    thump.connect(tg).connect(this.sfx)
+    thump.start(t)
+    thump.stop(t + 0.27)
+    const n = this.noiseSource(ctx)
+    const bp = ctx.createBiquadFilter()
+    bp.type = 'bandpass'
+    bp.frequency.value = soft ? 900 : stone ? 1400 : 2600
+    bp.Q.value = soft ? 0.6 : 1.4
+    const ng = ctx.createGain()
+    const dur = soft ? 0.25 : stone ? 0.5 : 0.35
+    ng.gain.setValueAtTime(0, t)
+    ng.gain.linearRampToValueAtTime(vol * (soft ? 0.5 : 1.3), t + 0.01)
+    ng.gain.exponentialRampToValueAtTime(0.001, t + dur)
+    n.connect(bp).connect(ng).connect(this.sfx)
+    n.stop(t + dur + 0.05)
   }
 
   hurt(): void {

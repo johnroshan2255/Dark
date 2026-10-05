@@ -3,6 +3,7 @@ import { ATLAS_CELLS, cellUv, SOLID_UV, SURFACE_UV } from '../../rendering/mater
 import { isOverland, isStorybook } from '../../rendering/artStyle'
 import { Rng } from '../noise/rng'
 import { TreeSpecies } from '../types'
+import { agave, dryShrub, joshua, saguaro } from './desertFlora'
 
 /**
  * Procedural stylized trees (refer/forest, refer/roads hero) built from alpha-tested FOLIAGE CARDS on a solid
@@ -548,8 +549,28 @@ export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } 
     { id: TreeSpecies.Fir, name: 'fir', levels: build(fir, 303, 'fir'), trunkRadius: 0.28, trunkHalfHeight: 3 },
     { id: TreeSpecies.Pine, name: 'pine', levels: build(pine, 404, 'pine'), trunkRadius: 0.26, trunkHalfHeight: 4 },
     { id: TreeSpecies.Birch, name: 'birch', levels: build(birch, 505, 'birch'), trunkRadius: 0.16, trunkHalfHeight: 3 },
+    { id: TreeSpecies.Cactus, name: 'cactus', levels: build(desert(saguaro, 'cactus'), 606, 'cactus'), trunkRadius: 0.34, trunkHalfHeight: 3 },
+    { id: TreeSpecies.Joshua, name: 'joshua', levels: build(desert(joshua, 'joshua'), 707, 'joshua'), trunkRadius: 0.3, trunkHalfHeight: 1.5 },
   ]
   return { species, dispose: () => species.forEach((s) => s.levels.forEach((g) => g.dispose())) }
+}
+
+function desert(fn: (s: Soup, level: number, rng: Rng) => void, name: string): (level: number, rng: Rng) => THREE.BufferGeometry {
+  return (level, rng) => {
+    const s = new Soup()
+    fn(s, level, rng)
+    return s.geometry(name)
+  }
+}
+
+/** Desert undergrowth: agave rosettes and grey-olive dry shrubs (replace ferns/bushes on sand, WorldChunk). */
+export function createDesertUndergrowth(): { agave: THREE.BufferGeometry; shrub: THREE.BufferGeometry } {
+  const rng = new Rng(919)
+  const a = new Soup()
+  agave(a, rng)
+  const b = new Soup()
+  dryShrub(b, rng)
+  return { agave: a.geometry('agave'), shrub: b.geometry('dryShrub') }
 }
 
 /** Fern: 6 arched frond cards (fern cell). Bush: blob + leaf cards. */

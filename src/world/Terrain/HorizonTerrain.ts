@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { stylize } from '../../rendering/shaders/stylize'
 import { CHUNK_SIZE } from '../constants'
+import { WorldFields } from '../WorldFields'
 import type { FarRequest } from '../Streaming/chunk.worker'
 import { groundPalette } from '../../rendering/artStyle'
 import { farOffset, type FarTerrainData } from './horizonGen'
@@ -40,11 +41,35 @@ export class HorizonTerrain {
     m.onBeforeCompile = (shader) => {
       shader.uniforms.uHole = { value: hole }
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec2 vFarXZ;')
-        .replace('#include <project_vertex>', '#include <project_vertex>\nvFarXZ = (modelMatrix * vec4(transformed, 1.0)).xz;')
+        .replace('#include <common>', '#include <common>\nattribute vec4 canopy; varying vec2 vFarXZ; varying vec4 vCanopy;')
+        .replace('#include <project_vertex>', '#include <project_vertex>\nvFarXZ = (modelMatrix * vec4(transformed, 1.0)).xz; vCanopy = canopy;')
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\nuniform vec4 uHole; varying vec2 vFarXZ;')
+        .replace('#include <common>', '#include <common>\nuniform vec4 uHole; varying vec2 vFarXZ; varying vec4 vCanopy;')
         .replace('void main() {', 'void main() {\n  if (vFarXZ.x > uHole.x && vFarXZ.x < uHole.z && vFarXZ.y > uHole.y && vFarXZ.y < uHole.w) discard;')
+        .replace('#include <color_fragment>', `#include <color_fragment>
+  // DISTANT TREE CROWNS (Genshin vistas: every far hill is dotted with trees, not a flat green): one round crown
+  // per ~11 m cell where the forest density allows, lit on its sun side, darker below, with a soft shadow next to
+  // it. Where crowns shrink under ~1.5 px the pattern fades to its mean colour (no shimmer). ~25 ALU, far mesh only.
+  if (vCanopy.a > 0.01) {
+    vec2 cp = vFarXZ / 11.0;
+    vec2 ci = floor(cp);
+    float h1 = fract(sin(dot(ci, vec2(127.1, 311.7))) * 43758.5453);
+    float h2 = fract(sin(dot(ci, vec2(269.5, 183.3))) * 43758.5453);
+    vec2 q = fract(cp) - 0.5 - (vec2(h1, h2) - 0.5) * 0.45;
+    float r = 0.27 + 0.16 * h2;
+    float d = length(q) / r;
+    float px = max(fwidth(cp.x), fwidth(cp.y)) / r;
+    float tree = step(h1, vCanopy.a);
+    float crown = (1.0 - smoothstep(1.0 - px, 1.0 + px, d)) * tree;
+    float sh = (1.0 - smoothstep(0.8, 1.3, length(q - vec2(0.12, 0.1)) / r)) * tree * (1.0 - crown);
+    // Soft, not spotty: crowns are only part-way to the canopy colour (lifted toward the ground's), the shadow
+    // is faint — far hills read as wooded texture, not as dark holes (they looked like distant objects).
+    vec3 canopyC = mix(vCanopy.rgb * 1.6, diffuseColor.rgb, 0.35);
+    vec3 lit = canopyC * (0.8 + 0.5 * clamp(0.55 - dot(q / r, vec2(0.55, 0.45)), 0.0, 1.0));
+    vec3 dotted = mix(diffuseColor.rgb * (1.0 - 0.18 * sh), lit, crown * 0.7);
+    vec3 mean = mix(diffuseColor.rgb, canopyC, vCanopy.a * 0.4);
+    diffuseColor.rgb = mix(dotted, mean, smoothstep(0.35, 0.8, px));
+  }`)
     }
     m.customProgramCacheKey = () => 'far-terrain'
     this.material = stylize(m, { key: 'far', rim: 0.2, toon: 0.45 })
@@ -90,8 +115,15 @@ export class HorizonTerrain {
       for (let i = 0; i < n; i++) {
         const k = j * n + i
         pos[k * 3] = d.cx + off[i]
-        // Sits below the true surface by more where cells are coarse: chords over valleys never poke through.
-        pos[k * 3 + 1] = d.heights[k] - 3 - 0.04 * Math.max(cell(i), cell(j))
+        // Sits below the true surface by more where cells are coarse: chords over valleys never poke through —
+        // but DRY land never sinks under the water plane (it used to: every low meadow within ~11 m of the water
+        // level flooded in the distance, so vistas read as a grey sea with green islands).
+        const h = d.heights[k]
+        const low = h - 3 - 0.04 * Math.max(cell(i), cell(j))
+        // And on COARSE cells (LOW's 40² grid: 60–200 m) a lake vertex stays just under the surface — a deep one
+        // dragged every triangle to its dry neighbours under water, so far lakes ballooned into a sea.
+        const cs = Math.max(cell(i), cell(j))
+        pos[k * 3 + 1] = h > WorldFields.WATER ? Math.max(low, Math.min(h, WorldFields.WATER + 0.3)) : cs > 30 ? Math.max(low, WorldFields.WATER - 0.6) : low
         pos[k * 3 + 2] = d.cz + off[j]
       }
     }
@@ -107,6 +139,7 @@ export class HorizonTerrain {
     const g = new THREE.BufferGeometry()
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
     g.setAttribute('color', new THREE.BufferAttribute(d.colors, 3))
+    g.setAttribute('canopy', new THREE.BufferAttribute(d.canopy, 4))
     g.setIndex(new THREE.BufferAttribute(idx, 1))
     g.computeVertexNormals()
     g.computeBoundingSphere()

@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { hashFloat, Layer } from '../noise/rng'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { isStorybook } from '../../rendering/artStyle'
 import { SOLID_UV, SURFACE_UV } from '../../rendering/materials/FoliageAtlas'
@@ -103,7 +104,8 @@ export function createFenceGeometry(): THREE.BufferGeometry {
  * Sagging wires from every pole in this chunk to the next pole down the road (computed analytically, so spans
  * crossing into the next chunk need no neighbour data). Chunk-local positions.
  */
-export function buildWires(d: ChunkData, fields: WorldFields, material: THREE.LineBasicMaterial): THREE.LineSegments | null {
+/** @param skip record offset → true for a broken pole: its span and the span arriving at it are left out. */
+export function buildWires(d: ChunkData, fields: WorldFields, material: THREE.LineBasicMaterial, skip?: (o: number) => boolean): THREE.LineSegments | null {
   const p = d.props
   const pts: number[] = []
   const ox = d.cx * CHUNK_SIZE
@@ -111,11 +113,16 @@ export function buildWires(d: ChunkData, fields: WorldFields, material: THREE.Li
   const SEG = 10
   const a = new THREE.Vector3()
   const b = new THREE.Vector3()
+  const gone: [number, number][] = []
+  if (skip) for (let i = 0; i < p.length; i += 6) if (p[i + 5] === RoadProp.Pole && skip(i)) gone.push([p[i], p[i + 2]])
   for (let i = 0; i < p.length; i += 6) {
-    if (p[i + 5] !== RoadProp.Pole) continue
+    if (p[i + 5] !== RoadProp.Pole || skip?.(i)) continue
     const wz0 = p[i + 2] + oz
     const wz1 = wz0 + POLE_SPACING
     const wx1 = fields.roadCenterX(wz1) + POLE_LATERAL
+    if (gone.some(([gx, gz]) => Math.abs(gx - (wx1 - ox)) < 1.5 && Math.abs(gz - (wz1 - oz)) < 1.5)) continue // ends at a broken pole
+    // The next pole may not exist (sparse stretches, a formation): no span hanging to nothing.
+    if (fields.formations.near(wx1, wz1, 3) || (fields.palette === 0 && hashFloat(fields.seed, Math.floor(wz1 / 420), 11, Layer.POI) > 0.35)) continue
     const y1 = fields.height(wx1, wz1)
     const r0 = p[i + 3]
     const r1 = roadYaw(fields, wz1)

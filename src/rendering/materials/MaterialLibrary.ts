@@ -84,13 +84,25 @@ export class MaterialLibrary {
   readonly terrain = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'terrain', rim: 0.25, terrain: true, toon: 0.45 })
   readonly vegetation = stylize(billboardable(
     new THREE.MeshLambertMaterial({ vertexColors: true, map: this.atlas, alphaTest: 0.42, side: THREE.DoubleSide }),
-  ), { key: 'foliage', rim: isOverland() ? 0.5 : 1.1, noFlip: true, surface: 'atlas', cullFade: true, nearFade: true, sway: true, wet: true })
+  ), { key: 'foliage', rim: isOverland() ? 0.5 : 1.1, noFlip: true, surface: 'atlas', cullFade: true, nearFade: true, sway: true, wet: true, biomeCover: 'foliage' })
+  /**
+   * LANDMARKS (world/Landmarks): the vegetation look (painted surfaces, snow cover, wet) WITHOUT the ring-edge
+   * dither or the near fade — they must stand on the skyline 1–2.5 km away (the foliage dither erased them past
+   * ~200 m). One extra program; drawn by LandmarkSystem in ≤ 2 merged meshes.
+   */
+  readonly landmark = stylize(billboardable(
+    new THREE.MeshLambertMaterial({ vertexColors: true, map: this.atlas, alphaTest: 0.42, side: THREE.DoubleSide }),
+  ), { key: 'landmark', rim: isOverland() ? 0.5 : 1.1, noFlip: true, surface: 'atlas', wet: true, biomeCover: 'foliage' })
   /** OVERLAND: soft plain-colour boulders (no stone paint strokes); otherwise smooth painted STONE. */
   readonly rock = isOverland()
-    ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', rim: 0.3, cullFade: true, wet: true })
-    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.35, surface: SURFACE.stone, cullFade: true })
+    ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock' })
+    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.35, surface: SURFACE.stone, cullFade: true, biomeCover: 'rock' })
+  /** Grass layers (GrassField): near (dense, curved blades) and far (sparse, wide) — same program, own bands. */
+  readonly grassNearU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
+  readonly grassFarU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
   /** Smooth Lambert + wind/fade/translucency patch. */
-  readonly grass = stylize(createGrassMaterial(), { key: 'grass', rim: 0.2, cheapFog: true, wet: true })
+  readonly grass = stylize(createGrassMaterial(this.grassNearU.band, this.grassNearU.thin), { key: 'grass', rim: 0.2, cheapFog: true, wet: true })
+  readonly grassFar = stylize(createGrassMaterial(this.grassFarU.band, this.grassFarU.thin), { key: 'grass', rim: 0.2, cheapFog: true, wet: true })
   /** Player character parts. */
   readonly character = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'character', rim: 0.6 })
   /**
@@ -169,7 +181,7 @@ export class MaterialLibrary {
   }
 
   all(): THREE.Material[] {
-    return [this.terrain, this.vegetation, this.rock, this.grass, this.character, this.lampGlow]
+    return [this.terrain, this.vegetation, this.landmark, this.rock, this.grass, this.grassFar, this.character, this.lampGlow]
   }
 
   dispose(): void {

@@ -37,6 +37,18 @@ export const globalUniforms = {
   uUpView: { value: new THREE.Vector3(0, 1, 0) },
   /** Shared hand-painted surface texture (materials/BrushTexture.ts), set by MaterialLibrary. */
   uBrush: { value: null as THREE.Texture | null },
+  /** Region biome weights around the player (rendering/biome/BiomeMap.ts) and its rect: minX, minZ, 1/size, 1/size. */
+  uBiomeMap: { value: null as THREE.Texture | null },
+  uBiomeRect: { value: new THREE.Vector4(-1e5, -1e5, 1e-6, 1e-6) },
+  /** Footprints / tyre tracks around the player (rendering/trails/TrailMap.ts) and its rect: minX, minZ, 1/size, 1/size. */
+  uTrailMap: { value: null as THREE.Texture | null },
+  /** 1 = the trail map is live (Ground & weather detail ≥ medium). */
+  uTrailOn: { value: 0 },
+  /** 1 = snow / sand micro-relief + glints in the terrain shader (Ground & weather detail ≥ medium). */
+  uSurfaceDetail: { value: 0 },
+  /** 1 = some snow or desert lies inside the biome map (else the biome-cover lookups are skipped entirely). */
+  uBiomeActive: { value: 0 },
+  uTrailRect: { value: new THREE.Vector4(-1e5, -1e5, 1e-6, 1e-6) },
 }
 
 /**
