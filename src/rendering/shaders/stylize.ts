@@ -1,8 +1,8 @@
 import * as THREE from 'three'
 import { MIST_GLSL, SKY_GLSL, skyUniforms } from '../sky/skyShader'
 import { globalUniforms, GUST_GLSL, SWAY_GLSL } from './uniforms'
-import { isOverland, isStorybook } from '../artStyle'
-import { ATLAS_SURF, PAINT_FRAG_PARS, PAINT_VERT_PARS, paintVert } from './paint'
+import { isGenshin, isOverland, isStorybook } from '../artStyle'
+import { ATLAS_SURF, PAINT_VERT_PARS, STONE_CLIFF_UV, paintFragPars, paintVert } from './paint'
 import { WorldFields } from '../../world/WorldFields'
 import { BIOME_GLSL } from '../biome/BiomeMap'
 
@@ -50,6 +50,8 @@ export interface StylizeOptions {
    * STRATA in the desert. Per instance (keyed by its origin) for instanced meshes, per vertex for merged ones.
    */
   biomeCover?: 'foliage' | 'rock'
+  /** World-scale STONE painting (cliff rock: formations + crags) instead of the unit-boulder brush scale. */
+  cliffStone?: boolean
 }
 
 /**
@@ -124,7 +126,9 @@ vec2 softGroundGrad(vec2 wp, vec2 biome, float dist) {
 `
 
 const NOISE = /* glsl */ `
-float st_hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+// Sin-free hash (Hoskins' hash12): ~8 ALU, no transcendental, and stable on mediump/phone GPUs where
+// fract(sin(x)·43758) loses its bits for large x. Every procedural pattern below goes through it.
+float st_hash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 float st_noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   f = f * f * (3.0 - 2.0 * f);
@@ -137,6 +141,7 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
   const rim = o.rim ?? 0.5
   const story = isStorybook() && !o.lit
   const over = isOverland()
+  const gen = isGenshin()
   material.onBeforeCompile = (shader, renderer) => {
     prev(shader, renderer)
     const u = globalUniforms
@@ -228,14 +233,17 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
     }
     if (o.terrain) {
       vs = vs
-        .replace('#include <common>', '#include <common>\nattribute float roadLat;\nattribute vec2 roadNet;\nattribute vec2 biome;\nvarying float vRoadLat;\nvarying vec2 vRoadNet;\nvarying vec2 vBiome;\nvarying vec3 vWorldPos;\nvarying float vUpN;')
-        .replace('#include <project_vertex>', '#include <project_vertex>\nvRoadLat = roadLat;\nvRoadNet = roadNet;\nvBiome = biome;\nvWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvUpN = normal.y; // terrain normals are world-space (the mesh is only translated)')
+        .replace('#include <common>', '#include <common>\nattribute float roadLat;\nattribute vec2 roadNet;\nattribute vec2 biome;\nvarying float vRoadLat;\nvarying vec2 vRoadNet;\nvarying vec2 vBiome;\nvarying vec3 vWorldPos;\nvarying float vUpN;\nvarying vec2 vNxz;')
+        .replace('#include <project_vertex>', '#include <project_vertex>\nvRoadLat = roadLat;\nvRoadNet = roadNet;\nvBiome = biome;\nvWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvUpN = normal.y; // terrain normals are world-space (the mesh is only translated)\nvNxz = normal.xz;')
     }
     if (o.surface !== undefined) {
       const surf = o.surface === 'atlas' ? ATLAS_SURF : o.surface.toFixed(1)
+      // GLOW (atlas surfaces only): solids authored on GLOW_UV (FoliageAtlas — the opaque block, v ∈ [0.024, 0.038))
+      // are emissive: mystic mushrooms and their spots. A varying, no attribute / program.
+      const glow = o.surface === 'atlas'
       vs = vs
-        .replace('#include <common>', `#include <common>\n${PAINT_VERT_PARS}`)
-        .replace('#include <project_vertex>', `#include <project_vertex>\n${paintVert(surf)}`)
+        .replace('#include <common>', `#include <common>\n${PAINT_VERT_PARS}${glow ? '\nvarying float vGlow;' : ''}`)
+        .replace('#include <project_vertex>', `#include <project_vertex>\n${paintVert(surf)}${glow ? '\nvGlow = (uv.x > 0.9625 && uv.y > 0.024 && uv.y < 0.038) ? 1.0 : 0.0;' : ''}`)
     }
     // Declare only what an earlier patch (e.g. grass) hasn't declared already.
     const decl = (d: string) => (fs.includes(d) ? '' : d + '\n')
@@ -248,9 +256,9 @@ uniform float uFogMax; uniform vec3 uLandHaze; uniform vec2 uFarEdge; uniform ve
 float skyHaze(float d) { return uSkyHaze.x * (1.0 - exp(-max(d - 12.0, 0.0) / uSkyHaze.y)); }
 varying vec3 vFogSky; varying vec3 vWPos;
 ${fs.includes('uSkyMist') ? '' : MIST_GLSL}
-${o.terrain || o.surface !== undefined ? 'uniform sampler2D uBrush;\n' : ''}${o.surface !== undefined ? PAINT_FRAG_PARS.replace('uniform sampler2D uBrush;', '') : ''}
+${o.terrain || o.surface !== undefined ? 'uniform sampler2D uBrush;\n' : ''}${o.surface !== undefined ? paintFragPars(o.cliffStone ? STONE_CLIFF_UV : undefined).replace('uniform sampler2D uBrush;', '') : ''}${o.surface === 'atlas' ? '\nvarying float vGlow;' : ''}
 ${o.biomeCover ? 'varying vec2 vBiomeW; varying float vSnowUp;\n' + (o.terrain ? '' : NOISE) : ''}
-${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying vec3 vWorldPos; varying float vUpN;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\n' + NOISE + GUST_GLSL + TRAIL_GLSL : ''}
+${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying vec3 vWorldPos; varying float vUpN; varying vec2 vNxz;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\nfloat cliffW = 0.0; vec3 cliffTilt = vec3(0.0); // cliff weight + per-block normal tilt: set in the colour block, read in the normal block\n' + NOISE + GUST_GLSL + TRAIL_GLSL : ''}
 ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
     )
     // Genshin CEL SHADING: N·L through a narrow ramp → lit / shadow sides with a crisp soft-edged terminator
@@ -260,7 +268,7 @@ ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
       THREE.ShaderChunk.lights_lambert_pars_fragment.replace(
         'float dotNL = saturate( dot( geometryNormal, directLight.direction ) );',
         `float dotNL = saturate( dot( geometryNormal, directLight.direction ) );
-  dotNL = mix(dotNL, smoothstep(0.0, 0.16, dotNL) * 0.82 + dotNL * 0.18, uToon * ${(o.toon ?? 1).toFixed(2)});`,
+  dotNL = mix(dotNL, ${gen ? 'smoothstep(-0.05, 0.5, dotNL) * 0.6 + dotNL * 0.4' : 'smoothstep(0.0, 0.16, dotNL) * 0.82 + dotNL * 0.18'}, uToon * ${(o.toon ?? 1).toFixed(2)});`, // Genshin scenery: a SOFT terminator (the hard cel step is for characters)
       ),
     )
     if (o.cullFade) {
@@ -282,24 +290,9 @@ ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
     vec2 sg = softGroundGrad(vWorldPos.xz, vBiome, length(vWorldPos - cameraPosition));
     if (dot(sg, sg) > 1e-8) normal = normalize(normal + mat3(viewMatrix) * vec3(-sg.x, 0.0, -sg.y));
   }
-  { // FACETED CLIFFS (Genshin's angular rock): steep faces break into ~7 m blocks (Voronoi on the face,
-    // flattened vertically → stacked slabs), each lit by its own tilted normal → planes of light and shade
-    // without extra geometry. Cliffs only (~40 ALU); fades in with steepness.
-    float cliffN = 1.0 - smoothstep(0.55, 0.78, vUpN);
-    if (cliffN > 0.01) {
-      vec2 fp = vec2(vWorldPos.x + vWorldPos.z * 0.7, vWorldPos.y * 1.7) / 7.0;
-      vec2 ip = floor(fp), best = ip;
-      float bd = 9.0;
-      for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
-        vec2 c = ip + vec2(float(i), float(j));
-        vec2 d = c + vec2(st_hash(c), st_hash(c + 17.3)) - fp;
-        float dd = dot(d, d);
-        if (dd < bd) { bd = dd; best = c; }
-      }
-      vec3 tilt = vec3(st_hash(best + 3.1) - 0.5, (st_hash(best + 5.7) - 0.25) * 0.9, st_hash(best + 9.2) - 0.5);
-      normal = normalize(normal + mat3(viewMatrix) * tilt * 1.1 * cliffN);
-    }
-  }`,
+  // FACETED CLIFFS (Genshin's angular rock): each block of the face (found in the colour block above) is lit by
+  // its own tilted normal → planes of light and shade without extra geometry.
+  if (cliffW > 0.01) normal = normalize(normal + mat3(viewMatrix) * cliffTilt * cliffW);`,
       )
     }
     if (o.noFlip) {
@@ -314,8 +307,11 @@ ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
         /* glsl */ `#include <color_fragment>
 {
   vec2 wp = vWorldPos.xz;
-  float n1 = st_noise(wp * 0.33), n2 = st_noise(wp * 1.9), n3 = st_hash(floor(wp * 6.0));
-  diffuseColor.rgb *= 0.82 + 0.22 * n1 + 0.12 * n2 + 0.05 * st_noise(wp * 7.0);
+  // DETAIL (uSurfaceDetail: MEDIUM+; LOW = phones) — the fine noise layers are a uniform branch, so LOW skips their
+  // hashes (the brush texture below still breaks the ground up) and hold-60 can toggle them without a recompile.
+  bool fine = uSurfaceDetail > 0.5;
+  float n1 = st_noise(wp * 0.33), n2 = fine ? st_noise(wp * 1.9) : 0.5;
+  diffuseColor.rgb *= 0.82 + 0.22 * n1 + 0.12 * n2 + (fine ? 0.05 * st_noise(wp * 7.0) : 0.025);
 ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above, plus faint blade streaks on the straw so
   // the meadow reads as grass beyond the real blades (no brush fetch, no gust bands).
   float straw = smoothstep(0.0, 0.05, diffuseColor.r - diffuseColor.b) * (1.0 - vBiome.x - vBiome.y);
@@ -327,52 +323,90 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   // Painted meadow beyond the real grass (Genshin): on green ground, soft blade streaks + the same rolling
   // wind-gust bands as the grass, so the meadow reads continuous to the horizon.
   float green = smoothstep(0.0, 0.03, diffuseColor.g - diffuseColor.b) * smoothstep(0.0, 0.02, diffuseColor.g - diffuseColor.r * 0.8) * (1.0 - vBiome.x - vBiome.y);
-  float streak = st_noise(vec2(wp.x * 6.0 + wp.y * 1.5, wp.y * 6.0 - wp.x * 1.5));
-  diffuseColor.rgb *= 1.0 + green * ((streak - 0.5) * 0.14 + windGust(wp, uTimeS, uWindS) * 0.14);`}
+  ${gen ? `// ANIME GRASS GROUND (Genshin): the meadow floor takes the same lime hue as the grass blades (world/Forest/grass.ts,
+  // ground colour → lime at the same brightness) — the blades' roots and the ground between them are ONE colour, so
+  // a sparser field (LOW / phones) still reads as a continuous lawn instead of blades on olive soil.
+  { float gl = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.223, 0.546, 0.061) * (gl / 0.442), 0.6 * green); }` : ''}
+  if (fine && green > 0.0) {
+    float streak = st_noise(vec2(wp.x * 6.0 + wp.y * 1.5, wp.y * 6.0 - wp.x * 1.5));
+    diffuseColor.rgb *= 1.0 + green * ((streak - 0.5) * 0.14 + windGust(wp, uTimeS, uWindS) * 0.14);
+  }`}
   // BIOMES (per-vertex weights): sand = wind ripples + fine grain; snow = sparkle + soft drifts (blue-white shading).
   if (vBiome.x > 0.01) {
-    float rip = sin((wp.x * 0.9 + wp.y * 0.35) * 2.2 + st_noise(wp * 0.3) * 4.0) * 0.5 + 0.5;
     float steep = 1.0 - smoothstep(0.55, 0.85, vUpN);
-    diffuseColor.rgb *= 1.0 + vBiome.x * ((rip - 0.5) * 0.16 * (1.0 - steep) + (st_hash(floor(wp * 14.0)) - 0.5) * 0.06);
+    if (fine) {
+      float rip = sin((wp.x * 0.9 + wp.y * 0.35) * 2.2 + st_noise(wp * 0.3) * 4.0) * 0.5 + 0.5;
+      diffuseColor.rgb *= 1.0 + vBiome.x * ((rip - 0.5) * 0.16 * (1.0 - steep) + (st_hash(floor(wp * 14.0)) - 0.5) * 0.06);
+    }
     // Mesa cliffs (Sumeru): broad, soft red-orange sandstone bands with faint fine layering — not zebra stripes.
     float band = smoothstep(0.15, 0.85, sin(vWorldPos.y * 0.42 + st_noise(wp * 0.05) * 3.0) * 0.5 + 0.5);
     float band2 = sin(vWorldPos.y * 2.6 + n1 * 2.0) * 0.5 + 0.5;
-    vec3 strata = mix(vec3(0.62, 0.3, 0.15), vec3(0.78, 0.47, 0.27), band) * (0.93 + 0.1 * band2) * (0.9 + 0.2 * st_noise(wp * 0.11));
+    vec3 strata = mix(vec3(0.62, 0.3, 0.15), vec3(0.78, 0.47, 0.27), band) * (0.93 + 0.1 * band2) * (fine ? 0.9 + 0.2 * st_noise(wp * 0.11) : 1.0);
     diffuseColor.rgb = mix(diffuseColor.rgb, strata, steep * vBiome.x * 0.85);
   }
-  // CLIFFS (green lands + snow; the desert has its own strata above): Genshin's layered stone — horizontal ledges
-  // of warm grey / tan rock, wavy, with darker seams, a blue cast in the snow. Steep faces only.
+  // CLIFFS (green lands + snow; the desert has its own strata above) — Genshin's rock (Starsnatch Cliff, Mt. Hulao,
+  // Stone Gate): cool slate blue-grey stone built from big angular BLOCKS stacked into tall COLUMNS. Each block is
+  // its own plane (cliffTilt, applied in the normal block) so the cel ramp splits the face into pale lit planes and
+  // blue shadow planes — no lines are drawn. Each block is painted with a soft gradient (rounded, lit top → darker
+  // foot) and some carry yellow-green moss on top. The meadow ends in a crisp, irregular lip at the cliff edge
+  // instead of washing grey over half-steep banks.
+  cliffW = 1.0 - smoothstep(0.6, 0.67, vUpN + (st_noise(wp * 0.15) - 0.5) * 0.1);
   {
-    float cliff = (1.0 - smoothstep(0.55, 0.78, vUpN)) * (1.0 - vBiome.x);
-    if (cliff > 0.01) {
-      // Genshin's slate-blue cliff rock (Mondstadt / Liyue): big flat FACETS (quantised noise on the face →
-      // angular blocks), a few thin lit LEDGES with a dark undercut, sparse vertical CRACKS; cool grey, never
-      // zebra stripes. The face is projected on a diagonal (x + 0.7 z, y) — fine for all but faces along it.
-      float u = wp.x + wp.y * 0.7;
-      float y = vWorldPos.y;
-      float f = st_noise(vec2(u * 0.11, y * 0.06)) * 0.65 + st_noise(vec2(u * 0.31, y * 0.17)) * 0.35;
-      float facet = floor(f * 5.0) / 4.0;
-      float lay = y * 0.16 + st_noise(vec2(u * 0.03, 1.7)) * 1.5;
-      float lf = fract(lay);
-      // Ledges are BROKEN (each layer shows only along part of the face) and cracks follow noise contours
-      // (irregular, mostly vertical) — a regular grid of lines read as tiles.
-      float keepL = smoothstep(0.5, 0.65, st_noise(vec2(u * 0.025, floor(lay) * 7.3)));
-      float ledge = smoothstep(0.0, 0.04, lf) * (1.0 - smoothstep(0.04, 0.12, lf)) * keepL;
-      float under = smoothstep(0.86, 0.99, lf) * keepL;
-      float crack = (1.0 - smoothstep(0.0, 0.025, abs(st_noise(vec2(u * 0.07, y * 0.012)) - 0.5)));
-      crack *= smoothstep(0.45, 0.7, st_noise(vec2(u * 0.03 + 5.0, y * 0.04)));
-      vec3 stone = mix(vec3(0.27, 0.29, 0.33), vec3(0.45, 0.46, 0.48), facet);
-      stone *= (1.0 + 0.35 * ledge) * (1.0 - 0.35 * under) * (1.0 - 0.45 * crack);
-      float blotch = st_noise(wp * 0.09 + vec2(y * 0.07));
-      stone *= mix(vec3(1.0), vec3(0.88, 0.94, 1.06), vBiome.y);
-      float moss = smoothstep(0.62, 0.74, vUpN + (blotch - 0.5) * 0.25) * (1.0 - vBiome.y);
-      stone = mix(stone, vec3(0.18, 0.3, 0.1) * (0.8 + 0.4 * blotch), moss * 0.85);
-      diffuseColor.rgb = mix(diffuseColor.rgb, stone, cliff);
+    float cliff = cliffW * (1.0 - vBiome.x);
+    if (cliffW > 0.01) {
+      // Blocks ~11 m wide × ~24 m tall (Voronoi) → big upright columns (small even cells read as scales). The face is projected on the horizontal axis it
+      // runs along (z for faces looking ±x, else x), so the columns stay vertical on a sloping face; where the face
+      // turns past 45° the blocks restart — it reads as one more facet edge. rel = fragment − the block's centre,
+      // in block units (rel.y > 0: upper part).
+      float u = abs(vNxz.x) > abs(vNxz.y) ? wp.y : wp.x;
+      // Genshin (Mondstadt cliffs): broad HORIZONTAL plates (~16 m × 7 m) — layered rock, not tall columns.
+      vec2 fp = ${gen ? 'vec2(u / 16.0, vWorldPos.y / 7.0)' : 'vec2(u / 11.0, vWorldPos.y / 24.0)'};
+      vec2 ip = floor(fp), cell = ip, rel = vec2(0.0);
+      if (fine) {
+        float bd = 9.0;
+        for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+          vec2 c = ip + vec2(float(i), float(j));
+          vec2 d = fp - c - vec2(st_hash(c), st_hash(c + 17.3));
+          float dd = dot(d, d);
+          if (dd < bd) { bd = dd; cell = c; rel = d; }
+        }
+      } else {
+        // LOW: staggered columns instead of the 3×3 Voronoi search (2 hashes instead of 18) — each column of
+        // blocks is shifted by its own amount, so the face still reads as stacked upright blocks.
+        float col = floor(fp.x);
+        float fy = fp.y + st_hash(vec2(col, 4.7));
+        cell = vec2(col, floor(fy));
+        rel = vec2(fract(fp.x) - 0.5, fract(fy) - 0.5);
+      }
+      float top = smoothstep(0.05, 0.5, rel.y);
+      cliffTilt = vec3((st_hash(cell + 3.1) - 0.5) * 1.3, (st_hash(cell + 5.7) - 0.3) * 0.5 + top * 0.8, (st_hash(cell + 9.2) - 0.5) * 1.3)${gen ? ' * 0.5' : ''}; // Genshin: gentle facets
+      if (cliff > 0.01) {
+        float region = fine ? st_noise(wp * 0.008 + vec2(vWorldPos.y * 0.01)) : n1;
+        ${gen ? `// GENSHIN (reference-matched): warm light-grey stone (lit ≈ 170,166,150 on screen); the blue comes from the
+        // cool sky fill in the shade, not from the albedo.
+        vec3 stone = mix(vec3(0.47, 0.44, 0.37), vec3(0.55, 0.51, 0.42), region);` : 'vec3 stone = mix(vec3(0.17, 0.21, 0.3), vec3(0.24, 0.25, 0.31), region); // slate blue ↔ lavender grey'}
+        stone *= 0.86 + 0.28 * st_hash(cell + 1.3);
+        stone *= 0.76 + 0.34 * smoothstep(-0.55, 0.55, rel.y);
+        if (fine) stone *= 0.94 + 0.12 * st_noise(vec2(u * 0.22, vWorldPos.y * 0.04));
+        // Match the crags standing on it (cliffRock material, Formations/crags.ts): the same vertical brush streaks
+        // (paint.ts STONE at STONE_CLIFF_UV) and the same mid-tone — the slope faces the sky more than the crags'
+        // walls, so its albedo sits lower (×0.74; measured on screen: was ~18 % brighter than the crags).
+        vec4 cb = texture2D(uBrush, vec2(u * 0.07, vWorldPos.y * 0.022));
+        stone *= (0.74 + 0.36 * cb.g + 0.3 * (cb.r - 0.5)) * 0.74;
+        float mn = st_noise(wp * 0.21 + vec2(vWorldPos.y * 0.13));
+        float moss = max(smoothstep(0.63, 0.7, vUpN + (mn - 0.5) * 0.2), top * smoothstep(0.55, 0.75, mn) * step(0.7, st_hash(cell + 7.7)));
+        stone = mix(stone, vec3(0.2, 0.3, 0.07) * (0.8 + 0.4 * mn), moss * (1.0 - vBiome.y) * 0.75);
+        stone *= mix(vec3(1.0), vec3(0.9, 0.96, 1.08), vBiome.y);
+        diffuseColor.rgb = mix(diffuseColor.rgb, stone, cliff);
+      }
     }
   }
   if (vBiome.y > 0.01) {
-    float sparkle = step(0.988, st_hash(floor(wp * 22.0))) * 0.5;
-    diffuseColor.rgb *= 1.0 + vBiome.y * ((st_noise(wp * 0.25) - 0.5) * 0.1 + sparkle);
+    if (fine) {
+      float sparkle = step(0.988, st_hash(floor(wp * 22.0))) * 0.5;
+      diffuseColor.rgb *= 1.0 + vBiome.y * ((st_noise(wp * 0.25) - 0.5) * 0.1 + sparkle);
+    }
     diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.94, 0.97, 1.05), vBiome.y * 0.5);
   }
   // Under water: the bed darkens and turns blue-green with depth (seen through the semi-clear water);
@@ -384,7 +418,8 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   diffuseColor.rgb *= 1.0 - 0.35 * smoothstep(-0.8, 0.0, wd) * step(wd, 0.0) * 0.5 * wetZone; // wet dark band above
   ${!over && !story ? '// Genshin: the lake bed glows turquoise through clear shallows, deepening to teal.\n  ' : ''}if (wd > 0.0) diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * ${!over && !story ? 'vec3(0.45, 0.9, 0.88)' : 'vec3(0.5, 0.66, 0.7)'}, ${!over && !story ? 'vec3(0.01, 0.12, 0.14)' : 'vec3(0.015, 0.045, 0.055)'}, smoothstep(0.0, ${!over && !story ? '5.0' : '3.5'}, wd)), 1.0 - smoothstep(0.35, 0.6, vBiome.x));
   wd = mix(-10.0, wd, wetZone); // kills the shore foam line below outside the wet zone
-  diffuseColor.rgb += vec3(0.25, 0.27, 0.27) * (1.0 - smoothstep(0.0, 0.18, abs(wd - 0.04))) * (0.5 + 0.5 * st_noise(wp * 3.0 + vec2(uTimeS * 0.3)));
+  float foam = 1.0 - smoothstep(0.0, 0.18, abs(wd - 0.04));
+  if (foam > 0.0) diffuseColor.rgb += vec3(0.25, 0.27, 0.27) * foam * (0.5 + 0.5 * st_noise(wp * 3.0 + vec2(uTimeS * 0.3))); // shoreline only
   // TRACKS in the snow (compacted blue-grey) and on sand (darker, disturbed): footprints and tyre ruts.
   {
     float tk = vBiome.x + vBiome.y > 0.02 ? trailAt(wp) * clamp(vBiome.x + vBiome.y, 0.0, 1.0) : 0.0;
@@ -505,7 +540,10 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   vec3 V = normalize(vViewPosition);
   float ndv = clamp(dot(normal, V), 0.0, 1.0);
   float back = pow(clamp(dot(-V, uKeyDirView), 0.0, 1.0), 2.0);
-  outgoingLight += uKeyColor * diffuseColor.rgb * pow(1.0 - ndv, 3.0) * (0.3 + back * 1.4) * uRim${story ? ' * (1.0 - uStoryAmt)' : ''};
+  outgoingLight += uKeyColor * diffuseColor.rgb * pow(1.0 - ndv, 3.0) * (0.3 + back * 1.4) * uRim${story ? ' * (1.0 - uStoryAmt)' : ''};${o.surface === 'atlas' ? `
+  // Emissive mushrooms (vGlow): their own light on top of the lit colour — bright in the shade, glowing at night,
+  // bloom picks it up on MEDIUM+ (LOW: no bloom, a bright flat colour).
+  outgoingLight = mix(outgoingLight, max(outgoingLight, diffuseColor.rgb * 1.9), vGlow);` : ''}
   ${o.terrain ? `{ // Sun glints on snow and sand: sparse cells that flash toward the key light (view dependent).
     float gd = length(vWorldPos - cameraPosition);
     float soft = (vBiome.y + vBiome.x * 0.55) * uSurfaceDetail;
@@ -552,6 +590,6 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     shader.fragmentShader = fs
   }
   const prevKey = material.customProgramCacheKey.bind(material)
-  material.customProgramCacheKey = () => `${prevKey()}|stylize2-${o.key}${o.biomeCover ? '-bc' : ''}${story ? '-story' : ''}${over ? '-over' : ''}`
+  material.customProgramCacheKey = () => `${prevKey()}|stylize2-${o.key}${o.biomeCover ? '-bc' : ''}${story ? '-story' : ''}${over ? '-over' : ''}${gen ? '-gen' : ''}`
   return material
 }

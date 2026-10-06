@@ -38,7 +38,7 @@ export interface Settings {
   painterly: boolean
   /** Force the painterly filter on tiers where it defaults off (LOW). */
   painterlyForce: boolean
-  /** Art style (rendering/artStyle.ts): 'bright' Genshin (default), 'overland' over the hill, or 'storybook'. Changing it reloads. */
+  /** Art style (rendering/artStyle.ts): 'genshin' (default, reference-matched), 'bright' (older Genshin-like), 'overland' over the hill, or 'storybook'. Changing it reloads. */
   artStyle: ArtStyle
   /** Monsters and storms in monster time (off = exploration mode). */
   monsters: boolean
@@ -58,7 +58,7 @@ export const DEFAULT_SETTINGS: Settings = {
   resolution: 'auto',
   pixelRatio: 'auto',
   camera: 'tpp',
-  handling: 'arcade',
+  handling: 'sim',
   autoAccelerate: false,
   dayLength: 24,
   showFps: true,
@@ -66,16 +66,17 @@ export const DEFAULT_SETTINGS: Settings = {
   filmGrain: true,
   painterly: false,
   painterlyForce: false,
-  artStyle: 'bright',
+  artStyle: 'genshin',
   monsters: true,
   sound: true,
   music: true,
   garage: { vehicle: DEFAULT_VEHICLE, tuning: {} },
 }
 
-const KEY = 'dark.settings.v4'
-/** v3 → v4: the default art style changed to 'bright' (Genshin); a v3 save keeps everything but its style choice. */
-const OLD_KEY = 'dark.settings.v3'
+const KEY = 'dark.settings.v6'
+/** v5 → v6: the default handling became the realistic simulation; a v5 save keeps everything else (and arcade only
+ *  if it wasn't simply the old default). v4 saves are no longer migrated (they get the defaults). */
+const OLD_KEY = 'dark.settings.v5'
 
 export function loadSettings(): Settings {
   try {
@@ -83,7 +84,7 @@ export function loadSettings(): Settings {
     if (raw) return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) }
     const old = localStorage.getItem(OLD_KEY)
     if (old) {
-      const { artStyle: _dropped, ...rest } = JSON.parse(old) as Partial<Settings>
+      const { handling: _oldDefault, ...rest } = JSON.parse(old) as Partial<Settings>
       const s = { ...DEFAULT_SETTINGS, ...rest }
       saveSettings(s)
       return s

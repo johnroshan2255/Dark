@@ -6,6 +6,7 @@ import { generateTerrain } from './Terrain/generateTerrain'
 import type { ChunkData } from './types'
 import { WorldFields } from './WorldFields'
 import { buildFormation } from './Formations/formations'
+import { buildCrags } from './Formations/crags'
 
 /**
  * Deterministic chunk generator: (seed, cx, cz) → ChunkData.
@@ -34,9 +35,10 @@ export class WorldGenerator {
   /**
    * Formations centred in this chunk, meshed (surface nets, 1.5 m voxels) and coloured: up-facing faces carry the
    * ground cover (grass / sand / snow), the rest is rock (warm grey-tan; sandstone in the desert; blue-grey in the
-   * snow) with horizontal bands. Chunk-local coordinates.
+   * snow) with horizontal bands. Then the chunk's CRAGS (Formations/crags.ts: faceted rock columns cladding the steep
+   * slopes) in the same mesh — one draw and one trimesh collider for all the chunk's rock. Chunk-local coordinates.
    */
-  private formations(cx: number, cz: number) {
+  private formations(cx: number, cz: number, heights: Float32Array) {
     const x0 = cx * CHUNK_SIZE, z0 = cz * CHUNK_SIZE
     const list = this.fields.formations.centredIn(x0, z0, x0 + CHUNK_SIZE, z0 + CHUNK_SIZE)
     const pos: number[] = [], nor: number[] = [], col: number[] = [], idx: number[] = []
@@ -66,9 +68,20 @@ export class WorldGenerator {
       }
       for (let i = 0; i < m.indices.length; i++) idx.push(m.indices[i] + base)
     }
+    const crag = { pos: [] as number[], nor: [] as number[], col: [] as number[] }
+    buildCrags(this.fields, cx, cz, heights, crag)
+    for (let i = 0; i < crag.pos.length; i += 3) {
+      const x = crag.pos[i], y = crag.pos[i + 1], z = crag.pos[i + 2]
+      idx.push(pos.length / 3)
+      pos.push(x, y, z)
+      b[0] = Math.min(b[0], x); b[1] = Math.min(b[1], y); b[2] = Math.min(b[2], z)
+      b[3] = Math.max(b[3], x); b[4] = Math.max(b[4], y); b[5] = Math.max(b[5], z)
+    }
+    for (const v of crag.nor) nor.push(v)
+    for (const v of crag.col) col.push(v)
     return {
       fmPos: new Float32Array(pos), fmNor: new Float32Array(nor), fmCol: new Float32Array(col), fmIdx: new Uint32Array(idx),
-      fmBounds: new Float32Array(list.length ? b : []),
+      fmBounds: new Float32Array(idx.length ? b : []),
     }
   }
 
@@ -76,7 +89,7 @@ export class WorldGenerator {
     const t0 = performance.now()
     const terrain = generateTerrain(this.fields, cx, cz)
     const forest = scatterForest(this.fields, cx, cz, terrain.heights)
-    const fm = this.formations(cx, cz)
+    const fm = this.formations(cx, cz, terrain.heights)
     return {
       cx,
       cz,

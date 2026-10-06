@@ -358,6 +358,7 @@ export class PostPipeline {
     }
     g.tBloom.value = this.bloomA.texture
     g.uBloom.value = this.bloom
+    g.uRaysOn.value = this.raysActive ? 1 : 0
     if (this.raysActive) {
       this.quad.material = this.raysMaterial
       renderer.setRenderTarget(this.raysTarget)

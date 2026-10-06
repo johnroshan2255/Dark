@@ -3,9 +3,13 @@ import { hashFloat, Layer } from '../noise/rng'
 import { sampleHeight } from '../Terrain/generateTerrain'
 import { PROP_STRIDE, TREE_STRIDE, TreeSpecies } from '../types'
 import { WorldFields } from '../WorldFields'
-import type { BiomeWeights } from '../Biomes'
+import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Biomes'
+import { BIOMES, pickRegion, pickWeighted, regionRoll } from '../biomes/BiomeDefs'
+import { CRAG_SLOPE0, gridSlope } from '../Formations/crags'
 
 const _bw: BiomeWeights = [0, 0]
+const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
+const _sg: [number, number] = [0, 0]
 
 /**
  * Jittered-grid scatter keyed by GLOBAL cell coordinates, so a cell's content never
@@ -55,6 +59,9 @@ function scatter(
       const scale = accept(wx, wz, r2, h)
       if (scale <= 0) continue
       if (layer !== Layer.Rocks && h < WorldFields.WATER + 0.9) continue // no trees/plants in water
+      // Cliffs are bare rock (crags clad them): nothing grows on slopes the crags start on (Formations/crags.ts).
+      gridSlope(heights, lx, lz, _sg)
+      if (_sg[0] * _sg[0] + _sg[1] * _sg[1] > CRAG_SLOPE0 * CRAG_SLOPE0) continue
       if (fields.pois.near(wx, wz, layer === Layer.Trees ? 4 : 0)) continue // places are cleared
       // Rock formations stand clear (an arch over open ground, a cave hill, the pillars' feet).
       if (fields.formations.near(wx, wz, layer === Layer.Trees ? 3 : 0)) continue
@@ -87,16 +94,25 @@ function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: 
   const density = fields.forestDensity(wx, wz, h)
   const road = fields.roadDistance(wx, wz)
   const stand = fields.colorVariation(wx * 0.35, wz * 0.35) // low-frequency stand selector
+  // REGION SPECIES: autumn valleys and mystic woods grow their own trees (BiomeDefs) — the tree picks a region in
+  // proportion to the weights here (a mixed border, the share rising across the blend band), then a species.
+  const wn = fields.region(wx, wz, _wn, h)
+  if (wn[Biome.Autumn] + wn[Biome.Mystic] > 0.002) {
+    const region = pickRegion(wn, regionRoll(fields.seed, wx, wz, 4711))
+    if (region === Biome.Autumn || region === Biome.Mystic) return pickWeighted(BIOMES[region].trees, r)
+  }
   const w = fields.biome(wx, wz, _bw, h)
   // Desert: saguaros, Joshua trees and the odd dead snag; the desert's rim keeps a few hardy pines.
   // Snow: conifers only (snow on their shelves comes from the material's biome cover).
   if (w[0] > 0.8) return r < 0.55 ? TreeSpecies.Cactus : r < 0.88 ? TreeSpecies.Joshua : TreeSpecies.Dead
   if (w[0] > 0.5) return r < 0.35 ? TreeSpecies.Cactus : r < 0.6 ? TreeSpecies.Joshua : r < 0.8 ? TreeSpecies.Dead : TreeSpecies.Pine
   if (w[1] > 0.5) return r < 0.6 ? TreeSpecies.Spruce : r < 0.9 ? TreeSpecies.Fir : TreeSpecies.Dead
-  if (r < 0.04) return TreeSpecies.Dead
+  // Genshin's green lands have no dead trees (palette 2): every tree is in leaf.
+  const gen = fields.palette === 2
+  if (r < 0.04 && !gen) return TreeSpecies.Dead
   // Genshin-style mixed forest: colourful broadleaf groves between conifer stands.
   if (road < 16) return r < 0.45 ? TreeSpecies.Spruce : r < 0.65 ? TreeSpecies.Pine : r < 0.8 ? TreeSpecies.Birch : TreeSpecies.Fir
-  if (density < 0.35) return r < 0.12 ? TreeSpecies.Dead : r < 0.6 ? TreeSpecies.Birch : TreeSpecies.Pine
+  if (density < 0.35) return r < 0.12 && !gen ? TreeSpecies.Dead : r < 0.6 ? TreeSpecies.Birch : TreeSpecies.Pine
   if (stand > 0.6) return r < 0.55 ? TreeSpecies.Birch : r < 0.8 ? TreeSpecies.Pine : TreeSpecies.Spruce
   return r < 0.45 ? TreeSpecies.Spruce : r < 0.7 ? TreeSpecies.Fir : r < 0.85 ? TreeSpecies.Birch : TreeSpecies.Pine
 }
@@ -144,11 +160,16 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     const rd = fields.roadDistance(wx, wz) - WorldFields.ROAD_HALF_WIDTH
     const verge = rd > 1.5 && rd < 12 ? 0.45 * (1 - Math.abs(rd - 5) / 7) : 0
     const w = fields.biome(wx, wz, _bw, h)
+    // Region undergrowth density (BiomeDefs.plantDensity, blended): leaf piles in the autumn valleys, a carpet of
+    // ferns and glowing mushrooms in the mystic woods.
+    const rw = fields.region(wx, wz, _wn, h)
+    const green = rw[Biome.Forest] + rw[Biome.Autumn] + rw[Biome.Mystic]
+    const reg = green > 0.01 ? (rw[Biome.Forest] + rw[Biome.Autumn] * BIOMES[Biome.Autumn].plantDensity + rw[Biome.Mystic] * BIOMES[Biome.Mystic].plantDensity) / green : 1
     // Overland palette: half the undergrowth — open straw meadows with a few bushes, not a carpet of dark spots.
     // Desert: sparse agaves and dry shrubs instead (WorldChunk picks the desert meshes by the biome at the plant).
     // SMALL bushes only, and ~40 % of the old count (the player asked for few, small ones): 0.45–0.8 scale
     // (was 0.7–1.6 — the big leafy mounds), a lighter verge band.
-    const density = ((0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1]) * 0.4 + w[0] * 0.05) * (fields.palette === 1 ? 0.45 : 1)
+    const density = ((0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1]) * 0.4 * Math.min(1.6, reg) + w[0] * 0.05) * (fields.palette === 1 ? 0.45 : 1)
     return r < density ? 0.45 + (r / Math.max(density, 1e-3)) * 0.35 : 0
   })
 

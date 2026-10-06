@@ -63,6 +63,28 @@ SSAO (HIGH level) ≈ +0.3 ms GPU, +2 draws. All features off on HIGH: 159 → 1
   idle, no hot spot — phones are fill-bound here. Programs 23 on LOW (budget 10; was 20 before) — a load-time cost,
   still to do. Real-device numbers are still required (below).
 
+**Snapdragon 6xx pass (2026-10-06)** — target: Adreno 610/612 (SD 662/665/680), Adreno 618/619 (SD 720G/695).
+Method (headless, M4): split the LOW frame at FULL GPU clocks (4K canvas keeps the post pass busy) into fixed scene
+work (scene RT shrunk to 0.05 MP), per-pixel scene work and per-pixel post, 3 runs, medians; project
+phone ≈ R × [fixed + scenePerMP × 0.21 MP + postPerMP × 0.38 MP] with R ≈ 25 (Adreno 610) / 15 (618/619).
+Single runs of the fixed term swing ±0.3 ms (±7 ms projected) — always repeat. Findings and fixes:
+- Terrain shader = most expensive pixels (≈ 0.9 ms/MP on the M4): ~30 `fract(sin)` hashes per pixel. `st_hash` is now
+  sin-free (Hoskins hash12, also correct on mediump); LOW (`uSurfaceDetail` = 0, a uniform branch → no recompiles)
+  skips the fine noise layers, meadow streaks/gusts, sand ripples, snow sparkle and uses staggered cliff columns
+  (2 hashes) instead of the 3×3 Voronoi (18); shore foam is evaluated on the shoreline only (all tiers).
+- Grading pass: shaft composite (5 fetches + 4 exp), bloom fetch and painterly grain are skipped when off (`uRaysOn`,
+  `uBloom`, `uPaintFx`).
+- Trees: species geometry is INDEXED (`mergeVertices` in createTreeLibrary): 40–70 % fewer vertex-shader runs
+  (sway + billboard + per-vertex sky fog), identical image. Forest fixed GPU 1.09 → 0.34 ms (M4, full clocks).
+- 8.3 MP LOW frame (M4) before → after: spawn 14.2 → 13.0, cliffs 13.1 → 11.5, vista 14.2 → 12.2, lake 14.0 → 12.0,
+  desert 16.3 → 12.9, snow 17.4 → 13.9, forest 13.1 → 12.6 (+ the fixed-cost cut above).
+- Projection now: Adreno 618/619 ≈ 6–10 ms (60 fps with headroom at LOW defaults); Adreno 610 ≈ 11–17 ms (R 25;
+  up to ~24 ms if R is 35) — 60 at LOW defaults in most places, AUTO lowers render scale (0.75 → 0.6) in dense forest.
+- CPU (915×412 @2.625, CPU ×6, streaming at 30 m/s for 20 s): mean 2.0 ms, p99 4.9 ms, 2 frames > 16.7 ms.
+- Tried and REVERTED: LOW canvas at 0.75 DPR + scene 100 % (grading pass on 45 % fewer pixels, ≈ −2 ms projected) —
+  the browser's upscale made tree/grass edges visibly blocky on a phone.
+- Still required: a real Snapdragon 6xx device (§10) — the M4 projection is a ratio estimate.
+
 **MSAA × depth readers (2026-10-05)** — the biggest single cost found: with MSAA 4× (the old HIGH/ULTRA default)
 every pass that SAMPLES scene depth (SSAO, volumetric light, grading) forces a multisampled depth resolve. Measured
 HIGH 1080p (M4): vista 14.4 → 8.0 ms, forest 9.4 → 6.5 ms, 720p 12.5 → 6.6 ms with FXAA; SSAO alone 4.6 → 0.9 ms;

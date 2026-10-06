@@ -210,7 +210,7 @@ export class CharacterModel {
    * @param speed horizontal m/s   @param grounded   @param aimPitch camera pitch (arm follows when aiming)
    * @param aiming flashlight on → right arm raised forward   @param vy vertical velocity (jump/fall pose)
    */
-  animate(dt: number, pos: THREE.Vector3, targetYaw: number, speed: number, grounded: boolean, aiming: boolean, aimPitch: number, vy = 0, knock = 0): void {
+  animate(dt: number, pos: THREE.Vector3, targetYaw: number, speed: number, grounded: boolean, aiming: boolean, aimPitch: number, vy = 0, knock = 0, tumble: { angle: number; yaw: number } | null = null): void {
     let d = targetYaw - this.yaw
     d = Math.atan2(Math.sin(d), Math.cos(d))
     this.yaw += d * (1 - Math.exp(-12 * dt))
@@ -260,6 +260,14 @@ export class CharacterModel {
       hipsY -= 0.14 * k
     }
     if (aiming) this.arm(1, Math.PI / 2, Math.PI / 2 - 0.1 + aimPitch * 0.8, 0.05) // flashlight: lowered, then swung straight forward
+    // BAIL TUMBLE: tucked body rolling forward along the slide (PlayerController.bail).
+    if (tumble) {
+      this.yaw = tumble.yaw
+      this.knockMode = 'fall'
+      this.lastKnock = 1
+      this.tumblePose(tumble.angle, pos)
+      return
+    }
     // KNOCKDOWN / GET UP: authored human sequences (knockPose), solved against the ground (see `groundPose`).
     if (knock > 0.001) {
       if (knock > this.lastKnock + 1e-4 && this.knockMode !== 'up') this.knockMode = 'fall'
@@ -344,6 +352,47 @@ export class CharacterModel {
       this.bones[ft].quaternion.copy(_q).multiply(_q2).multiply(_q3.setFromAxisAngle(_xAxis, 0.35 * swing))
       for (const id of [th, sh, ft]) this.target[id].copy(this.bones[id].quaternion)
     }
+  }
+
+  /**
+   * Forward roll: arms wrapped in, knees tucked to the chest, chin down; the whole body pitched forward by `angle`
+   * about its right axis (yaw = slide direction). Centred on the hips over `pos`, lowest point on the ground.
+   * In the last quarter-turn before lying on the back the limbs open out toward the supine pose.
+   */
+  private tumblePose(angle: number, pos: THREE.Vector3): void {
+    const S = CharacterModel.KP.supine
+    const a = ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)
+    const open = angle > Math.PI * 2 ? smooth(Math.PI * 2 - 2.6, Math.PI * 2 - 1.5, a) : 0 // unfold onto the back
+    const mix = (tuck: number, sup: number) => tuck + (sup - tuck) * open
+    this.pose(B.chest, mix(-0.7, S.chest))
+    this.pose(B.head, mix(-0.5, S.head))
+    this.pose(B.hips, mix(-0.3, S.hips))
+    this.leg(-1, mix(1.9, S.thL), mix(2.2, S.knL), mix(0.08, S.spread))
+    this.leg(1, mix(1.8, S.thR), mix(2.1, S.knR), mix(0.08, S.spread))
+    this.arm(1, mix(0.9, S.aDown), mix(1.1, S.aFwd), mix(1.6, S.aBend), mix(0.1, S.aOut))
+    this.arm(-1, mix(0.95, S.aDown), mix(1.0, S.aFwd), mix(1.6, S.aBend), mix(0.12, S.aOut))
+    this.bones[B.hips].position.copy(this.rest[B.hips])
+    this.commit(1)
+    const R = this.root
+    R.rotation.set(-angle, this.yaw, 0) // − = pitching FORWARD (head first) about the body's right axis
+    R.position.copy(pos)
+    R.updateMatrixWorld(true)
+    // Centre the roll on the hips (not the feet), then rest the lowest part on the ground.
+    this.bones[B.hips].getWorldPosition(_a)
+    R.position.x += pos.x - _a.x
+    R.position.z += pos.z - _a.z
+    R.updateMatrixWorld(true)
+    let low = Infinity
+    const probe = (id: BoneId, r: number, up = 0) => {
+      if (up) this.bones[id].localToWorld(_t.set(0, up, 0))
+      else this.bones[id].getWorldPosition(_t)
+      low = Math.min(low, _t.y - r)
+    }
+    probe(B.footL, ANKLE_Y); probe(B.footR, ANKLE_Y); probe(B.handL, 0.05); probe(B.handR, 0.05)
+    probe(B.hips, 0.13); probe(B.chest, 0.15); probe(B.head, 0.27, 0.3)
+    const g = this.ground ? this.ground(pos.x, pos.z) : pos.y
+    R.position.y += Math.max(g, pos.y) - low // on the ground (in the hop out of the door: at the player's height)
+    R.updateMatrixWorld(true)
   }
 
   /** Pose keyframes of the fall and the get-up (blended by `knockPose`). */

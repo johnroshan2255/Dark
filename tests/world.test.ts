@@ -17,7 +17,7 @@ import { sampleHeight } from '../src/world/Terrain/generateTerrain'
 import { WorldGenerator } from '../src/world/WorldGenerator'
 import { createPropGeometries } from '../src/world/Forest/propGeometries'
 import { buildInstanceAttributes } from '../src/optimization/instancing/InstanceBuilder'
-import { Biome } from '../src/world/Biomes'
+import { Biome, BIOME_COUNT } from '../src/world/Biomes'
 import { RoadNetwork } from '../src/world/Road/RoadNetwork'
 
 let failures = 0
@@ -123,7 +123,8 @@ for (const seed of [7, 1337, 42]) {
     step = Math.max(step, Math.abs(f.height(x + 12, z) - rh), Math.abs(f.height(x - 12, z) - rh))
     if (Math.abs(f.height(x, z) - rh) > 1e-6) step = 1e9 // the bed itself is exact
   }
-  check(`seed ${seed}: main-road shoulder step ≤ 9 m`, step <= 9, `${step.toFixed(1)} m`)
+  // (≤ 9.5 m: with the v2 region layout seed 1337 has a farm 12 m off the road on a hillside, levelled ~10 m above it.)
+  check(`seed ${seed}: main-road shoulder step ≤ 9.5 m`, step <= 9.5, `${step.toFixed(1)} m`)
   let disc = 0, n = 0
   for (const p of f.pois.inBox(-1500, -1500, 1500, 1500)) {
     let lo = Infinity, hi = -Infinity
@@ -145,22 +146,41 @@ for (const seed of [7, 1337, 42]) {
   // Biomes.
   const w0 = f.biome(f.roadCenterX(8), 8, [0, 0], f.height(f.roadCenterX(8), 8))
   check(`seed ${seed}: spawn is forest`, w0[0] + w0[1] < 0.02, `desert ${w0[0].toFixed(2)} snow ${w0[1].toFixed(2)}`)
-  const types = [f.biomes.cell(0, 2).type, f.biomes.cell(0, -2).type].sort()
-  check(`seed ${seed}: desert and snow both lie on the road within ~2.7 km`, types[0] === Biome.Desert && types[1] === Biome.Snow)
+  // Down the main road: forest → autumn → desert one way, forest → mystic → snow the other (cells (0, ±2), (0, ±3)).
+  const road = [-3, -2, 2, 3].map((j) => f.biomes.cell(0, j).type).sort()
+  check(`seed ${seed}: autumn, mystic, desert and snow all lie on the road within ~3.6 km`, road.join() === [Biome.Desert, Biome.Snow, Biome.Autumn, Biome.Mystic].sort().join())
+  const dry = f.biomes.cell(0, 2).type === Biome.Autumn ? 1 : -1
+  check(`seed ${seed}: the road runs autumn → desert and mystic → snow`, f.biomes.cell(0, 3 * dry).type === Biome.Desert && f.biomes.cell(0, -2 * dry).type === Biome.Mystic && f.biomes.cell(0, -3 * dry).type === Biome.Snow)
   let bad = 0
   const rng2 = new Rng(seed)
+  const wn = new Float32Array(BIOME_COUNT)
   for (let i = 0; i < 2000; i++) {
-    const w = f.biome(rng2.range(-5000, 5000), rng2.range(-5000, 5000), [0, 0])
+    const x = rng2.range(-5000, 5000), z = rng2.range(-5000, 5000)
+    const w = f.biome(x, z, [0, 0])
     if (w[0] < 0 || w[1] < 0 || w[0] + w[1] > 1 + 1e-6 || Number.isNaN(w[0] + w[1])) bad++
+    f.biomes.weightsN(x, z, wn, i % 2 ? f.height(x, z) : undefined)
+    let sum = 0
+    for (const v of wn) { if (v < -1e-6 || Number.isNaN(v)) bad++; sum += v }
+    if (Math.abs(sum - 1) > 1e-4) bad++
   }
-  check(`seed ${seed}: biome weights well-formed`, bad === 0, `${bad} bad`)
+  check(`seed ${seed}: region weights well-formed (each >= 0, sum = 1)`, bad === 0, `${bad} bad`)
+  // Region shares over a 37 x 37 km map (climate table): forest ~50 %, autumn / desert / snow ~15 %, mystic ~5 %.
+  const share = [0, 0, 0, 0, 0]
+  for (let j = -20; j <= 20; j++) for (let i = -20; i <= 20; i++) share[f.biomes.cell(i, j).type]++
+  const tot = share.reduce((a, b) => a + b)
+  const pct = share.map((c) => (c / tot) * 100)
+  check(`seed ${seed}: region shares (forest ${pct[0].toFixed(0)} desert ${pct[1].toFixed(0)} snow ${pct[2].toFixed(0)} autumn ${pct[3].toFixed(0)} mystic ${pct[4].toFixed(0)} %)`,
+    pct[0] > 38 && pct[0] < 62 && [1, 2, 3].every((b) => pct[b] > 8 && pct[b] < 24) && pct[4] > 2 && pct[4] < 10)
   // Biome flora: chunks deep inside the desert / snow cells along the road.
   const gen = new WorldGenerator(seed)
   const deep = (want: number) => {
     const out: [number, number][] = []
-    for (let z = -2900; z <= 2900 && out.length < 6; z += 64) {
-      const x = f.roadCenterX(z) + 40
-      if (f.biome(x, z, [0, 0])[want] > 0.97) out.push([Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE)])
+    // The road runs near the x = 0 cell edge: look a little to either side of it (cells (0, j) and (−1, j)).
+    for (let z = -3800; z <= 3800 && out.length < 6; z += 64) {
+      for (const off of [40, 220, -220]) {
+        const x = f.roadCenterX(z) + off
+        if (f.biome(x, z, [0, 0])[want] > 0.97) { out.push([Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE)]); break }
+      }
     }
     return out
   }

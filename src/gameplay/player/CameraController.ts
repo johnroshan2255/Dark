@@ -116,7 +116,7 @@ export class CameraController {
     if (tpp) {
       const moving = p.horizontalSpeed > 0.4
       const targetYaw = flashlightOn || !moving ? (flashlightOn ? p.yaw : this.character.yaw) : Math.atan2(-p.velocity.x, -p.velocity.z)
-      this.character.animate(dt, pos, targetYaw, p.horizontalSpeed, p.grounded, flashlightOn, p.pitch, p.velocity.y, k) // knockdown / get-up posed inside
+      this.character.animate(dt, pos, targetYaw, p.horizontalSpeed, p.grounded, flashlightOn, p.pitch, p.velocity.y, k, p.tumbling ? { angle: p.tumble, yaw: p.tumbleYaw } : null) // knockdown / bail tumble / get-up posed inside
       this.blob.position.set(pos.x, this.fields.surface(pos.x, pos.z) + 0.03, pos.z)
       this.character.handPosition(this.flashOrigin)
       this.flashTarget.copy(cam.position).addScaledVector(this.fwd, 28)

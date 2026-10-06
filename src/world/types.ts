@@ -44,10 +44,12 @@ export const TREE_STRIDE = 6
 export const PROP_STRIDE = 5
 
 /** Cactus (saguaro) and Joshua grow only in the desert (Forest/desertFlora.ts). */
-export const TreeSpecies = { Spruce: 0, Dead: 1, Fir: 2, Pine: 3, Birch: 4, Cactus: 5, Joshua: 6 } as const
-export const TREE_SPECIES_COUNT = 7
+/** Maple grows in the autumn valleys; Ancient (giant violet tree) and Shroom (glowing mushroom tree) in the mystic woods
+ *  (world/biomes/BiomeDefs.ts). Region species REPLACE the forest ones there, so a chunk's draw count stays flat. */
+export const TreeSpecies = { Spruce: 0, Dead: 1, Fir: 2, Pine: 3, Birch: 4, Cactus: 5, Joshua: 6, Maple: 7, Ancient: 8, Shroom: 9 } as const
+export const TREE_SPECIES_COUNT = 10
 /** Trunk collider radius at scale 1, indexed by species id (see Forest/treeFactory.ts). */
-export const TRUNK_RADIUS = [0.24, 0.22, 0.28, 0.26, 0.16, 0.34, 0.3] as const
+export const TRUNK_RADIUS = [0.24, 0.22, 0.28, 0.32, 0.3, 0.34, 0.3, 0.3, 0.6, 0.26] as const
 
 export const chunkKey = (cx: number, cz: number): string => `${cx},${cz}`
 

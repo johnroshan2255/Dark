@@ -82,7 +82,11 @@ export class LandmarkSystem {
     const parts = list.map((l) => {
       this.q.setFromAxisAngle(this.up, l.rot)
       this.m.compose(new THREE.Vector3(l.x, l.y, l.z), this.q, new THREE.Vector3(1, 1, 1))
-      return lod[l.kind].clone().applyMatrix4(this.m)
+      const g = lod[l.kind].clone().applyMatrix4(this.m)
+      // Billboarded leaf tufts (the world tree) expand around bbCenter in the shader: move it with the landmark.
+      const bc = g.getAttribute('bbCenter')
+      if (bc) bc.applyMatrix4(this.m)
+      return g
     })
     const g = mergeGeometries(parts)
     parts.forEach((p) => p.dispose())

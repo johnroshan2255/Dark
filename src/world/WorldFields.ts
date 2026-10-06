@@ -2,7 +2,8 @@ import { hash4 } from './noise/rng'
 import { createNoise2D, fbm, ridged, type Noise2D } from './noise/simplex'
 import { RoadNetwork, type RoadHit } from './Road/RoadNetwork'
 import { PoiField } from './POI/pois'
-import { BiomeField, type BiomeWeights } from './Biomes'
+import { Biome, BIOME_COUNT, BiomeField, type BiomeWeights, type RegionWeights } from './Biomes'
+import { BIOMES } from './biomes/BiomeDefs'
 import { ICE_SNOW } from './types'
 import { FormationField } from './Formations/formations'
 import { LandmarkField } from './Landmarks/landmarks'
@@ -55,6 +56,7 @@ export class WorldFields {
   readonly landmarks: LandmarkField
   private readonly hit: RoadHit = { dist: 0, height: 0, type: 0, halfWidth: 0 }
   private readonly bw: BiomeWeights = [0, 0]
+  private readonly wn: RegionWeights = new Float32Array(BIOME_COUNT)
   static readonly NET_SHOULDER = 4
   /** Secondary-road embankments: horizontal run per metre of cut/fill (1.6 → ≤ ~43° at the steepest point). */
   static readonly NET_EMBANKMENT = 1.6
@@ -111,6 +113,7 @@ export class WorldFields {
       placeNear: (x, z, m) => this.pois.near(x, z, m) !== null,
       formationNear: (x, z, m) => this.formations.near(x, z, m) !== null,
       biome: (x, z) => this.biomes.weights(x, z, lmBw),
+      region: (x, z) => this.biomes.dominant(x, z),
       roadCenterX: (z) => this.roadCenterX(z),
       water: WorldFields.WATER,
     })
@@ -146,15 +149,18 @@ export class WorldFields {
     const ridge = ridged(this.detail, x * 0.007, z * 0.007, 3) * 12
     const bumps = this.detail(x * 0.06, z * 0.06) * 0.6
     let h = base + mountains + ridge + bumps
-    const w = this.biomes.weights(x, z, this.bw)
-    const sand = w[0], snow = w[1]
+    const wn = this.biomes.weightsN(x, z, this.wn)
+    const sand = wn[Biome.Desert], snow = wn[Biome.Snow], autumn = wn[Biome.Autumn], mystic = wn[Biome.Mystic]
     // GENSHIN UPLANDS (Mondstadt / Liyue): terraced PLATEAUS — up to three grassy tiers of 12–16 m with sheer
     // layered-rock cliffs between them (a threshold of low-frequency noise: ~45–55° faces), wandering across the
     // land, so the world reads as cliffs, shelves and valleys, not a uniform hillside. Snow keeps half of it
     // (Dragonspine's ledges); the desert has its own mesas. The road's valley shaping still levels the corridor.
     const pn = fbm(this.mountN, x * 0.0022 + 31.7, z * 0.0022 - 8.3, 3)
     const tiers = sstep(0.1, 0.165, pn) * 16 + sstep(0.28, 0.335, pn) * 14 + sstep(0.46, 0.505, pn) * 12
-    h += tiers * (1 - sand) * (1 - snow * 0.5)
+    // AUTUMN valleys are open and rolling (fewer tiers, softer hills); the MYSTIC woods are dramatic (taller tiers,
+    // sharper ridges).
+    h += tiers * (1 - sand) * (1 - snow * 0.5) * (1 - 0.55 * autumn + 0.4 * mystic)
+    h += ridge * 0.6 * mystic - base * 0.2 * autumn
     if (sand > 0.001) {
       const dunes = this.dunes(x, z) + this.detail(x * 0.02, z * 0.02) * 0.6
       // MESAS & BUTTES: flat-topped tables with sheer sides (a threshold of low-frequency noise → cliffs ~50°),
@@ -376,6 +382,11 @@ export class WorldFields {
     return this.biomes.weights(x, z, out, h)
   }
 
+  /** Region weights (one per region, sum 1; world/Biomes.ts). */
+  region(x: number, z: number, out: RegionWeights, h?: number): RegionWeights {
+    return this.biomes.weightsN(x, z, out, h)
+  }
+
   /**
    * Forest density 0..1: dense belts with clearings. Deserts are nearly bare, snowfields sparse, and nothing
    * grows above the treeline (~95–125 m) — pass the terrain height when known.
@@ -385,8 +396,10 @@ export class WorldFields {
     // edge), leaving open meadows between them — Genshin's lands are mostly open grass and flowers.
     const n = fbm(this.forestN, x * 0.006, z * 0.006, 3) * 0.5 + 0.5
     let d = Math.min(1, Math.max(0, (n - 0.5) * 3.2))
-    const w = this.biomes.weights(x, z, this.bw, h)
-    d *= 1 - w[0] * 0.94 - w[1] * 0.7
+    const wn = this.biomes.weightsN(x, z, this.wn, h)
+    d *= 1 - wn[Biome.Desert] * 0.94 - wn[Biome.Snow] * 0.7
+    // Region character: autumn valleys open up, the mystic woods close in (BiomeDefs.treeDensity).
+    d = Math.min(1, d * (1 + wn[Biome.Autumn] * (BIOMES[Biome.Autumn].treeDensity - 1) + wn[Biome.Mystic] * (BIOMES[Biome.Mystic].treeDensity - 1)))
     if (h !== undefined && h > 95) d *= 1 - Math.min(1, (h - 95) / 30)
     return d
   }

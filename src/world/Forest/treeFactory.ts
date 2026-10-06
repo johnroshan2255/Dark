@@ -1,9 +1,12 @@
 import * as THREE from 'three'
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { ATLAS_CELLS, cellUv, SOLID_UV, SURFACE_UV } from '../../rendering/materials/FoliageAtlas'
-import { isOverland, isStorybook } from '../../rendering/artStyle'
+import { isGenshin, isOverland, isStorybook } from '../../rendering/artStyle'
 import { Rng } from '../noise/rng'
 import { TreeSpecies } from '../types'
 import { agave, dryShrub, joshua, saguaro } from './desertFlora'
+import { crownLump, Soup, srgb, sub, tuft, type V3 } from './treeParts'
+import { ANCIENT_TREE, broadleaf, cardBush, glowShrooms, gnarledSnag, leafPile, LIYUE_PINE, MAPLE_TREE, MONDSTADT_TREE, shroomTree, twistedPine } from './genshinTrees'
 
 /**
  * Procedural stylized trees (refer/forest, refer/roads hero) built from alpha-tested FOLIAGE CARDS on a solid
@@ -23,61 +26,6 @@ export interface SpeciesDef {
   levels: [THREE.BufferGeometry, THREE.BufferGeometry, THREE.BufferGeometry]
   trunkRadius: number
   trunkHalfHeight: number
-}
-
-type V3 = [number, number, number]
-const srgb = (hex: number) => new THREE.Color().setHex(hex, THREE.SRGBColorSpace)
-
-/** Triangle soup with explicit normals, uvs and colours. */
-class Soup {
-  readonly pos: number[] = []
-  readonly nor: number[] = []
-  readonly uv: number[] = []
-  readonly col: number[] = []
-  readonly bbC: number[] = []
-  readonly bbO: number[] = []
-  vert(p: V3, n: V3, uv: readonly [number, number], c: THREE.Color, bbCenter?: V3, bbOff?: [number, number]): void {
-    this.bbC.push(...(bbCenter ?? [0, 0, 0]))
-    this.bbO.push(...(bbOff ?? [0, 0]))
-    this.pos.push(p[0], p[1], p[2])
-    // Zero-length normals → NaN in the shader → bright blobs spread by the paint filter/bloom. Guard them.
-    const l = Math.hypot(n[0], n[1], n[2])
-    if (l < 1e-5) this.nor.push(0, 1, 0)
-    else this.nor.push(n[0] / l, n[1] / l, n[2] / l)
-    this.uv.push(uv[0], uv[1])
-    this.col.push(c.r, c.g, c.b)
-  }
-  geometry(name: string): THREE.BufferGeometry {
-    const g = new THREE.BufferGeometry()
-    g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3))
-    g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3))
-    g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2))
-    g.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3))
-    g.setAttribute('bbCenter', new THREE.Float32BufferAttribute(this.bbC, 3))
-    g.setAttribute('bbOff', new THREE.Float32BufferAttribute(this.bbO, 2))
-    g.name = name
-    g.computeBoundingSphere()
-    return g
-  }
-}
-
-const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-
-/**
- * Camera-facing fluffy TUFT (billboarded in the vertex shader): quad of half-size `r` at `c`, normal from the
- * crown centre `crown` (the canopy lights as one soft volume), colour dark→light bottom→top.
- */
-function tuft(s: Soup, c: V3, r: number, crown: V3, dark: THREE.Color, light: THREE.Color): void {
-  const [u0, v0, u1, v1] = cellUv(ATLAS_CELLS.tuft)
-  const n: V3 = [c[0] - crown[0], (c[1] - crown[1]) * 0.8 + 0.25, c[2] - crown[2]]
-  const up = Math.max(0, Math.min(1, (c[1] - crown[1]) * 0.3 + 0.5))
-  const cb = dark.clone().lerp(light, up * 0.7), ct = dark.clone().lerp(light, 0.35 + up * 0.65)
-  const q: [number, number, number, number, THREE.Color][] = [[-r, -r, u0, v0, cb], [r, -r, u1, v0, cb], [r, r, u1, v1, ct], [-r, r, u0, v1, ct]]
-  for (const i of [0, 1, 2, 0, 2, 3]) {
-    const [ox, oy, u, v, col] = q[i]
-    // Authored position = flat quad in XY (what the shadow pass sees); the shader re-orients it to the camera.
-    s.vert([c[0] + ox, c[1] + oy, c[2]], n, [u, v], col, c, [ox, oy])
-  }
 }
 
 /** A flat card p0→p1 with half-width vector `side`; normals from `centre` (canopy volume). */
@@ -373,12 +321,15 @@ function overBirch(level: number, rng: Rng): THREE.BufferGeometry {
 function spruce(level: number, rng: Rng): THREE.BufferGeometry {
   if (isOverland()) return overConifer(level, rng, { height: 16, radius: 2.9, bare: 2.2, droop: 0.42, trunk: 0x4a3222, dark: 0x22482a, light: 0x7aa636 })
   if (isStorybook()) return storyConifer(level, rng, { height: 11, radius: 2.5, bare: 4.2, droop: 0.55, trunk: 0x9a4a2e })
+  // Genshin (reference-matched): conifers are a mid TEAL (sampled ≈ 40, 88, 90 on screen), not near-black.
+  if (isGenshin()) return conifer(level, rng, { height: 11, radius: 2.6, bare: 4.4, tiers: [8, 4, 3], points: [6, 5, 4], droop: 0.5, dark: 0x2e6660, light: 0x78b49a, trunk: 0x5a4434 })
   return conifer(level, rng, { height: 11, radius: 2.6, bare: 4.4, tiers: [8, 4, 3], points: [6, 5, 4], droop: 0.5, dark: 0x16302e, light: 0x4c7a5c, trunk: 0x4e3a2e })
 }
 
 function fir(level: number, rng: Rng): THREE.BufferGeometry {
   if (isOverland()) return overConifer(level, rng, { height: 13, radius: 3.1, bare: 2.0, droop: 0.4, trunk: 0x46301f, dark: 0x1e4228, light: 0x6c9e34 })
   if (isStorybook()) return storyConifer(level, rng, { height: 9.5, radius: 2.7, bare: 4.0, droop: 0.45, trunk: 0x9a4a2e })
+  if (isGenshin()) return conifer(level, rng, { height: 9.5, radius: 2.9, bare: 4.1, tiers: [7, 4, 3], points: [7, 5, 4], droop: 0.38, dark: 0x2c605c, light: 0x70ac94, trunk: 0x56402f })
   return conifer(level, rng, { height: 9.5, radius: 2.9, bare: 4.1, tiers: [7, 4, 3], points: [7, 5, 4], droop: 0.38, dark: 0x15292c, light: 0x3f6a5a, trunk: 0x4a372c })
 }
 
@@ -388,6 +339,12 @@ function pine(level: number, rng: Rng): THREE.BufferGeometry {
   if (isOverland()) return overConifer(level, rng, { height: 19, radius: 2.6, bare: 4.2, droop: 0.42, trunk: 0x54392a, dark: 0x21482a, light: 0x7aa438 })
   // Storybook: the tall redwood-like conifer of the reference (long bare orange-red trunk, tiers up top).
   if (isStorybook()) return storyConifer(level, rng, { height: 12.5, radius: 2.3, bare: 5.2, droop: 0.5, trunk: 0xa8502e })
+  // Genshin: Liyue's twisted pine — S-bent trunk, flat cloud pads on near-horizontal branches (genshinTrees.ts).
+  return twistedPine(level, rng, isGenshin() ? { ...LIYUE_PINE, branches: 6, dark: 0x1e5246, light: 0x7cc690, bark: 0x7a5640 } : LIYUE_PINE)
+}
+
+/** The previous pine (straight pole + pads), kept for reference / comparison shots. */
+export function polePine(level: number, rng: Rng): THREE.BufferGeometry {
   const s = new Soup()
   const bark = srgb(0x7a4a32)
   const dark = srgb(0x1f3d2c)
@@ -410,24 +367,6 @@ function pine(level: number, rng: Rng): THREE.BufferGeometry {
     }
   }
   return s.geometry('pine')
-}
-
-/** Lump of a crown: jittered icosahedron whose normals point from the CROWN centre (unified soft shading). */
-function crownLump(s: Soup, c: V3, r: number, crown: V3, rng: Rng, dark: THREE.Color, light: THREE.Color, detail: number): void {
-  const g = new THREE.IcosahedronGeometry(1, detail)
-  const p = g.getAttribute('position')
-  const j = new Map<string, number>()
-  for (let i = 0; i < p.count; i++) {
-    const x = p.getX(i), y = p.getY(i), z = p.getZ(i)
-    const key = `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`
-    if (!j.has(key)) j.set(key, rng.range(0.85, 1.12))
-    const k = j.get(key)!
-    const v: V3 = [c[0] + x * r * k, c[1] + y * r * k * 0.9, c[2] + z * r * k]
-    const n: V3 = [v[0] - crown[0], (v[1] - crown[1]) * 1.2 + 0.3, v[2] - crown[2]]
-    const up = THREE.MathUtils.clamp((v[1] - crown[1]) / 1.6 * 0.5 + 0.5, 0, 1)
-    s.vert(v, n, SOLID_UV, dark.clone().lerp(light, up))
-  }
-  g.dispose()
 }
 
 /** Birch/aspen: banded white trunk, soft rounded crown MASSES (smooth normals) with leaf tufts at the edge. */
@@ -470,6 +409,13 @@ function storyBirch(level: number, rng: Rng): THREE.BufferGeometry {
 function birch(level: number, rng: Rng): THREE.BufferGeometry {
   if (isOverland()) return overBirch(level, rng)
   if (isStorybook()) return storyBirch(level, rng)
+  // Genshin: a Mondstadt broadleaf — rooted, twisting trunk, forked limbs, cloud clumps (genshinTrees.ts).
+  // Genshin (reference-matched): fresh mid green with teal shade (sampled broadleaf ≈ 75,125,60 lit / 45,90,75 shade).
+  return broadleaf(level, rng, isGenshin() ? { ...MONDSTADT_TREE, plates: true, fork: 2.0, spread: 3.7, limbs: 5, clumpR: 1.6, lean: 0.06, dark: 0x1a5248, light: 0xb4dc6c, bark: 0x7e5a3e } : MONDSTADT_TREE, 'birch')
+}
+
+/** The previous birch (pole + ball crown), kept for reference / comparison shots. */
+export function ballBirch(level: number, rng: Rng): THREE.BufferGeometry {
   const s = new Soup()
   const barkL = srgb(0xd9d4c4)
   const barkD = srgb(0x55504a)
@@ -511,6 +457,7 @@ function birch(level: number, rng: Rng): THREE.BufferGeometry {
 }
 
 function dead(level: number, rng: Rng): THREE.BufferGeometry {
+  if (!isOverland() && !isStorybook()) return gnarledSnag(level, rng)
   const s = new Soup()
   const c = srgb(0x6e665c)
   solid(s, 0, 7, 0.24, 0.05, level === 2 ? 4 : 6, c.clone().multiplyScalar(0.6), c, 0, SURFACE_UV.bark)
@@ -536,10 +483,29 @@ function dead(level: number, rng: Rng): THREE.BufferGeometry {
   return s.geometry('dead')
 }
 
+/**
+ * SPECIES REGISTRY: a GLB / GLTF tree (three detail levels on the shared vegetation material's vertex format — see
+ * skills/asset-optimization and `npm run validate:assets`) can replace or add a species before the world is built:
+ * `registerTreeSpecies({ id: TreeSpecies.Maple, name: 'maple', levels: [l0, l1, l2], trunkRadius, trunkHalfHeight })`.
+ * Region tables (BiomeDefs) refer to species ids only, so nothing else changes.
+ */
+const EXTRA_SPECIES: SpeciesDef[] = []
+export function registerTreeSpecies(def: SpeciesDef): void {
+  const i = EXTRA_SPECIES.findIndex((s) => s.id === def.id)
+  if (i >= 0) EXTRA_SPECIES[i] = def
+  else EXTRA_SPECIES.push(def)
+}
+
 export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } {
   const build = (fn: (l: number, r: Rng) => THREE.BufferGeometry, seed: number, name: string) =>
     [0, 1, 2].map((l) => {
-      const g = fn(l, new Rng(seed + l))
+      const soup = fn(l, new Rng(seed + l))
+      // Index the triangle soup (shared corners of cards, tube rings, lumps): the vegetation vertex shader (sway,
+      // billboarding, per-vertex sky fog) then runs once per unique vertex instead of 3× per triangle — it is the
+      // trees' main GPU cost on phones (fixed per frame, and again in the shadow pass). Identical image.
+      const g = mergeVertices(soup, 1e-5)
+      soup.dispose()
+      g.computeBoundingSphere()
       g.name = `${name}.lod${l}`
       return g
     }) as SpeciesDef['levels']
@@ -547,11 +513,22 @@ export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } 
     { id: TreeSpecies.Spruce, name: 'spruce', levels: build(spruce, 101, 'spruce'), trunkRadius: 0.24, trunkHalfHeight: 3 },
     { id: TreeSpecies.Dead, name: 'dead', levels: build(dead, 202, 'dead'), trunkRadius: 0.22, trunkHalfHeight: 3 },
     { id: TreeSpecies.Fir, name: 'fir', levels: build(fir, 303, 'fir'), trunkRadius: 0.28, trunkHalfHeight: 3 },
-    { id: TreeSpecies.Pine, name: 'pine', levels: build(pine, 404, 'pine'), trunkRadius: 0.26, trunkHalfHeight: 4 },
-    { id: TreeSpecies.Birch, name: 'birch', levels: build(birch, 505, 'birch'), trunkRadius: 0.16, trunkHalfHeight: 3 },
+    { id: TreeSpecies.Pine, name: 'pine', levels: build(pine, 404, 'pine'), trunkRadius: 0.32, trunkHalfHeight: 4 },
+    { id: TreeSpecies.Birch, name: 'birch', levels: build(birch, 505, 'birch'), trunkRadius: 0.3, trunkHalfHeight: 3 },
     { id: TreeSpecies.Cactus, name: 'cactus', levels: build(desert(saguaro, 'cactus'), 606, 'cactus'), trunkRadius: 0.34, trunkHalfHeight: 3 },
     { id: TreeSpecies.Joshua, name: 'joshua', levels: build(desert(joshua, 'joshua'), 707, 'joshua'), trunkRadius: 0.3, trunkHalfHeight: 1.5 },
+    // Region species (world/biomes/BiomeDefs.ts): autumn maple, mystic ancient giant and glowing mushroom tree.
+    { id: TreeSpecies.Maple, name: 'maple', levels: build((l, r) => broadleaf(l, r, isGenshin() ? { ...MAPLE_TREE, plates: true, fork: 1.8, spread: 3.9, limbs: 5, clumpR: 1.65 } : MAPLE_TREE, 'maple'), 808, 'maple'), trunkRadius: 0.3, trunkHalfHeight: 3 },
+    { id: TreeSpecies.Ancient, name: 'ancient', levels: build((l, r) => broadleaf(l, r, isGenshin() ? { ...ANCIENT_TREE, plates: true, fork: 3.0, spread: 5.4, limbs: 6, clumpR: 2.3 } : ANCIENT_TREE, 'ancient'), 909, 'ancient'), trunkRadius: 0.6, trunkHalfHeight: 4 },
+    { id: TreeSpecies.Shroom, name: 'shroom', levels: build(shroomTree, 1010, 'shroom'), trunkRadius: 0.26, trunkHalfHeight: 2.5 },
   ]
+  // Registered species (e.g. GLB models, `registerTreeSpecies`) replace the built-in one with the same id.
+  for (const extra of EXTRA_SPECIES) {
+    const i = species.findIndex((s) => s.id === extra.id)
+    if (i >= 0) species[i].levels.forEach((g) => g.dispose())
+    if (i >= 0) species[i] = extra
+    else species.push(extra)
+  }
   return { species, dispose: () => species.forEach((s) => s.levels.forEach((g) => g.dispose())) }
 }
 
@@ -571,6 +548,15 @@ export function createDesertUndergrowth(): { agave: THREE.BufferGeometry; shrub:
   const b = new Soup()
   dryShrub(b, rng)
   return { agave: a.geometry('agave'), shrub: b.geometry('dryShrub') }
+}
+
+/** Region undergrowth: autumn leaf piles and mystic glowing mushroom clusters (BiomeDefs Plant). */
+export function createRegionUndergrowth(): { leafPile: THREE.BufferGeometry; glowShroom: THREE.BufferGeometry } {
+  const rng = new Rng(929)
+  const lp = mergeVertices(leafPile(rng), 1e-5), gs = mergeVertices(glowShrooms(rng), 1e-5)
+  lp.computeBoundingSphere(); gs.computeBoundingSphere()
+  lp.name = 'leafPile'; gs.name = 'glowShroom'
+  return { leafPile: lp, glowShroom: gs }
 }
 
 /** Fern: 6 arched frond cards (fern cell). Bush: blob + leaf cards. */
@@ -599,5 +585,7 @@ export function createUndergrowth(): { fern: THREE.BufferGeometry; bush: THREE.B
     const a = rng.next() * Math.PI * 2, u = rng.range(0.15, 0.7)
     tuft(b, [Math.cos(a) * 0.4, u, Math.sin(a) * 0.4], rng.range(0.22, 0.32), [0, 0.2, 0], bd, bl)
   }
+  // Genshin: the bush is built like the crowns — leaf-cluster cards with one smooth normal field (genshinTrees).
+  if (isGenshin()) { const gb = cardBush(rng, srgb(0x1e5a44), srgb(0x8cc860)); return { fern, bush: gb } }
   return { fern, bush: b.geometry('bush') }
 }

@@ -12,7 +12,9 @@ import { PropType } from './POI/poiLayout'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { WorldFields } from './WorldFields'
 import type { BiomeWeights } from './Biomes'
-import { isOverland } from '../rendering/artStyle'
+import { isGenshin, isOverland } from '../rendering/artStyle'
+import { Biome, BIOME_COUNT, type RegionWeights } from './Biomes'
+import { BIOMES, Plant, pickRegion, pickWeighted, regionRoll } from './biomes/BiomeDefs'
 import { LAYER_NO_REFLECT, LAYER_REFLECT_ONLY } from '../rendering/water/PlanarReflection'
 
 const _bw: BiomeWeights = [0, 0]
@@ -73,8 +75,53 @@ const GENSHIN_HUES: Record<number, readonly (readonly [number, number, number])[
   [TreeSpecies.Cactus]: DESERT_HUES,
   [TreeSpecies.Joshua]: DESERT_HUES,
 }
-const HUES = isOverland() ? OVER_HUES : GENSHIN_HUES
-const FAR_CONIFER_HUES = isOverland() ? ([OVER_GREEN, OVER_DEEP, OVER_GREEN, OVER_LARCH] as const) : ([TEAL, DEEP, FRESH, BRIGHT, LIME, ORANGE] as const)
+// GENSHIN (reference-matched) stands: Mondstadt is mostly green — fresh, light and teal-leaning broadleaves with
+// the odd yellow / orange autumn tree (Windwail), conifers a narrow band of teal. The colour lives in the albedos
+// (treeFactory), so these stay close to 1 (the 'bright' hues pushed blue to zero → neon).
+const G_FRESH = [1.0, 1.05, 0.96] as const
+const G_LIGHT = [1.1, 1.14, 0.98] as const
+const G_TEAL = [0.88, 1.0, 1.08] as const
+const G_DEEP = [0.82, 0.92, 0.96] as const
+const G_YELLOW = [1.28, 1.22, 0.8] as const
+const G_ORANGE = [1.6, 1.12, 0.66] as const
+const GEN_HUES: Record<number, readonly (readonly [number, number, number])[]> = {
+  [TreeSpecies.Spruce]: [G_TEAL, G_TEAL, G_DEEP, G_FRESH],
+  [TreeSpecies.Fir]: [G_DEEP, G_TEAL, G_TEAL, G_FRESH],
+  [TreeSpecies.Pine]: [G_FRESH, G_TEAL, G_LIGHT, G_FRESH],
+  [TreeSpecies.Birch]: [G_FRESH, G_FRESH, G_LIGHT, G_LIGHT, G_TEAL, G_FRESH, G_YELLOW, G_ORANGE],
+  [TreeSpecies.Dead]: [BASE],
+  [TreeSpecies.Cactus]: DESERT_HUES,
+  [TreeSpecies.Joshua]: DESERT_HUES,
+}
+// REGION SPECIES palettes (world/biomes/BiomeDefs.ts), the same in every art style — multipliers on their own leaf
+// albedo: MAPLE (orange) → gold / amber / orange / red / scarlet / russet, picked per stand and per tree like the
+// greens; ANCIENT (violet) → violet / blue / purple / teal / lilac; SHROOM caps → magenta / blue / rose.
+const MAPLE_HUES: [number, number, number][] = [[1.05, 1.3, 0.9], [1, 1, 1], [1.1, 0.62, 0.75], [1.05, 1.15, 0.62], [0.82, 0.72, 0.68], [1.15, 0.5, 0.6]]
+const ANCIENT_HUES: [number, number, number][] = [[1, 1, 1], [0.75, 0.95, 1.2], [1.15, 0.8, 1.0], [0.6, 1.15, 1.05], [1.15, 1.05, 1.1]]
+const SHROOM_HUES: [number, number, number][] = [[1, 1, 1], [0.7, 0.9, 1.25], [1.15, 0.85, 0.9]]
+for (const set of [OVER_HUES, GENSHIN_HUES, GEN_HUES]) {
+  set[TreeSpecies.Maple] = MAPLE_HUES
+  set[TreeSpecies.Ancient] = ANCIENT_HUES
+  set[TreeSpecies.Shroom] = SHROOM_HUES
+}
+const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
+/** Autumn colours on SHARED species (birch / pine) growing in the autumn valleys, faded in with the autumn weight —
+ *  the green → yellow → autumn transition of the border (BiomeDefs.sharedHues). Per tree, deterministic. */
+function regionLeafTint(fields: WorldFields, x: number, z: number, h: number, out: [number, number, number]): void {
+  const w = fields.region(x, z, _wn, h)
+  for (const b of [Biome.Autumn, Biome.Mystic]) {
+    const k = w[b], hues = BIOMES[b].sharedHues
+    if (k < 0.01 || !hues) continue
+    const hue = hues[Math.floor(regionRoll(fields.seed, x, z, 5252 + b) * hues.length)]
+    out[0] *= 1 + (hue[0] - 1) * k
+    out[1] *= 1 + (hue[1] - 1) * k
+    out[2] *= 1 + (hue[2] - 1) * k
+  }
+}
+// Resolved when a chunk is built (not at import: the art style is set after the modules load).
+const hueSet = () => (isOverland() ? OVER_HUES : isGenshin() ? GEN_HUES : GENSHIN_HUES)
+const farConiferHues = () =>
+  isOverland() ? ([OVER_GREEN, OVER_DEEP, OVER_GREEN, OVER_LARCH] as const) : isGenshin() ? ([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) : ([TEAL, DEEP, FRESH, BRIGHT, LIME, ORANGE] as const)
 
 /** Per-tier chunk detail switches. */
 export interface ChunkDetail {
@@ -136,6 +183,8 @@ export class WorldChunk implements Cullable {
   private bushes: THREE.InstancedMesh | null = null
   private agaves: THREE.InstancedMesh | null = null
   private shrubs: THREE.InstancedMesh | null = null
+  private leafPiles: THREE.InstancedMesh | null = null
+  private glowShrooms: THREE.InstancedMesh | null = null
   private poles: THREE.InstancedMesh | null = null
   private lamps: THREE.InstancedMesh | null = null
   private fences: THREE.InstancedMesh | null = null
@@ -193,15 +242,22 @@ export class WorldChunk implements Cullable {
       g.setAttribute('color', new THREE.BufferAttribute(data.fmCol, 3))
       g.setIndex(new THREE.BufferAttribute(data.fmIdx, 1))
       g.computeBoundingSphere()
-      this.formation = this.add(new THREE.Mesh(g, mats.rock))
+      this.formation = this.add(new THREE.Mesh(g, mats.cliffRock))
       this.formation.name = 'formation'
       this.formation.receiveShadow = true
     }
 
-    const treeTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.trees, o, FROST_TREE, data.trees[o + 5] >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
+    const treeTint = (o: number, out: [number, number, number]) => {
+      const sp = data.trees[o + 5]
+      biomeTint(fields, this.origin, data.trees, o, FROST_TREE, sp >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
+      if (sp === TreeSpecies.Birch || sp === TreeSpecies.Pine) regionLeafTint(fields, this.origin[0] + data.trees[o], this.origin[1] + data.trees[o + 2], data.trees[o + 1], out)
+    }
     const rockTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.rocks, o, SNOW_ROCK, SAND_ROCK, out)
     for (const sp of geos.trees) {
-      const attrs = buildInstanceAttributes(data.trees, TREE_STRIDE, (o) => data.trees[o + 5] === sp.id, 0.16, 0.22, HUES[sp.id] ?? HUES[0], this.origin, treeTint)
+      // Genshin broadleaves: more per-tree shape variety (width / height / lean) — with their lopsided crowns and random
+      // rotation, neighbouring trees of one species read as different silhouettes (no extra geometry or draws).
+      const spreadSp = isGenshin() && (sp.id === TreeSpecies.Birch || sp.id === TreeSpecies.Maple || sp.id === TreeSpecies.Ancient)
+      const attrs = buildInstanceAttributes(data.trees, TREE_STRIDE, (o) => data.trees[o + 5] === sp.id, 0.16, spreadSp ? 0.34 : 0.22, hueSet()[sp.id] ?? hueSet()[0], this.origin, treeTint)
       if (!attrs) continue
       const levels = [0, 1].map((l) => this.add(createInstancedMesh(sp.levels[l], mats.vegetation, attrs, `${sp.name}.lod${l}`)))
       levels.forEach((m) => m.layers.set(LAYER_NO_REFLECT)) // the reflection draws the merged far trees instead
@@ -216,9 +272,10 @@ export class WorldChunk implements Cullable {
     const byId = (id: number) => geos.trees.find((x) => x.id === id)!
     // Desert species keep their own far meshes (a saguaro and a Joshua tree read differently on the skyline); a
     // desert chunk has no conifers or birches, so its far draws stay at ≤ 2 like a forest chunk's.
-    const farSets = [[conifer, spruce], [only(TreeSpecies.Birch), birch], [only(TreeSpecies.Cactus), byId(TreeSpecies.Cactus)], [only(TreeSpecies.Joshua), byId(TreeSpecies.Joshua)]] as const
+    const farSets = [[conifer, spruce], [only(TreeSpecies.Birch), birch], [only(TreeSpecies.Cactus), byId(TreeSpecies.Cactus)], [only(TreeSpecies.Joshua), byId(TreeSpecies.Joshua)],
+      [only(TreeSpecies.Maple), byId(TreeSpecies.Maple)], [only(TreeSpecies.Ancient), byId(TreeSpecies.Ancient)], [only(TreeSpecies.Shroom), byId(TreeSpecies.Shroom)]] as const
     for (const [filter, sp] of farSets) {
-      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === spruce.id ? FAR_CONIFER_HUES : HUES[sp.id] ?? HUES[0], this.origin, treeTint)
+      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === spruce.id ? farConiferHues() : hueSet()[sp.id] ?? hueSet()[0], this.origin, treeTint)
       if (!attrs) continue
       this.far.push({
         lod1: this.add(createInstancedMesh(sp.levels[1], mats.vegetation, attrs, `far.${sp.name}.lod1`)),
@@ -231,25 +288,34 @@ export class WorldChunk implements Cullable {
       this.rocksFar = this.add(createInstancedMesh(geos.rockFar, mats.rock, rockAttrs, 'rocks.far'))
       this.instanceCount += rockAttrs.count
     }
-    // Undergrowth (refer/forest): ferns + leafy bushes, split deterministically by record (2 draws per near chunk).
-    // On sand the same two slots hold agaves + dry shrubs (desert flora), picked by the biome at each plant.
+    // Undergrowth by REGION (BiomeDefs.plants): each plant picks a region in proportion to the weights at it, then a
+    // kind from that region's list — ferns + small bushes in the forest, agaves + dry shrubs on sand, leaf piles +
+    // russet bushes in the autumn valleys, glowing mushrooms + blue ferns in the mystic woods. One instanced draw
+    // per kind present (2 inside a region, ≤ 4 on a border).
     const pl = data.plants
-    const sandy = new Uint8Array(pl.length / PROP_STRIDE)
-    for (let k = 0; k < sandy.length; k++) {
+    const nPl = pl.length / PROP_STRIDE
+    const kind = new Uint8Array(nPl)
+    for (let k = 0; k < nPl; k++) {
       const o = k * PROP_STRIDE
-      sandy[k] = fields.biome(this.origin[0] + pl[o], this.origin[1] + pl[o + 2], _bw, pl[o + 1])[0] > 0.5 ? 1 : 0
+      const x = this.origin[0] + pl[o], z = this.origin[1] + pl[o + 2]
+      const region = pickRegion(fields.region(x, z, _wn, pl[o + 1]), regionRoll(fields.seed, x, z, 5150))
+      kind[k] = pickWeighted(BIOMES[region].plants, (pl[o] * 7.31 + pl[o + 2] * 3.17) % 1)
     }
-    // Mostly low ferns; the leafy bush mesh only for ~1 in 4 (small bushes — the big mounds were too many).
-    const isFern = (o: number) => ((pl[o] * 7.31 + pl[o + 2] * 3.17) % 1) < 0.75
-    const isDesert = (o: number) => sandy[o / PROP_STRIDE] === 1
-    const fernAttrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => isFern(o) && !isDesert(o), 0.22, 0.2)
-    const bushAttrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => !isFern(o) && !isDesert(o), 0.25, 0.25)
-    const agaveAttrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => isFern(o) && isDesert(o), 0.2, 0.25)
-    const shrubAttrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => !isFern(o) && isDesert(o), 0.2, 0.3)
-    if (fernAttrs) this.ferns = this.addPlant(geos.fern, fernAttrs, 'ferns')
-    if (bushAttrs) this.bushes = this.addPlant(geos.bush, bushAttrs, 'bushes')
-    if (agaveAttrs) this.agaves = this.addPlant(geos.agave, agaveAttrs, 'agaves')
-    if (shrubAttrs) this.shrubs = this.addPlant(geos.shrub, shrubAttrs, 'shrubs')
+    const plantTint = (o: number, out: [number, number, number]) => {
+      out[0] = out[1] = out[2] = 1
+      const kd = kind[o / PROP_STRIDE]
+      if (kd === Plant.Fern || kd === Plant.Bush) regionLeafTint(fields, this.origin[0] + pl[o], this.origin[1] + pl[o + 2], pl[o + 1], out)
+    }
+    const plantMesh = (kd: number, g: THREE.BufferGeometry, tint: number, shape: number, name: string) => {
+      const attrs = buildInstanceAttributes(pl, PROP_STRIDE, (o) => kind[o / PROP_STRIDE] === kd, tint, shape, undefined, this.origin, plantTint)
+      return attrs ? this.addPlant(g, attrs, name) : null
+    }
+    this.ferns = plantMesh(Plant.Fern, geos.fern, 0.22, 0.2, 'ferns')
+    this.bushes = plantMesh(Plant.Bush, geos.bush, 0.25, 0.25, 'bushes')
+    this.agaves = plantMesh(Plant.Agave, geos.agave, 0.2, 0.25, 'agaves')
+    this.shrubs = plantMesh(Plant.Shrub, geos.shrub, 0.2, 0.3, 'shrubs')
+    this.leafPiles = plantMesh(Plant.LeafPile, geos.leafPile, 0.25, 0.3, 'leafPiles')
+    this.glowShrooms = plantMesh(Plant.GlowShroom, geos.glowShroom, 0.15, 0.25, 'glowShrooms')
     // Roadside props (only chunks the road passes through have any).
     const pr = data.props
     const poleAttrs = buildInstanceAttributes(pr, 6, (o) => pr[o + 5] === RoadProp.Pole, 0.1)
@@ -272,7 +338,7 @@ export class WorldChunk implements Cullable {
     const wires = buildWires(data, fields, geos.wire)
     if (wires) this.wires = this.add(wires)
     // Too small to read in the water's mirror: main camera only (PlanarReflection).
-    for (const m of [this.rocks, this.ferns, this.bushes, this.agaves, this.shrubs, this.poles, this.lamps, this.fences, this.wires]) m?.layers.set(LAYER_NO_REFLECT)
+    for (const m of [this.rocks, this.ferns, this.bushes, this.agaves, this.shrubs, this.leafPiles, this.glowShrooms, this.poles, this.lamps, this.fences, this.wires]) m?.layers.set(LAYER_NO_REFLECT)
   }
 
 
@@ -393,13 +459,18 @@ export class WorldChunk implements Cullable {
     if (this.bushes) this.bushes.visible = near && detail.plants
     if (this.agaves) this.agaves.visible = near && detail.plants
     if (this.shrubs) this.shrubs.visible = near && detail.plants
+    if (this.leafPiles) this.leafPiles.visible = near && detail.plants
+    if (this.glowShrooms) this.glowShrooms.visible = near && detail.plants
     if (this.poles) (this.poles.visible = lod <= 1), (this.poles.castShadow = near)
     if (this.lamps) this.lamps.visible = lod <= 1
     if (this.fences) (this.fences.visible = lod <= 1), (this.fences.castShadow = near && !detail.lean)
     if (this.wires) this.wires.visible = lod <= 1
     if (this.formation) {
       this.formation.visible = true // landmarks: every LOD (they dither out at the streamed-detail edge)
-      this.formation.castShadow = lod <= 1
+      // The mesh also holds the chunk's crags (cliff rock), so most hilly chunks have one: sun shadows and the water
+      // mirror only from the near ring, or each costs up to 3 draws per chunk (measured +48 draws on MEDIUM).
+      this.formation.castShadow = near
+      this.formation.layers.set(near ? 0 : LAYER_NO_REFLECT)
     }
     for (const { mesh, small } of this.places) {
       mesh.visible = small ? lod <= 1 : lod <= 1 || !detail.lean // buildings are far landmarks (not on LOW: draw budget)
@@ -429,7 +500,7 @@ export class WorldChunk implements Cullable {
     // Shared geometries/materials belong to the libraries; only per-chunk buffers are freed.
     for (const { m } of this.species) m.levels.forEach((x) => x.dispose())
     for (const f of this.far) (f.lod1.dispose(), f.lod2.dispose())
-    for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.agaves, this.shrubs, this.poles, this.lamps, this.fences]) m?.dispose()
+    for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.agaves, this.shrubs, this.leafPiles, this.glowShrooms, this.poles, this.lamps, this.fences]) m?.dispose()
     for (const { mesh } of this.places) mesh.geometry.dispose()
     this.formation?.geometry.dispose()
     this.wires?.geometry.dispose()

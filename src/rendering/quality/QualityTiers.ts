@@ -211,7 +211,9 @@ interface Preset {
 // pay a multisampled depth RESOLVE — measured HIGH vista 1080p 14.4 → 8.0 ms GPU (AO alone 4.6 → 0.9 ms);
 // tile-based phone GPUs pay it worse. MSAA stays selectable in Settings.
 export const PRESETS: Record<TierName, Preset> = {
-  // ~₹15k phones (Mali-G57 / Adreno 610), Intel UHD laptops: no reflections, no AO.
+  // ~₹15k phones (Mali-G57 / Adreno 610, Snapdragon 6xx), Intel UHD laptops: no reflections, no AO.
+  // (Tried 2026-10-06: canvas at 0.75 DPR + scene at 100 % → the grading pass shades ~45 % fewer pixels, but the
+  // browser's upscale made edges visibly blocky on a phone. Kept DPR 1 + scene 75 %: our pass upscales smoothly.)
   low: {
     base: {
       maxDpr: 1, renderScale: { min: 0.5, max: 0.85, start: 0.75 }, aa: 'fxaa', sharpen: 0.35, paint: { stride: 0, bloom: 0.45 },

@@ -1,4 +1,4 @@
-import { isOverland } from '../artStyle'
+import { isGenshin, isOverland } from '../artStyle'
 import * as THREE from 'three'
 import type { TimeOfDay } from '../lighting/TimeOfDay'
 import { MIST_GLSL, SKY_GLSL, skyUniforms } from './skyShader'
@@ -135,7 +135,11 @@ export class SkyDome {
     u.uSkyClouds.value = p.clouds
     u.uSkyCloudWhite.value = p.cloudWhite
     u.uSkyStorm.value = p.storm
-    u.uSkyHaze.value.set(p.haze, isOverland() ? 380 : 110) // overland: the haze builds over a longer distance — near field stays crisp
+    // Genshin: the pale cyan horizon gives way to deep azure within ~15° (sampled refs); others keep the soft ramp.
+    u.uSkyCurve.value = isGenshin() ? 0.25 : 0.45
+    u.uSkyCumulus.value = isGenshin() ? 1 : 0
+    // Genshin keeps the middle distance green; the cyan veil builds over a few hundred metres.
+    u.uSkyHaze.value.set(p.haze, isOverland() ? 380 : isGenshin() ? 320 : 110) // overland: the haze builds over a longer distance — near field stays crisp
     u.uSkyTime.value = time
     // Follow the camera; scale inside the far plane (the vertex shader pins depth to far anyway).
     const r = camera.far * 0.9

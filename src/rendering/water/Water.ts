@@ -32,7 +32,7 @@ export class Water {
         uTime: { value: 0 },
         uFog: { value: new THREE.Vector2(60, 900) },
         // Genshin lakes are clear TURQUOISE (Cider Lake, Bishui); the other styles keep a deep teal.
-        uDeep: { value: ART.style === 'bright' ? new THREE.Color(0.012, 0.15, 0.17) : new THREE.Color(0.03, 0.07, 0.085) },
+        uDeep: { value: ART.style === 'bright' || ART.style === 'genshin' ? new THREE.Color(0.012, 0.15, 0.17) : new THREE.Color(0.03, 0.07, 0.085) },
         uKeyColor: { value: new THREE.Color() },
         uKeyDir: { value: new THREE.Vector3(0, 1, 0) },
         /** Rain 0..1: dense fine ripples + a duller, greyer surface. */

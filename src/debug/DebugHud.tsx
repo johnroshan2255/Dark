@@ -1,3 +1,4 @@
+import { WORLD_GEN_VERSION } from '../world/Biomes'
 import { useEffect, useRef } from 'react'
 import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
@@ -46,7 +47,7 @@ export function DebugHud({ game }: { game: Game }) {
         `physics bodies ${s.physicsBodies} colliders ${s.physicsColliders} chunks ${s.physicsChunks} step ${f(s.physicsMs, 2)} ms`,
         `monsters ${s.monstersActive}   gen ${f(s.genMs, 2)} ms/chunk (worker)  build ${f(s.buildMs, 2)} ms`,
         `sys ${[...t].map(([k, v]) => `${k} ${v.toFixed(2)}`).join('  ')}`,
-        `pos ${p.x.toFixed(1)} ${p.y.toFixed(1)} ${p.z.toFixed(1)}  seed ${st.seed}  time ${clock(game.tod.hours)} ${st.phase}${st.nightmare ? ' NIGHTMARE' : ''}  day ${game.tod.dayLengthMinutes || '∞'} min  cam ${game.cameraCtl.mode}`,
+        `pos ${p.x.toFixed(1)} ${p.y.toFixed(1)} ${p.z.toFixed(1)}  seed ${st.seed} v${WORLD_GEN_VERSION}  time ${clock(game.tod.hours)} ${st.phase}${st.nightmare ? ' NIGHTMARE' : ''}  day ${game.tod.dayLengthMinutes || '∞'} min  cam ${game.cameraCtl.mode}`,
         `aa ${game.post.aa}  sharpen ${f(game.post.material.uniforms.uSharpen.value, 2)}  rays ${game.post.raysSamples}@1/${game.post.raysDivisor}`,
         `flashlight ${st.flashlight ? 'on' : 'off'}  chunks(F4) ${st.debugChunks ? 'on' : 'off'}  freeze(F5) ${st.cullingFrozen ? 'on' : 'off'}  physics(F6) ${st.debugPhysics ? 'on' : 'off'}`,
       ].join('\n')

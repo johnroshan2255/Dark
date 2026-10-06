@@ -52,6 +52,7 @@ export const Layer = {
   Caves: 6,
   POI: 7,
   Monsters: 8,
+  Crags: 9,
 } as const
 
 export function chunkRng(seed: number, cx: number, cz: number, layer: number): Rng {

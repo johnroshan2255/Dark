@@ -1,24 +1,46 @@
-import { hashFloat } from './noise/rng'
+import { hash4, hashFloat } from './noise/rng'
+import { createNoise2D, fbm, type Noise2D } from './noise/simplex'
 
 /**
- * BIOMES — Genshin-style regions with soft borders (deterministic, global, evaluated per point like every
- * other field): the world is tiled by BIOME_CELL m cells, each with a jittered centre and ONE type picked by
- * hash (forest 50 %, desert 27 %, snow 23 %); the cells around the spawn are forest, so a new game always
- * starts in the familiar green valley and the sand / ice regions are found by travelling.
- * A point's biome WEIGHTS blend the nearest cells over BIOME_BLEND m (never a hard line), and high ground
- * becomes snow regardless (the snow line) so mountains get white peaks in every region.
- * Everything reads the weights: terrain relief (dunes / flatter deserts), ground palette, trees, rocks,
- * grass, the terrain shader's surface detail and the fog tint. Only arithmetic + sqrt → identical on every client.
+ * BIOMES / REGIONS — Genshin-style regions with soft borders (deterministic, global, evaluated per point like
+ * every other field). The world is tiled by BIOME_CELL m cells, each with a jittered centre and ONE region type.
+ *
+ * REGION LAYOUT (generator v2): a cell's type comes from a seeded CLIMATE at its centre — smooth temperature,
+ * moisture and "magic" noise fields varying over a few cells — through a small climate table:
+ *     cold → SNOW highlands · hot & dry → DESERT · drier → AUTUMN valley · moist + magic → MYSTIC wood · else FOREST
+ * so neighbours make sense (forest ↔ autumn ↔ desert along the dry gradient, forest climbing into snow, mystic
+ * pockets inside the green lands) and every seed draws its own map. Shares ≈ forest 50 %, autumn / desert / snow
+ * 15 % each, mystic 5 % (tests/world.test.ts). The 3×3 cells around the spawn are forest; down the main road
+ * (cells (0, j)) one side always runs forest → autumn → desert and the other forest → mystic → snow, so every
+ * region is reached by just driving.
+ *
+ * A point's region WEIGHTS (`weightsN`, one per region, summing to 1) blend the nearest cells over BIOME_BLEND m
+ * (never a hard line; borders warp with noise), and high ground becomes snow regardless (the snow line).
+ * `weights()` keeps the original [desert, snow] view for the systems that only care about those two (autumn and
+ * mystic count as green land there). Region definitions: world/biomes/BiomeDefs.ts.
+ * Only arithmetic + sqrt + seeded noise → identical on every client.
  */
-export const Biome = { Forest: 0, Desert: 1, Snow: 2 } as const
+export const Biome = { Forest: 0, Desert: 1, Snow: 2, Autumn: 3, Mystic: 4 } as const
+export const BIOME_COUNT = 5
 export const BIOME_CELL = 900
 export const BIOME_BLEND = 260
 /** Altitude where snow starts / is complete (m). Only the big massifs (up to ~260 m) wear snow caps — Genshin's
  *  green lands keep their hilltops green (snow belongs to the snow regions, Dragonspine). */
 export const SNOW_LINE = [135, 175] as const
+/**
+ * World generator version: mixed into the region layout, shown with the seed in the HUD. Bump it whenever a change
+ * makes the same seed produce a different world, so shared `?seed=` links and co-op peers can tell (v1 = the
+ * original random forest / desert / snow cells).
+ */
+export const WORLD_GEN_VERSION = 2
 
-/** Weights (sum ≤ 1 for the named types; the rest is forest): [desert, snow]. */
+/** Weights (sum ≤ 1 for the named types; the rest is green land): [desert, snow]. */
 export type BiomeWeights = [number, number]
+/** One weight per region (index = Biome id), summing to 1. */
+export type RegionWeights = Float32Array
+
+/** Climate table thresholds (noise units; tuned so the shares match the header — tests check them). */
+const CLIMATE = { snow: -0.4, hot: 0.19, dry: -0.01, autumn: -0.23, magic: 0.43 }
 
 export class BiomeField {
   private readonly cells = new Map<string, { x: number; z: number; type: number }>()
@@ -30,7 +52,31 @@ export class BiomeField {
   private readonly nz = new Float64Array(9)
   private readonly nt = new Int8Array(9)
   private readonly nd = new Float64Array(9)
-  constructor(private readonly seed: number) {}
+  private readonly tmp = new Float32Array(BIOME_COUNT)
+  private readonly temp: Noise2D
+  private readonly moist: Noise2D
+  private readonly magic: Noise2D
+  /** Side of the main road (+1 / −1 in j) that runs forest → autumn → desert; the other runs mystic → snow. */
+  private readonly drySide: number
+  constructor(private readonly seed: number) {
+    const v = WORLD_GEN_VERSION
+    this.temp = createNoise2D(hash4(seed, 3101, v))
+    this.moist = createNoise2D(hash4(seed, 3102, v))
+    this.magic = createNoise2D(hash4(seed, 3103, v))
+    this.drySide = hashFloat(seed, 3004) < 0.5 ? 1 : -1
+  }
+
+  /** The climate-table region at world (x, z) (before blending). Exposed for tests and the map. */
+  climateType(x: number, z: number): number {
+    const k = 1 / (BIOME_CELL * 7)
+    const t = fbm(this.temp, x * k, z * k, 2)
+    const m = fbm(this.moist, x * k + 17.3, z * k - 9.1, 2)
+    if (t < CLIMATE.snow) return Biome.Snow
+    if (t > CLIMATE.hot && m < CLIMATE.dry) return Biome.Desert
+    if (m < CLIMATE.autumn) return Biome.Autumn
+    if (fbm(this.magic, x * k * 1.6 - 4.4, z * k * 1.6 + 2.2, 2) > CLIMATE.magic && m > 0) return Biome.Mystic
+    return Biome.Forest
+  }
 
   /** Cell (i, j): jittered centre + type. The 3×3 cells around the origin are always forest (spawn). */
   cell(i: number, j: number): { x: number; z: number; type: number } {
@@ -42,13 +88,12 @@ export class BiomeField {
     const z = (j + 0.25 + 0.5 * hashFloat(s, i, j, 3002)) * BIOME_CELL
     let type: number = Biome.Forest
     if (Math.abs(i) > 1 || Math.abs(j) > 1) {
-      const r = hashFloat(s, i, j, 3003)
-      type = r < 0.5 ? Biome.Forest : r < 0.77 ? Biome.Desert : Biome.Snow
-      // Findable: the main road (x ≈ 0 ± 115 m, along z) crosses cells (0, j) — the two cells two steps down
-      // and up the road are always one desert and one snowfield, so both are reached by just driving.
-      if (i === 0 && Math.abs(j) === 2) {
-        const first = hashFloat(s, 3004) < 0.5 ? Biome.Desert : Biome.Snow
-        type = j > 0 ? first : first === Biome.Desert ? Biome.Snow : Biome.Desert
+      type = this.climateType(x, z)
+      // Findable: the main road (x ≈ 0 ± 115 m, along z) crosses cells (0, j) — two and three steps along it the
+      // regions are fixed: forest → AUTUMN → DESERT on the dry side, forest → MYSTIC → SNOW on the other.
+      if (i === 0 && (Math.abs(j) === 2 || Math.abs(j) === 3)) {
+        const dry = Math.sign(j) === this.drySide
+        type = Math.abs(j) === 2 ? (dry ? Biome.Autumn : Biome.Mystic) : dry ? Biome.Desert : Biome.Snow
       }
     }
     c = { x, z, type }
@@ -58,11 +103,11 @@ export class BiomeField {
   }
 
   /**
-   * Biome weights at (x, z) — [desert, snow]; forest = 1 − desert − snow. Nearest-cell blend: each of the
-   * 3×3 surrounding cells gets weight (1 − (d − dMin) / BIOME_BLEND)² (0 beyond), normalised.
+   * Region weights at (x, z), one per region (index = Biome id), summing to 1. Nearest-cell blend: each of the 3×3
+   * surrounding cells gets weight (1 − (d − dMin) / BIOME_BLEND)² (0 beyond), normalised.
    * @param h terrain height for the snow line (omit for the pure region weights).
    */
-  weights(x: number, z: number, out: BiomeWeights, h?: number): BiomeWeights {
+  weightsN(x: number, z: number, out: RegionWeights, h?: number): RegionWeights {
     if (this.warp) {
       const w = this.warp(x, z)
       x += w[0]
@@ -92,35 +137,47 @@ export class BiomeField {
       d[k] = dd
       if (dd < dMin) dMin = dd
     }
-    let sand = 0, snow = 0, sum = 0
+    out.fill(0)
+    let sum = 0
     for (let k = 0; k < 9; k++) {
       const w0 = 1 - (d[k] - dMin) / BIOME_BLEND
       if (w0 <= 0) continue
       const w = w0 * w0
       sum += w
-      if (this.nt[k] === Biome.Desert) sand += w
-      else if (this.nt[k] === Biome.Snow) snow += w
+      out[this.nt[k]] += w
     }
-    sand /= sum
-    snow /= sum
+    for (let b = 0; b < BIOME_COUNT; b++) out[b] /= sum
     if (h !== undefined) {
-      // Snow line: white peaks in every region; deserts keep theirs a little higher (dry air).
+      // Snow line: white peaks in every region; deserts keep theirs a little higher (dry air). The other regions
+      // give up their share proportionally, so the weights still sum to 1.
+      const sand = out[Biome.Desert]
       const lo = SNOW_LINE[0] + sand * 30, hi = SNOW_LINE[1] + sand * 30
       const k = Math.min(1, Math.max(0, (h - lo) / (hi - lo)))
       const alt = k * k * (3 - 2 * k)
-      snow = Math.max(snow, alt)
-      sand = Math.min(sand, 1 - snow)
+      const snow = out[Biome.Snow]
+      if (alt > snow) {
+        const rest = 1 - snow, keep = rest > 1e-6 ? (1 - alt) / rest : 0
+        for (let b = 0; b < BIOME_COUNT; b++) out[b] = b === Biome.Snow ? alt : out[b] * keep
+      }
     }
-    out[0] = sand
-    out[1] = snow
     return out
   }
 
-  /** Dominant biome at (x, z) — HUD label. */
+  /** [desert, snow] view of `weightsN` (autumn and mystic count as green land here). */
+  weights(x: number, z: number, out: BiomeWeights, h?: number): BiomeWeights {
+    const w = this.weightsN(x, z, this.tmp, h)
+    out[0] = w[Biome.Desert]
+    out[1] = w[Biome.Snow]
+    return out
+  }
+
+  /** Dominant region at (x, z) — HUD label, map. */
   dominant(x: number, z: number, h?: number): number {
-    const w = this.weights(x, z, [0, 0], h)
-    return w[1] > 0.5 ? Biome.Snow : w[0] > 0.5 ? Biome.Desert : Biome.Forest
+    const w = this.weightsN(x, z, this.tmp, h)
+    let best = 0
+    for (let b = 1; b < BIOME_COUNT; b++) if (w[b] > w[best]) best = b
+    return best
   }
 }
 
-export const BIOME_NAMES = ['Forest', 'Desert', 'Snowfield'] as const
+export const BIOME_NAMES = ['Forest', 'Desert', 'Snowfield', 'Autumn Valley', 'Mystic Wood'] as const

@@ -1,6 +1,7 @@
 // Headless-Chrome screenshot / probe harness (dev-only: needs `npm run dev` and window.__game).
 //   npm run shot -- <outdir> <shots.json>        env: PORT (5173), W/H (1280×720)
 // shots.json: [{ name, seed, tier, hour, look, x, z, yaw, pitch, cam: 'fpp'|'tpp', drive, keys, keysMs, wait, eval }]
+//   x: 'ROAD' places the shot on the main road at z (+ dx metres to the side)
 //   x/z teleport the player (yaw/pitch aim; forward = (−sin yaw, −cos yaw)), `drive` parks the truck there and gets in,
 //   `keys` are held for keysMs (e.g. ["KeyW"] to drive), `eval` is a JS body run with `g` = the Game (returned as info.eval),
 //   `pre` is a JS body run with `g` BEFORE the wait (e.g. toggle a feature, then measure it).
@@ -40,6 +41,7 @@ for (const s of shots) {
     const p = g.player
     if (s.hour !== undefined) { g.tod.hours = s.hour; g.tod.dayLengthMinutes = 0 }
     if (s.cam) g.updateSettings({ camera: s.cam })
+    if (s.x === 'ROAD') s.x = g.world.fields.roadCenterX(s.z) + (s.dx ?? 0) // x relative to the main road
     if (s.x !== undefined) {
       const y = (g.world.fields.surface ?? g.world.fields.height).call(g.world.fields, s.x, s.z) + 0.2
       p.teleport(new (Object.getPrototypeOf(p.curr).constructor)(s.x, y, s.z))

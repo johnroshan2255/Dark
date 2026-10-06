@@ -3,6 +3,7 @@ import type { QualitySettings } from '../quality/QualityTiers'
 import { configureSunShadow, followShadow, SHADOW_LIGHT_DISTANCE } from '../shadows/ShadowFollow'
 import type { TimeOfDay } from './TimeOfDay'
 import { globalUniforms } from '../shaders/uniforms'
+import { isGenshin } from '../artStyle'
 
 /**
  * Owns the fixed light set: sun/moon (1 shadow), hemisphere fill, flashlight (spot, 1 small shadow).
@@ -29,6 +30,11 @@ export class LightingSystem {
   constructor(private readonly tod: TimeOfDay) {
     this.root.name = 'lighting'
     configureSunShadow(this.sun, 36, 2048)
+    // Genshin's cast shadows are soft and light (sampled: shaded grass ≈ 0.8–0.9× the sunlit grass, teal-tinted by
+    // the sky fill): the map darkens to 55 % only; NdotL still shapes every volume. Uniform → no extra program.
+    if (isGenshin()) this.sun.shadow.intensity = 0.55
+    // …and SOFT-edged: the PCF kernel (5 taps either way) spread over ~3 texels.
+    if (isGenshin()) this.sun.shadow.radius = 3
     this.flashlight.castShadow = true
     this.flashlight.shadow.mapSize.set(512, 512)
     this.flashlight.shadow.camera.near = 0.3

@@ -2,6 +2,10 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { finish } from '../POI/poiGeometry'
 import { LANDMARK_SCALE, LandmarkKind } from './landmarks'
+import { ANCIENT_TREE, broadleafInto, MAPLE_TREE, WORLD_TREE } from '../Forest/genshinTrees'
+import { isGenshin } from '../../rendering/artStyle'
+import { Soup } from '../Forest/treeParts'
+import { Rng } from '../noise/rng'
 
 /**
  * Landmark meshes (Genshin palette, built from primitives in code like the places): one geometry per kind in the
@@ -78,7 +82,26 @@ const r01 = (i: number) => {
   return s - Math.floor(s)
 }
 
+/**
+ * WORLD TREE (Windrise's oak): the Genshin broadleaf generator at landmark scale — buttress roots, a twisting
+ * trunk, five huge limbs and cloud clumps of billboarded leaf tufts (genshinTrees.ts). Far LOD = its mid level.
+ */
 function giantTree(): G {
+  const s = new Soup()
+  broadleafInto(s, LO ? 1 : 0, new Rng(9001), isGenshin() ? { ...WORLD_TREE, plates: true, fork: 6.5, spread: 13, limbs: 6, clumpR: 6.3, dark: 0x22604c, light: 0xc0e27a } : WORLD_TREE)
+  return s.geometry('landmark.giantTree')
+}
+
+/** Region giants (autumn Great Maple, mystic Elder Bloom): the world-tree generator in the region's colours. */
+function regionGiant(name: string, o: typeof WORLD_TREE, seed: number): G {
+  const s = new Soup()
+  const gen = isGenshin()
+  broadleafInto(s, LO ? 1 : 0, new Rng(seed), gen ? { ...o, plates: true, fork: 6.5, spread: 13, limbs: 6, clumpR: 6.3 } : { ...o, cumulus: true, clumpR: 5.6, tufts: 22 })
+  return s.geometry(name)
+}
+
+/** The previous giant tree (cylinders + spheres), kept for comparison shots. */
+export function blobGiantTree(): G {
   const p: G[] = []
   // Flared roots, a massive tapering trunk, five big boughs, a wide dome of round crowns (Windrise's oak).
   for (let i = 0; i < 6; i++) {
@@ -271,6 +294,8 @@ function buildAll(): G[] {
   body[LandmarkKind.Gate] = gate()
   body[LandmarkKind.FrostTree] = frostTree()
   body[LandmarkKind.IceSpire] = iceSpire()
+  body[LandmarkKind.GiantMaple] = regionGiant('landmark.giantMaple', { ...WORLD_TREE, dark: MAPLE_TREE.dark, light: MAPLE_TREE.light, bark: MAPLE_TREE.bark, spread: 12, fork: 11 }, 9101)
+  body[LandmarkKind.ElderBloom] = regionGiant('landmark.elderBloom', { ...WORLD_TREE, dark: ANCIENT_TREE.dark, light: ANCIENT_TREE.light, bark: ANCIENT_TREE.bark, twist: 0.32, roots: 9 }, 9201)
   return body
 }
 
@@ -294,13 +319,28 @@ export function createLandmarkGeometries(): LandmarkGeometries {
   colliders[LandmarkKind.Gate] = [{ x: -6, z: 0, r: 1.9, y0: -4, h: 19 }, { x: 6, z: 0, r: 1.9, y0: -4, h: 19 }]
   colliders[LandmarkKind.FrostTree] = [{ x: 0, z: 0, r: 2, y0: -2, h: 12 }]
   colliders[LandmarkKind.IceSpire] = [{ x: 0, z: 0, r: 5, y0: -1, h: 10 }]
+  colliders[LandmarkKind.GiantMaple] = [{ x: 0, z: 0, r: 3.2, y0: -2, h: 18 }]
+  colliders[LandmarkKind.ElderBloom] = [{ x: 0, z: 0, r: 3.2, y0: -2, h: 20 }]
   // Genshin exaggerates its landmarks (the Windrise oak dwarfs the meadow): scale each kind so it reads from
   // 0.5–2 km away. Footprints in landmarks.ts (LANDMARK_RADIUS) match these.
   const rotor = windmillRotor()
   const hub = new THREE.Vector3(0, 17, 4.8)
+  // Billboarded leaf tufts (the world tree) are placed from bbCenter/bbOff in the shader: scale those too, or the
+  // tufts stay at the unscaled size and position (inside the crown).
+  const scaleAll = (g: G, k: number) => {
+    g.scale(k, k, k)
+    for (const name of ['bbCenter', 'bbOff']) {
+      const a = g.getAttribute(name)
+      if (!a) continue
+      const arr = a.array as Float32Array
+      for (let i = 0; i < arr.length; i++) arr[i] *= k
+      a.needsUpdate = true
+    }
+    g.computeBoundingSphere()
+  }
   LANDMARK_SCALE.forEach((k, kind) => {
-    body[kind].scale(k, k, k).computeBoundingSphere()
-    far[kind].scale(k, k, k).computeBoundingSphere()
+    scaleAll(body[kind], k)
+    scaleAll(far[kind], k)
     for (const c of colliders[kind]) { c.x *= k; c.z *= k; c.r *= k; c.y0 *= k; c.h *= k }
   })
   const ws = LANDMARK_SCALE[LandmarkKind.Windmill]

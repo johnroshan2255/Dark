@@ -1,3 +1,4 @@
+import { Biome } from '../Biomes'
 import { hashFloat } from '../noise/rng'
 
 /**
@@ -13,7 +14,7 @@ import { hashFloat } from '../noise/rng'
  * footprint and its foundation reaches down (`LandmarkSystem` renders them, out to the tier's view distance,
  * with colliders when near).
  */
-export const LandmarkKind = { GiantTree: 0, Windmill: 1, Ruins: 2, Statue: 3, Tower: 4, Obelisk: 5, Gate: 6, FrostTree: 7, IceSpire: 8 } as const
+export const LandmarkKind = { GiantTree: 0, Windmill: 1, Ruins: 2, Statue: 3, Tower: 4, Obelisk: 5, Gate: 6, FrostTree: 7, IceSpire: 8, GiantMaple: 9, ElderBloom: 10 } as const
 export const LANDMARK_REGION = 700
 
 export interface Landmark {
@@ -37,14 +38,16 @@ export interface LandmarkHost {
   placeNear(x: number, z: number, margin: number): boolean
   formationNear(x: number, z: number, margin: number): boolean
   biome(x: number, z: number): [number, number]
+  /** Dominant region (world/Biomes.ts Biome). */
+  region(x: number, z: number): number
   roadCenterX(z: number): number
   water: number
 }
 
 /** Per-kind size multiplier on the base meshes (landmarkGeometry) — giant tree ~64 m tall, tower ~50 m. */
-export const LANDMARK_SCALE = [2, 1.3, 1.2, 1.6, 1.4, 1.4, 1.3, 1.6, 1.5]
-export const LANDMARK_RADIUS = [26, 9, 18, 11, 10, 8, 13, 17, 13]
-export const LANDMARK_ICONS = ['🌳', '🌬️', '🏛️', '🗿', '🗼', '🔺', '⛩️', '🌲', '❄️']
+export const LANDMARK_SCALE = [2, 1.3, 1.2, 1.6, 1.4, 1.4, 1.3, 1.6, 1.5, 2, 2]
+export const LANDMARK_RADIUS = [26, 9, 18, 11, 10, 8, 13, 17, 13, 26, 28]
+export const LANDMARK_ICONS = ['🌳', '🌬️', '🏛️', '🗿', '🗼', '🔺', '⛩️', '🌲', '❄️', '🍁', '🔮']
 const NAMES: string[][] = [
   ['Windrise Oak', 'Elder Tree', 'Old Guardian Oak', 'The Great Bough'],
   ['Hillcrest Windmill', 'Old Mill', 'Breezy Windmill', 'Sunny Mill'],
@@ -55,6 +58,8 @@ const NAMES: string[][] = [
   ['Gate of Sands', 'Ruined Gate', 'Old Desert Gate', 'Dune Gate'],
   ['Frostbearing Tree', 'Snowcrown Pine', 'Frozen Giant', 'Winter Elder'],
   ['Ice Spire', 'Crystal Peak', 'Frost Shards', 'Glacier Spike'],
+  ['Great Maple', 'Ember Crown', 'Old Russet Maple', 'Harvest Tree'],
+  ['Elder Bloom', 'Dreaming Giant', 'Violet Ancient', 'Moonshade Tree'],
 ]
 
 /** Deterministic display name (compass + arrival banner). */
@@ -86,6 +91,9 @@ export class LandmarkField {
 
   private kindFor(x: number, z: number, t: number): number {
     const [sand, snow] = this.host.biome(x, z)
+    const region = this.host.region(x, z)
+    if (region === Biome.Autumn) return t < 0.4 ? LandmarkKind.GiantMaple : t < 0.7 ? LandmarkKind.Windmill : t < 0.85 ? LandmarkKind.Ruins : LandmarkKind.Tower
+    if (region === Biome.Mystic) return t < 0.55 ? LandmarkKind.ElderBloom : t < 0.8 ? LandmarkKind.Ruins : LandmarkKind.Statue
     if (sand > 0.5) return t < 0.55 ? LandmarkKind.Obelisk : LandmarkKind.Gate
     if (snow > 0.5) return t < 0.45 ? LandmarkKind.FrostTree : t < 0.8 ? LandmarkKind.IceSpire : LandmarkKind.Tower
     if (sand > 0.15 || snow > 0.15) return LandmarkKind.Tower

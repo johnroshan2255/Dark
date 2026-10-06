@@ -19,6 +19,16 @@ const SAND_FOG = new THREE.Color(1.0, 0.9, 0.72)
 const SAND_ZENITH = new THREE.Color(0.26, 0.48, 0.86)
 const SAND_BOUNCE = new THREE.Color(0.85, 0.6, 0.35)
 
+// AUTUMN: warm golden air — honey haze, a warmer lower-feeling sun, an amber bounce from the leaf-strewn ground.
+const AUT_FOG = new THREE.Color(1.0, 0.86, 0.66)
+const AUT_SUN = new THREE.Color(1.0, 0.82, 0.6)
+const AUT_BOUNCE = new THREE.Color(0.9, 0.62, 0.32)
+// MYSTIC: violet mist — lavender fog and haze, a deeper blue-violet zenith, a cooler dimmer sun, teal bounce,
+// thick ground mist pooling between the giants.
+const MYS_FOG = new THREE.Color(0.74, 0.68, 1.0)
+const MYS_ZENITH = new THREE.Color(0.24, 0.22, 0.7)
+const MYS_SUN = new THREE.Color(0.82, 0.86, 1.0)
+const MYS_BOUNCE = new THREE.Color(0.42, 0.7, 0.78)
 const lum = (c: THREE.Color) => c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722
 
 /** Re-tint `p` toward a colour of the same brightness (keeps the phase's exposure, changes its hue). */
@@ -28,8 +38,33 @@ function hueToward(c: THREE.Color, target: THREE.Color, k: number, gain = 1): vo
   c.lerp(_c, k)
 }
 
-/** @param sand desert weight under the player · @param snow snow weight (incl. the snow line) */
-export function applyBiomeAir(p: LightingParams, sand: number, snow: number): void {
+/**
+ * @param sand desert weight under the player · @param snow snow weight (incl. the snow line)
+ * @param autumn / @param mystic the other region weights (world/biomes/BiomeDefs.ts)
+ */
+export function applyBiomeAir(p: LightingParams, sand: number, snow: number, autumn = 0, mystic = 0): void {
+  if (autumn > 0.001) {
+    hueToward(p.fogColor, AUT_FOG, 0.55 * autumn, 1 + 0.04 * autumn)
+    hueToward(p.landHaze, AUT_FOG, 0.5 * autumn)
+    hueToward(p.sunColor, AUT_SUN, 0.45 * autumn)
+    hueToward(p.hemiGround, AUT_BOUNCE, 0.6 * autumn)
+    hueToward(p.tint, AUT_SUN, 0.12 * autumn)
+    p.haze = Math.min(1, p.haze + 0.1 * autumn)
+    p.saturation *= 1 + 0.06 * autumn
+  }
+  if (mystic > 0.001) {
+    hueToward(p.fogColor, MYS_FOG, 0.7 * mystic)
+    hueToward(p.landHaze, MYS_FOG, 0.65 * mystic)
+    hueToward(p.skyZenith, MYS_ZENITH, 0.55 * mystic)
+    hueToward(p.sunColor, MYS_SUN, 0.4 * mystic)
+    hueToward(p.hemiSky, MYS_FOG, 0.35 * mystic)
+    hueToward(p.hemiGround, MYS_BOUNCE, 0.6 * mystic)
+    p.sunIntensity *= 1 - 0.18 * mystic
+    p.haze = Math.min(1, p.haze + 0.18 * mystic)
+    // Ground mist between the giants (the analytic height mist on every tier — no extra pass).
+    p.mistDensity = p.mistDensity * (1 - mystic) + Math.max(p.mistDensity, 0.012) * mystic
+    p.mistBase += 2 * mystic
+  }
   if (snow > 0.001) {
     hueToward(p.fogColor, SNOW_FOG, 0.75 * snow, 1 + 0.08 * snow)
     hueToward(p.skyZenith, SNOW_ZENITH, 0.6 * snow)

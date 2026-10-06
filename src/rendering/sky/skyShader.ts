@@ -31,6 +31,10 @@ export const skyUniforms = {
   uSkyBoltColor: { value: new THREE.Color(1, 0.3, 0.4) },
   /** Aerial-perspective haze: x = max amount (0..1), y = distance scale (m). */
   uSkyHaze: { value: new THREE.Vector2(0.4, 110) },
+  /** Horizon → zenith falloff exponent (smaller = the deep zenith colour starts lower: Genshin's azure sky). */
+  uSkyCurve: { value: 0.45 },
+  /** Genshin cumulus (1): round puffy white clouds with sunlit tops and soft blue-grey bellies; 0 = painted streaks. */
+  uSkyCumulus: { value: 0 },
   /** Volumetric ground MIST (exponential height fog): x density at the base, y base height (m), z falloff (1/m), w camera height. */
   uSkyMist: { value: new THREE.Vector4(0, -2, 0.09, 0) },
 }
@@ -59,6 +63,8 @@ uniform vec3 uSkyHorizon, uSkyZenith, uSkySunDir, uSkySunColor, uSkyMoonDir, uSk
 uniform float uSkySunVis, uSkyMoonVis, uSkyStars, uSkyClouds, uSkyTime, uSkyBolt, uSkyCloudWhite, uSkyStorm, uSkyLowRes;
 uniform vec3 uSkyBoltDir, uSkyBoltColor;
 uniform vec2 uSkyHaze;
+uniform float uSkyCurve;
+uniform float uSkyCumulus;
 // Layered depth haze on top of the distance fog (refer/roads: trees 40–150 m soften into blue-violet air).
 float skyHaze(float d) { return uSkyHaze.x * (1.0 - exp(-max(d - 12.0, 0.0) / uSkyHaze.y)); }
 
@@ -98,7 +104,7 @@ vec3 skyColor(vec3 d, bool full) {
   // Warm = the sun's own orange/peach (not a blend with the cool horizon — that goes pink).
   vec3 warm = uSkySunColor * vec3(1.0, 0.82, 0.62) * 1.05;
   vec3 horizon = mix(uSkyHorizon, warm, sunward);
-  vec3 col = mix(horizon, uSkyZenith, pow(up, 0.45));
+  vec3 col = mix(horizon, uSkyZenith, pow(up, uSkyCurve));
   col = mix(horizon, col, smoothstep(-0.02, 0.06, d.y));
 
   // Sun: crisp pale-gold disc + small halo (no wide wash — the reference sun is a clean disc).
@@ -134,6 +140,19 @@ vec3 skyColor(vec3 d, bool full) {
       float body = smoothstep(1.0 - uSkyClouds, 1.0, n);
       vec3 white = mix(vec3(0.62, 0.7, 0.88), vec3(1.08, 1.06, 1.02), smoothstep(0.1, 0.75, body + 0.25 * (n - sky_noise(p * 2.3 + vec2(0.4, 0.9)))));
       white += uSkySunColor * toward * 0.35;
+      if (uSkyCumulus > 0.5) {
+        // GENSHIN CUMULUS: big rounded puffs (low-frequency weighted, a narrow soft edge → defined but soft outlines),
+        // lit from the sun's side (a second sample offset toward the sun: brighter where the puff faces it), bright
+        // white tops over soft blue-grey bellies, a silver rim toward the sun.
+        vec2 q = p * 0.95;
+        float b = sky_noise(q) * 0.62 + sky_noise(q * 2.1 + 5.3) * 0.26 + sky_noise(q * 4.7 + 1.7) * 0.12;
+        cov = smoothstep(1.0 - uSkyClouds * 1.05, 1.0 - uSkyClouds * 1.05 + 0.07, b) * smoothstep(0.02, 0.14, d.y);
+        vec2 sd = normalize(keyDir.xz + 1e-4) * 0.09;
+        vec2 qs = q + sd;
+        float bs = sky_noise(qs) * 0.62 + sky_noise(qs * 2.1 + 5.3) * 0.26 + sky_noise(qs * 4.7 + 1.7) * 0.12;
+        float lit = clamp(0.55 + (bs - b) * 6.0 + smoothstep(1.0 - uSkyClouds, 1.0, b) * 0.3, 0.0, 1.0);
+        white = mix(vec3(0.66, 0.74, 0.88), vec3(1.12, 1.11, 1.08), lit) + uSkySunColor * toward * 0.25;
+      }
       cloud = mix(cloud, white, uSkyCloudWhite);
       // Storm: a heavy grey lid — dark bellies, ragged lighter edges, coverage pushed toward total.
       if (uSkyStorm > 0.01) {

@@ -7,9 +7,10 @@ import type { WorldChunk } from '../WorldChunk'
 import { LandmarkKind } from '../Landmarks/landmarks'
 import { WorldFields } from '../WorldFields'
 import { createGrassGeometry } from './grass'
-import { isOverland } from '../../rendering/artStyle'
+import { isGenshin, isOverland } from '../../rendering/artStyle'
 import { farmFieldAt } from '../POI/pois'
-import type { BiomeWeights } from '../Biomes'
+import { BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Biomes'
+import { blendBy } from '../biomes/BiomeDefs'
 
 /**
  * Dense grass carpet AROUND THE PLAYER — cost ∝ radius², independent of loaded chunks. ONE draw call.
@@ -40,6 +41,10 @@ export interface GrassSettings {
   /** Blade height / width multipliers (art style; default 1). */
   tall?: number
   wide?: number
+  /** Blade height spread (default 1). */
+  vary?: number
+  /** Random lean multiplier (default 1; Genshin's upright blades 0.35). */
+  lean?: number
 }
 
 /**
@@ -47,6 +52,10 @@ export interface GrassSettings {
  * blades reaching further out.
  */
 export function styledGrass(s: GrassSettings): GrassSettings {
+  // GENSHIN (Statue of the Seven / Starfell reference): a LUSH field of thin, UPRIGHT individual blades of a fairly
+  // even height (knee-ish), 1.5× the tier's blades per m², 0.72× as wide (same coverage, finer look).
+  // Anime grass (Genshin meadow close-up): tall, broad-ish curving blades (×1.2 tall, ×0.95 wide, more lean).
+  if (isGenshin()) return { ...s, density: Math.round(s.density * 1.5), tall: 1.2, wide: 0.95, vary: 0.55, lean: 0.6 }
   if (!isOverland()) return s
   // INDIVIDUAL blades like theirs (not card clumps): the tier's density, 1.35× taller and 1.4× wider blades so
   // the straw closes into a soft carpet, 1.3× radius. ~1.7× the tier's blade triangles.
@@ -63,6 +72,7 @@ const _s = new THREE.Vector3()
 const _up = new THREE.Vector3(0, 1, 0)
 const ZERO = new THREE.Matrix4().makeScale(0, 0, 0)
 const _bw: BiomeWeights = [0, 0]
+const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
 
 /** Per-layer uniforms (MaterialLibrary): the grow-in / shrink-out band and the thinning range (m from the player). */
 export interface GrassUniforms {
@@ -136,19 +146,19 @@ export class GrassField {
     const thinStart = R * (isOverland() ? 0.6 : 0.4)
     this.near.u.thin.value.set(thinStart, R)
     this.far.u.thin.value.set(thinStart, R)
-    this.setupLayer(this.near, nearR * 1.12, Math.round(s.density), s.blades, s.tall ?? 1, s.wide ?? 1)
-    this.setupLayer(this.far, R, Math.max(4, Math.round(s.density * 0.32)), 1, s.tall ?? 1, (s.wide ?? 1) * 1.75)
+    this.setupLayer(this.near, nearR * 1.12, Math.round(s.density), s.blades, s.tall ?? 1, s.wide ?? 1, s.vary ?? 1, s.lean ?? 1)
+    this.setupLayer(this.far, R, Math.max(4, Math.round(s.density * 0.32)), 1, s.tall ?? 1, (s.wide ?? 1) * 1.75, s.vary ?? 1, s.lean ?? 1)
     this.instances = (this.near.mesh?.count ?? 0) + (this.far.mesh?.count ?? 0)
   }
 
-  private setupLayer(L: Layer, radius: number, blades: number, segments: number, tall: number, wide: number): void {
+  private setupLayer(L: Layer, radius: number, blades: number, segments: number, tall: number, wide: number, vary = 1, lean = 1): void {
     const g = Math.ceil((radius * 2) / TILE) + 1
-    const key = `${g}|${blades}|${segments}|${tall}|${wide}`
+    const key = `${g}|${blades}|${segments}|${tall}|${wide}|${vary}|${lean}`
     if (key === L.key && L.mesh) return
     this.disposeLayer(L)
     L.key = key
     L.g = g
-    L.geometry = createGrassGeometry(blades, segments, tall, wide)
+    L.geometry = createGrassGeometry(blades, segments, tall, wide, vary, lean)
     const count = g * g * TILE * TILE // one 1 m² patch per cell
     L.density = new THREE.InstancedBufferAttribute(new Float32Array(count), 1).setUsage(THREE.DynamicDrawUsage)
     L.geometry.setAttribute('iDensity', L.density)
@@ -207,8 +217,9 @@ export class GrassField {
     if (v !== undefined) return v
     const x = ix * CORNER, z = iz * CORNER
     const h = this.fields.height(x, z)
-    const bw = this.fields.biome(x, z, _bw, h)
-    const bare = Math.max(0, 1 - bw[0] * 0.96 - bw[1])
+    // Region grass amount (BiomeDefs.grass, blended): full meadows in the forest and the mystic woods, a little less
+    // in the autumn valleys, sparse dry tufts on sand, none on snow.
+    const bare = Math.max(0, blendBy(this.fields.region(x, z, _wn, h), (d) => d.grass))
     v = (0.45 + 0.55 * (1 - this.fields.forestDensity(x, z, h))) * bare
     if (this.corners.size > 20000) this.corners.clear()
     this.corners.set(key, v)
@@ -309,13 +320,16 @@ export class GrassField {
       // Base colour = the ground's own colour (blades melt into the terrain → a carpet, not tufts); only a
       // few dry clumps on sunny verges (refs), and a slight per-clump hue jitter.
       // Overland: one even golden field — no dry clumps, no per-patch jitter (they read as tufts in a short field).
-      const dry = dryBiome || (!isOverland() && hashFloat(seed, tx, tz, i * 4 + DRY_KEY) < 0.03 + verge * 0.06)
-      const j = isOverland() ? 1 : 0.92 + hashFloat(seed, tx, tz, i * 4 + DRY_KEY + 1) * 0.16
+      // Genshin: no dry tufts in the carpet and a near-even tone (±3 %).
+      const dry = dryBiome || (!isOverland() && !isGenshin() && hashFloat(seed, tx, tz, i * 4 + DRY_KEY) < 0.03 + verge * 0.06)
+      const j = isOverland() ? 1 : isGenshin() ? 0.97 + hashFloat(seed, tx, tz, i * 4 + DRY_KEY + 1) * 0.06 : 0.92 + hashFloat(seed, tx, tz, i * 4 + DRY_KEY + 1) * 0.16
       const tr = d.colors[ni * 3], tg = d.colors[ni * 3 + 1], tb = d.colors[ni * 3 + 2]
       if (dry) {
         cols[o] = tr * 1.3; cols[o + 1] = tg * 1.15; cols[o + 2] = tb * 0.7
       } else {
-        cols[o] = tr * 0.95 * j; cols[o + 1] = tg * 1.05 * j; cols[o + 2] = tb * 0.95 * j
+        // (Genshin: exactly the ground's hue — the grass shader does the tip / root shading.)
+        if (isGenshin()) { cols[o] = tr * j; cols[o + 1] = tg * j; cols[o + 2] = tb * j }
+        else { cols[o] = tr * 0.95 * j; cols[o + 1] = tg * 1.05 * j; cols[o + 2] = tb * 0.95 * j }
       }
     }
     mesh.instanceMatrix.addUpdateRange(base * 16, n * 16)

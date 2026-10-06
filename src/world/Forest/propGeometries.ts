@@ -3,7 +3,7 @@ import { isOverland } from '../../rendering/artStyle'
 import { hash4 } from '../noise/rng'
 import { createFenceGeometry, createLampGlowGeometry, createPoleGeometry } from '../Road/propMeshes'
 import { createPoiGeometries } from '../POI/poiGeometry'
-import { createDesertUndergrowth, createTreeLibrary, createUndergrowth, type SpeciesDef } from './treeFactory'
+import { createDesertUndergrowth, createRegionUndergrowth, createTreeLibrary, createUndergrowth, type SpeciesDef } from './treeFactory'
 
 /**
  * Placeholder low-poly vegetation/prop geometry built in code, until AI-generated
@@ -25,6 +25,9 @@ export interface PropGeometries {
   /** Desert undergrowth (replaces fern/bush on sand). */
   agave: THREE.BufferGeometry
   shrub: THREE.BufferGeometry
+  /** Region undergrowth: autumn leaf piles, mystic glowing mushrooms. */
+  leafPile: THREE.BufferGeometry
+  glowShroom: THREE.BufferGeometry
   pole: THREE.BufferGeometry
   /** Street-lamp glow + ground pool, instanced with the poles (MaterialLibrary.lampGlow). */
   lampGlow: THREE.BufferGeometry
@@ -108,6 +111,7 @@ export function createPropGeometries(): PropGeometries {
   const rockFar = makeRock(0)
   const { fern, bush } = createUndergrowth()
   const { agave, shrub } = createDesertUndergrowth()
+  const { leafPile, glowShroom } = createRegionUndergrowth()
   const pole = createPoleGeometry()
   const lampGlow = createLampGlowGeometry()
   const fence = createFenceGeometry()
@@ -127,6 +131,8 @@ export function createPropGeometries(): PropGeometries {
     bush,
     agave,
     shrub,
+    leafPile,
+    glowShroom,
     pole,
     lampGlow,
     fence,
@@ -134,7 +140,7 @@ export function createPropGeometries(): PropGeometries {
     poi,
     dispose: () => {
       lib.dispose()
-      ;[rock, rockFar, fern, bush, agave, shrub, pole, lampGlow, fence].forEach((g) => g.dispose())
+      ;[rock, rockFar, fern, bush, agave, shrub, leafPile, glowShroom, pole, lampGlow, fence].forEach((g) => g.dispose())
       wire.dispose()
       poi.forEach((g) => g.dispose())
     },

@@ -43,6 +43,11 @@ export class PlayerController {
   readonly ride = { riding: false, heading: 0, speed: 0, steer: 0, travelled: 0 }
   /** Inside a car: the car moves this body (collider disabled); no own movement. */
   inVehicle = false
+  /** BAIL (jumped out of a moving car, GTA-style): tumbling forward along `tumbleYaw` (game yaw of the slide);
+   *  `tumble` is the accumulated forward-roll angle (rad) the character model poses. */
+  tumbling = false
+  tumble = 0
+  tumbleYaw = 0
   /** Seconds since the last mouse / touch look input (bike camera auto-follow). */
   lookIdle = 99
 
@@ -98,6 +103,23 @@ export class PlayerController {
     if (stun >= 1) this.knockTarget = 1
   }
 
+  /**
+   * Thrown out of a moving vehicle with its velocity (m/s, world): a short hop, then the body TUMBLES forward like a
+   * rolling log (roll rate = slide speed / 0.45 m) while it slides to a stop on the ground, ends on its back
+   * (the knockdown's supine pose) and gets up with the usual sequence. No control until then.
+   */
+  bail(vx: number, vy: number, vz: number): void {
+    const sp = Math.hypot(vx, vz)
+    this.velocity.set(vx, Math.max(vy, 2.2 + sp * 0.05), vz)
+    this.stunned = Math.min(3.2, 1.0 + sp * 0.07)
+    this.knockTarget = 1
+    this.knock = 1 // on the ground already as far as the camera / get-up are concerned
+    this.knockLanded = true
+    this.tumbling = true
+    this.tumble = 0
+    this.tumbleYaw = Math.atan2(-vx, -vz)
+  }
+
   private knockTarget = 0
   private knockT = 0
   private knockLanded = false
@@ -106,7 +128,7 @@ export class PlayerController {
     this.prev.copy(this.curr)
     if (this.frozen || this.inVehicle) return
     // Knockdown: fall fast, get up slowly once the stun ends.
-    if (this.stunned <= 0.4 && !this.dead) this.knockTarget = 0
+    if (this.stunned <= 0.4 && !this.dead && !this.tumbling) this.knockTarget = 0
     if (this.dead) this.knockTarget = 1
     // FALL: a short stagger, then the body accelerates over like a felled tree (0.4 s, ease-in) and overshoots
     // to 1.12 at impact (a bounce the pose reads as a thump), settling to 1. GET UP at a steady pace
@@ -136,7 +158,21 @@ export class PlayerController {
     if (this.wish.lengthSq() > 1) this.wish.normalize()
     this.wish.multiplyScalar(speed)
 
-    const k = 1 - Math.exp(-(locked ? 2.5 : ACCEL) * dt) // thrown players slide to a stop
+    if (this.tumbling) {
+      // Roll with the slide; once nearly stopped, finish the turn and come to rest ON THE BACK — the forward-roll
+      // angle ≡ 2π − 1.5 (the supine pose's backward tilt of 1.5 rad), so the get-up starts without a pop.
+      const sp = this.horizontalSpeed
+      const settling = sp < 1.4 && this.grounded
+      this.tumble += Math.max(sp / 0.45, settling ? 5 : 0) * dt
+      const SUPINE = Math.PI * 2 - 1.5
+      const into = ((this.tumble % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)
+      if (settling && Math.abs(into - SUPINE) < 0.2) {
+        this.tumbling = false
+        this.stunned = Math.max(this.stunned, 0.9) // lie still a moment, then get up
+      }
+      if (this.tumble > 60) this.tumbling = false // safety
+    }
+    const k = 1 - Math.exp(-(this.tumbling ? (this.grounded ? 2.2 : 0.2) : locked ? 2.5 : ACCEL) * dt) // thrown players slide to a stop
     this.velocity.x += (this.wish.x - this.velocity.x) * k
     this.velocity.z += (this.wish.z - this.velocity.z) * k
     if (this.grounded && this.velocity.y <= 0.5) {

@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { globalUniforms, GUST_GLSL } from '../../rendering/shaders/uniforms'
-import { isOverland } from '../../rendering/artStyle'
+import { isGenshin, isOverland } from '../../rendering/artStyle'
 
 /**
  * Genshin-style grass: a dense field of INDIVIDUAL blades (no clumps, no alpha cards).
@@ -17,8 +17,10 @@ import { isOverland } from '../../rendering/artStyle'
 /**
  * @param tall blade height multiplier (overland meadows ≈ 2.1: knee-to-waist-high straw)
  * @param wide blade width multiplier (taller blades are wider so the carpet stays closed)
+ * @param vary height spread (1 = 0.28–0.62 m × tall)
+ * @param lean random lean multiplier (Genshin's blades stand UPRIGHT ≈ 0.35)
  */
-export function createGrassGeometry(blades: number, segments: number, tall = 1, wide = 1): THREE.BufferGeometry {
+export function createGrassGeometry(blades: number, segments: number, tall = 1, wide = 1, vary = 1, leanK = 1): THREE.BufferGeometry {
   const pos: number[] = []
   const col: number[] = []
   const tip: number[] = []
@@ -41,10 +43,10 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
   for (let b = 0; b < blades; b++) {
     const rx = rnd() * 1.1 - 0.55
     const rz = rnd() * 1.1 - 0.55
-    const h = (0.28 + Math.pow(rnd(), 0.7) * 0.34) * tall
+    const h = (0.28 + Math.pow(rnd(), 0.7) * 0.34 * vary) * tall
     const w = (0.028 + rnd() * 0.018) * wide
     const face = rnd() * Math.PI
-    const lean = 0.06 + rnd() * 0.16
+    const lean = (0.06 + rnd() * 0.16) * Math.min(1, tall) * leanK
     const la = face + Math.PI / 2 + (rnd() - 0.5) * 1.2 // lean roughly across the blade face (natural curl)
     const px = Math.cos(face) * w, pz = Math.sin(face) * w
     const at = (t: number): [number, number, number] => [rx + Math.cos(la) * lean * t * t, h * t, rz + Math.sin(la) * lean * t * t]
@@ -68,10 +70,19 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
   }
   // One flower per patch (2 tris), shown on ~10 % of patches.
   {
-    const cx = rnd() * 0.6 - 0.3, cz = rnd() * 0.6 - 0.3, cy = 0.42 * tall, e = 0.04
-    const q: [number, number, number][] = [[cx - e, cy, cz - e * 0.3], [cx + e, cy, cz + e * 0.3], [cx + e, cy + e * 1.5, cz + e * 0.3], [cx - e, cy + e * 1.5, cz - e * 0.3]]
-    const qi = q.map((v) => push(v, 1, [cx, cz], 0, 1))
-    index.push(qi[0], qi[1], qi[2], qi[0], qi[2], qi[3])
+    // A small DAISY just above the blades: a 5-petal star (centre `tip` 0 → yellow eye, petal tips 1 → white; the
+    // shader colours it), tilted ~40° so it reads from a low camera. 10 triangles.
+    const cx = rnd() * 0.6 - 0.3, cz = rnd() * 0.6 - 0.3, cy = 0.5 * tall, R = 0.045
+    const tilt = 0.7, ct = Math.cos(tilt), st = Math.sin(tilt), rot = rnd() * Math.PI * 2
+    const P = (a: number, r: number): [number, number, number] => {
+      const x = Math.cos(a) * r, z = Math.sin(a) * r // flat, then tilted about x and spun
+      const y2 = z * st, z2 = z * ct
+      return [cx + x * Math.cos(rot) - z2 * Math.sin(rot), cy + y2, cz + x * Math.sin(rot) + z2 * Math.cos(rot)]
+    }
+    const c0 = push([cx, cy, cz], 0, [cx, cz], 0, 1)
+    const ring: number[] = []
+    for (let k = 0; k < 10; k++) ring.push(push(P((k / 10) * Math.PI * 2, k % 2 === 0 ? R : R * 0.42), k % 2 === 0 ? 1 : 0.55, [cx, cz], 0, 1))
+    for (let k = 0; k < 10; k++) index.push(c0, ring[k], ring[(k + 1) % 10])
   }
   const g = new THREE.BufferGeometry()
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
@@ -83,7 +94,7 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
   g.setAttribute('flower', new THREE.Float32BufferAttribute(flower, 1))
   g.setIndex(index)
   g.computeBoundingSphere()
-  g.name = `grass.blades${blades}x${segments}${tall !== 1 ? `.tall${tall}` : ''}`
+  g.name = `grass.blades${blades}x${segments}${tall !== 1 ? `.tall${tall}` : ''}${vary !== 1 ? `.vary${vary}` : ''}${leanK !== 1 ? `.lean${leanK}` : ''}`
   return g
 }
 
@@ -246,15 +257,17 @@ vec4 gBW; float gGust;`,
           // Distance thinning toward the edge (fewer blades rasterised far away), random per blade.
           float keep = 1.0 - smoothstep(uGrassThin.x, uGrassThin.y, dist) * ${isOverland() ? '0.45' : '0.6'};
           fade *= 1.0 - smoothstep(keep - 0.15, keep, h);
-          if (flower > 0.5 && gHash(bw.xz) > 0.1) fade = 0.0;
+          // Flowers: a sprinkle; Genshin meadows have DRIFTS of small white / yellow flowers (low-frequency clusters).
+          float fl = ${isGenshin() ? '0.06 + 0.5 * smoothstep(0.35, 0.8, sin(bw.x * 0.09 + sin(bw.z * 0.07) * 2.0) * sin(bw.z * 0.11 - bw.x * 0.03) * 0.5 + 0.5)' : '0.1'};
+          if (flower > 0.5 && gHash(bw.xz) > fl) fade = 0.0;
           vec2 rootL = bladeRoot;
           transformed = vec3(rootL.x, 0.0, rootL.y) + (transformed - vec3(rootL.x, 0.0, rootL.y)) * fade;
           // ON THE SLOPE: each blade's root sits on the terrain under it (the patch's local height gradient,
           // GrassField) — a flat 1 m patch on a hillside buried its uphill blades and floated its downhill ones,
           // which stacked into terraced rows across every slope.
           transformed.y += dot(iSlope, rootL);
-          // Per-blade height variety.
-          transformed.y *= 0.8 + 0.45 * gHash(bw.xz + 3.1);
+          // Per-blade height variety (Genshin: a fairly even, lush field).
+          transformed.y *= ${isGenshin() ? '0.85 + 0.3' : '0.8 + 0.45'} * gHash(bw.xz + 3.1);
           // Blades thicken with distance (base widens, tip stays a point) so a far blade never thins below a
           // pixel: sub-pixel blades shimmer as the camera pans (the "glitter" on phones).
           transformed.xz = vec2(rootL.x, rootL.y) + (transformed.xz - vec2(rootL.x, rootL.y)) * (1.0 + dist * ${isOverland() ? '0.14' : '0.08'});
@@ -288,10 +301,26 @@ vec4 gBW; float gGust;`,
           vec3 tipHue = mix(vec3(1.16, 1.14, 0.84), vec3(1.2, 1.16, 0.78), tn) * (0.98 + 0.04 * bh);
           // Flatten the geometry's root→tip gradient (0.55→1): dark roots between pale blades flicker on phones.
           vColor.rgb *= mix(vec3(0.92, 0.84, 0.6), tipHue, tip) * (0.8 + 0.2 * tip) / (0.55 + 0.45 * tip); // shaded roots → depth in a dense short field`
+            : isGenshin()
+            ? `// GENSHIN (sampled, Statue of the Seven / Starfell): the blades ARE the meadow's colour — the tip a little
+          // lighter and warmer than the ground (so near grass and the far painted hill read as one green), the root a
+          // cooler, darker GREEN (never olive-brown). The geometry's 0.55→1 root gradient is replaced, not stacked.
+          // (Measured: blades averaged 13 % darker and yellower than the bare ground under them → lifted so the
+          // field's mean ≈ the ground (sampled 119,160,81), tips ≈ +25 %.)
+          // ANIME GRASS (Genshin meadow close-up): blade = the GROUND's colour at the root (no dark band — the field
+          // and the soil read as one surface) brightening to a LIME, slightly yellow tip (≈ 130,195,70 on screen),
+          // lit with the terrain's own up normal (whole field shades as one, no per-blade facets); soft gust bands.
+          // The ground colour, hue-shifted toward Genshin's LIME (keeping its brightness): olive / golden ground patches
+          // don't turn the grass olive.
+          vec3 gc = vColor.rgb / (0.55 + 0.45 * tip);
+          float gl = dot(gc, vec3(0.2126, 0.7152, 0.0722));
+          gc = mix(gc, vec3(0.223, 0.546, 0.061) * (gl / 0.442), 0.6);
+          vec3 tipHue = mix(vec3(1.2, 1.3, 0.95), vec3(1.34, 1.32, 0.85), tn) * (0.96 + 0.08 * bh);
+          vColor.rgb = gc * mix(vec3(0.96, 1.0, 1.0), tipHue, tip * tip * (3.0 - 2.0 * tip));`
             : `vec3 tipHue = mix(vec3(0.9, 1.05, 0.92), vec3(1.2, 1.08, 0.68), tn) * (0.9 + 0.2 * bh);
           vColor.rgb *= mix(vec3(1.0), tipHue, tip);`}
           vColor.rgb *= 1.0 + gGust * (${isOverland() ? '0.08' : '0.2'}) * tip;
-          if (flower > 0.5) vColor.rgb = gHash(bwc.xz + 1.3) > 0.5 ? vec3(0.95, 0.92, 0.82) : vec3(0.95, 0.72, 0.12);
+          if (flower > 0.5) { float fh = gHash(bwc.xz + 1.3); vColor.rgb = ${isGenshin() ? 'mix(vec3(1.0, 0.72, 0.12), fh > 0.3 ? vec3(1.0, 0.98, 0.92) : vec3(1.0, 0.86, 0.3), smoothstep(0.3, 0.8, tip))' : 'fh > 0.66 ? vec3(0.95, 0.92, 0.82) : fh > 0.33 ? vec3(0.95, 0.72, 0.12) : vec3(0.3, 0.75, 0.95)'}; }
         }
         #endif`,
       )
@@ -304,10 +333,10 @@ vec4 gBW; float gGust;`,
       .replace(
         '#include <opaque_fragment>',
         /* glsl */ `float back = pow(max(dot(normalize(-vViewPosition), uKeyDirView), 0.0), 4.0);
-        outgoingLight += uKeyColor * diffuseColor.rgb * (back * 0.2 + 0.1) * vTip; // warm soft sunlit tips
+        outgoingLight += uKeyColor * diffuseColor.rgb * (back * ${isGenshin() ? '0.4' : '0.2'} + ${isGenshin() ? '0.16' : '0.1'}) * vTip; // warm soft sunlit (translucent) tips
         #include <opaque_fragment>`,
       )
   }
-  m.customProgramCacheKey = () => `grass-v7-blades${isOverland() ? '-over' : ''}`
+  m.customProgramCacheKey = () => `grass-v7-blades${isOverland() ? '-over' : isGenshin() ? '-gen' : ''}`
   return m
 }

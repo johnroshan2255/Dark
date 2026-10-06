@@ -4,7 +4,7 @@ import { SURFACE } from '../shaders/paint'
 import { stylize } from '../shaders/stylize'
 import { globalUniforms, GUST_GLSL, SWAY_GLSL } from '../shaders/uniforms'
 import { createBrushTexture } from './BrushTexture'
-import { isOverland, isStorybook } from '../artStyle'
+import { isGenshin, isOverland, isStorybook } from '../artStyle'
 import { createFoliageAtlas } from './FoliageAtlas'
 
 /**
@@ -16,6 +16,15 @@ function billboardable(m: THREE.MeshLambertMaterial): THREE.MeshLambertMaterial 
   m.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\nattribute vec3 bbCenter; attribute vec2 bbOff;\nuniform float uTimeS; uniform vec2 uWindS; uniform vec2 uNearFade;\n${GUST_GLSL}\n${SWAY_GLSL}`)
+      // Instance hue palettes (autumn reds, limes…) tint the LEAVES; bark keeps its colour (only the instance's
+      // brightness): a red stand must not have pink trunks. Bark = the atlas's BARK surface texel (SURFACE_UV).
+      .replace(
+        '#include <color_vertex>',
+        `#include <color_vertex>
+        #ifdef USE_INSTANCING_COLOR
+          if (uv.x > 0.9775 && uv.x < 0.985 && uv.y < 0.038) vColor.rgb *= dot(instanceColor.rgb, vec3(0.3, 0.5, 0.2)) / max(instanceColor.rgb, vec3(1e-3));
+        #endif`,
+      )
       .replace(
         '#include <project_vertex>',
         `#include <project_vertex>
@@ -78,13 +87,13 @@ function goldCaps(m: THREE.MeshLambertMaterial): THREE.MeshLambertMaterial {
  * Keep the number of distinct programs small: see skills/webgl.
  */
 export class MaterialLibrary {
-  readonly atlas = createFoliageAtlas(isStorybook())
+  readonly atlas = createFoliageAtlas(isStorybook(), isGenshin())
   /** Hand-painted surface detail for solids and ground (shaders/paint.ts) — 0.35 MB, shared. */
   readonly brush = (globalUniforms.uBrush.value = createBrushTexture())
   readonly terrain = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'terrain', rim: 0.25, terrain: true, toon: 0.45 })
   readonly vegetation = stylize(billboardable(
     new THREE.MeshLambertMaterial({ vertexColors: true, map: this.atlas, alphaTest: 0.42, side: THREE.DoubleSide }),
-  ), { key: 'foliage', rim: isOverland() ? 0.5 : 1.1, noFlip: true, surface: 'atlas', cullFade: true, nearFade: true, sway: true, wet: true, biomeCover: 'foliage' })
+  ), { key: 'foliage', rim: isOverland() ? 0.5 : isGenshin() ? 0.45 : 1.1, noFlip: true, surface: 'atlas', cullFade: true, nearFade: true, sway: true, wet: true, biomeCover: 'foliage' })
   /**
    * LANDMARKS (world/Landmarks): the vegetation look (painted surfaces, snow cover, wet) WITHOUT the ring-edge
    * dither or the near fade — they must stand on the skyline 1–2.5 km away (the foliage dither erased them past
@@ -92,11 +101,19 @@ export class MaterialLibrary {
    */
   readonly landmark = stylize(billboardable(
     new THREE.MeshLambertMaterial({ vertexColors: true, map: this.atlas, alphaTest: 0.42, side: THREE.DoubleSide }),
-  ), { key: 'landmark', rim: isOverland() ? 0.5 : 1.1, noFlip: true, surface: 'atlas', wet: true, biomeCover: 'foliage' })
+  ), { key: 'landmark', rim: isOverland() ? 0.5 : isGenshin() ? 0.45 : 1.1, noFlip: true, surface: 'atlas', wet: true, biomeCover: 'foliage' })
   /** OVERLAND: soft plain-colour boulders (no stone paint strokes); otherwise smooth painted STONE. */
   readonly rock = isOverland()
     ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock' })
     : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.35, surface: SURFACE.stone, cullFade: true, biomeCover: 'rock' })
+  /**
+   * CLIFF ROCK (formations + crags, world-scale merged meshes): the rock look with cliff-sized brush strokes (vertical
+   * streaks on walls) and softer shading than the boulders — Genshin shades scenery softly (hard cel ramps on big
+   * flat facets read as a toy). One extra program, no extra draws (the formation mesh just uses it).
+   */
+  readonly cliffRock = isOverland()
+    ? this.rock
+    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', rim: 0.25, surface: SURFACE.stone, cliffStone: true, toon: 0.35, cullFade: true, wet: true, biomeCover: 'rock' })
   /** Grass layers (GrassField): near (dense, curved blades) and far (sparse, wide) — same program, own bands. */
   readonly grassNearU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
   readonly grassFarU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
@@ -181,7 +198,7 @@ export class MaterialLibrary {
   }
 
   all(): THREE.Material[] {
-    return [this.terrain, this.vegetation, this.landmark, this.rock, this.grass, this.grassFar, this.character, this.lampGlow]
+    return [this.terrain, this.vegetation, this.landmark, this.rock, ...(this.cliffRock === this.rock ? [] : [this.cliffRock]), this.grass, this.grassFar, this.character, this.lampGlow]
   }
 
   dispose(): void {

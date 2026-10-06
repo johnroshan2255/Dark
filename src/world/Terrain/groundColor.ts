@@ -1,5 +1,5 @@
 import { WorldFields } from '../WorldFields'
-import type { BiomeWeights } from '../Biomes'
+import { Biome, BIOME_COUNT, type RegionWeights } from '../Biomes'
 
 /**
  * Ground albedo (linear RGB) shared by chunk terrain, horizon terrain and (through the vertex colour) grass —
@@ -25,13 +25,20 @@ const PALETTES: Palette[] = [
   // 0 — Genshin meadow: vivid fresh green → lime → yellow-green, rare straw patches; green forest floor.
   {
     fresh: hex(0x5c9a36), olive: hex(0x78ac3c), golden: hex(0x9cb448), ochre: hex(0xb4a856), earth: hex(0x7c6444), moss: hex(0x3f6a30),
-    litter: hex(0x4a5c2e), alpine: hex(0x7a8c62), rock: hex(0x7e8190), sand: hex(0xc4b080), silt: hex(0x4a5a50), forest: 0.7,
+    litter: hex(0x4a5c2e), alpine: hex(0x7a8c62), rock: hex(0x6b7486), sand: hex(0xc4b080), silt: hex(0x4a5a50), forest: 0.7,
   },
   // 1 — OVERLAND (over the hill): golden straw meadows (olive → straw → pale gold), warm earth, saturated green
   //     under the forest islands, blue-grey rock. The straw is what the warm haze and low sun are painted onto.
   {
     fresh: hex(0xe8c458), olive: hex(0xeccc5e), golden: hex(0xf0d468), ochre: hex(0xf4dc82), earth: hex(0xb09460), moss: hex(0x5a9a3a),
     litter: hex(0x6a9a3c), alpine: hex(0xc4b868), rock: hex(0x5c667c), sand: hex(0xd8bc7c), silt: hex(0x585e50), forest: 0.85,
+  },
+  // 2 — GENSHIN (reference-matched, sampled from Windrise / Galesong Hill / Springvale): soft yellow-green meadow
+  //     that keeps a real blue component (lit ≈ sRGB 145,185,105 on screen), a little lighter and more yellow in the
+  //     sun patches, cool green-teal under the trees, warm-grey stone, pale sandy paths.
+  {
+    fresh: hex(0x84bc58), olive: hex(0x90c45c), golden: hex(0x9ccc60), ochre: hex(0xa8cc68), earth: hex(0x9a8a62), moss: hex(0x5e9a5c),
+    litter: hex(0x5c8c5c), alpine: hex(0x8eaa86), rock: hex(0xa4a296), sand: hex(0xd8c898), silt: hex(0x5c6c64), forest: 0.6,
   },
 ]
 // Desert (Genshin Sumeru sands): warm golden dunes, orange-ochre in the dips, red-orange rock on the slopes.
@@ -44,7 +51,19 @@ const SNOW = hex(0xf4f7fc)
 const SNOW_SHADE = hex(0xcbd8ea)
 const SNOW_ROCK = hex(0x6d7686)
 const ICE = hex(0xbfe0ee)
-const _bw: BiomeWeights = [0, 0]
+const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
+// AUTUMN VALLEY (Windwail in autumn): golden-olive grass, ochre and russet leaf-litter patches, warm brown rock.
+const AUT_LUSH = hex(0xb4b45a)
+const AUT_GOLD = hex(0xd2b052)
+const AUT_RUSSET = hex(0xb4683c)
+const AUT_EARTH = hex(0x8a6a44)
+const AUT_ROCK = hex(0x9a8676)
+// MYSTIC WOOD: blue-teal grass, violet bloom patches, deep moss under the giants, slate-violet rock.
+const MYS_LUSH = hex(0x5c9c84)
+const MYS_TEAL = hex(0x5ea8a2)
+const MYS_VIOLET = hex(0x8a7ac8)
+const MYS_MOSS = hex(0x2e6a62)
+const MYS_ROCK = hex(0x6a6a8e)
 
 const lerp = (o: RGB, t: readonly number[], k: number) => {
   o[0] += (t[0] - o[0]) * k
@@ -77,7 +96,31 @@ export function groundColor(fields: WorldFields, x: number, z: number, h: number
   const wl = h - WorldFields.WATER
   if (wl < 2.2) lerp(out, wl < 0 ? P.silt : P.sand, Math.min(1, (2.2 - wl) / 1.6))
   // Biomes last, so a region's own palette wins across its interior and blends over ~260 m at the border.
-  const w = fields.biome(x, z, _bw, h)
+  const wn = fields.region(x, z, _wn, h)
+  const w = [wn[Biome.Desert], wn[Biome.Snow]]
+  if (wn[Biome.Autumn] > 0.002) {
+    const a: RGB = [AUT_LUSH[0], AUT_LUSH[1], AUT_LUSH[2]]
+    lerp(a, AUT_GOLD, sstep(0.35, 0.75, m) * 0.85)
+    lerp(a, AUT_RUSSET, sstep(0.6, 0.9, p) * 0.6)
+    const kk = 0.92 + 0.16 * fine
+    a[0] *= kk; a[1] *= kk; a[2] *= kk
+    lerp(a, AUT_EARTH, fields.forestDensity(x, z, h) * 0.55) // leaf litter under the groves
+    if (slope > 0.2) lerp(a, AUT_EARTH, Math.min(1, (slope - 0.2) * 3) * 0.5)
+    if (slope > 0.5) lerp(a, AUT_ROCK, Math.min(1, (slope - 0.5) * 4))
+    if (wl < 2.2) lerp(a, wl < 0 ? P.silt : P.sand, Math.min(1, (2.2 - wl) / 1.6))
+    lerp(out, a, wn[Biome.Autumn])
+  }
+  if (wn[Biome.Mystic] > 0.002) {
+    const a: RGB = [MYS_LUSH[0], MYS_LUSH[1], MYS_LUSH[2]]
+    lerp(a, MYS_TEAL, sstep(0.4, 0.8, m) * 0.6)
+    lerp(a, MYS_VIOLET, sstep(0.62, 0.9, p) * 0.7)
+    const kk = 0.9 + 0.2 * fine
+    a[0] *= kk; a[1] *= kk; a[2] *= kk
+    lerp(a, MYS_MOSS, fields.forestDensity(x, z, h) * 0.7)
+    if (slope > 0.5) lerp(a, MYS_ROCK, Math.min(1, (slope - 0.5) * 4))
+    if (wl < 2.2) lerp(a, wl < 0 ? MYS_MOSS : P.sand, Math.min(1, (2.2 - wl) / 1.6))
+    lerp(out, a, wn[Biome.Mystic])
+  }
   if (w[0] > 0.002) {
     const d: RGB = [DUNE_L[0], DUNE_L[1], DUNE_L[2]]
     lerp(d, DUNE_D, sstep(0.3, 0.75, m) * 0.8)

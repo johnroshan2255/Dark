@@ -34,6 +34,8 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
       uMistColor: { value: new THREE.Color(0, 0, 0) },
       uTexel: { value: new THREE.Vector2(1, 1) },
       uRaysTexel: { value: new THREE.Vector2(1, 1) },
+      /** Shafts / fog banks rendered this frame (PostPipeline.raysActive): else their 5 fetches + 4 exp are skipped. */
+      uRaysOn: { value: 0 },
       uFxaa: { value: 1 },
       uSharpen: { value: 0.25 },
       uExposure: { value: 1 },
@@ -67,7 +69,7 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
       uniform vec2 uFog;
       uniform vec3 uRaysColor, uVolColor, uMistColor, uTint, uLift;
       uniform vec2 uTexel, uRaysTexel;
-      uniform float uFxaa, uSharpen;
+      uniform float uFxaa, uSharpen, uRaysOn;
       uniform float uExposure, uSaturation, uContrast, uVignette, uGrain, uDistortion, uTime, uAspect;
       uniform int uDebugView;
       uniform float uSplit, uFlash, uDamage, uPaintFx;
@@ -132,6 +134,9 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
         if (uDebugView == 2) { gl_FragColor = vec4(vec3(uAO > 0.5 ? texture2D(tAO, uv).r : 1.0), 1.0); return; } // AO buffer only
         // Shafts live in the air: full strength over sky / fogged distance, faded over nearby solid
         // geometry (otherwise a backlit tree gets striped by its own rays).
+        // Per-pixel extras are uniform branches (one program): skipped when off — the LOW tier on phones runs this
+        // pass at full canvas resolution, so every skipped fetch counts there.
+        if (uRaysOn > 0.5) {
         float z = texture2D(tDepth, uv).x;
         float air = z >= 0.9999 ? 1.0 : mix(0.2, 1.0, smoothstep(uFog.x, uFog.y, -perspectiveDepthToViewZ(z, uNear, uFar)));
         // Depth-aware (joint bilateral) upsample of the low-res rays RT: 4 taps weighted by how close each
@@ -146,8 +151,9 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
         vec3 rays = (t0.rga * w.x + t1.rga * w.y + t2.rga * w.z + t3.rga * w.w) / (w.x + w.y + w.z + w.w);
         col = mix(col, uMistColor, rays.b); // drifting fog banks (volumetric march), then the light shafts on top
         col += rays.r * uRaysColor * air + rays.g * uVolColor;
+        }
         // Bloom: light bleeding around the sun, sky and lit edges (painted glow of the references).
-        col += texture2D(tBloom, uv).rgb * uBloom;
+        if (uBloom > 0.0) col += texture2D(tBloom, uv).rgb * uBloom;
         if (uDebugView == 1) { gl_FragColor = vec4(col, 1.0); return; } // raw linear, no grading
 
         // Lightning flash: the whole scene lights up blue-white for a few frames.
@@ -173,12 +179,13 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
         float dv = smoothstep(0.2, 1.0, length(v) * 1.4) * uDamage;
         c = mix(c, vec3(0.55, 0.02, 0.02), dv * 0.8);
         // Painted canvas: static diagonal brush-streak texture in the midtones (not animated film grain).
-        vec2 px = vUv / vec2(1.0, uAspect) * 900.0;
-        float streak = hash(floor(vec2(px.x * 0.35 + px.y * 0.9, px.y * 0.35 - px.x * 0.2)));
-        float canvas = (streak - 0.5) * 0.03 * (1.0 - abs(L - 0.5) * 1.6);
-        c += canvas * uPaintFx; // canvas texture + grain only with the painterly look (off = clean, Genshin-style)
-        // STATIC grain (fixed per pixel): texture without the whole-screen shimmer animated grain caused.
-        c += (hash(vUv * 1024.0) - 0.5) * uGrain * 0.35 * uPaintFx;
+        if (uPaintFx > 0.5) { // canvas texture + grain only with the painterly look (off = clean, Genshin-style)
+          vec2 px = vUv / vec2(1.0, uAspect) * 900.0;
+          float streak = hash(floor(vec2(px.x * 0.35 + px.y * 0.9, px.y * 0.35 - px.x * 0.2)));
+          c += (streak - 0.5) * 0.03 * (1.0 - abs(L - 0.5) * 1.6);
+          // STATIC grain (fixed per pixel): texture without the whole-screen shimmer animated grain caused.
+          c += (hash(vUv * 1024.0) - 0.5) * uGrain * 0.35;
+        }
         gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
       }
     `,

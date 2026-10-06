@@ -35,6 +35,12 @@ export const SURFACE_UV = {
 export type SurfaceName = keyof typeof SURFACE_UV
 /** Default solid texel = PLAIN painted surface. */
 export const SOLID_UV: readonly [number, number] = SURFACE_UV.plain
+/**
+ * GLOWING solid (mystic mushrooms, spores on caps): the PLAIN surface texel, but higher in the opaque block
+ * (v ∈ [0.024, 0.038)) — the vegetation shader reads that as "emissive" (stylize `vGlow`): no new attribute,
+ * material or program.
+ */
+export const GLOW_UV: readonly [number, number] = [SURFACE_UV.plain[0], 0.031]
 
 const SIZE = 1024
 const CELL = SIZE / 2
@@ -152,33 +158,87 @@ function drawLeaves(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rn
 }
 
 /**
- * Genshin-style LEAF CLUSTER (cell 2): ~160 individual pointed leaves fanned around a centre, back leaves
- * darker, front/top leaves lighter (light from upper-left), leaf tips forming a serrated leafy outline.
- * Billboarded around canopies (treeFactory `tuft`).
+ * Genshin-style LEAF MASS (cell 2): a soft, rounded clump of ~300 small overlapping leaves — NOT a radial star
+ * (that rosette read as a flower / ball on every tuft). Leaves sit at random points inside a lumpy blob (a few
+ * overlapping lobes), hang at random angles biased downward, and the outline is a fine scallop of leaf tips.
+ * Shading is painted for volume: back/lower leaves darker, front/upper leaves lighter (light from above), so
+ * overlapping cards blend into one leafy mass. Billboarded over canopies (treeFactory / genshinTrees `tuft`).
  */
-function drawTuft(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng): void {
-  const cx = ox + CELL / 2, cy = oy + CELL / 2, R = CELL * 0.42
+/**
+ * GENSHIN LEAF CLUSTER (cell 2, 'genshin' style) — what Genshin's foliage cards are (studied in close-ups of the
+ * Windrise oak and a Mondstadt bush): a cut-out of ~45 distinct LOBED leaves (5–7 pointed lobes, oak / maple-like)
+ * filling a ragged fan, painted in FLAT tones only — back leaves darker, front leaves lighter, no gradient, no
+ * speckle; crisp edges with gaps between leaves (the lacy look from under the canopy). All the light and shade come
+ * from the crown's shared normals + vertex colours, not the texture.
+ */
+function drawTuftGenshin(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng): void {
+  const cx = ox + CELL / 2, cy = oy + CELL / 2, R = CELL * 0.46
+  const leafPath = (x: number, y: number, size: number, rot: number, lobes: number) => {
+    g.beginPath()
+    const N = 72
+    for (let i = 0; i <= N; i++) {
+      const t = (i / N) * Math.PI * 2
+      // Pointed lobes: r = size × (0.55 + 0.45 |cos(lobes·t/2)|^2.5), the leaf elongated along its axis.
+      const lobe = 0.55 + 0.45 * Math.pow(Math.abs(Math.cos((lobes * t) / 2)), 2.5)
+      const r = size * lobe * (1 + 0.25 * Math.cos(t))
+      const px = Math.cos(t) * r, py = Math.sin(t) * r * 0.8
+      const xr = x + px * Math.cos(rot) - py * Math.sin(rot), yr = y + px * Math.sin(rot) + py * Math.cos(rot)
+      if (i === 0) g.moveTo(xr, yr)
+      else g.lineTo(xr, yr)
+    }
+    g.fill()
+  }
+  // Two flat layers (back darker, front lighter), leaves inside a ragged fan (denser at the centre).
+  const layers = [[30, 0.74, 1.0], [24, 0.94, 0.82]] as const
+  for (const [count, tone, spread] of layers) {
+    for (let i = 0; i < count; i++) {
+      const a = rng.next() * Math.PI * 2, d = Math.pow(rng.next(), 0.7) * spread
+      const x = cx + Math.cos(a) * d * R * 0.78, y = cy + Math.sin(a) * d * R * 0.62
+      g.fillStyle = grey(tone + rng.range(-0.03, 0.03))
+      leafPath(x, y, R * rng.range(0.13, 0.19), a + rng.range(-0.8, 0.8), rng.next() < 0.5 ? 5 : 7)
+    }
+  }
+}
+
+function drawTuft(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng, round = false): void {
+  const cx = ox + CELL / 2, cy = oy + CELL * 0.5, R = CELL * 0.4
+  // Lumpy blob: union of lobes (fraction of R).
+  const lobes: [number, number, number][] = [[0, 0, 0.78]]
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 + rng.range(-0.3, 0.3)
+    lobes.push([Math.cos(a) * 0.42, Math.sin(a) * 0.36, rng.range(0.42, 0.55)])
+  }
+  const inside = (x: number, y: number) => lobes.some(([lx, ly, lr]) => (x - lx) ** 2 + (y - ly) ** 2 < lr * lr)
   const leaf = (x: number, y: number, a: number, len: number, wid: number, v: number) => {
     g.fillStyle = grey(v)
     g.beginPath()
     const ca = Math.cos(a), sa = Math.sin(a)
-    const tx = x + ca * len, ty = y + sa * len
+    const bx = x - ca * len * 0.5, by = y - sa * len * 0.5
+    const tx = x + ca * len * 0.5, ty = y + sa * len * 0.5
     const nx = -sa * wid, ny = ca * wid
-    g.moveTo(x, y)
-    g.quadraticCurveTo(x + ca * len * 0.5 + nx, y + sa * len * 0.5 + ny, tx, ty)
-    g.quadraticCurveTo(x + ca * len * 0.5 - nx, y + sa * len * 0.5 - ny, x, y)
+    g.moveTo(bx, by)
+    g.quadraticCurveTo(x + nx, y + ny, tx, ty)
+    g.quadraticCurveTo(x - nx, y - ny, bx, by)
     g.fill()
   }
-  for (let layer = 0; layer < 3; layer++) {
-    const count = [70, 55, 40][layer]
-    for (let i = 0; i < count; i++) {
-      const a = rng.next() * Math.PI * 2
-      const r = Math.sqrt(rng.next()) * R * [0.95, 0.8, 0.6][layer]
-      const x = cx + Math.cos(a) * r * 0.6, y = cy + Math.sin(a) * r * 0.55
-      const dir = a + rng.range(-0.5, 0.5)
-      const len = rng.range(0.28, 0.45) * R * (1 - layer * 0.12)
-      const lit = 0.5 - (Math.cos(a) + Math.sin(a)) * 0.12 + layer * 0.16
-      leaf(x, y, dir, len, len * rng.range(0.28, 0.4), Math.min(1, Math.max(0.3, lit + rng.range(-0.08, 0.08))))
+  // Three depth layers, back (dark, larger area) → front (lighter, toward the upper-centre).
+  // Fewer, larger leaves in a narrow value range (0.72–1): the crown's light and shade come from the vertex colours
+  // (painted gradient), the texture only adds a soft leafy grain + the scalloped edge. High-contrast tiny leaves
+  // read as pixel noise at game distances.
+  const layers = [[90, 1.0, 0.74], [70, 0.86, 0.84], [45, 0.66, 0.93]] as const
+  for (const [count, extent, base] of layers) {
+    let n = 0, guard = 0
+    while (n < count && guard++ < count * 20) {
+      const x = rng.range(-1, 1) * extent, y = rng.range(-1, 1) * extent
+      if (!inside(x / extent * 0.98, y / extent * 0.98)) continue
+      n++
+      const px = cx + x * R, py = cy + y * R
+      // Hanging leaves: pointing down-and-out, randomised (never a radial fan).
+      const a = Math.PI / 2 + Math.atan2(0, x) * 0 + (x * 0.6) + rng.range(-1.1, 1.1)
+      // Genshin: broad ROUNDED leaves kept inside the blob (a soft scalloped outline, no spikes poking out).
+      const len = R * (round ? rng.range(0.22, 0.3) * (1 - 0.25 * Math.hypot(x, y) / extent) : rng.range(0.2, 0.3))
+      const lit = base + (-y) * 0.08 + rng.range(-0.04, 0.04) // a little lighter toward the top
+      leaf(px, py, a, len, len * (round ? rng.range(0.55, 0.7) : rng.range(0.34, 0.46)), Math.min(1, Math.max(0.6, lit)))
     }
   }
 }
@@ -209,24 +269,25 @@ function drawFern(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng)
 }
 
 /** Draws the atlas ('storybook' art style swaps the conifer spray for brush-stroke fans). */
-function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean): void {
+function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean, genshin = false): void {
   const g = canvas.getContext('2d')!
   g.clearRect(0, 0, SIZE, SIZE)
   const rng = new Rng(4242)
   if (storybook) drawBrushSpray(g, 0, 0, rng)
   else drawSpray(g, 0, 0, rng)
   drawLeaves(g, CELL, 0, rng)
-  drawTuft(g, 0, CELL, rng)
+  if (genshin) drawTuftGenshin(g, 0, CELL, rng)
+  else drawTuft(g, 0, CELL, rng)
   drawFern(g, CELL, CELL, rng)
   // Opaque white block for solids (bottom-right corner of the fern cell, outside the frond).
   g.fillStyle = '#ffffff'
   g.fillRect(SIZE - 40, SIZE - 40, 40, 40)
 }
 
-export function createFoliageAtlas(storybook = false): THREE.CanvasTexture {
+export function createFoliageAtlas(storybook = false, genshin = false): THREE.CanvasTexture {
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = SIZE
-  drawAtlas(canvas, storybook)
+  drawAtlas(canvas, storybook, genshin)
   const tex = new THREE.CanvasTexture(canvas)
   tex.colorSpace = THREE.SRGBColorSpace
   tex.anisotropy = 4

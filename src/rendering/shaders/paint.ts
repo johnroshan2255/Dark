@@ -30,7 +30,12 @@ vSurf = ${surf};`
 /** Decodes the atlas opaque block: u ∈ [0.9625, 1) in 0.0075 steps, v < 0.038. */
 export const ATLAS_SURF = '(uv.x > 0.9625 && uv.y < 0.038) ? floor((uv.x - 0.9625) / 0.0075) : -10.0'
 
-export const PAINT_FRAG_PARS = /* glsl */ `
+/**
+ * @param stoneUv GLSL for the STONE brush coordinates (from `pu`, the planar projection in metres of object space).
+ *   Unit boulders use `pu * 0.45`; world-scale cliff rock (formations + crags, 10–30 m faces) uses big strokes,
+ *   stretched vertically on walls into the rain streaks of a painted cliff (STONE_CLIFF_UV).
+ */
+export const paintFragPars = (stoneUv = 'pu * 0.45') => /* glsl */ `
 uniform sampler2D uBrush;
 varying vec3 vPObj;
 varying vec3 vNObj;
@@ -45,7 +50,7 @@ vec3 paintSurface(vec3 c, float id) {
   const vec3 MOSS = vec3(0.16, 0.3, 0.07);
   float base = 1.0 - smoothstep(0.0, 1.1, p.y); // near the object's foot
   if (id < 0.5) {                                   // STONE
-    vec4 b = texture2D(uBrush, pu * 0.45);
+    vec4 b = texture2D(uBrush, ${stoneUv});
     c *= 0.74 + 0.36 * b.g + 0.3 * (b.r - 0.5);
     c = mix(c, c * 1.35 + 0.03, smoothstep(0.25, 0.9, n.y) * 0.55);
     float m = smoothstep(0.6, 0.78, n.y + (b.a - 0.5) * 0.8);
@@ -84,3 +89,6 @@ vec3 paintSurface(vec3 c, float id) {
   }
   return c;
 }`
+export const PAINT_FRAG_PARS = paintFragPars()
+/** Cliff-scale STONE strokes: ~12 m blotches on tops, vertical streaks (~14 m × 45 m) on walls. */
+export const STONE_CLIFF_UV = '(an.y > max(an.x, an.z) ? pu * 0.08 : pu * vec2(0.07, 0.022))'

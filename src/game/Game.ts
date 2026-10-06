@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { ART, isOverland, type ArtStyle } from '../rendering/artStyle'
+import { ART, isGenshin, isOverland, type ArtStyle } from '../rendering/artStyle'
 import { downscaleTexture, loadModels, loadVehicle, type GameModels } from '../assets/loadModels'
 import { tuningFor, vehicleDef, type VehicleTuning } from '../gameplay/vehicle/catalogue'
 import { CHUNK_SIZE } from '../world/constants'
@@ -61,7 +61,8 @@ import { applyBiomeAir } from '../rendering/weather/BiomeAir'
 import { GameLoop } from './GameLoop'
 import { createStore, type GameStateShape, type Store } from './GameState'
 import { loadSettings, saveSettings, type Settings } from './Settings'
-import type { BiomeWeights } from '../world/Biomes'
+import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../world/Biomes'
+import { BIOMES } from '../world/biomes/BiomeDefs'
 
 export interface GameOptions {
   seed: number
@@ -149,6 +150,8 @@ export class Game {
 
   private readonly bw: BiomeWeights = [0, 0]
   private readonly bwRegion: BiomeWeights = [0, 0]
+  /** All region weights under the player (air, ambient particles). */
+  private readonly rw: RegionWeights = new Float32Array(BIOME_COUNT)
   private readonly ahead = new THREE.Vector3()
   private readonly mistColor = new THREE.Color()
   private readonly fxLight = new THREE.Color()
@@ -253,7 +256,7 @@ export class Game {
     this.bike = new Bike(this.materials.character, this.player, this.character, this.world.fields, physics, this.input)
     this.bike.parkNear(spawn, this.player.yaw, 2.4)
     this.car = new Car(this.materials.character, models.truck, physics, this.world.fields, this.player, this.character, this.input, this.tuning(models.truck.id))
-    this.car.sim.arcade = this.settings.handling !== 'sim' // Asphalt-style handling by default (VehicleSim)
+    this.car.sim.arcade = this.settings.handling === 'arcade' // realistic simulation by default (VehicleSim); arcade = Asphalt-style option
     this.car.autoAccel = this.settings.autoAccelerate
     this.destruction = new Destruction(physics, this.materials.character)
     this.destruction.vehicle = {
@@ -439,7 +442,7 @@ export class Game {
       this.store.set({ adaptive: this.adaptive.enabled })
     }
     this.cameraCtl.mode = this.settings.camera as CameraMode
-    this.car.sim.arcade = this.settings.handling !== 'sim'
+    this.car.sim.arcade = this.settings.handling === 'arcade'
     this.car.autoAccel = this.settings.autoAccelerate
     this.audio.setEnabled(this.settings.sound)
     this.audio.setMusic(this.settings.music)
@@ -502,7 +505,8 @@ export class Game {
     const st = this.settings
     this.post.setAA(st.aa === 'auto' ? q.aa : st.aa)
     // Overland: no sharpening — the unsharp mask makes thin grass blades sparkle on phones.
-    this.post.setSharpness(st.sharpness === 'auto' ? (isOverland() ? 0 : q.sharpen) : st.sharpness)
+    // Overland: no sharpening (thin grass sparkles on phones). Genshin: none either — its image is soft and painterly.
+    this.post.setSharpness(st.sharpness === 'auto' ? (isOverland() || isGenshin() ? 0 : q.sharpen) : st.sharpness)
     this.post.grainScale = st.filmGrain ? 1 : 0
     // Painterly: tier default, or the player's explicit choice (LOW defaults off — ~25 fetches/px).
     const stride = q.paint.stride || (st.painterlyForce ? 1 : 0)
@@ -799,7 +803,8 @@ export class Game {
           this.post.damage = Math.max(this.health.hurt, this.health.dead ? 1 : 0, (1 - this.health.hp / this.health.max) * 0.35)
           // Biome air (cold snowfields, hot bleached desert) re-tints the phase params before the lights read them.
           const bw = this.world.fields.biome(p.renderPosition.x, p.renderPosition.z, this.bw, p.renderPosition.y)
-          applyBiomeAir(this.tod.current, bw[0], bw[1])
+          const rw = this.world.fields.region(p.renderPosition.x, p.renderPosition.z, this.rw, p.renderPosition.y)
+          applyBiomeAir(this.tod.current, bw[0], bw[1], rw[Biome.Autumn], rw[Biome.Mystic])
           this.lighting.update(dt, p.renderPosition, c.flashOrigin, c.flashTarget)
           this.ash.update(time, cam.position, THREE.MathUtils.smoothstep(this.tod.nightmare, 0.2, 0.9), this.renderer?.domElement.height ?? 800)
           const darkness = (this.darkness = 1 - THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.05, 0.45) * (1 - this.tod.nightmare))
@@ -841,7 +846,13 @@ export class Game {
           const region = this.world.fields.biome(p.renderPosition.x, p.renderPosition.z, this.bwRegion)
           const snowFall = bw[1] * (1 - region[0]) * Math.max(this.weather.rain, 0.35 + 0.5 * this.weather.cloud)
           const precip = this.weather.rain * (1 - bw[0]) * (1 - bw[1]) + snowFall
-          this.rain.update(time, cam.position, precip, this.rainBudget, globalUniforms.uWind.value, this.fxLight.copy(tp.hemiSky).multiplyScalar(0.9), this.renderer?.domElement.height ?? 800, precip > 0 ? snowFall / precip : 0)
+          // Region ambience in the same pool: drifting leaves in the autumn valleys, glowing spores in the mystic woods
+          // (BiomeDefs.leaves / spores × the region weight under the player; spores glow brighter at night).
+          const leafAmt = rw[Biome.Autumn] * BIOMES[Biome.Autumn].leaves * (1 - 0.5 * this.weather.rain)
+          const sporeAmt = rw[Biome.Mystic] * BIOMES[Biome.Mystic].spores * (0.6 + 0.4 * this.darkness)
+          const allP = precip + leafAmt + sporeAmt
+          this.rain.update(time, cam.position, Math.min(1, allP), this.rainBudget, globalUniforms.uWind.value, this.fxLight.copy(tp.hemiSky).multiplyScalar(0.9), this.renderer?.domElement.height ?? 800,
+            allP > 0 ? snowFall / allP : 0, allP > 0 ? leafAmt / allP : 0, allP > 0 ? sporeAmt / allP : 0)
           this.drift.update(time, cam.position, p.renderPosition.y, 0, bw[1] * (1 - region[0]), this.weather.wind, this.quality.fx.drift, globalUniforms.uWind.value, this.fxLight, this.renderer?.domElement.height ?? 800)
           // Heat shimmer over distant desert ground on a sunny day (grading pass).
           this.post.material.uniforms.uHeat.value = (this.quality.fx.heat ? 1 : 0) * region[0] * this.lighting.keyStrength * Math.max(0, this.tod.sunDir.y) * (1 - this.weather.cloud) * (1 - darkness)
@@ -952,7 +963,7 @@ export class Game {
         this.car.dispose()
         this.car = new Car(this.materials.character, model, this.physics, this.world.fields, this.player, this.character, this.input, this.tuning(id))
         this.car.park(pos.x, pos.z, heading)
-        this.car.sim.arcade = this.settings.handling !== 'sim'
+        this.car.sim.arcade = this.settings.handling === 'arcade'
         this.car.autoAccel = this.settings.autoAccelerate
         this.envRoot.add(this.car.root)
         this.car.castShadow = this.quality.objectShadows

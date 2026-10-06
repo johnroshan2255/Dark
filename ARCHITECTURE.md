@@ -85,38 +85,21 @@ World (seed)
   VALLEY (slope-limited banks, never walls) → river → PLACES flattened to a base measured on that ground →
   SECONDARY ROADS graded within ±3 m of it, meeting the ground on embankments → main road bed. Each stage is
   measured on the stages before it; `npm test` checks the shoulder step, place flatness and road banks.
-- **Biomes** (`src/world/Biomes.ts`): 900 m cells (forest / desert / snowfield) with 260 m blended, noise-warped
-  borders + an altitude snow line; the spawn's 3×3 cells are forest and one desert + one snow cell always sit on
-  the road ~2 km up/down it. Weights drive relief, ground palette, trees/rocks/grass, the terrain shader and the fog tint.
-  Each biome is its own PLACE, not a recolour: **desert** = saguaros + Joshua trees (`Forest/desertFlora.ts`, own
-  species → same draw count as a forest chunk), agaves + dry shrubs, flat-topped **mesas** with sandstone strata,
-  hot bleached air, no rain; **snowfield** = snow lying on tree shelves / rock tops / roofs, packed-snow roads,
-  falling snow, **frozen lakes and rivers**, cold blue air with bright snow bounce light. Rendering reads the region
-  weights from the **biome map** (`rendering/biome/BiomeMap.ts`: 64² RG8 texture, 2 km around the player, 1 fetch
-  per vertex/fragment); `rendering/weather/BiomeAir.ts` re-tints the time-of-day params by the biome underfoot.
-  GENSHIN LANDSCAPE: terraced PLATEAUS (up to 3 tiers of 12–16 m with layered-stone, mossy cliffs) in the green
-  lands, trees in GROVES with open meadows between them (forestDensity keeps only the top third of its noise), and
-  voxel ROCK FORMATIONS (`world/Formations/`: arches, drive-through caves, karst pillar clusters, overhanging
-  outcrops — signed-distance shapes meshed by surface nets in the chunk worker, 1.5 m voxels, ≤ ~8 k tris each,
-  exact trimesh colliders, ≤ 2 per 340 m region, clear of roads / water / places; trees, rocks and grass keep out).
-  LANDMARKS (`world/Landmarks/`): one per 700 m region on its highest dry, clear ground — giant oak, windmill,
-  ruined colonnade, statue, watchtower (green lands), obelisk / sand gate (desert), frosted giant fir / ice spire
-  (snow); Genshin-scaled (oak ~64 m). The HOME landmark is a giant oak in line of sight of the spawn and the game
-  opens facing it. `LandmarkSystem` draws them independently of the chunk ring out to 0.45 × the horizon size in
-  2 merged meshes (+1 per windmill rotor) on `materials.landmark` (the foliage look without the ring-edge dither),
-  cylinder colliders within 160 m; compass + arrival banner list them. Low: +1 draw, +5 k tris, ≤ 0.8 ms GPU @1080p.
-  Gorges (`WorldFields.gorge`, rock walls along ~¼ of the road, never near the spawn), road formations every
-  240 m segment (arch / tunnel / pillars), no power lines in the Genshin style, the road drawn as a worn dirt path.
-  Ground you can FEEL: Sumeru-like transverse DUNES (`WorldFields.dunes`: long windward slope, sharp crest, ~34° slip
-  face) and soft snow DRIFTS + plough BANKS along the snow road (`WorldFields.drifts`, `height`); in the terrain
-  shader sand WIND RIPPLES and snow SASTRUGI as normal detail, sun GLINTS, and FOOTPRINTS / TYRE TRACKS pressed in
-  (`rendering/trails/TrailMap.ts`: a 48 m top-down R8 target around the player stamped by feet and wheels, ≤ 1 draw);
-  blowing sand / drifting snow powder (`particles/WindDrift.ts`, 1 draw) and heat shimmer on distant desert
-  ground (grading pass `uHeat`). Snow falls only where the REGION is snow (desert peaks keep caps, no desert snow).
-  WATER by biome: none in the desert (water shader discards; basins and the river bed are dry clay pans), FROZEN
-  in the snow — walkable: the physics heightfield, `WorldManager.groundAt` and `WorldFields.surface` put the
-  ground on the ice (`types.solidHeight`, ICE_SNOW). Places (farms, cabins, camps, ruins) are only built in the
-  green lands (`PoiField.flatEnough` rejects desert / snow > 0.25; tested).
+- **Regions** (`src/world/Biomes.ts` + `src/world/biomes/BiomeDefs.ts`, generator **v2** = `WORLD_GEN_VERSION`):
+  900 m cells whose type comes from a seeded CLIMATE (temperature / moisture / magic noise over ~4 cells → table:
+  cold = SNOW, hot+dry = DESERT, drier = AUTUMN valley, moist+magic = MYSTIC wood, else FOREST; ≈ 50/15/15/15/5 %),
+  so neighbours make sense (forest ↔ autumn ↔ desert, forest → snow, mystic pockets). Spawn 3×3 is forest; the main
+  road runs forest → autumn → desert one way and forest → mystic → snow the other (cells (0, ±2), (0, ±3)).
+  `weightsN` = one weight per region (sum 1, 260 m noise-warped blend + altitude snow line); `weights()` keeps the
+  old [desert, snow] view. `BiomeDefs` holds each region's identity — tree species, undergrowth, grass, leaf
+  palettes, ambient particles, density — CONTINUOUS values are blended by the weights, DISCRETE choices (species,
+  plant kind, landmark) pick a region by seeded hash ∝ weights → gradual mixed borders. Autumn: maples (gold → red),
+  birches/pines turning gold, leaf piles, golden grass, falling leaves, warm air, open rolling terrain, Great Maple
+  landmarks. Mystic: violet ancient giants, glowing mushroom trees (`GLOW_UV` emissive in the vegetation shader),
+  glow-shrooms + blue ferns, teal grass, violet mist + spores, dramatic tiers, Elder Bloom landmarks. Region species
+  REPLACE the forest's (draws flat); new species/GLBs via `registerTreeSpecies`. Measured LOW (phone projection,
+  M4 × 25 ≈ Adreno 610): forest 10, autumn 9, mystic 10, borders 9 ms; CPU ×6 driving through them: 2.5–3 ms mean.
+  The previous paragraph's numbers for desert / snow still hold.
 - **Streaming radii** (in chunks, Chebyshev distance from player chunk). The **render ring and LOD rings are per
   quality tier** (LOW 2 / MEDIUM 3 / HIGH 4 — `QualityTiers.ts`); the values below are HIGH:
 

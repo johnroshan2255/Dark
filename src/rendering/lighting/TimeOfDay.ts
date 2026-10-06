@@ -202,12 +202,37 @@ const OVER_NIGHT = key({
   haze: 0.2, fogMax: 0.8, landHaze: c(0x8c98b8), mistDensity: 0.012, mistBase: 1, mistFalloff: 0.075,
 })
 
+// GENSHIN art style (reference-matched: Windrise, Galesong Hill, Springvale, Windwail screenshots, sampled):
+// a cobalt zenith over a pale cyan horizon, a warm-white sun, and a BRIGHT cool sky fill so shadows stay light
+// and blue-teal (Genshin never crushes shade to black); a NEUTRAL grade (the colours are in the albedos — the
+// 'bright' style's saturation 1.2 drove the meadow's blue channel to zero = neon olive); soft cel terminator;
+// strong blue aerial perspective on distant land (far hills go sky-cyan). Night/dusk keep the game's mood.
+const GEN_BASE = { painted: 0, grain: 0, vignette: 0.04, lift: c(0x000000) }
+const GEN_DAWN = key({
+  ...DAWN, ...GEN_BASE, sunColor: c(0xffc89a), sunIntensity: 2.2, hemiSky: c(0xa8b8e0), hemiGround: c(0x6a6a58), hemiIntensity: 1.6,
+  fogColor: c(0xe8c8c0), skyZenith: c(0x5a84c8), saturation: 1.0, contrast: 1.0, split: 0.15, toon: 0.8,
+  clouds: 0.45, cloudWhite: 0.7, fogMax: 0.62, landHaze: c(0xc8c8e0), haze: 0.3, mistDensity: 0.01,
+})
+const GEN_DAY = key({
+  ...DAY, ...GEN_BASE, sunColor: c(0xfff2dc), sunIntensity: 2.9, hemiSky: c(0xa8d4ff), hemiGround: c(0x8aa878), hemiIntensity: 2.25,
+  fogColor: c(0x96d2eb), skyZenith: c(0x0675bf), exposure: 1.1, saturation: 0.94, contrast: 1.0, split: 0.1, toon: 0.8,
+  clouds: 0.3, cloudWhite: 1, haze: 0.24, fogMax: 0.62, landHaze: c(0xa4d0f2), mistDensity: 0.0006,
+})
+const GEN_EVENING = key({
+  ...EVENING, ...GEN_BASE, sunColor: c(0xffc890), sunIntensity: 3.0, hemiSky: c(0x9cb4e8), hemiGround: c(0x6a6458), hemiIntensity: 1.7,
+  fogColor: c(0xe8c4a8), skyZenith: c(0x3a6cc4), saturation: 1.0, contrast: 1.02, split: 0.3, toon: 0.8, fogMax: 0.7,
+  landHaze: c(0xc4c4dc), haze: 0.4,
+})
+const GEN_DUSK = key({ ...DUSK, ...GEN_BASE, saturation: 0.95, vignette: 0.2 })
+const GEN_NIGHT = key({ ...NIGHT, ...GEN_BASE, vignette: 0.2 })
+
 /** The base schedule with each phase's params swapped for a style's. */
 function styled(map: Map<LightingParams, LightingParams>): [number, LightingParams, TimeLabel][] {
   return SCHEDULE.map(([h, p, l]) => [h, map.get(p) ?? p, l])
 }
 const STORY_SCHEDULE = styled(new Map([[DAWN, STORY_DAWN], [DAY, STORY_DAY], [EVENING, STORY_EVENING], [DUSK, STORY_DUSK], [NIGHT, STORY_NIGHT]]))
 const OVER_SCHEDULE = styled(new Map([[DAWN, OVER_DAWN], [DAY, OVER_DAY], [EVENING, OVER_EVENING], [DUSK, OVER_DUSK], [NIGHT, OVER_NIGHT]]))
+const GEN_SCHEDULE = styled(new Map([[DAWN, GEN_DAWN], [DAY, GEN_DAY], [EVENING, GEN_EVENING], [DUSK, GEN_DUSK], [NIGHT, GEN_NIGHT]]))
 
 /** Named jump targets for the T key / buttons. */
 export const TIME_PRESETS: { label: TimeLabel; hours: number }[] = [
@@ -327,7 +352,7 @@ export class TimeOfDay {
 
   private evaluate(): void {
     const h = this.hours
-    const sched = this.style === 'storybook' ? STORY_SCHEDULE : this.style === 'overland' ? OVER_SCHEDULE : SCHEDULE
+    const sched = this.style === 'storybook' ? STORY_SCHEDULE : this.style === 'overland' ? OVER_SCHEDULE : this.style === 'genshin' ? GEN_SCHEDULE : SCHEDULE
     let i = sched.length - 1
     for (let j = 0; j < sched.length; j++) if (sched[j][0] <= h) i = j
     const [h0, p0, l0] = sched[i]

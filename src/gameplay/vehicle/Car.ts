@@ -290,9 +290,16 @@ export class Car {
       p.inVehicle = false
       p.teleport(new THREE.Vector3(x, this.fields.surface(x, z) + 0.2, z))
       this.character.root.visible = true
+      // BAIL (GTA): out of a moving car you keep its momentum — thrown from the door, tumbling along the ground —
+      // and the empty car rolls on until friction stops it (fixedUpdate: no driver ≠ parked while it moves).
+      const v = this.sim.body.linvel()
+      if (Math.hypot(v.x, v.z) > BAIL_SPEED) {
+        const out = 1.6 // pushed away from the door (left side)
+        p.bail(v.x * 0.85 - c * out, v.y, v.z * 0.85 + s * out)
+      }
       return true
     }
-    if (!this.near || p.dead || p.ride.riding) return false
+    if (!this.near || p.dead || p.ride.riding || p.tumbling || p.knock > 0.05) return false // not while thrown / getting up
     this.driving = true
     p.inVehicle = true
     p.collider.setEnabled(false)
@@ -313,7 +320,8 @@ export class Car {
     c.handbrake = drive && i.down('Space')
     c.brake = drive && (i.down('KeyS') || i.touchMove.y < -0.35)
     c.boost = drive && (i.down('ShiftLeft') || i.down('ShiftRight'))
-    c.parked = !drive
+    // Nobody driving: the brakes lock only once it has (nearly) stopped — a car bailed out of keeps rolling.
+    c.parked = !drive && Math.abs(this.sim.speed) < 1.5
     // Only simulate where the ground has colliders (the physics ring follows the player AND runs ahead of a
     // moving vehicle, WorldManager); frozen elsewhere — while driving too, so a fast truck waits a few frames at
     // a chunk that hasn't streamed in instead of falling through the road.
@@ -345,7 +353,7 @@ export class Car {
     this.pos.lerpVectors(this.prevP, this.curP, alpha)
     this.root.position.copy(this.pos)
     this.root.quaternion.slerpQuaternions(this.prevQ, this.curQ, alpha)
-    this.near = !this.driving && Math.hypot(p.curr.x - this.pos.x, p.curr.z - this.pos.z) < 4
+    this.near = !this.driving && !p.tumbling && p.knock < 0.05 && Math.hypot(p.curr.x - this.pos.x, p.curr.z - this.pos.z) < 4
     const w = this.sim.wheels
     this.wheelPos.forEach(([x, y, z], k) => {
       const rightSide = k === 1 || k === 3
@@ -390,6 +398,9 @@ export class Car {
     this.bodyMat.dispose()
   }
 }
+
+/** Getting out faster than this (m/s ≈ 14 km/h) is a bail: the player is thrown out and tumbles. */
+const BAIL_SPEED = 4
 
 const _e = new THREE.Euler()
 const _m = new THREE.Matrix4()
