@@ -13,6 +13,33 @@ silhouette against fog.
 
 ## 2. Architecture
 
+**Trees: per-tree LOD + octahedral impostors (current).** Once the impostor atlas is baked (`Game.syncImpostors`),
+trees no longer switch per chunk:
+
+| Stage | Distance (camera → tree) | What draws it |
+|---|---|---|
+| Near mesh | < `impostors.start` (LOW 50 · MED 70 · HIGH 100 · ULTRA 130 m) | per-species LOD0 (LOW: level 1 tagged `near1`) |
+| Crossfade | `start` … `start + 12 m` | both, complementary screen-door dither on the SAME per-tree distance |
+| Impostor | > `start` … `impostors.far` (260 · 400 · 700 · 900 m); the last 40 % THINS (each tree vanishes whole at its own hashed distance — a pixel dither read as a speckled cloud on phones) | one camera-facing card per tree, 1 draw per chunk |
+| Far forest | outside the built render ring … `far` | `world/Forest/FarForest.ts`: impostor-only blocks of 4×4 chunks |
+
+- **Bake** (`rendering/impostors/Impostors.ts`, ~30–80 ms once): each species' LOD0 from 8×8 directions on the
+  hemi-octahedral map, unlit albedo + alpha (1 leaf / 0.5 bark / 0 empty) into one atlas (1024² LOW, 2048² others),
+  dilated, mipmapped. Draw: view direction → tree-local → 3 nearest views blended (1 on LOW); Lambert + `stylize`
+  on a crown-volume normal so light, fog, snow and night match the meshes. Debug: `g.impostorAtlas.target`.
+- **Bands**: every tree geometry carries `aLodBand` (1 near, 2 low-poly, 3 legacy far); `uTreeLod` holds the band
+  distances. A tree outside its band is dropped in the VERTEX shader (off-clip, before sway / sky fog).
+  `WorldChunk.setTreeBands` enables a mesh set only while one of the chunk's trees can be in it.
+- **Why no low-poly middle stage** (`trees.lod1` = 999): the LOD1 conifer is a thin spire unlike the real tree,
+  so walking away read broad → thin → broad. Near mesh → impostor directly.
+- **Far forest**: tree records from `WorldGenerator.generateTrees` (same heights + scatter as the chunk → the
+  same trees in the same places) in its own worker; seated on the DRAWN horizon surface (`HorizonTerrain.heightAt`
+  — the coarse horizon sits metres under the true ground, trees at true height floated).
+- Cost (measured RTX 4050, 1080p, median of 40 samples): GPU within noise on every tier; LOW +8 draws (≤ 65),
+  fewer submitted triangles; HIGH +15–23 draws.
+
+The terrain and props still use the per-chunk LOD below.
+
 LOD is decided **per chunk**, not per object (`src/optimization/lod/LodSelector.ts`):
 
 | Chunk LOD | Chebyshev ring | Terrain grid | Vegetation | Props | Shadows |

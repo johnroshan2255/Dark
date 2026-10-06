@@ -91,6 +91,24 @@ function scatter(
  * `r` is the per-tree uniform random from the scatter cell (deterministic).
  */
 function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: number): number {
+  const sp = pickBaseSpecies(fields, wx, wz, r, h)
+  return sp === TreeSpecies.Birch ? broadleafStand(fields, wx, wz) : sp
+}
+
+/**
+ * BROADLEAF STANDS (the reference shapes): every ~56 m cell grows mostly ONE broadleaf type — Mondstadt broadleaf,
+ * slender forked tree, Windrise oak, curvy S-trunk or golden Liyue tree — with 20 % of its trees the common
+ * Mondstadt/slender ones, so a forest reads as groves of distinct trees while a chunk adds only 1–2 draws.
+ * Deterministic (hash of the cell / tree position + seed).
+ */
+const STAND_TYPES: readonly [number, number][] = [[TreeSpecies.Birch, 0.26], [TreeSpecies.Slender, 0.28], [TreeSpecies.Oak, 0.14], [TreeSpecies.Curvy, 0.18], [TreeSpecies.Golden, 0.14]]
+function broadleafStand(fields: WorldFields, wx: number, wz: number): number {
+  const cx = Math.floor(wx / 56), cz = Math.floor(wz / 56)
+  if (regionRoll(fields.seed, wx, wz, 6162) < 0.2) return regionRoll(fields.seed, wx, wz, 6163) < 0.5 ? TreeSpecies.Birch : TreeSpecies.Slender
+  return pickWeighted(STAND_TYPES, regionRoll(fields.seed, cx * 56 + 7, cz * 56 + 13, 6161))
+}
+
+function pickBaseSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: number): number {
   const density = fields.forestDensity(wx, wz, h)
   const road = fields.roadDistance(wx, wz)
   const stand = fields.colorVariation(wx * 0.35, wz * 0.35) // low-frequency stand selector
@@ -117,7 +135,7 @@ function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: 
   return r < 0.45 ? TreeSpecies.Spruce : r < 0.7 ? TreeSpecies.Fir : r < 0.85 ? TreeSpecies.Birch : TreeSpecies.Pine
 }
 
-export function scatterForest(fields: WorldFields, cx: number, cz: number, heights: Float32Array) {
+export function scatterForest(fields: WorldFields, cx: number, cz: number, heights: Float32Array, treesOnly = false) {
   const ctx: ScatterCtx = { fields, cx, cz, heights }
   // Open road corridor (refer/roads hero): grassy verges, trees set back, a long view down the road.
   const clearRoad = WorldFields.ROAD_HALF_WIDTH + 9
@@ -143,6 +161,8 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     (wx, wz, r, h) => pickSpecies(fields, wx, wz, r, h),
   )
 
+  // Far forest (FarForest): trees only — the impostor ring needs nothing else.
+  if (treesOnly) return { trees, rocks: new Float32Array(0), plants: new Float32Array(0) }
   const rocks = scatter(ctx, ROCK_CELL, Layer.Rocks, PROP_STRIDE, (wx, wz, r, h) => {
     const w = fields.biome(wx, wz, _bw, h)
     const p = 0.14 * (1 + w[0] * 1.2 + w[1] * 0.5) // sparse (≈ 9 per chunk in the forest); deserts and snowfields stonier

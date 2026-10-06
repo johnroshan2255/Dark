@@ -1,5 +1,6 @@
 import { hash4, hashFloat } from '../noise/rng'
 import { surfaceNets, type VoxelMesh } from './surfaceNets'
+import { cavePlan, caveFloorAt, caveFootprint, caveRock, MOUTH_X, toLocal } from './caves'
 
 /**
  * ROCK FORMATIONS — the landmarks a heightfield can't make (Genshin's arches, caves, karst pillars, overhangs):
@@ -28,6 +29,8 @@ export interface Formation {
   rot: number
   /** Footprint radius (m). */
   radius: number
+  /** HILLSIDE CAVE (Formations/caves.ts): dug into a slope, mouth facing downhill, terrain carved under its air. */
+  hill?: boolean
   seed: number
   /** Built ON the main road: an arch spanning it, or a cave hill it tunnels straight through. */
   road?: boolean
@@ -40,6 +43,9 @@ export interface FormationHost {
   riverDistance(x: number, z: number): number
   /** A farm / cabin / camp near (x, z) within margin? */
   placeNear(x: number, z: number, margin: number): boolean
+  /** A secondary road within `margin` of (x, z)? (Hillside caves keep clear of them; lazily bound, the network is
+   *  built from the places after the formations.) */
+  netRoadNear?(x: number, z: number, margin: number): boolean
   biome(x: number, z: number): [number, number]
   roadCenterX(z: number): number
   roadHeight(z: number): number
@@ -68,6 +74,26 @@ export class FormationField {
       const kind = bw[0] > 0.5 ? (r < 0.5 ? FormationKind.Arch : FormationKind.Pillars)
         : bw[1] > 0.5 ? (r < 0.55 ? FormationKind.Cave : FormationKind.Arch)
         : r < 0.25 ? FormationKind.Arch : r < 0.5 ? FormationKind.Cave : r < 0.78 ? FormationKind.Pillars : FormationKind.Outcrop
+      // CAVES ON HILLS / CLIFFS: where the ground slopes (≥ ~14°) the cave is dug INTO the slope — the mouth here,
+      // facing downhill, the chamber ~40 m in (Formations/caves.ts). Flat ground keeps the free-standing rock-hill cave.
+      if (kind === FormationKind.Cave) {
+        const gx = (h.height(x + 8, z) - h.height(x - 8, z)) / 16, gz = (h.height(x, z + 8) - h.height(x, z - 8)) / 16
+        const g = Math.hypot(gx, gz)
+        if (g > 0.42) { // ≥ ~23°: a real hillside / cliff (the hill rises fast behind the mouth)
+          const rot = Math.atan2(gz / g, gx / g) // local +x = uphill
+          const cxw = x - MOUTH_X * Math.cos(rot), czw = z - MOUTH_X * Math.sin(rot) // centre ~26 m in from the mouth
+          const R = 48
+          const my = h.height(x, z)
+          if (h.roadDistance(cxw, czw) < R + 10 || h.roadDistance(x, z) < 14 || h.riverDistance(cxw, czw) < R || my < h.water + 2) continue
+          if (h.placeNear(cxw, czw, R + 20) || list.some((o) => Math.hypot(o.x - cxw, o.z - czw) < o.radius + R + 20)) continue
+          // No secondary road through the hill (the carve would drop the road's verge into the tunnel).
+          let road = false
+          for (let a = 0; a < 8 && !road; a++) road = !!h.netRoadNear?.(cxw + Math.cos(a * 0.785) * 30, czw + Math.sin(a * 0.785) * 30, 32)
+          if (road || h.netRoadNear?.(cxw, czw, 40)) continue
+          list.push({ kind, x: cxw, z: czw, y: my - 0.2, rot, radius: R, seed: hash4(s, ci, cj, 4105 + n), hill: true })
+          continue
+        }
+      }
       const radius = RADIUS[kind]
       if (h.roadDistance(x, z) < radius + 22 || h.riverDistance(x, z) < radius + 12) continue
       if (h.placeNear(x, z, radius + 25) || list.some((f) => Math.hypot(f.x - x, f.z - z) < f.radius + radius + 20)) continue
@@ -136,6 +162,37 @@ export class FormationField {
       if (f && Math.hypot(x - f.x, z - f.z) < f.radius + margin) return f
     }
     return null
+  }
+
+  private readonly _l: [number, number] = [0, 0]
+  /**
+   * Terrain under a HILLSIDE CAVE: the ground `h` at (x, z), carved down below the cave's air (its floor − 2.2 m)
+   * where it would cut through the tunnel or the chamber — the cave's rock mesh is the floor there. Else `h`.
+   */
+  caveCarve(x: number, z: number, h: number): number {
+    const ci = Math.floor(x / FORMATION_REGION), cj = Math.floor(z / FORMATION_REGION)
+    for (let j = cj - 1; j <= cj + 1; j++) for (let i = ci - 1; i <= ci + 1; i++) {
+      for (const f of this.region(i, j)) {
+        if (!f.hill || Math.abs(x - f.x) > f.radius || Math.abs(z - f.z) > f.radius) continue
+        const [lx, lz] = toLocal(f, x, z, this._l)
+        const p = cavePlan(f)
+        if (caveFootprint(p, lx, lz) > 1.5) continue
+        const floor = f.y + caveFloorAt(p, lx, lz) - 2.2
+        if (h > floor) return floor
+      }
+    }
+    return h
+  }
+
+  /** Hillside caves within `r` m of (x, z) (rendering / interaction: CaveSystem). */
+  cavesNear(x: number, z: number, r: number, out: Formation[] = []): Formation[] {
+    out.length = 0
+    const ci = Math.floor(x / FORMATION_REGION), cj = Math.floor(z / FORMATION_REGION)
+    const k = Math.ceil(r / FORMATION_REGION)
+    for (let j = cj - k; j <= cj + k; j++) for (let i = ci - k; i <= ci + k; i++) {
+      for (const f of this.region(i, j)) if (f.hill && Math.hypot(x - f.x, z - f.z) < r + f.radius) out.push(f)
+    }
+    return out
   }
 
   /** Formations whose CENTRE lies in the box (the chunk that owns their mesh). */
@@ -265,11 +322,36 @@ function bounds(f: Formation): [[number, number, number], [number, number, numbe
  * The formation's mesh in WORLD coordinates (rotated, on its base), at voxel size `step` (1.5 m near-detail;
  * LOW builds 2.5 m — the shape is smooth, so coarse voxels mostly cost silhouette detail).
  */
-export function buildFormation(f: Formation, step: number): VoxelMesh {
-  const [lo, hi] = bounds(f)
-  const size: [number, number, number] = [Math.ceil((hi[0] - lo[0]) / step), Math.ceil((hi[1] - lo[1]) / step), Math.ceil((hi[2] - lo[2]) / step)]
-  const m = surfaceNets(formationSdf(f), lo, size, step)
+export function buildFormation(f: Formation, step: number, ground?: (x: number, z: number) => number): VoxelMesh {
   const c = Math.cos(f.rot), sn = Math.sin(f.rot)
+  let lo: [number, number, number], hi: [number, number, number], sdf: (x: number, y: number, z: number) => number
+  if (f.hill && ground) {
+    // HILLSIDE CAVE: the original ground (pre-carve) on a 2 m grid in the local frame (bilinear) → the rock cap.
+    const p = cavePlan(f)
+    const G = 2, gx0 = p.min[0], gz0 = p.min[1]
+    const nx = Math.ceil((p.max[0] - gx0) / G) + 1, nz = Math.ceil((p.max[1] - gz0) / G) + 1
+    const H = new Float32Array(nx * nz)
+    let top = -Infinity
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+      const lx = gx0 + i * G, lz = gz0 + j * G
+      const v = ground(f.x + lx * c - lz * sn, f.z + lx * sn + lz * c) - f.y
+      H[j * nx + i] = v
+      if (caveFootprint(p, lx, lz) < 4) top = Math.max(top, v)
+    }
+    const hl = (x: number, z: number) => {
+      const fx = Math.min(nx - 1.001, Math.max(0, (x - gx0) / G)), fz = Math.min(nz - 1.001, Math.max(0, (z - gz0) / G))
+      const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j
+      return H[j * nx + i] * (1 - u) * (1 - v) + H[j * nx + i + 1] * u * (1 - v) + H[(j + 1) * nx + i] * (1 - u) * v + H[(j + 1) * nx + i + 1] * u * v
+    }
+    lo = [p.min[0], Math.min(p.floor, p.alcove[1], ...p.path.map((q) => q[1])) - 4, p.min[1]]
+    hi = [p.max[0], Math.min(60, Math.max(top, p.chamber[1] + p.cr[1]) + 4), p.max[1]]
+    sdf = caveRock(f, hl)
+  } else {
+    ;[lo, hi] = bounds(f)
+    sdf = formationSdf(f)
+  }
+  const size: [number, number, number] = [Math.ceil((hi[0] - lo[0]) / step), Math.ceil((hi[1] - lo[1]) / step), Math.ceil((hi[2] - lo[2]) / step)]
+  const m = surfaceNets(sdf, lo, size, step)
   for (let i = 0; i < m.positions.length; i += 3) {
     const x = m.positions[i], z = m.positions[i + 2], nx = m.normals[i], nz = m.normals[i + 2]
     m.positions[i] = f.x + x * c - z * sn

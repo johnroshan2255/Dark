@@ -1,9 +1,10 @@
 import * as THREE from 'three'
 
 /**
- * Player character: the Sketchfab "Stickman" (assets/loadModels) RIGGED IN CODE — the GLB is a single static
- * T-pose mesh with no skeleton, so we build 16 bones from measured joint landmarks, skin every vertex by body
- * region (smooth 2-bone blends at the joints) and animate procedurally:
+ * Player character: the stylized human built in Blender (scripts/blender/human.py → human.lod0.glb: one smooth
+ * skin-modifier body + head, hair, face, clothes by vertex colour, T-pose, joints exactly at the SRC landmarks),
+ * RIGGED IN CODE — 15 bones from those landmarks, every vertex skinned by body region (smooth 2-bone blends at the
+ * joints) — and animated procedurally:
  *   idle (breathing), walk ↔ jog ↔ sprint with PLANTED FEET (each foot stays put on the ground during its
  *   stance, two-bone leg IK, hips drop to let the short legs reach, flight phase when running, feet follow the
  *   terrain; footsteps fire on each touchdown — `steps`), arm swing against the legs, lean and twist,
@@ -14,21 +15,49 @@ import * as THREE from 'three'
  * 1.6k vertices × 16 bones is negligible on any GPU. Faces −Z in local space (camera convention).
  */
 
-/** Source landmarks (model units, facing +Z, measured from the vertex distribution of human.glb). */
+/** Source landmarks (metres, facing +Z, +X = the character's left) — = scripts/blender/human.py `L`. */
 const SRC = {
-  sole: -40.1, ankle: -32.5, knee: -21.5, hip: -11, pelvis: -8, chest: 10, neck: 24.5, shoulderY: 20,
-  shoulderX: 12.5, elbowX: 30, wristX: 42.5, handX: 47.4, legX: 6.7, zc: -1.5, height: 96.67,
+  sole: 0, ankle: 0.085, knee: 0.5, hip: 0.9, pelvis: 0.96, chest: 1.26, neck: 1.5, shoulderY: 1.44,
+  shoulderX: 0.19, elbowX: 0.465, wristX: 0.705, handX: 0.79, legX: 0.092, zc: 0, height: 1.78,
 }
-/** Standing height (m). Slightly tall: the cartoon head is big and the legs short (must reach BMX pedals). */
-const HEIGHT = 1.85
-const U = HEIGHT / SRC.height
-const toFinal = (x: number, y: number, z: number) => new THREE.Vector3(-x * U, (y - SRC.sole) * U, -(z - SRC.zc) * U)
+/** Skinning blend widths were tuned in the old model's units (96.67 per body height): scale them to this one. */
+const SU = SRC.height / 96.67
+/**
+ * PROPORTIONS. The source stickman has a head a third of its height and very short legs — next to real-size cars
+ * (catalogue: wheelbases match the real vehicles) it read as a 2.5 m giant. The mesh is reshaped at load
+ * (`remapY` / head width): legs × LEG_K below the hip joint, the head × HEAD_K above the neck (height and width),
+ * torso unchanged — then scaled to HEIGHT: a 1.78 m adult (hip joint ≈ 0.8 m, head ≈ 0.3 m), the same height as
+ * the capsule and the 1.62 m first-person eye, so the world's scale is unchanged.
+ */
+const LEG_K = 1 // (the Blender human is modelled at real proportions — no reshaping)
+const HEAD_K = 1
+/** Standing height (m). */
+const HEIGHT = 1.78
+const remapY = (y: number) => (y < SRC.hip ? SRC.hip - (SRC.hip - y) * LEG_K : y > SRC.neck ? SRC.neck + (y - SRC.neck) * HEAD_K : y)
+/** Head width factor: 1 below the neck, HEAD_K over the head (a smooth band at the neck). */
+const headW = (y: number) => {
+  const t = Math.min(1, Math.max(0, (y - (SRC.neck - 1)) / 5))
+  return 1 + (HEAD_K - 1) * t * t * (3 - 2 * t)
+}
+const TOP = SRC.sole + SRC.height
+const U = HEIGHT / (remapY(TOP) - remapY(SRC.sole))
+/** Source point → final space (m, facing −Z, soles at y = 0), reshaped. */
+const toFinal = (x: number, y: number, z: number) => {
+  const w = headW(y)
+  return new THREE.Vector3(-x * w * U, (remapY(y) - remapY(SRC.sole)) * U, -(z - SRC.zc) * w * U)
+}
+/** Height of a source landmark above the soles (m, final). */
+const Y = (y: number) => (remapY(y) - remapY(SRC.sole)) * U
 const BODY_COLOUR = 0xeeeae2
 /** Hip joint height (m) standing, ankle above the sole (m), hip→ankle leg length (m), half the hip spacing. */
-const HIP_Y = (SRC.hip - SRC.sole) * U
-const ANKLE_Y = (SRC.ankle - SRC.sole) * U
-const LEG = (SRC.hip - SRC.ankle) * U
+const HIP_Y = Y(SRC.hip)
+const ANKLE_Y = Y(SRC.ankle)
+const LEG = HIP_Y - ANKLE_Y
 const FOOT_X = SRC.legX * U
+/** Head: neck → top (m); its centre above the neck bone and its radius (ground contact probes, eye). */
+const HEAD_LEN = Y(TOP) - Y(SRC.neck)
+const HEAD_C = HEAD_LEN * 0.5
+const HEAD_R = HEAD_LEN * 0.45
 
 const B = {
   hips: 0, chest: 1, head: 2,
@@ -46,6 +75,36 @@ export interface RideRig {
   /** Fork pivot + grip offsets in fork space (the fork steers about its Y axis). */
   fork: THREE.Vector3
   grip: THREE.Vector3
+}
+
+/** Hips-bone height standing (m above the soles) and the ankle above the sole — car-seat posing (CarEntry). */
+export const STAND_HIPS = Y(SRC.pelvis)
+export const ANKLE_HEIGHT = ANKLE_Y
+/** Hips → top of the head (m): how much headroom a seated body needs at scale 1. */
+export const SEATED_HEIGHT = Y(TOP) - Y(SRC.pelvis)
+/** Hip joint → ankle (m): seated feet are placed within reach. */
+export const LEG_LENGTH = LEG
+
+/** A pose inside / beside a car (CarEntry), everything in CAR space (the root takes the car's frame). */
+export interface CarPose {
+  /** Hips position. */
+  hip: THREE.Vector3
+  /** Body yaw (0 = facing the car's front, −Z). */
+  yaw: number
+  /** 0 standing … 1 seated: spine and (when no foot targets) the legs. */
+  sit: number
+  /** Chest pitch (+ = leaning back). */
+  lean: number
+  /** Body scale (a seated cartoon fits a cramped cab) and the head's own scale. */
+  scale: number
+  head: number
+  /** Head turn (rad, + = left). */
+  look: number
+  /** Ankle / wrist targets (two-bone IK), null = a default pose. */
+  footL: THREE.Vector3 | null
+  footR: THREE.Vector3 | null
+  handL: THREE.Vector3 | null
+  handR: THREE.Vector3 | null
 }
 
 const smooth = (a: number, b: number, x: number) => {
@@ -136,31 +195,32 @@ export class CharacterModel {
     const sw = new Float32Array(n * 4)
     const col = new Float32Array(n * 3)
     const c = new THREE.Color().setHex(BODY_COLOUR, THREE.SRGBColorSpace)
+    const srcCol = g.getAttribute('color') // the Blender model's clothes / skin / hair (linear, RGB or RGBA)
     const S = SRC
     for (let i = 0; i < n; i++) {
       const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i)
       const ax = Math.abs(x)
       const left = x > 0 // source faces +Z → +x is the character's LEFT
       let a: number, b2: number, t: number
-      if (y > S.neck + 1.5) (a = B.head), (b2 = B.head), (t = 0)
-      else if (y > S.neck - 1.5 && ax < S.shoulderX) (a = B.chest), (b2 = B.head), (t = (y - (S.neck - 1.5)) / 3)
-      else if (ax > S.shoulderX + 0.5 && y > S.shoulderY - 7) {
+      if (y > S.neck + 1.5 * SU) (a = B.head), (b2 = B.head), (t = 0)
+      else if (y > S.neck - 1.5 * SU && ax < S.shoulderX) (a = B.chest), (b2 = B.head), (t = (y - (S.neck - 1.5 * SU)) / (3 * SU))
+      else if (ax > S.shoulderX + 0.5 * SU && y > S.shoulderY - 7 * SU) {
         const up = left ? B.armL : B.armR, fo = left ? B.foreL : B.foreR, ha = left ? B.handL : B.handR
-        if (ax < S.shoulderX + 3.5) (a = B.chest), (b2 = up), (t = (ax - S.shoulderX - 0.5) / 3)
-        else if (ax < S.elbowX - 2.5) (a = up), (b2 = up), (t = 0)
-        else if (ax < S.elbowX + 2.5) (a = up), (b2 = fo), (t = (ax - (S.elbowX - 2.5)) / 5)
+        if (ax < S.shoulderX + 3.5 * SU) (a = B.chest), (b2 = up), (t = (ax - S.shoulderX - 0.5 * SU) / (3 * SU))
+        else if (ax < S.elbowX - 2.5 * SU) (a = up), (b2 = up), (t = 0)
+        else if (ax < S.elbowX + 2.5 * SU) (a = up), (b2 = fo), (t = (ax - (S.elbowX - 2.5 * SU)) / (5 * SU))
         else if (ax < S.wristX) (a = fo), (b2 = fo), (t = 0)
-        else (a = fo), (b2 = ha), (t = Math.min(1, (ax - S.wristX) / 2))
-      } else if (y < S.hip + 0.5) {
+        else (a = fo), (b2 = ha), (t = Math.min(1, (ax - S.wristX) / (2 * SU)))
+      } else if (y < S.hip + 0.5 * SU) {
         const th = left ? B.thighL : B.thighR, sh = left ? B.shinL : B.shinR, fo = left ? B.footL : B.footR
-        if (y > S.hip - 2.5) (a = B.hips), (b2 = th), (t = (S.hip + 0.5 - y) / 3)
-        else if (y > S.knee + 2) (a = th), (b2 = th), (t = 0)
-        else if (y > S.knee - 2) (a = th), (b2 = sh), (t = (S.knee + 2 - y) / 4)
-        else if (y > S.ankle + 1) (a = sh), (b2 = sh), (t = 0)
-        else (a = sh), (b2 = fo), (t = Math.min(1, (S.ankle + 1 - y) / 2))
-      } else if (y < S.pelvis + 6) (a = B.hips), (b2 = B.hips), (t = 0)
-      else if (y > S.chest - 2) (a = B.chest), (b2 = B.chest), (t = 0)
-      else (a = B.hips), (b2 = B.chest), (t = (y - (S.pelvis + 6)) / (S.chest - 2 - (S.pelvis + 6)))
+        if (y > S.hip - 2.5 * SU) (a = B.hips), (b2 = th), (t = (S.hip + 0.5 * SU - y) / (3 * SU))
+        else if (y > S.knee + 2 * SU) (a = th), (b2 = th), (t = 0)
+        else if (y > S.knee - 2 * SU) (a = th), (b2 = sh), (t = (S.knee + 2 * SU - y) / (4 * SU))
+        else if (y > S.ankle + 1 * SU) (a = sh), (b2 = sh), (t = 0)
+        else (a = sh), (b2 = fo), (t = Math.min(1, (S.ankle + 1 * SU - y) / (2 * SU)))
+      } else if (y < S.pelvis + 6 * SU) (a = B.hips), (b2 = B.hips), (t = 0)
+      else if (y > S.chest - 2 * SU) (a = B.chest), (b2 = B.chest), (t = 0)
+      else (a = B.hips), (b2 = B.chest), (t = (y - (S.pelvis + 6 * SU)) / (S.chest - 2 * SU - (S.pelvis + 6 * SU)))
       t = smooth(0, 1, t)
       si[i * 4] = a
       si[i * 4 + 1] = b2
@@ -169,7 +229,8 @@ export class CharacterModel {
       const f = toFinal(x, y, z)
       pos.setXYZ(i, f.x, f.y, f.z)
       if (nor) nor.setXYZ(i, -nor.getX(i), nor.getY(i), -nor.getZ(i)) // same 180° turn as the positions
-      c.toArray(col, i * 3)
+      if (srcCol) (col[i * 3] = srcCol.getX(i)), (col[i * 3 + 1] = srcCol.getY(i)), (col[i * 3 + 2] = srcCol.getZ(i))
+      else c.toArray(col, i * 3)
     }
     g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4))
     g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4))
@@ -211,6 +272,7 @@ export class CharacterModel {
    * @param aiming flashlight on → right arm raised forward   @param vy vertical velocity (jump/fall pose)
    */
   animate(dt: number, pos: THREE.Vector3, targetYaw: number, speed: number, grounded: boolean, aiming: boolean, aimPitch: number, vy = 0, knock = 0, tumble: { angle: number; yaw: number } | null = null): void {
+    this.unscale()
     let d = targetYaw - this.yaw
     d = Math.atan2(Math.sin(d), Math.cos(d))
     this.yaw += d * (1 - Math.exp(-12 * dt))
@@ -228,26 +290,38 @@ export class CharacterModel {
     const r = this.runK, m = this.moveK
     let hipsY = 0
     if (!grounded && this.air > 0.06) {
-      // Airborne: rising = tucked knees, arms up/out; falling = legs reaching down, arms higher.
+      // AIRBORNE (Genshin / GTA jump): rising = the lead knee DRIVEN UP, the other leg trailing back, arms swung out
+      // to the sides and a little back, chest up; falling = both legs reaching down for the landing (lead knee
+      // still bent), arms rising out for balance.
       const fall = smooth(1, -4, vy)
-      this.leg(-1, 0.75 - fall * 0.35, 1.3 - fall * 0.6, 0.06)
-      this.leg(1, 0.2 + fall * 0.1, 0.7 - fall * 0.2, 0.06)
-      this.arm(1, 0.55 - fall * 0.25, 0.35, 0.5, 0.2)
-      this.arm(-1, 0.55 - fall * 0.25, 0.35, 0.5, 0.2)
-      this.pose(B.chest, -0.12 + fall * 0.1)
-      this.pose(B.hips, -0.05)
-      this.pose(B.head, 0.1)
+      this.leg(-1, 1.25 - fall * 0.7, 1.7 - fall * 0.95, 0.05, -0.25)
+      this.leg(1, -0.25 + fall * 0.35, 0.95 - fall * 0.55, 0.05, 0.35 - fall * 0.2)
+      this.arm(1, 0.95 - fall * 0.3, -0.25 + fall * 0.15, 0.55, 0.25)
+      this.arm(-1, 0.95 - fall * 0.3, 0.15 + fall * 0.05, 0.55, 0.25)
+      this.pose(B.chest, 0.08 - fall * 0.14, 0.12 * (1 - fall))
+      this.pose(B.hips, -0.08, -0.08 * (1 - fall))
+      this.pose(B.head, 0.12 - fall * 0.2)
     } else {
-      // Upper body (legs are placed by foot IK below): arm swing against the legs, lean and twist, breathing.
-      const breath = Math.sin(this.time * 2.2) * 0.03 * (1 - m)
-      const sw = Math.sin(this.cycle * Math.PI * 2)
-      const armSwing = (0.45 + 0.4 * r) * m
-      const elbow = 0.25 + 1.15 * r * m
-      this.arm(1, 1.35 - 0.1 * r, armSwing * sw, elbow, 0.05)
-      this.arm(-1, 1.35 - 0.1 * r, -armSwing * sw, elbow, 0.05)
-      this.pose(B.hips, -0.06 * m - 0.06 * r * m, -0.12 * sw * m)
-      this.pose(B.chest, -0.06 * m - 0.2 * r * m - breath, 0.2 * sw * m)
-      this.pose(B.head, 0.06 * m + 0.12 * r * m + breath)
+      // Upper body (legs are placed by foot IK below). WALK / RUN: the pelvis twists with the forward leg and rolls
+      // over the stance leg, the chest counter-rotates, the head stays on the horizon (cancels the twist), arms
+      // swing against the legs (relaxed in the walk, bent ~90° and driving in the run), forward lean when running.
+      // IDLE: weight shifting from leg to leg, breathing in the chest and shoulders, relaxed slightly bent arms.
+      const idle = 1 - m
+      const breath = Math.sin(this.time * 2.0) * 0.025 * idle
+      const shift = Math.sin(this.time * 0.7) // idle weight shift (also moves the hips sideways in plantFeet)
+      const ph = this.cycle * Math.PI * 2
+      const sw = Math.sin(ph)
+      const armSwing = (0.55 + 0.4 * r) * m
+      const elbow = (0.28 + 0.05 * shift) * idle + (0.35 + 1.15 * r) * m
+      const fwd = 0.06 * idle + 0.12 * r * m // arms carried a little forward (more when running)
+      this.arm(1, 1.3 - 0.12 * r + 0.03 * breath * 10, fwd + armSwing * sw, elbow, 0.04 + 0.03 * idle)
+      this.arm(-1, 1.3 - 0.12 * r + 0.03 * breath * 10, fwd - armSwing * sw, elbow, 0.04 + 0.03 * idle)
+      const hipYaw = -(0.13 + 0.07 * r) * sw * m
+      const chestYaw = (0.2 + 0.1 * r) * sw * m
+      const roll = 0.045 * sw * m * (1 - 0.5 * r) + 0.035 * shift * idle
+      this.pose(B.hips, -0.05 * m - 0.07 * r * m, hipYaw, roll)
+      this.pose(B.chest, -0.04 * m - 0.22 * r * m - breath, chestYaw, -roll * 0.8)
+      this.pose(B.head, 0.04 * m + 0.16 * r * m + breath * 0.5, -(hipYaw + chestYaw) * 0.8, roll * 0.4 - 0.02 * shift * idle)
       this.leg(-1, 0, 0.08)
       this.leg(1, 0, 0.08)
     }
@@ -301,7 +375,7 @@ export class CharacterModel {
     const m = this.moveK
     const v = Math.max(speed, 0.6 * m)
     const beta = v < 1.5 ? 0.62 : v < 3.6 ? 0.62 - (v - 1.5) / 2.1 * 0.22 : Math.max(0.3, 0.4 - (v - 3.6) / 2.9 * 0.1)
-    const S = Math.min(0.56, 0.3 + v * 0.06) * m // step: how far a planted foot travels under the body
+    const S = Math.min(0.95, 0.34 + v * 0.1) * m // step: how far a planted foot travels under the body (0.8 m legs: long run strides)
     const strideLen = Math.max(0.2, S / beta)
     const prevCycle = this.cycle
     this.cycle = (this.cycle + (v * dt) / strideLen) % 1
@@ -314,14 +388,24 @@ export class CharacterModel {
       const c = (this.cycle + off) % 1
       const cPrev = (prevCycle + off) % 1
       const touchdown = c < cPrev && m > 0.35 && speed > 0.4 // a new stance begins
-      let fz: number, lift = 0, swing = 0
-      if (c < beta) fz = S / 2 - S * (c / beta)
-      else {
+      let fz: number, lift = 0
+      // FOOT ROLL (+ = toes down): heel strike (toes up) → flat → heel off / toe push at the end of the stance; in
+      // the swing the toes trail down, then come up again to meet the ground heel first.
+      let roll = 0
+      if (c < beta) {
+        const k = c / beta
+        fz = S / 2 - S * k
+        roll = (-0.32 * (1 - smooth(0, 0.22, k)) + 0.5 * smooth(0.62, 1, k)) * m
+      } else {
         const t = (c - beta) / (1 - beta)
         fz = -S / 2 + S * (0.5 - 0.5 * Math.cos(Math.PI * t))
-        lift = (0.05 + 0.1 * this.runK) * Math.sin(Math.PI * t) * m
-        swing = Math.sin(Math.PI * t)
+        // Swing height: a low walk step, a high run (knee drive + heel kicked up behind, early in the swing).
+        lift = (0.06 * Math.sin(Math.PI * t) + 0.26 * this.runK * Math.sin(Math.PI * Math.pow(t, 0.75))) * m
+
+        roll = (0.5 * (1 - smooth(0, 0.55, t)) - 0.32 * smooth(0.7, 1, t)) * m
       }
+      // Heel up at the push-off: the foot pivots on its ball, so the ankle rises (no toes through the ground).
+      lift += 0.11 * Math.sin(Math.max(0, roll)) * (c < beta ? 1 : 1 - smooth(0, 0.4, (c - beta) / (1 - beta)))
       const lx = side * FOOT_X * 0.9
       const wx = pos.x + rightX * lx + fwdX * fz, wz = pos.z + rightZ * lx + fwdZ * fz
       if (touchdown) {
@@ -333,23 +417,25 @@ export class CharacterModel {
       // Highest hip that still lets this leg reach its foot (with 3 % slack so the knee keeps a little bend).
       const reach = LEG * 0.97
       hip = Math.min(hip, fy + Math.sqrt(Math.max(0, reach * reach - fz * fz)))
-      targets.push([wx, pos.y + fy, wz, swing])
+      targets.push([wx, pos.y + fy, wz, roll])
     }
     // Hips: never above standing; smoothed (the landing / stance compression reads as a soft bob).
     this.hipH += (hip - this.hipH) * (1 - Math.exp(-dt * 30))
     const hipsY = this.hipH - HIP_Y + extraHipY
-    this.bones[B.hips].position.set(this.rest[B.hips].x, this.rest[B.hips].y + hipsY, this.rest[B.hips].z)
+    // Idle: the weight shifts from leg to leg (hips sway sideways over the planted feet; the IK bends the knee).
+    const sway = 0.022 * Math.sin(this.time * 0.7) * (1 - m)
+    this.bones[B.hips].position.set(this.rest[B.hips].x + sway, this.rest[B.hips].y + hipsY, this.rest[B.hips].z)
     this.root.updateMatrixWorld(true)
     _p.set(fwdX, 0.15, fwdZ) // knees bend forward
     for (let i = 0; i < 2; i++) {
       const side = i === 0 ? -1 : 1
-      const [x, y, z, swing] = targets[i]
+      const [x, y, z, roll] = targets[i]
       const th = side > 0 ? B.thighR : B.thighL, sh = side > 0 ? B.shinR : B.shinL, ft = side > 0 ? B.footR : B.footL
       this.ik(th, sh, ft, _t.set(x, y, z), _p)
       // Foot flat on the ground (cancel the leg's rotation), toes dipping a little as it swings through.
       this.bones[sh].getWorldQuaternion(_q).invert()
       this.root.getWorldQuaternion(_q2)
-      this.bones[ft].quaternion.copy(_q).multiply(_q2).multiply(_q3.setFromAxisAngle(_xAxis, 0.35 * swing))
+      this.bones[ft].quaternion.copy(_q).multiply(_q2).multiply(_q3.setFromAxisAngle(_xAxis, roll))
       for (const id of [th, sh, ft]) this.target[id].copy(this.bones[id].quaternion)
     }
   }
@@ -389,7 +475,7 @@ export class CharacterModel {
       low = Math.min(low, _t.y - r)
     }
     probe(B.footL, ANKLE_Y); probe(B.footR, ANKLE_Y); probe(B.handL, 0.05); probe(B.handR, 0.05)
-    probe(B.hips, 0.13); probe(B.chest, 0.15); probe(B.head, 0.27, 0.3)
+    probe(B.hips, 0.13); probe(B.chest, 0.15); probe(B.head, HEAD_R, HEAD_C)
     const g = this.ground ? this.ground(pos.x, pos.z) : pos.y
     R.position.y += Math.max(g, pos.y) - low // on the ground (in the hop out of the door: at the player's height)
     R.updateMatrixWorld(true)
@@ -465,7 +551,7 @@ export class CharacterModel {
     probe(B.handR, 0.05)
     probe(B.hips, 0.13)
     probe(B.chest, 0.15)
-    probe(B.head, 0.27, 0.3)
+    probe(B.head, HEAD_R, HEAD_C)
     const g = this.ground ? this.ground(pos.x, pos.z) : pos.y
     R.position.y += g - low
     R.updateMatrixWorld(true)
@@ -477,6 +563,7 @@ export class CharacterModel {
    * leaning forward and into turns with the bike. `pedal` = crank angle, `steer` = fork angle (rad).
    */
   ride(pos: THREE.Vector3, heading: number, pedal: number, lean: number, rig?: RideRig, steer = 0, bikeQ?: THREE.Quaternion): void {
+    this.unscale()
     this.yaw = heading
     this.root.position.copy(pos)
     // The rider sits in the bike's frame: its full simulated orientation (lean, pitch on slopes) when given.
@@ -507,6 +594,62 @@ export class CharacterModel {
     }
     // Keep the next ground animation blending from here.
     for (let i = 0; i < bones.length; i++) this.target[i].copy(bones[i].quaternion)
+  }
+
+  /**
+   * In / beside a car (CarEntry: open the door, climb in, sit and steer, climb out): the root takes the car's world
+   * frame `carM` (and the body scale), the hips go to `o.hip` (car space) turned by `o.yaw`, the spine bends with
+   * `sit`/`lean`, and hands / feet reach their car-space targets by two-bone IK (else a default arm / seated leg).
+   */
+  carPose(carM: THREE.Matrix4, o: CarPose): void {
+    const R = this.root, b = this.bones, s = o.scale
+    carM.decompose(R.position, R.quaternion, _v)
+    R.scale.setScalar(s)
+    for (const x of b) x.quaternion.identity()
+    b[B.head].scale.setScalar(o.head)
+    b[B.hips].position.copy(o.hip).divideScalar(s)
+    b[B.hips].quaternion.setFromEuler(this._e.set(-0.12 * o.sit, o.yaw, 0, 'YXZ'))
+    b[B.chest].quaternion.setFromEuler(this._e.set(o.lean - 0.05 * o.sit, 0, 0))
+    // Leaning back: the head compensates (eyes on the road); ducking forward: it bows with the chest.
+    b[B.head].quaternion.setFromEuler(this._e.set(0.08 * o.sit - Math.max(0, o.lean) * 0.6 + Math.min(0, o.lean) * 0.35, o.look, 0, 'YXZ'))
+    // Default limbs: seated legs (thighs forward, shins down) / standing legs, arms hanging.
+    const legs = (side: 1 | -1) => this.leg(side, 1.5 * o.sit, 1.45 * o.sit, 0.06 + 0.06 * o.sit)
+    legs(-1)
+    legs(1)
+    this.arm(1, 1.3, 0.25 * o.sit, 0.35 + 0.5 * o.sit, 0.05)
+    this.arm(-1, 1.3, 0.25 * o.sit, 0.35 + 0.5 * o.sit, 0.05)
+    for (const id of [B.thighL, B.shinL, B.footL, B.thighR, B.shinR, B.footR, B.armL, B.foreL, B.armR, B.foreR]) b[id].quaternion.copy(this.target[id])
+    R.updateMatrixWorld(true)
+    const sy = Math.sin(o.yaw), cy = Math.cos(o.yaw)
+    // Knees bend forward (and up when seated); elbows down and out.
+    _p.set(-sy, 0.25 + 0.5 * o.sit, -cy).transformDirection(R.matrixWorld)
+    for (const [side, t] of [[-1, o.footL], [1, o.footR]] as const) {
+      if (!t) continue
+      this.ik(side > 0 ? B.thighR : B.thighL, side > 0 ? B.shinR : B.shinL, side > 0 ? B.footR : B.footL, _t.copy(t).applyMatrix4(carM), _p)
+      // Foot flat in the car's frame.
+      b[side > 0 ? B.shinR : B.shinL].getWorldQuaternion(_q).invert()
+      b[side > 0 ? B.footR : B.footL].quaternion.copy(_q).multiply(R.quaternion).multiply(_q3.setFromAxisAngle(_up, o.yaw))
+    }
+    for (const [side, t] of [[-1, o.handL], [1, o.handR]] as const) {
+      if (!t) continue
+      _p.set(side * cy * 0.25 - sy * 0.2, -1, -side * sy * 0.25 - cy * 0.2).transformDirection(R.matrixWorld) // elbows down (not out through the window)
+      this.ik(side > 0 ? B.armR : B.armL, side > 0 ? B.foreR : B.foreL, side > 0 ? B.handR : B.handL, _t.copy(t).applyMatrix4(carM), _p)
+    }
+    // The next on-foot frame blends from here.
+    for (let i = 0; i < b.length; i++) this.target[i].copy(b[i].quaternion)
+    this.yaw = Math.atan2(-_v.set(-sy, 0, -cy).applyQuaternion(R.quaternion).x, -_v.z)
+  }
+
+  /** World position of the head (FPP eye while getting in / out). */
+  headPosition(out: THREE.Vector3): THREE.Vector3 {
+    this.root.updateMatrixWorld(true)
+    return this.bones[B.head].localToWorld(out.set(0, HEAD_C * 0.9, -HEAD_R * 0.5))
+  }
+
+  /** Back to normal size (after a car seat). */
+  private unscale(): void {
+    if (this.root.scale.x !== 1) this.root.scale.setScalar(1)
+    this.bones[B.head].scale.setScalar(1)
   }
 
   /** Two-bone IK: rotate `upper`/`lower` so the `end` joint reaches `target` (world), bending toward `pole`. */

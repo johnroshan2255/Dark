@@ -37,7 +37,9 @@ const PALETTES: Palette[] = [
   //     that keeps a real blue component (lit ≈ sRGB 145,185,105 on screen), a little lighter and more yellow in the
   //     sun patches, cool green-teal under the trees, warm-grey stone, pale sandy paths.
   {
-    fresh: hex(0x84bc58), olive: hex(0x90c45c), golden: hex(0x9ccc60), ochre: hex(0xa8cc68), earth: hex(0x9a8a62), moss: hex(0x5e9a5c),
+    // (2026-10-07: ~10 % darker and cooler, matched to Genshin meadow close-ups — the grass blades take this colour,
+    //  so field and soil read as one muted mid-green surface.)
+    fresh: hex(0x76ac56), olive: hex(0x80b25a), golden: hex(0x8cba5e), ochre: hex(0x98be66), earth: hex(0x8e8060), moss: hex(0x58925a),
     litter: hex(0x5c8c5c), alpine: hex(0x8eaa86), rock: hex(0xa4a296), sand: hex(0xd8c898), silt: hex(0x5c6c64), forest: 0.6,
   },
 ]

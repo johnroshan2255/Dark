@@ -19,8 +19,10 @@ import { isGenshin, isOverland } from '../../rendering/artStyle'
  * @param wide blade width multiplier (taller blades are wider so the carpet stays closed)
  * @param vary height spread (1 = 0.28–0.62 m × tall)
  * @param lean random lean multiplier (Genshin's blades stand UPRIGHT ≈ 0.35)
+ * @param tuft blades per TUFT (Genshin / fluffy-grass look): blades of a tuft share a root area (r ≈ 7 cm) and fan
+ *   OUTWARD from it with varied heights — a soft clump of blades instead of an even bed of separate spikes. 1 = off.
  */
-export function createGrassGeometry(blades: number, segments: number, tall = 1, wide = 1, vary = 1, leanK = 1): THREE.BufferGeometry {
+export function createGrassGeometry(blades: number, segments: number, tall = 1, wide = 1, vary = 1, leanK = 1, tuft = 1): THREE.BufferGeometry {
   const pos: number[] = []
   const col: number[] = []
   const tip: number[] = []
@@ -31,8 +33,11 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
   let nv = 0
   let seed = 7
   const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
+  const nrm: number[] = []
+  let bn: [number, number, number] = [0, 1, 0]
   const push = (p: [number, number, number], t: number, r: [number, number], bid: number, f = 0): number => {
     pos.push(p[0], p[1], p[2])
+    nrm.push(bn[0], bn[1], bn[2])
     col.push(0.55 + 0.45 * t, 0.55 + 0.45 * t, 0.55 + 0.45 * t)
     tip.push(t)
     root.push(r[0], r[1])
@@ -40,15 +45,23 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
     flower.push(f)
     return nv++
   }
+  let tx = 0, tz = 0
   for (let b = 0; b < blades; b++) {
-    const rx = rnd() * 1.1 - 0.55
-    const rz = rnd() * 1.1 - 0.55
+    if (b % tuft === 0) { tx = rnd() * 1.0 - 0.5; tz = rnd() * 1.0 - 0.5 }
+    const ta = rnd() * Math.PI * 2, tr = tuft > 1 ? 0.05 + rnd() * 0.09 : 0 // spread out: each blade stands apart
+    const rx = tuft > 1 ? tx + Math.cos(ta) * tr : rnd() * 1.1 - 0.55
+    const rz = tuft > 1 ? tz + Math.sin(ta) * tr : rnd() * 1.1 - 0.55
     const h = (0.28 + Math.pow(rnd(), 0.7) * 0.34 * vary) * tall
     const w = (0.028 + rnd() * 0.018) * wide
     const face = rnd() * Math.PI
     const lean = (0.06 + rnd() * 0.16) * Math.min(1, tall) * leanK
-    const la = face + Math.PI / 2 + (rnd() - 0.5) * 1.2 // lean roughly across the blade face (natural curl)
+    // Lean across the blade face, either way, ±0.9 rad (natural curl; blades cross each other, never all upright).
+    // In a tuft each blade leans OUTWARD from the tuft's centre (a fan); otherwise across its face either way.
+    const la = tuft > 1 ? ta + (rnd() - 0.5) * 0.8 : face + (rnd() < 0.5 ? 1 : -1) * Math.PI / 2 + (rnd() - 0.5) * 1.8
     const px = Math.cos(face) * w, pz = Math.sin(face) * w
+    // Normal: 60 % up + 40 % the blade's face (sign random) → blades facing the sun are a little lighter.
+    const fs = rnd() < 0.5 ? 1 : -1
+    void fs // (per-blade facing normals made every blade a lit facet → spikes; the field shades as one surface)
     const at = (t: number): [number, number, number] => [rx + Math.cos(la) * lean * t * t, h * t, rz + Math.sin(la) * lean * t * t]
     const bid = b / blades
     const r: [number, number] = [rx, rz]
@@ -61,7 +74,7 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
       index.push(a0, a1, a2)
     } else {
       const m = at(0.55)
-      const k = 0.62
+      const k = 0.78 // ribbon: stays wide past the middle, then tapers to the point
       const ML: [number, number, number] = [m[0] + px * k, m[1], m[2] + pz * k]
       const MR: [number, number, number] = [m[0] - px * k, m[1], m[2] - pz * k]
       const iL = push(L, 0, r, bid), iR = push(R, 0, r, bid), iML = push(ML, 0.55, r, bid), iMR = push(MR, 0.55, r, bid), iT = push(T, 1, r, bid)
@@ -79,6 +92,7 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
       const y2 = z * st, z2 = z * ct
       return [cx + x * Math.cos(rot) - z2 * Math.sin(rot), cy + y2, cz + x * Math.sin(rot) + z2 * Math.cos(rot)]
     }
+    bn = [0, 1, 0]
     const c0 = push([cx, cy, cz], 0, [cx, cz], 0, 1)
     const ring: number[] = []
     for (let k = 0; k < 10; k++) ring.push(push(P((k / 10) * Math.PI * 2, k % 2 === 0 ? R : R * 0.42), k % 2 === 0 ? 1 : 0.55, [cx, cz], 0, 1))
@@ -87,7 +101,7 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
   const g = new THREE.BufferGeometry()
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3))
-  g.setAttribute('normal', new THREE.Float32BufferAttribute(new Array(pos.length).fill(0).map((_, i) => (i % 3 === 1 ? 1 : 0)), 3))
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3))
   g.setAttribute('tip', new THREE.Float32BufferAttribute(tip, 1))
   g.setAttribute('bladeRoot', new THREE.Float32BufferAttribute(root, 2))
   g.setAttribute('bladeId', new THREE.Float32BufferAttribute(id, 1))
@@ -228,6 +242,10 @@ uniform float uTime; uniform vec2 uWind; uniform vec4 uGrassBand; uniform vec2 u
 attribute float tip; attribute float flower; attribute vec2 bladeRoot; attribute float bladeId; attribute float iDensity; attribute vec2 iSlope; varying float vTip;
 ${GUST_GLSL}
 float gHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+float gVN(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(gHash(i), gHash(i + vec2(1, 0)), f.x), mix(gHash(i + vec2(0, 1)), gHash(i + vec2(1, 1)), f.x), f.y); }
+// Large soft PATCHES over the field (≈ 25 m + 8 m octaves): lighter / darker tip colour and taller / shorter grass.
+float gPatch(vec2 xz) { return gVN(xz * 0.04) * 0.65 + gVN(xz * 0.13 + 17.0) * 0.35; }
 vec4 gBW; float gGust;`,
       )
       .replace(
@@ -267,15 +285,17 @@ vec4 gBW; float gGust;`,
           // which stacked into terraced rows across every slope.
           transformed.y += dot(iSlope, rootL);
           // Per-blade height variety (Genshin: a fairly even, lush field).
-          transformed.y *= ${isGenshin() ? '0.85 + 0.3' : '0.8 + 0.45'} * gHash(bw.xz + 3.1);
+          transformed.y *= ${isGenshin() ? '(0.8 + 0.25 * gHash(bw.xz + 3.1)) * (0.7 + 0.6 * gPatch(bw.xz))' : '0.8 + 0.45 * gHash(bw.xz + 3.1)'}; // Genshin: soft height waves
           // Blades thicken with distance (base widens, tip stays a point) so a far blade never thins below a
           // pixel: sub-pixel blades shimmer as the camera pans (the "glitter" on phones).
-          transformed.xz = vec2(rootL.x, rootL.y) + (transformed.xz - vec2(rootL.x, rootL.y)) * (1.0 + dist * ${isOverland() ? '0.14' : '0.08'});
+          transformed.xz = vec2(rootL.x, rootL.y) + (transformed.xz - vec2(rootL.x, rootL.y)) * (1.0 + dist * ${isOverland() ? '0.14' : isGenshin() ? '0.03' : '0.08'});
           float t2 = tip * tip;
           float gust = gGust;
           float phase = dot(bw.xz, vec2(0.37, 0.29));
-          float sway = (sin(uTime * 2.1 + phase) * 0.4 + sin(uTime * 4.7 + phase * 1.9) * 0.14) * (0.45 + 0.9 * gust) + gust * 0.7;
-          transformed.xz += vec2(dot(uWind, ax), dot(uWind, az)) * sway * t2 * 0.28;
+          // Gentle (Genshin meadows ripple, they never lie flat): ≈ ⅓ of the old swing — at 0.28 a 0.6 m blade bent
+          // ~0.7 m at the default wind and the whole field smeared into streaks.
+          float sway = (sin(uTime * 2.1 + phase) * 0.4 + sin(uTime * 4.7 + phase * 1.9) * 0.12) * (0.5 + 0.7 * gust) + gust * 0.35; // (× 0.3 below: a soft ripple, blades never stretch)
+          transformed.xz += vec2(dot(uWind, ax), dot(uWind, az)) * sway * t2 * 0.036;
           // Parting around the player (~1.2 m).
           vec2 dp = bw.xz - uPlayerPos.xz;
           float pd = length(dp);
@@ -314,12 +334,19 @@ vec4 gBW; float gGust;`,
           // don't turn the grass olive.
           vec3 gc = vColor.rgb / (0.55 + 0.45 * tip);
           float gl = dot(gc, vec3(0.2126, 0.7152, 0.0722));
-          gc = mix(gc, vec3(0.223, 0.546, 0.061) * (gl / 0.442), 0.6);
-          vec3 tipHue = mix(vec3(1.2, 1.3, 0.95), vec3(1.34, 1.32, 0.85), tn) * (0.96 + 0.08 * bh);
-          vColor.rgb = gc * mix(vec3(0.96, 1.0, 1.0), tipHue, tip * tip * (3.0 - 2.0 * tip));`
+          // Softer than the old lime (sampled Genshin meadow close-up: a light, slightly yellow, unsaturated green).
+          // Genshin field close-ups: the blades ARE the ground's muted mid green (field and soil one surface) — only a
+          // slight pull toward a cool natural green, no lime.
+          // The blade takes the GROUND'S OWN HUE (golden autumn grass on golden ground, lush green on green, pale on
+          // dry), only a little more saturated (+20 %) so it doesn't read grey — never pulled toward a fixed green.
+          gc = max(mix(vec3(gl), gc, 1.2), vec3(0.0));
+          // Tip colour picked between two greens by the world PATCH noise (fluffy-grass): big soft light / dark areas.
+          float pt = gPatch(bwc.xz);
+          vec3 tipHue = vec3(mix(1.02, 1.3, smoothstep(0.25, 0.75, pt))) * (0.96 + 0.08 * bh); // brightness only (hue = ground)
+          vColor.rgb = gc * mix(vec3(0.68), tipHue, smoothstep(0.0, 1.0, tip)); // dark root → light tip, a smooth gradient, hue kept`
             : `vec3 tipHue = mix(vec3(0.9, 1.05, 0.92), vec3(1.2, 1.08, 0.68), tn) * (0.9 + 0.2 * bh);
           vColor.rgb *= mix(vec3(1.0), tipHue, tip);`}
-          vColor.rgb *= 1.0 + gGust * (${isOverland() ? '0.08' : '0.2'}) * tip;
+          vColor.rgb *= 1.0 + gGust * (${isOverland() ? '0.08' : '0.1'}) * tip; // soft gust bands
           if (flower > 0.5) { float fh = gHash(bwc.xz + 1.3); vColor.rgb = ${isGenshin() ? 'mix(vec3(1.0, 0.72, 0.12), fh > 0.3 ? vec3(1.0, 0.98, 0.92) : vec3(1.0, 0.86, 0.3), smoothstep(0.3, 0.8, tip))' : 'fh > 0.66 ? vec3(0.95, 0.92, 0.82) : fh > 0.33 ? vec3(0.95, 0.72, 0.12) : vec3(0.3, 0.75, 0.95)'}; }
         }
         #endif`,
@@ -333,7 +360,7 @@ vec4 gBW; float gGust;`,
       .replace(
         '#include <opaque_fragment>',
         /* glsl */ `float back = pow(max(dot(normalize(-vViewPosition), uKeyDirView), 0.0), 4.0);
-        outgoingLight += uKeyColor * diffuseColor.rgb * (back * ${isGenshin() ? '0.4' : '0.2'} + ${isGenshin() ? '0.16' : '0.1'}) * vTip; // warm soft sunlit (translucent) tips
+        outgoingLight += uKeyColor * diffuseColor.rgb * (back * ${isGenshin() ? '0.12' : '0.2'} + ${isGenshin() ? '0.04' : '0.1'}) * vTip; // warm soft sunlit (translucent) tips
         #include <opaque_fragment>`,
       )
   }

@@ -14,11 +14,16 @@ import { styledGrass, GrassField } from './Forest/GrassField'
 import { WorldFields } from './WorldFields'
 import { groundPalette } from '../rendering/artStyle'
 import { sampleHeight } from './Terrain/generateTerrain'
+import { FarForest } from './Forest/FarForest'
+import type { SpeciesDef } from './Forest/treeFactory'
 
 /** Soft time budget for chunk mesh builds per frame (count limit comes from the tier). */
 const BUILD_BUDGET_MS = 3
 
-export type WorldQuality = Pick<QualitySettings, 'name' | 'renderRadius' | 'lodRings' | 'plants' | 'buildPerFrame' | 'grass' | 'trees' | 'vegDetail'>
+export type WorldQuality = Pick<QualitySettings, 'name' | 'renderRadius' | 'lodRings' | 'plants' | 'buildPerFrame' | 'grass' | 'trees' | 'vegDetail' | 'impostors'>
+
+/** Per-tree LOD crossfade width (m): a tree dithers between two LODs over this much distance. */
+export const TREE_FADE = 12
 
 /**
  * Owns chunk lifecycle: request (worker) → cache → build → LOD/cull → physics → unload.
@@ -37,11 +42,16 @@ export class WorldManager {
   private centerZ = Number.NaN
   private q: WorldQuality = {
     name: 'low', renderRadius: 2, lodRings: [1.5, 2.2], plants: false, buildPerFrame: 1,
-    grass: { radius: 16, density: 1.1, blades: 5 }, trees: { near: 1 }, vegDetail: { farRocks: false, lean: true },
+    grass: { radius: 16, density: 1.1, blades: 5 }, trees: { near: 1, lod1: 45 }, vegDetail: { farRocks: false, lean: true },
+    impostors: { start: 70, far: 360, atlas: 1024, blend: false },
   }
   private detail: ChunkDetail = { plants: false, treeNear: 1, farRocks: false, lean: true }
   /** Dense grass around the player (one draw call). */
   readonly grass: GrassField
+  /** Trees beyond the streamed chunks (octahedral impostors) — on once the atlas is baked (setImpostors). */
+  readonly farForest: FarForest
+  /** Per-tree LOD + impostors active (Game bakes the atlas, then turns this on). */
+  private impostorsOn = false
   /** Chebyshev radius (chunks) around the player inside which every chunk is built (see update). */
   builtRadius = 0
 
@@ -59,6 +69,8 @@ export class WorldManager {
     this.geos = createPropGeometries()
     this.grass = new GrassField(mats.grass, mats.grassFar, mats.grassNearU, mats.grassFarU, this.fields, this.chunks)
     this.root.add(this.grass.root)
+    this.farForest = new FarForest(seed, this.fields.palette, this.fields, this.geos.trees, mats.impostor)
+    this.root.add(this.farForest.root)
     this.streamer = new ChunkStreamer(seed, (d) => {
       const key = chunkKey(d.cx, d.cz)
       this.cache.set(key, d)
@@ -72,7 +84,13 @@ export class WorldManager {
     this.q = { ...q, lodRings: [...q.lodRings] as [number, number], vegDetail: { ...q.vegDetail } }
     this.detail = { plants: q.plants, treeNear: q.trees.near, farRocks: q.vegDetail.farRocks, lean: q.vegDetail.lean }
     this.grass.configure(styledGrass(q.grass))
+    this.farForest.setRange(q.impostors.far)
     if (radiusChanged) this.centerX = this.centerZ = Number.NaN
+  }
+
+  /** The tree species library (impostor bake: slot = index here). */
+  get treeSpecies(): readonly SpeciesDef[] {
+    return this.geos.trees
   }
 
   get renderRadius(): number {
@@ -166,6 +184,7 @@ export class WorldManager {
       else if (chunk.ring > RADIUS.physics + 1 && ringAhead > RADIUS.physics + 1) this.physics.removeChunk(chunk.key)
       if (this.physics.hasChunk(chunk.key)) physicsChunks++
     }
+    this.treeBands(camera.position)
     this.visibility.update(camera, this.chunks.values())
     // Water in view (planar reflections render only then), re-tested every 4th frame.
     if ((this.frame++ & 3) === 0) this.stats.shoreVisible = this.waterInView(camera.position)
@@ -195,6 +214,43 @@ export class WorldManager {
     s.physicsChunks = physicsChunks
   }
 
+  /** Per-tree LOD + octahedral impostors on/off (Game turns it on once the atlas is baked). */
+  setImpostors(on: boolean): void {
+    if (on === this.impostorsOn) return
+    this.impostorsOn = on
+    this.farForest.enabled = on
+    this.farForest.invalidate()
+    if (!on) for (const c of this.chunks.values()) c.setTreeBands(null)
+  }
+
+  private readonly _bands = { near: false, mid: false, imp: false }
+  /**
+   * PER-TREE LOD: from the camera's nearest / farthest distance to each chunk's box, which tree sets (near mesh,
+   * low-poly mesh, impostors) any of its trees can be in — the shaders then pick each tree's LOD by its own
+   * distance. Chunks outside the render ring (the unload margin) leave their trees to the far forest.
+   */
+  private treeBands(cam: THREE.Vector3): void {
+    if (!this.impostorsOn) return
+    const im = this.q.impostors.start, l1 = Math.min(this.q.trees.lod1, im), W = TREE_FADE
+    const b = this._bands
+    for (const c of this.chunks.values()) {
+      const bx = c.bounds
+      const dx = Math.max(bx.min.x - cam.x, 0, cam.x - bx.max.x), dy = Math.max(bx.min.y - cam.y, 0, cam.y - bx.max.y), dz = Math.max(bx.min.z - cam.z, 0, cam.z - bx.max.z)
+      const dMin = Math.hypot(dx, dy, dz)
+      const fx = Math.max(Math.abs(cam.x - bx.min.x), Math.abs(cam.x - bx.max.x)), fy = Math.max(Math.abs(cam.y - bx.min.y), Math.abs(cam.y - bx.max.y)), fz = Math.max(Math.abs(cam.z - bx.min.z), Math.abs(cam.z - bx.max.z))
+      const dMax = Math.hypot(fx, fy, fz)
+      const inRing = c.ring <= this.q.renderRadius
+      b.near = inRing && dMin < l1 + W
+      b.mid = inRing && l1 < im && dMax > l1 && dMin < im + W // no mid stage when the near mesh hands straight to the impostor
+      b.imp = inRing && dMax > im
+      c.setTreeBands(b)
+    }
+    this.farForest.update(this.centerX, this.centerZ, (key) => {
+      const c = this.chunks.get(key)
+      return !!c && c.ring <= this.q.renderRadius
+    })
+  }
+
   private recenter(): void {
     const R = this.q.renderRadius
     // Request missing chunks, nearest first.
@@ -218,6 +274,7 @@ export class WorldManager {
         this.physics.broken.delete(key) // smashed props are rebuilt when you come back
         chunk.dispose()
         this.chunks.delete(key)
+        this.farForest.invalidate()
       }
     }
     for (const [key, d] of this.buildQueue) if (!this.inRing(d.cx, d.cz, R)) this.buildQueue.delete(key)
@@ -242,6 +299,7 @@ export class WorldManager {
       chunk.setLod(selectLod(-1, chunkDistance(focus.x, focus.z, d.cx, d.cz), this.q.lodRings), this.detail)
       this.root.add(chunk.group)
       this.chunks.set(key, chunk)
+      this.farForest.invalidate()
       built++
     }
     this.stats.buildMs = performance.now() - t0
@@ -256,5 +314,6 @@ export class WorldManager {
     this.chunks.clear()
     this.geos.dispose()
     this.grass.dispose()
+    this.farForest.dispose()
   }
 }

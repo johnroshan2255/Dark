@@ -4,8 +4,10 @@ import { buildInstanceAttributes, createInstancedMesh, type InstanceAttributes }
 import type { Cullable } from '../optimization/culling/ChunkVisibility'
 import { CELL_SIZE, CHUNK_RES, CHUNK_SIZE, LOD_COUNT } from './constants'
 import type { PropGeometries } from './Forest/propGeometries'
+import type { SpeciesDef } from './Forest/treeFactory'
+import { impostorQuad } from '../rendering/impostors/Impostors'
 import { buildTerrainGeometry } from './Terrain/TerrainGeometry'
-import { PROP_STRIDE, TREE_STRIDE, TreeSpecies, type ChunkData } from './types'
+import { PROP_STRIDE, TREE_STRIDE, TreeSpecies, isBroadleaf, type ChunkData } from './types'
 import { buildWires } from './Road/propMeshes'
 import { RoadProp } from './Road/roadProps'
 import { PropType } from './POI/poiLayout'
@@ -88,7 +90,7 @@ const GEN_HUES: Record<number, readonly (readonly [number, number, number])[]> =
   [TreeSpecies.Spruce]: [G_TEAL, G_TEAL, G_DEEP, G_FRESH],
   [TreeSpecies.Fir]: [G_DEEP, G_TEAL, G_TEAL, G_FRESH],
   [TreeSpecies.Pine]: [G_FRESH, G_TEAL, G_LIGHT, G_FRESH],
-  [TreeSpecies.Birch]: [G_FRESH, G_FRESH, G_LIGHT, G_LIGHT, G_TEAL, G_FRESH, G_YELLOW, G_ORANGE],
+  [TreeSpecies.Birch]: [G_FRESH, G_FRESH, G_LIGHT, G_LIGHT, G_FRESH, G_FRESH, G_YELLOW, G_ORANGE], // no teal: Genshin broadleaves are warm olive / yellow-green
   [TreeSpecies.Dead]: [BASE],
   [TreeSpecies.Cactus]: DESERT_HUES,
   [TreeSpecies.Joshua]: DESERT_HUES,
@@ -103,6 +105,15 @@ for (const set of [OVER_HUES, GENSHIN_HUES, GEN_HUES]) {
   set[TreeSpecies.Maple] = MAPLE_HUES
   set[TreeSpecies.Ancient] = ANCIENT_HUES
   set[TreeSpecies.Shroom] = SHROOM_HUES
+}
+// Broadleaf STAND types (scatter.ts broadleafStand): their colour is modelled (Blender) — gentle variation only;
+// the golden Liyue tree stays gold (no green hues on it).
+const G_GOLD: (readonly [number, number, number])[] = [[1, 1, 1], [1.06, 1.0, 0.9], [0.96, 0.92, 0.9], [1.1, 1.04, 0.86]]
+for (const set of [OVER_HUES, GENSHIN_HUES, GEN_HUES]) {
+  set[TreeSpecies.Slender] = [G_FRESH, G_LIGHT, G_FRESH, G_LIGHT]
+  set[TreeSpecies.Oak] = [G_FRESH, G_FRESH, G_LIGHT]
+  set[TreeSpecies.Curvy] = [G_FRESH, G_LIGHT, G_FRESH, G_YELLOW]
+  set[TreeSpecies.Golden] = G_GOLD
 }
 const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
 /** Autumn colours on SHARED species (birch / pine) growing in the autumn valleys, faded in with the autumn weight —
@@ -120,8 +131,74 @@ function regionLeafTint(fields: WorldFields, x: number, z: number, h: number, ou
 }
 // Resolved when a chunk is built (not at import: the art style is set after the modules load).
 const hueSet = () => (isOverland() ? OVER_HUES : isGenshin() ? GEN_HUES : GENSHIN_HUES)
-const farConiferHues = () =>
+// Blender-modelled species carry final Genshin colours in every art style (SpeciesDef.modelled).
+const huesOf = (sp: SpeciesDef) => (sp.modelled ? GEN_HUES : hueSet())[sp.id] ?? hueSet()[0]
+const farConiferHues = (sp?: SpeciesDef) =>
+  sp?.modelled ? ([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) :
   isOverland() ? ([OVER_GREEN, OVER_DEEP, OVER_GREEN, OVER_LARCH] as const) : isGenshin() ? ([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) : ([TEAL, DEEP, FRESH, BRIGHT, LIME, ORANGE] as const)
+
+/**
+ * Instance attributes of every species present in a tree record array (chunk-local positions, `origin` = the
+ * chunk's world corner) — exactly what the chunk's per-species meshes draw (same hues, tints, shape spread), so
+ * an impostor stands where its mesh tree stood and wears its colours. Shared with the far forest.
+ */
+export function speciesTreeAttrs(trees: Float32Array, origin: readonly [number, number], fields: WorldFields, species: readonly SpeciesDef[]): { sp: SpeciesDef; attrs: InstanceAttributes }[] {
+  const tint = (o: number, out: [number, number, number]) => {
+    const sp = trees[o + 5]
+    biomeTint(fields, origin, trees, o, FROST_TREE, sp >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
+    if (isBroadleaf(sp) || sp === TreeSpecies.Pine) regionLeafTint(fields, origin[0] + trees[o], origin[1] + trees[o + 2], trees[o + 1], out)
+  }
+  const out: { sp: SpeciesDef; attrs: InstanceAttributes }[] = []
+  for (const sp of species) {
+    // Genshin broadleaves: more per-tree shape variety (width / height / lean) — with their lopsided crowns and random
+    // rotation, neighbouring trees of one species read as different silhouettes (no extra geometry or draws).
+    const spreadSp = isGenshin() && (isBroadleaf(sp.id) || sp.id === TreeSpecies.Maple || sp.id === TreeSpecies.Ancient)
+    const attrs = buildInstanceAttributes(trees, TREE_STRIDE, (o) => trees[o + 5] === sp.id, 0.16, spreadSp ? 0.34 : 0.22, huesOf(sp), origin, tint)
+    if (attrs) out.push({ sp, attrs })
+  }
+  return out
+}
+
+let _quad: THREE.BufferGeometry | null = null
+/**
+ * One impostor InstancedMesh for all the given species' trees (atlas slot = the species' index in the library,
+ * per instance) — 1 draw. Matrices are re-based by `offset` (far-forest blocks merge several chunks).
+ */
+export function createImpostorMesh(list: { sp: SpeciesDef; attrs: InstanceAttributes; offset?: [number, number] }[], library: readonly SpeciesDef[], material: THREE.Material): THREE.InstancedMesh | null {
+  let count = 0
+  for (const l of list) count += l.attrs.count
+  if (!count) return null
+  const mat = new Float32Array(count * 16), col = new Float32Array(count * 3), slot = new Float32Array(count)
+  let n = 0
+  for (const { sp, attrs, offset } of list) {
+    mat.set(attrs.matrix.array as Float32Array, n * 16)
+    col.set(attrs.color.array as Float32Array, n * 3)
+    slot.fill(library.indexOf(sp), n, n + attrs.count)
+    if (offset) for (let k = n; k < n + attrs.count; k++) (mat[k * 16 + 12] += offset[0]), (mat[k * 16 + 14] += offset[1])
+    n += attrs.count
+  }
+  _quad ??= impostorQuad()
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', _quad.getAttribute('position'))
+  g.setAttribute('normal', _quad.getAttribute('normal'))
+  g.setIndex(_quad.getIndex())
+  g.setAttribute('aSlot', new THREE.InstancedBufferAttribute(slot, 1))
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 7, 0), 16) // a big tree's crown, before instancing
+  const mesh = new THREE.InstancedMesh(g, material, count)
+  mesh.instanceMatrix = new THREE.InstancedBufferAttribute(mat, 16)
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(col, 3)
+  mesh.computeBoundingSphere()
+  mesh.matrixAutoUpdate = false
+  mesh.name = 'impostors'
+  return mesh
+}
+
+/** Which tree meshes a chunk needs under the per-tree LOD (from its nearest / farthest point's distance). */
+export interface TreeBands {
+  near: boolean
+  mid: boolean
+  imp: boolean
+}
 
 /** Per-tier chunk detail switches. */
 export interface ChunkDetail {
@@ -176,6 +253,10 @@ export class WorldChunk implements Cullable {
   readonly waterPts: Float32Array | null = null
   private species: { id: number; m: SpeciesMeshes }[] = []
   private far: FarGroup[] = []
+  /** All trees as octahedral impostors (1 draw), or null (no trees). */
+  private impostors: THREE.InstancedMesh | null = null
+  /** Per-tree LOD (impostors baked): which tree meshes are needed; null = the legacy whole-chunk LOD. */
+  private bands: TreeBands | null = null
   private rocks: THREE.InstancedMesh | null = null
   /** LOD1 rocks: low-poly geometry, same instances. */
   private rocksFar: THREE.InstancedMesh | null = null
@@ -250,20 +331,20 @@ export class WorldChunk implements Cullable {
     const treeTint = (o: number, out: [number, number, number]) => {
       const sp = data.trees[o + 5]
       biomeTint(fields, this.origin, data.trees, o, FROST_TREE, sp >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
-      if (sp === TreeSpecies.Birch || sp === TreeSpecies.Pine) regionLeafTint(fields, this.origin[0] + data.trees[o], this.origin[1] + data.trees[o + 2], data.trees[o + 1], out)
+      if (isBroadleaf(sp) || sp === TreeSpecies.Pine) regionLeafTint(fields, this.origin[0] + data.trees[o], this.origin[1] + data.trees[o + 2], data.trees[o + 1], out)
     }
     const rockTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.rocks, o, SNOW_ROCK, SAND_ROCK, out)
-    for (const sp of geos.trees) {
-      // Genshin broadleaves: more per-tree shape variety (width / height / lean) — with their lopsided crowns and random
-      // rotation, neighbouring trees of one species read as different silhouettes (no extra geometry or draws).
-      const spreadSp = isGenshin() && (sp.id === TreeSpecies.Birch || sp.id === TreeSpecies.Maple || sp.id === TreeSpecies.Ancient)
-      const attrs = buildInstanceAttributes(data.trees, TREE_STRIDE, (o) => data.trees[o + 5] === sp.id, 0.16, spreadSp ? 0.34 : 0.22, hueSet()[sp.id] ?? hueSet()[0], this.origin, treeTint)
-      if (!attrs) continue
-      const levels = [0, 1].map((l) => this.add(createInstancedMesh(sp.levels[l], mats.vegetation, attrs, `${sp.name}.lod${l}`)))
+    const perSpecies = speciesTreeAttrs(data.trees, this.origin, fields, geos.trees)
+    for (const { sp, attrs } of perSpecies) {
+      // Near meshes: full detail, or level 1 tagged as the NEAR LOD band (LOW's near trees).
+      const levels = [sp.levels[0], sp.near1 ?? sp.levels[1]].map((g, l) => this.add(createInstancedMesh(g, mats.vegetation, attrs, `${sp.name}.lod${l}`)))
       levels.forEach((m) => m.layers.set(LAYER_NO_REFLECT)) // the reflection draws the merged far trees instead
       this.species.push({ id: sp.id, m: { levels } })
       this.instanceCount += attrs.count
     }
+    // Distant trees: one octahedral-impostor card per tree, all species, one draw (shown under the per-tree LOD).
+    this.impostors = createImpostorMesh(perSpecies, geos.trees, mats.impostor)
+    if (this.impostors) this.add(this.impostors)
     const t = data.trees
     const spruce = geos.trees.find((x) => x.id === TreeSpecies.Spruce)!
     const birch = geos.trees.find((x) => x.id === TreeSpecies.Birch)!
@@ -273,9 +354,10 @@ export class WorldChunk implements Cullable {
     // Desert species keep their own far meshes (a saguaro and a Joshua tree read differently on the skyline); a
     // desert chunk has no conifers or birches, so its far draws stay at ≤ 2 like a forest chunk's.
     const farSets = [[conifer, spruce], [only(TreeSpecies.Birch), birch], [only(TreeSpecies.Cactus), byId(TreeSpecies.Cactus)], [only(TreeSpecies.Joshua), byId(TreeSpecies.Joshua)],
-      [only(TreeSpecies.Maple), byId(TreeSpecies.Maple)], [only(TreeSpecies.Ancient), byId(TreeSpecies.Ancient)], [only(TreeSpecies.Shroom), byId(TreeSpecies.Shroom)]] as const
+      [only(TreeSpecies.Maple), byId(TreeSpecies.Maple)], [only(TreeSpecies.Ancient), byId(TreeSpecies.Ancient)], [only(TreeSpecies.Shroom), byId(TreeSpecies.Shroom)],
+      ...[TreeSpecies.Oak, TreeSpecies.Slender, TreeSpecies.Golden, TreeSpecies.Curvy].map((id) => [only(id), byId(id)] as const)] as const
     for (const [filter, sp] of farSets) {
-      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === spruce.id ? farConiferHues() : hueSet()[sp.id] ?? hueSet()[0], this.origin, treeTint)
+      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === spruce.id ? farConiferHues(spruce) : huesOf(sp), this.origin, treeTint)
       if (!attrs) continue
       this.far.push({
         lod1: this.add(createInstancedMesh(sp.levels[1], mats.vegetation, attrs, `far.${sp.name}.lod1`)),
@@ -436,23 +518,7 @@ export class WorldChunk implements Cullable {
     this.terrain[tl]!.castShadow = !(detail.lean && lod === 2)
 
     const near = lod === 0
-    for (const { id, m } of this.species) {
-      const skip = detail.lean && id === TreeSpecies.Dead // LOW: rare snags cost a draw per chunk → hidden
-      m.levels.forEach((mesh, l) => {
-        mesh.visible = near && l === detail.treeNear && !skip
-        mesh.castShadow = mesh.visible
-      })
-    }
-    for (const f of this.far) {
-      // Near chunks: the merged LOD1 trees stand in for the per-species near trees in the water's reflection
-      // only (≤ 2 draws, ~¼ of the triangles); the main camera and the shadow pass never see them there.
-      f.lod1.visible = lod <= 1
-      f.lod1.layers.set(lod === 0 ? LAYER_REFLECT_ONLY : 0)
-      f.lod2.visible = lod === 2
-      // LOD1 trees can sit inside the shadow box on LOW/MEDIUM (small LOD0 ring): let them cast so tree
-      // shadows don't stop at a chunk border. The shadow frustum culls the far ones.
-      f.lod1.castShadow = lod === 1
-    }
+    this.applyTrees()
     if (this.rocks) (this.rocks.visible = near), (this.rocks.castShadow = near && !detail.lean)
     if (this.rocksFar) this.rocksFar.visible = lod === 1 && detail.farRocks
     if (this.ferns) this.ferns.visible = near && detail.plants
@@ -478,6 +544,45 @@ export class WorldChunk implements Cullable {
     }
   }
 
+  /**
+   * PER-TREE LOD (impostors baked; WorldManager per frame): `bands` = which tree sets any of this chunk's trees
+   * fall in — near meshes, low-poly meshes, impostor cards. Each tree then picks its own LOD in the shaders by
+   * its distance (uTreeLod dither), so a chunk straddling a boundary draws both sets and nothing pops. null =
+   * back to the whole-chunk LOD.
+   */
+  setTreeBands(b: TreeBands | null): void {
+    const o = this.bands
+    if (o === b || (o && b && o.near === b.near && o.mid === b.mid && o.imp === b.imp)) return
+    this.bands = b && { ...b }
+    this.applyTrees()
+  }
+
+  private applyTrees(): void {
+    const detail = this.detail, b = this.bands
+    const lod = this.lod
+    // Near meshes: whole-chunk LOD0, or (per-tree LOD) any tree inside the near band.
+    const near = b ? b.near : lod === 0
+    for (const { id, m } of this.species) {
+      const skip = detail.lean && id === TreeSpecies.Dead // LOW: rare snags cost a draw per chunk → hidden
+      m.levels.forEach((mesh, l) => {
+        mesh.visible = near && l === detail.treeNear && !skip
+        mesh.castShadow = mesh.visible
+      })
+    }
+    const mid = b ? b.mid : lod === 1
+    for (const f of this.far) {
+      // Chunks with near trees: the merged LOD1 trees stand in for the per-species near trees in the water's
+      // reflection only (≤ 2 draws, ~¼ of the triangles); the main camera and the shadow pass never see them there.
+      f.lod1.visible = mid || near
+      f.lod1.layers.set(mid ? 0 : LAYER_REFLECT_ONLY)
+      f.lod2.visible = !b && lod === 2
+      // LOD1 trees can sit inside the shadow box on LOW/MEDIUM (small LOD0 ring): let them cast so tree
+      // shadows don't stop at a chunk border. The shadow frustum culls the far ones.
+      f.lod1.castShadow = mid
+    }
+    if (this.impostors) this.impostors.visible = !!b && b.imp
+  }
+
   setVisible(v: boolean): void {
     if (v === this.isVisible) return
     this.isVisible = v
@@ -500,6 +605,7 @@ export class WorldChunk implements Cullable {
     // Shared geometries/materials belong to the libraries; only per-chunk buffers are freed.
     for (const { m } of this.species) m.levels.forEach((x) => x.dispose())
     for (const f of this.far) (f.lod1.dispose(), f.lod2.dispose())
+    if (this.impostors) (this.impostors.geometry.dispose(), this.impostors.dispose())
     for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.agaves, this.shrubs, this.leafPiles, this.glowShrooms, this.poles, this.lamps, this.fences]) m?.dispose()
     for (const { mesh } of this.places) mesh.geometry.dispose()
     this.formation?.geometry.dispose()

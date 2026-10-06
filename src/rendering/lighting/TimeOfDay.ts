@@ -211,17 +211,19 @@ const GEN_BASE = { painted: 0, grain: 0, vignette: 0.04, lift: c(0x000000) }
 const GEN_DAWN = key({
   ...DAWN, ...GEN_BASE, sunColor: c(0xffc89a), sunIntensity: 2.2, hemiSky: c(0xa8b8e0), hemiGround: c(0x6a6a58), hemiIntensity: 1.6,
   fogColor: c(0xe8c8c0), skyZenith: c(0x5a84c8), saturation: 1.0, contrast: 1.0, split: 0.15, toon: 0.8,
-  clouds: 0.45, cloudWhite: 0.7, fogMax: 0.62, landHaze: c(0xc8c8e0), haze: 0.3, mistDensity: 0.01,
+  clouds: 0.45, cloudWhite: 0.7, fogStart: 50, fogEnd: 800, fogMax: 0.82, landHaze: c(0xc8c8e0), haze: 0.42, mistDensity: 0.016, mistBase: 0, mistFalloff: 0.085,
 })
 const GEN_DAY = key({
   ...DAY, ...GEN_BASE, sunColor: c(0xfff2dc), sunIntensity: 2.9, hemiSky: c(0xa8d4ff), hemiGround: c(0x8aa878), hemiIntensity: 2.25,
-  fogColor: c(0x96d2eb), skyZenith: c(0x0675bf), exposure: 1.1, saturation: 0.94, contrast: 1.0, split: 0.1, toon: 0.8,
-  clouds: 0.3, cloudWhite: 1, haze: 0.24, fogMax: 0.62, landHaze: c(0xa4d0f2), mistDensity: 0.0006,
+  fogColor: c(0xc2e6f4), skyZenith: c(0x0f86e2), exposure: 1.1, saturation: 1.0, contrast: 1.0, split: 0.1, toon: 0.8,
+  // Visible ATMOSPHERIC DEPTH (Genshin daytime): a pale-blue veil builds from ~60 m — a hill 400 m off is ~40 %
+  // sky-tinted, 1 km ~75 % — and a thin milky mist lies in the valleys and over water.
+  clouds: 0.3, cloudWhite: 1, fogStart: 60, fogEnd: 900, haze: 0.4, fogMax: 0.8, landHaze: c(0xa2ccf4), mistDensity: 0.006, mistBase: -4, mistFalloff: 0.1,
 })
 const GEN_EVENING = key({
   ...EVENING, ...GEN_BASE, sunColor: c(0xffc890), sunIntensity: 3.0, hemiSky: c(0x9cb4e8), hemiGround: c(0x6a6458), hemiIntensity: 1.7,
-  fogColor: c(0xe8c4a8), skyZenith: c(0x3a6cc4), saturation: 1.0, contrast: 1.02, split: 0.3, toon: 0.8, fogMax: 0.7,
-  landHaze: c(0xc4c4dc), haze: 0.4,
+  fogColor: c(0xe8c4a8), skyZenith: c(0x3a6cc4), saturation: 1.0, contrast: 1.02, split: 0.3, toon: 0.8, fogMax: 0.82,
+  fogStart: 50, fogEnd: 800, landHaze: c(0xd4c8dc), haze: 0.5, mistDensity: 0.012, mistBase: 0, mistFalloff: 0.085,
 })
 const GEN_DUSK = key({ ...DUSK, ...GEN_BASE, saturation: 0.95, vignette: 0.2 })
 const GEN_NIGHT = key({ ...NIGHT, ...GEN_BASE, vignette: 0.2 })

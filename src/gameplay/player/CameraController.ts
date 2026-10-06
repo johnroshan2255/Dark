@@ -20,6 +20,8 @@ export class CameraController {
   mode: CameraMode = 'fpp'
   /** Vehicle view: farther and higher behind (car). null = on foot / bike. */
   vehicle: { distance: number; pivot: number } | null = null
+  /** The car the player is in / climbing into: its chassis never pulls the camera in (the pivot is inside it). */
+  ignoreBody: RAPIER.RigidBody | null = null
   /** Garage turntable: orbit this point (the parked car) slowly; the player and look input are ignored. */
   garage: THREE.Vector3 | null = null
   private orbit = 0
@@ -97,7 +99,7 @@ export class CameraController {
       const len = Math.hypot(dx, dy, dz)
       this.ray.origin = { x: this.pivot.x, y: this.pivot.y, z: this.pivot.z }
       this.ray.dir = { x: dx / len, y: dy / len, z: dz / len }
-      const hit = this.physics.world.castRay(this.ray, len, true, undefined, undefined, p.collider)
+      const hit = this.physics.world.castRay(this.ray, len, true, undefined, undefined, p.collider, this.ignoreBody ?? undefined)
       const target = hit ? Math.max(0.35, hit.timeOfImpact - 0.3) : len
       // (named `pull`, NOT `k`: shadowing the knockdown amount made the camera roll ~0.5° and wobble every frame)
       const pull = target < this.dist ? 1 - Math.exp(-30 * dt) : 1 - Math.exp(-4 * dt)
@@ -112,8 +114,10 @@ export class CameraController {
 
     // Character: visible in TPP only. Faces the view when aiming the flashlight, else the move direction.
     this.character.root.visible = tpp
-    this.blob.visible = tpp && this.blob.userData.enabled !== false
-    if (tpp) {
+    // In / getting into a car the body is posed by the car (Car.updateEntry, after this); the bike re-poses it itself.
+    const inCar = p.inVehicle && !p.ride.riding
+    this.blob.visible = tpp && this.blob.userData.enabled !== false && !inCar
+    if (tpp && !inCar) {
       const moving = p.horizontalSpeed > 0.4
       const targetYaw = flashlightOn || !moving ? (flashlightOn ? p.yaw : this.character.yaw) : Math.atan2(-p.velocity.x, -p.velocity.z)
       this.character.animate(dt, pos, targetYaw, p.horizontalSpeed, p.grounded, flashlightOn, p.pitch, p.velocity.y, k, p.tumbling ? { angle: p.tumble, yaw: p.tumbleYaw } : null) // knockdown / bail tumble / get-up posed inside

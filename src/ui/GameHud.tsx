@@ -19,6 +19,9 @@ export function GameHud({ game }: { game: Game }) {
   const letters = useRef<(HTMLSpanElement | null)[]>([])
   const hpBar = useRef<HTMLDivElement>(null)
   const prompt = useRef<HTMLDivElement>(null)
+  const toast = useRef<HTMLDivElement>(null)
+  const lastTreasures = useRef(0)
+  const toastUntil = useRef(0)
   const marks = useRef<(HTMLSpanElement | null)[]>([])
   const nearest = useRef<HTMLDivElement>(null)
   const banner = useRef<HTMLDivElement>(null)
@@ -108,9 +111,19 @@ export function GameHud({ game }: { game: Game }) {
         // Only when standing next to a vehicle — never while inside / riding (E or the RIDE button gets you out).
         const car = game.car.near && !game.car.driving && !game.bike.riding
         const bike = game.bike.near && !game.bike.riding && !game.car.driving
-        prompt.current.style.display = car || bike ? 'flex' : 'none'
+        const chest = game.caves.nearChest && !game.car.driving && !game.bike.riding
+        prompt.current.style.display = car || bike || chest ? 'flex' : 'none'
         const label = prompt.current.lastChild as HTMLElement
-        if (label) label.textContent = car ? 'Drive truck' : 'Mount bike'
+        if (label) label.textContent = chest ? 'Open chest' : car ? 'Drive truck' : 'Mount bike'
+      }
+      // Treasure toast: a chest was just opened (CaveSystem.treasures went up).
+      if (toast.current) {
+        const n = game.caves.treasures
+        if (n !== lastTreasures.current) {
+          lastTreasures.current = n
+          if (n > 0) (toast.current.textContent = `✦ Treasure found  ·  ${n}`), (toastUntil.current = performance.now() + 3200)
+        }
+        toast.current.style.opacity = performance.now() < toastUntil.current ? '1' : '0'
       }
       if (hpBar.current) {
         const k = game.health.hp / game.health.max
@@ -144,6 +157,7 @@ export function GameHud({ game }: { game: Game }) {
           <div style={{ opacity: 0.7, marginTop: 8 }}>Waking up on the road…</div>
         </div>
       )}
+      <div ref={toast} style={toastStyle} />
       <div ref={prompt} style={promptStyle}>
         <span style={keyCap}>E</span>
         <span>Mount bike</span>
@@ -178,6 +192,7 @@ const speedUnit: CSSProperties = { marginLeft: 4, opacity: 0.8 }
 const nitroTrack: CSSProperties = { width: 180, height: 8, borderRadius: 4, background: 'rgba(0,0,0,0.45)', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.35)' }
 const nitroFill: CSSProperties = { width: '100%', height: '100%', transformOrigin: 'left center', background: '#3fb8ff', transform: 'scaleX(1)' }
 const deathStyle: CSSProperties = { position: 'fixed', inset: 0, zIndex: 20, display: 'grid', placeContent: 'center', textAlign: 'center', color: '#f2d0d0', font: '600 14px system-ui, sans-serif', background: 'radial-gradient(rgba(60,0,0,0.35), rgba(10,0,0,0.85))', pointerEvents: 'none' }
+const toastStyle: CSSProperties = { position: 'fixed', left: '50%', top: '18%', transform: 'translateX(-50%)', padding: '8px 18px', borderRadius: 20, background: 'rgba(20,16,6,0.6)', color: '#ffd76a', font: '700 16px system-ui, sans-serif', letterSpacing: 2, zIndex: 9, pointerEvents: 'none', opacity: 0, transition: 'opacity 400ms' }
 const promptStyle: CSSProperties = { position: 'fixed', left: '50%', bottom: '22%', transform: 'translateX(-50%)', display: 'none', alignItems: 'center', gap: 8, padding: '6px 12px', borderRadius: 18, background: 'rgba(10,12,16,0.6)', color: '#fff', font: '600 13px system-ui, sans-serif', zIndex: 9, pointerEvents: 'none' }
 const keyCap: CSSProperties = { display: 'inline-grid', placeItems: 'center', width: 22, height: 22, borderRadius: 5, background: '#f1f1f1', color: '#111', fontWeight: 800 }
 const partyBox: CSSProperties = { position: 'fixed', top: 14, left: 16, zIndex: 9, pointerEvents: 'none', font: '600 13px system-ui, sans-serif', color: '#fff', textShadow: '0 1px 3px rgba(0,0,0,0.8)' }

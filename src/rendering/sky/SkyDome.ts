@@ -95,6 +95,8 @@ export class SkyDome {
    */
   prepare(renderer: THREE.WebGLRenderer, camera: THREE.Camera, w: number, h: number, scale: number): void {
     this.lowRes = scale < 0.99
+    // Cloud edges a few low-res texels wide at any sky resolution (0.07 at 0.5×, 0.14 at LOW's 0.25×).
+    skyUniforms.uSkyEdge.value = 0.07 * Math.min(2, Math.max(1, 0.5 / Math.max(scale, 0.05)))
     if (!this.lowRes) {
       this.mesh.material = this.material
       return

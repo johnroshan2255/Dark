@@ -27,6 +27,20 @@ export const globalUniforms = {
   uFarEdge: { value: new THREE.Vector2(1e5, 1e5 + 1) },
   /** Streamed-detail edge: trees/props dither out between x and y (view depth, m) — not drawn beyond. */
   uCullFade: { value: new THREE.Vector2(1e5, 1e5 + 1) },
+  /**
+   * PER-TREE LOD CROSSFADE (camera → tree origin distance, m): LOD0 mesh → LOD1 mesh dither between x and y,
+   * LOD1 mesh → octahedral impostor between z and w. Every tree geometry carries its band (`aLodBand`); the same
+   * interleaved-gradient dither on both sides makes each pixel belong to exactly one LOD. x < 0 = off (legacy LOD).
+   */
+  uTreeLod: { value: new THREE.Vector4(-1, 0, 1e5, 1e5 + 1) }, // x < 0 = off (legacy chunk LOD)
+  /**
+   * AERIAL PERSPECTIVE (Genshin's distance "filter", stylize fog block): from x to y metres distant surfaces lose
+   * saturation and contrast toward the haze (z = strength), so far detail reads as soft silhouettes long before the
+   * tint covers it; w = how much warmer / brighter the haze is toward the sun (cooler away from it). ~12 ALU.
+   */
+  uAerial: { value: new THREE.Vector4(30, 600, 0.75, 0.65) },
+  /** Far-forest edge: trees thin out (each vanishes whole at its own hashed distance) between x and y (m). */
+  uImpFar: { value: new THREE.Vector2(1e5, 1e5 + 1) },
   /** Ground wetness 0..1 (weather): darker ground, a sheen toward the key light, sky-reflecting puddles on flat ground. */
   uWet: { value: 0 },
   /** Foliage cards dissolve this close to the eye (view depth, m): start, end. */
@@ -68,10 +82,10 @@ vec3 foliageSway(vec3 p, vec2 ixz, float t, vec2 wind) {
   vec2 dir = wind / max(ws, 1e-4);
   float phase = dot(ixz, vec2(0.37, 0.61));
   float gust = windGust(ixz, t, wind);
-  // ~1 m lean + ±1 m sway at the top of a 17 m tree in a strong wind (ws ≈ 1.8); a whisper in still air.
-  float lean = (0.35 + 0.65 * gust) * ws * 0.6;
+  // ~15 cm lean + ±15 cm sway at the top of a 17 m tree in a strong wind (ws ≈ 1.8); a whisper in still air.
+  float lean = (0.35 + 0.65 * gust) * ws * 0.09; // (30 % of the last pass: crowns barely lean, they breathe)
   float sway = sin(t * 1.1 + phase) * 0.5 + sin(t * 2.7 + phase * 1.7 + h * 0.4) * 0.2;
-  p.xz += dir * k * (lean + sway * ws * 0.4);
+  p.xz += dir * k * (lean + sway * ws * 0.06);
   return p;
 }`
 

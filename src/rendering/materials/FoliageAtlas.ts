@@ -172,30 +172,51 @@ function drawLeaves(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rn
  * from the crown's shared normals + vertex colours, not the texture.
  */
 function drawTuftGenshin(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng): void {
+  // GENSHIN LEAF SPRAY (matched to Genshin's ginkgo / broadleaf close-ups — the Blender trees' camera-facing card):
+  //  - 5 thin curving TWIGS fanning out from near the card's middle, leaves ALONG them (no radial rosette: the
+  //    sprays point different ways, the leaves on them alternate sides at random angles);
+  //  - ROUND FAN leaves on short stalks, each its own width (0.45–1.1: some seen at an angle) and size;
+  //  - ONE flat tone per leaf in a narrow range (0.86–1.0), no outlines, no contact shadows (they read as
+  //    paper cut-outs); open GAPS between leaves and sprays (sky shows through, an airy crown);
+  //  - everything inside |x|, |y| ≤ 0.9 of the cell (cards never cut off straight).
   const cx = ox + CELL / 2, cy = oy + CELL / 2, R = CELL * 0.46
-  const leafPath = (x: number, y: number, size: number, rot: number, lobes: number) => {
+  const leaf = (x: number, y: number, a: number, len: number, w: number, v: number) => {
+    const ca = Math.cos(a), sa = Math.sin(a)
+    const P = (u: number, vv: number) => [x + ca * u * len - sa * vv * len, y + sa * u * len + ca * vv * len] as const
+    const s0 = P(0, 0), l1 = P(0.18, -0.2 * w), lt = P(0.62, -0.5 * w), lc = P(0.95, -0.42 * w), tip = P(1.0, 0), rc = P(0.95, 0.42 * w), rt = P(0.62, 0.5 * w), r1 = P(0.18, 0.2 * w)
+    g.fillStyle = grey(v)
     g.beginPath()
-    const N = 72
-    for (let i = 0; i <= N; i++) {
-      const t = (i / N) * Math.PI * 2
-      // Pointed lobes: r = size × (0.55 + 0.45 |cos(lobes·t/2)|^2.5), the leaf elongated along its axis.
-      const lobe = 0.55 + 0.45 * Math.pow(Math.abs(Math.cos((lobes * t) / 2)), 2.5)
-      const r = size * lobe * (1 + 0.25 * Math.cos(t))
-      const px = Math.cos(t) * r, py = Math.sin(t) * r * 0.8
-      const xr = x + px * Math.cos(rot) - py * Math.sin(rot), yr = y + px * Math.sin(rot) + py * Math.cos(rot)
-      if (i === 0) g.moveTo(xr, yr)
-      else g.lineTo(xr, yr)
-    }
+    g.moveTo(s0[0], s0[1])
+    g.quadraticCurveTo(l1[0], l1[1], lt[0], lt[1])
+    g.quadraticCurveTo(lc[0], lc[1], tip[0], tip[1]) // a broad, ROUND top (no corners)
+    g.quadraticCurveTo(rc[0], rc[1], rt[0], rt[1])
+    g.quadraticCurveTo(r1[0], r1[1], s0[0], s0[1])
     g.fill()
   }
-  // Two flat layers (back darker, front lighter), leaves inside a ragged fan (denser at the centre).
-  const layers = [[30, 0.74, 1.0], [24, 0.94, 0.82]] as const
-  for (const [count, tone, spread] of layers) {
-    for (let i = 0; i < count; i++) {
-      const a = rng.next() * Math.PI * 2, d = Math.pow(rng.next(), 0.7) * spread
-      const x = cx + Math.cos(a) * d * R * 0.78, y = cy + Math.sin(a) * d * R * 0.62
-      g.fillStyle = grey(tone + rng.range(-0.03, 0.03))
-      leafPath(x, y, R * rng.range(0.13, 0.19), a + rng.range(-0.8, 0.8), rng.next() < 0.5 ? 5 : 7)
+  const twigs = 5
+  const rot = rng.range(0, Math.PI * 2)
+  for (let t = 0; t < twigs; t++) {
+    // Each twig starts near the middle and fans out in its own direction (evenly around, jittered), curving.
+    let a = rot + (t / twigs) * Math.PI * 2 + rng.range(-0.35, 0.35)
+    let x = rng.range(-0.12, 0.12), y = rng.range(-0.12, 0.12)
+    const L = rng.range(0.62, 0.78), steps = 7, bend = rng.range(-0.18, 0.18)
+    for (let i = 0; i < steps; i++) {
+      const nx = x + Math.cos(a) * (L / steps), ny = y + Math.sin(a) * (L / steps)
+      if (Math.abs(nx) > 0.8 || Math.abs(ny) > 0.8) break
+      g.strokeStyle = grey(0.62); g.lineWidth = Math.max(1, 3.2 * (1 - i / steps))
+      g.beginPath(); g.moveTo(cx + x * R, cy + y * R); g.lineTo(cx + nx * R, cy + ny * R); g.stroke()
+      x = nx; y = ny; a += bend
+      // Leaves along the twig, alternating sides at random angles; the twig's end gets a small tuft of 3.
+      const n = i === steps - 1 ? 3 : 2
+      for (let k = 0; k < n; k++) {
+        const side = (k + i) % 2 ? 1 : -1
+        const la = a + side * rng.range(0.5, 1.4) + rng.range(-0.3, 0.3)
+        const len = R * rng.range(0.15, 0.21) * (0.85 + 0.25 * (i / steps))
+        // Keep the whole leaf inside the cell.
+        const ex = x + Math.cos(la) * len / R, ey = y + Math.sin(la) * len / R
+        if (Math.abs(ex) > 0.9 || Math.abs(ey) > 0.9) continue
+        leaf(cx + x * R, cy + y * R, la, len, rng.range(0.45, 1.1), rng.range(0.86, 1.0))
+      }
     }
   }
 }
@@ -276,7 +297,9 @@ function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean, genshin = fals
   if (storybook) drawBrushSpray(g, 0, 0, rng)
   else drawSpray(g, 0, 0, rng)
   drawLeaves(g, CELL, 0, rng)
-  if (genshin) drawTuftGenshin(g, 0, CELL, rng)
+  // The leaf-cluster cell is the Blender trees' leaf texture (assets/treeModels.ts): the painted Genshin cluster in
+  // every style but storybook (its brush look keeps its own tufts).
+  if (genshin || !storybook) drawTuftGenshin(g, 0, CELL, rng)
   else drawTuft(g, 0, CELL, rng)
   drawFern(g, CELL, CELL, rng)
   // Opaque white block for solids (bottom-right corner of the fern cell, outside the frond).

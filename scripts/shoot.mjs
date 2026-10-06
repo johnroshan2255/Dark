@@ -14,13 +14,14 @@ import path from 'node:path'
 const [outDir, shotsFile] = process.argv.slice(2)
 const shots = JSON.parse(fs.readFileSync(shotsFile, 'utf8'))
 fs.mkdirSync(outDir, { recursive: true })
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+const CHROME = process.env.CHROME || (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+const ANGLE = process.platform === 'win32' ? 'd3d11' : process.platform === 'darwin' ? 'metal' : 'gl'
 const W = Number(process.env.W || 1280), H = Number(process.env.H || 720)
 
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'new',
-  args: ['--use-angle=metal', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--enable-gpu-rasterization', `--window-size=${W},${H}`, '--autoplay-policy=no-user-gesture-required', '--mute-audio'],
+  args: [`--use-angle=${ANGLE}`, '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--enable-gpu-rasterization', `--window-size=${W},${H}`, '--autoplay-policy=no-user-gesture-required', '--mute-audio'],
   defaultViewport: { width: W, height: H, deviceScaleFactor: 1 },
 })
 const page = await browser.newPage()
@@ -29,7 +30,7 @@ page.on('console', (m) => { const t = m.text(); if (/error|warn|GL_|WebGL/i.test
 
 let loadedUrl = ''
 for (const s of shots) {
-  const url = `http://localhost:${process.env.PORT || 5173}/?seed=${s.seed ?? 7}&tier=${s.tier ?? 'high'}&adaptive=0&hour=${s.hour ?? 11}&play=1${s.look ? `&look=${s.look}` : ''}`
+  const url = `http://localhost:${process.env.PORT || 5173}/?seed=${s.seed ?? 7}&tier=${s.tier ?? 'high'}&adaptive=0&hour=${s.hour ?? 11}&play=1${s.look ? `&look=${s.look}` : ''}${s.query ? `&${s.query}` : ''}`
   if (url !== loadedUrl) {
     await page.goto(url, { waitUntil: 'load' })
     loadedUrl = url
@@ -53,7 +54,7 @@ for (const s of shots) {
       g.car.park(s.x, s.z, s.yaw ?? 0)
       // enter the car (unless the previous shot left us in it)
       g.car.near = true
-      if (!g.car.driving) g.car.toggle()
+      if (!g.car.driving) g.car.seatNow()
       g.cameraCtl.vehicle = g.car.driving ? { distance: 9, pivot: 2.9 } : null
     }
     if (s.flashlight !== undefined) g.lighting.flashlightOn = s.flashlight
@@ -63,10 +64,15 @@ for (const s of shots) {
   // wait for streaming to settle at the new spot
   await page.waitForFunction(() => window.__game.worldReadiness() >= 1 && window.__game.world.stats.pending === 0, { timeout: 60_000, polling: 100 }).catch(() => console.log('  (readiness timeout)'))
   await new Promise((r) => setTimeout(r, s.wait ?? 1200))
+  let heldShot = false
   if (s.keys) {
     // hold keys for a while (driving): dispatch keydown, wait, keyup
     for (const k of s.keys) await page.keyboard.down(k)
     await new Promise((r) => setTimeout(r, s.keysMs ?? 3000))
+    // `tap`: a key pressed once while the others are held (e.g. Space = jump mid-run); `hold: true` = the screenshot is
+    // taken WHILE the keys are still down (`tapMs` after the tap) — animation stills of walking / running / jumping.
+    if (s.tap) { await page.keyboard.down(s.tap); await new Promise((r) => setTimeout(r, 60)); await page.keyboard.up(s.tap); await new Promise((r) => setTimeout(r, s.tapMs ?? 250)) }
+    if (s.hold) { heldShot = true; await page.screenshot({ path: path.join(outDir, `${s.name}.png`) }) }
     for (const k of s.keys) await page.keyboard.up(k)
     await new Promise((r) => setTimeout(r, 300))
   }
@@ -78,7 +84,7 @@ for (const s of shots) {
     return out
   }, s)
   const file = path.join(outDir, `${s.name}.png`)
-  await page.screenshot({ path: file })
+  if (!heldShot) await page.screenshot({ path: file })
   console.log(s.name, JSON.stringify(info), `${Date.now() - t0} ms`)
 }
 await browser.close()

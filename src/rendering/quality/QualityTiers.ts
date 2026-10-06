@@ -68,8 +68,19 @@ export interface QualitySettings {
   fog: { banks: boolean }
   /** Grass field around the player: fade radius (m), individual blades per m², blade segments (1 or 2). One draw call. */
   grass: { radius: number; density: number; blades: number }
-  /** Trees: geometry level for near (LOD0) chunks (0 full ≈170–250 tris, 1 mid ≈50–100). */
-  trees: { near: number }
+  /** Trees: geometry level for near (LOD0) chunks (0 full ≈170–250 tris, 1 mid ≈50–100); `lod1` = camera distance
+   *  (m) where each tree would dither from its near mesh to the low-poly mesh — ≥ `impostors.start` (999) skips that
+   *  stage: the low-poly conifer is a thin spire unlike the real tree, so walking away read broad → thin → broad;
+   *  the impostor IS the real tree, so near mesh → impostor directly (measured: same GPU time, fewer triangles). */
+  trees: { near: number; lod1: number }
+  /**
+   * OCTAHEDRAL IMPOSTORS (rendering/impostors): past `start` m every tree dithers from its low-poly mesh into a
+   * camera-facing card that shows the tree baked from the nearest of 64 directions (hemi-octahedral atlas), and
+   * a FAR FOREST of impostor-only trees covers the hills out to `far` m (beyond the streamed chunks), dissolving
+   * there into the horizon terrain. `atlas` = texture size (px, 10 species), `blend` = mix the 3 nearest views
+   * (smooth turning, 3 texture reads; off on LOW: 1 read).
+   */
+  impostors: { start: number; far: number; atlas: number; blend: boolean }
   /** Sun/moon shadow map on/off (off = no shadow pass at all; characters keep their blob shadow). */
   shadows: boolean
   /** Vehicles, monsters and the character cast real shadows (else blob shadows). */
@@ -123,7 +134,7 @@ type FeatureFields = {
   reflections: Pick<QualitySettings, 'reflections' | 'reflectionEvery'>
   ao: Pick<QualitySettings, 'ao'>
   volumetrics: Pick<QualitySettings, 'godRays' | 'fog'>
-  view: Pick<QualitySettings, 'renderRadius' | 'lodRings' | 'viewDistance' | 'horizon' | 'landmarkRange'>
+  view: Pick<QualitySettings, 'renderRadius' | 'lodRings' | 'viewDistance' | 'horizon' | 'landmarkRange' | 'impostors'>
   grass: Pick<QualitySettings, 'grass'>
   effects: Pick<QualitySettings, 'fx'>
   vegetation: Pick<QualitySettings, 'plants' | 'trees' | 'vegDetail'>
@@ -164,10 +175,10 @@ export const FEATURE_TABLE: { [F in Feature]: Partial<Record<Level, FeatureField
     ultra: { godRays: { divisor: 3, samples: 32, volumeSteps: 24 }, fog: { banks: true } },
   },
   view: {
-    low: { renderRadius: 2, lodRings: [0.8, 1.4], viewDistance: 230, horizon: { size: 2400, res: 40 }, landmarkRange: 700 },
-    medium: { renderRadius: 3, lodRings: [0.9, 1.8], viewDistance: 330, horizon: { size: 3200, res: 52 }, landmarkRange: 1000 },
-    high: { renderRadius: 3, lodRings: [1.2, 2.3], viewDistance: 420, horizon: { size: 4400, res: 72 }, landmarkRange: 1500 },
-    ultra: { renderRadius: 4, lodRings: [1.5, 2.8], viewDistance: 540, horizon: { size: 5600, res: 96 }, landmarkRange: 2200 },
+    low: { renderRadius: 2, lodRings: [0.8, 1.4], viewDistance: 200, horizon: { size: 2400, res: 40 }, landmarkRange: 700, impostors: { start: 50, far: 260, atlas: 1024, blend: false } },
+    medium: { renderRadius: 3, lodRings: [0.9, 1.8], viewDistance: 300, horizon: { size: 3200, res: 52 }, landmarkRange: 1000, impostors: { start: 70, far: 400, atlas: 2048, blend: true } },
+    high: { renderRadius: 3, lodRings: [1.2, 2.3], viewDistance: 420, horizon: { size: 4400, res: 72 }, landmarkRange: 1500, impostors: { start: 100, far: 700, atlas: 2048, blend: true } },
+    ultra: { renderRadius: 4, lodRings: [1.5, 2.8], viewDistance: 540, horizon: { size: 5600, res: 96 }, landmarkRange: 2200, impostors: { start: 130, far: 900, atlas: 2048, blend: true } },
   },
   // Grass field around the player (GrassField: near + far layers). OFF = the painted meadow on the terrain only.
   grass: {
@@ -186,9 +197,9 @@ export const FEATURE_TABLE: { [F in Feature]: Partial<Record<Level, FeatureField
   },
   // Trees, bushes, undergrowth and rocks.
   vegetation: {
-    low: { plants: false, trees: { near: 1 }, vegDetail: { farRocks: false, lean: true } },
-    medium: { plants: true, trees: { near: 0 }, vegDetail: { farRocks: false, lean: false } },
-    high: { plants: true, trees: { near: 0 }, vegDetail: { farRocks: true, lean: false } },
+    low: { plants: false, trees: { near: 1, lod1: 999 }, vegDetail: { farRocks: false, lean: true } },
+    medium: { plants: true, trees: { near: 0, lod1: 999 }, vegDetail: { farRocks: false, lean: false } },
+    high: { plants: true, trees: { near: 0, lod1: 999 }, vegDetail: { farRocks: true, lean: false } },
   },
 }
 

@@ -6,6 +6,8 @@
  */
 import { group, Groups, PhysicsWorld } from '../src/physics/PhysicsWorld'
 import { BikeSim, TruckSim, type Controls } from '../src/gameplay/vehicle/VehicleSim'
+import { CarEntry, DOOR_OPEN } from '../src/gameplay/vehicle/CarEntry'
+import * as THREE from 'three'
 
 let failures = 0
 const check = (name: string, ok: boolean, detail = '') => {
@@ -42,7 +44,7 @@ function world(rampDeg = 0, half = 400): PhysicsWorld {
 }
 
 function run(p: PhysicsWorld, sim: TruckSim | BikeSim, seconds: number, ctl: Partial<Controls>, each?: (t: number) => void): void {
-  Object.assign(sim.controls, { throttle: 0, steer: 0, handbrake: false, boost: false, ...ctl })
+  Object.assign(sim.controls, { throttle: 0, steer: 0, handbrake: false, boost: false, lift: 0, ...ctl })
   for (let i = 0; i < Math.round(seconds * 60); i++) {
     sim.step(1 / 60)
     p.world.step()
@@ -264,6 +266,83 @@ for (const [deg, want] of [[12, true], [18, true], [32, false]] as const) {
   log(`bike ramp ${deg}°: height ${y.toFixed(1)} m, speed ${b.speed.toFixed(1)}`)
   check(want ? `bike climbs a ${deg}° slope` : `bike can't pedal up a ${deg}° slope (push it)`, (y > 4) === want && b.axesUp() > 0.85, `+${y.toFixed(1)} m in 10 s`)
   p.dispose()
+}
+
+// ---- air suspension + hover flight (the flying car) ---------------------------------------------------------
+{
+  const p = world()
+  const t = new TruckSim(p, TRUCK)
+  t.place(0, 0, 0, 0)
+  run(p, t, 1.5, {})
+  const y0 = pos(t).y
+  run(p, t, 2.5, { lift: 1 })
+  run(p, t, 1.5, {})
+  const up = pos(t).y - y0
+  const att = t.attitude()
+  check('air suspension lifts the body ~1 m on its wheels', up > 0.85 && up < 1.1 && t.wheels.every((w) => w.contact) && Math.abs(att.roll) < 0.03, `+${up.toFixed(2)} m`)
+  run(p, t, 4, { lift: -1 })
+  check('…and lowers it again', Math.abs(pos(t).y - y0) < 0.06, `${(pos(t).y - y0).toFixed(3)} m`)
+  // Hover: holds its height, climbs on ↑, flies forward on W, turns on D, stays level-ish.
+  t.hover = true
+  t.hoverFloor = 0.8
+  run(p, t, 2, {})
+  const hy = pos(t).y
+  check('hover lifts off to its floor and holds it', hy > 0.7 && hy < 1.1 && t.wheels.every((w) => !w.contact), `${hy.toFixed(2)} m`)
+  run(p, t, 2, { lift: 1 })
+  const climbed = pos(t).y - hy
+  run(p, t, 2, {})
+  const held = pos(t).y - hy - climbed
+  check('↑ climbs (≈ 9 m/s), then the height holds', climbed > 10 && Math.abs(held) < 0.6, `+${climbed.toFixed(1)} m, drift ${held.toFixed(2)} m`)
+  const z0 = pos(t).z
+  run(p, t, 4, { throttle: 1 })
+  check('W flies forward (≈ 38 m/s top)', z0 - pos(t).z > 60 && t.speed > 25 && t.speed < 42, `${(z0 - pos(t).z).toFixed(0)} m, ${t.speed.toFixed(1)} m/s`)
+  const tr = turned(t)
+  run(p, t, 2, { throttle: 1, steer: 1 }, tr.step)
+  const a = t.attitude()
+  check('D turns right, banking into it, never flips', tr.total() < -1.5 && a.roll > 0.05 && t.axesUp() > 0.85, `${tr.total().toFixed(2)} rad, bank ${a.roll.toFixed(2)}`)
+  t.hover = false
+  run(p, t, 5, {})
+  check('hover off: drops back onto its wheels', t.wheels.every((w) => w.contact) && t.axesUp() > 0.95 && pos(t).y < 0.2, `y ${pos(t).y.toFixed(2)}`)
+  p.dispose()
+}
+
+// ---- getting in / out (CarEntry: the GTA-style sequence, pure arithmetic) ----------------------------------
+{
+  const car = {
+    seat: new THREE.Vector3(-0.415, 0.86, 0.04), wheel: new THREE.Vector3(-0.415, 1.12, -0.48), wheelAxis: new THREE.Vector3(0, -0.5, -0.87).normalize(),
+    wheelRadius: 0.19, roof: 1.62, halfX: 0.87, front: -2.6, rear: 2.5,
+  }
+  const doors = [-1, 1].map((side) => ({ side: side as -1 | 1, hinge: new THREE.Vector3(side * 0.86, 1.07, -1.04), length: 1.0, bottom: -0.53, top: 0.53 }))
+  /** Runs the sequence at 60 Hz until `until` (or 12 s): door angles, slams, the walk path. */
+  const play = (e: CarEntry, until: (p: string) => boolean) => {
+    let maxDoor = 0, slams = 0, t = 0, inside = false
+    while (!until(e.phase) && t < 12) {
+      if (e.phase === 'approach') {
+        if (!e.stepWalk(1 / 60)) (e.phase = 'open'), (e.t = 0)
+        if (Math.abs(e.walk.x) < car.halfX && e.walk.z > car.front && e.walk.z < car.rear) inside = true
+      } else e.update(1 / 60, 0, 0, false)
+      if (e.slam) slams++
+      maxDoor = Math.max(maxDoor, e.doorAngle ?? 0)
+      t += 1 / 60
+    }
+    return { maxDoor, slams, t, inside, door: e.doorAngle ?? 0 }
+  }
+  const e = new CarEntry(car, doors)
+  e.enter(new THREE.Vector3(-3, 0, 1.5))
+  const inn = play(e, (p) => p === 'seated')
+  check('get in (driver side): walk, open, climb, shut, seated', e.phase === 'seated' && inn.maxDoor > DOOR_OPEN * 0.95 && inn.slams === 1 && inn.t < 5, `${inn.t.toFixed(1)} s, door ${inn.maxDoor.toFixed(2)} rad, ${inn.slams} slam`)
+  check('seated body fits the cab (scaled ≥ 60 %)', e.seatScale >= 0.6 && e.seatScale <= 1 && e.pose.hip.distanceTo(car.seat) < 0.01, `scale ${e.seatScale.toFixed(2)}`)
+  e.exit()
+  const out = play(e, (p) => p === 'none')
+  check('get out: door opened, climbed out, door shut again', e.phase === 'none' && out.slams === 1 && out.door === 0 && Math.abs(e.pose.hip.x) > car.halfX, `${out.t.toFixed(1)} s, hip x ${e.pose.hip.x.toFixed(2)}`)
+  const p = new CarEntry(car, doors)
+  p.enter(new THREE.Vector3(4, 0, -4)) // in front of the passenger side: walks round to the right door
+  const pass = play(p, (q) => q === 'seated')
+  check('get in from the passenger side: slides over to the wheel', p.phase === 'seated' && p.door === 1 && Math.abs(p.pose.hip.x - car.seat.x) < 0.01 && !pass.inside, `${pass.t.toFixed(1)} s`)
+  const far = new CarEntry(car, doors)
+  far.enter(new THREE.Vector3(3, 0, 0.5)) // beside the passenger door but nearer… the right door is the nearer one
+  const f = play(far, (q) => q !== 'approach')
+  check('the walk to the door never cuts through the car', !f.inside && far.door === 1)
 }
 
 process.exit(failures ? 1 : 0)

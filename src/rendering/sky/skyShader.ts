@@ -35,6 +35,8 @@ export const skyUniforms = {
   uSkyCurve: { value: 0.45 },
   /** Genshin cumulus (1): round puffy white clouds with sunlit tops and soft blue-grey bellies; 0 = painted streaks. */
   uSkyCumulus: { value: 0 },
+  /** Cloud edge softness: wider when the sky is drawn at low resolution (LOW: 0.25×) so edges never stair-step. */
+  uSkyEdge: { value: 0.07 },
   /** Volumetric ground MIST (exponential height fog): x density at the base, y base height (m), z falloff (1/m), w camera height. */
   uSkyMist: { value: new THREE.Vector4(0, -2, 0.09, 0) },
 }
@@ -60,7 +62,7 @@ float mistAmount(vec3 dir, float dist) {
 
 export const SKY_GLSL = /* glsl */ `
 uniform vec3 uSkyHorizon, uSkyZenith, uSkySunDir, uSkySunColor, uSkyMoonDir, uSkyMoonColor;
-uniform float uSkySunVis, uSkyMoonVis, uSkyStars, uSkyClouds, uSkyTime, uSkyBolt, uSkyCloudWhite, uSkyStorm, uSkyLowRes;
+uniform float uSkySunVis, uSkyMoonVis, uSkyStars, uSkyClouds, uSkyTime, uSkyBolt, uSkyCloudWhite, uSkyStorm, uSkyLowRes, uSkyEdge;
 uniform vec3 uSkyBoltDir, uSkyBoltColor;
 uniform vec2 uSkyHaze;
 uniform float uSkyCurve;
@@ -106,12 +108,17 @@ vec3 skyColor(vec3 d, bool full) {
   vec3 horizon = mix(uSkyHorizon, warm, sunward);
   vec3 col = mix(horizon, uSkyZenith, pow(up, uSkyCurve));
   col = mix(horizon, col, smoothstep(-0.02, 0.06, d.y));
+  // Genshin: a thin, bright, almost white HORIZON GLOW band (the sky seen through the most air) under the azure —
+  // distant ranges melt into it.
+  if (uSkyCumulus > 0.5) col = mix(col, mix(horizon, vec3(1.0), 0.45), exp(-up * 16.0) * 0.6 * uSkySunVis);
 
   // Sun: crisp pale-gold disc + small halo (no wide wash — the reference sun is a clean disc).
   float s = max(dot(d, uSkySunDir), 0.0);
   vec3 sunDisc = mix(uSkySunColor, vec3(1.0, 0.95, 0.8), 0.6);
   // The hard disc only on the dome (full): fog/reflections use the soft glow (safe to evaluate per vertex).
-  col += uSkySunVis * ((full ? sunDisc * smoothstep(0.99935, 0.9996, s) * 6.0 : vec3(0.0)) + uSkySunColor * (pow(s, 600.0) * 1.2 + pow(s, 40.0) * 0.18));
+  // (Genshin: a tighter glow — the wide one washed a quarter of the sky to pale grey-blue.)
+  float wideGlow = uSkyCumulus > 0.5 ? pow(s, 160.0) * 0.12 : pow(s, 40.0) * 0.18;
+  col += uSkySunVis * ((full ? sunDisc * smoothstep(0.99935, 0.9996, s) * 6.0 : vec3(0.0)) + uSkySunColor * (pow(s, 600.0) * 1.2 + wideGlow));
 
   // Moon disc + halo.
   float m = max(dot(d, uSkyMoonDir), 0.0);
@@ -146,7 +153,9 @@ vec3 skyColor(vec3 d, bool full) {
         // white tops over soft blue-grey bellies, a silver rim toward the sun.
         vec2 q = p * 0.95;
         float b = sky_noise(q) * 0.62 + sky_noise(q * 2.1 + 5.3) * 0.26 + sky_noise(q * 4.7 + 1.7) * 0.12;
-        cov = smoothstep(1.0 - uSkyClouds * 1.05, 1.0 - uSkyClouds * 1.05 + 0.07, b) * smoothstep(0.02, 0.14, d.y);
+        // Clouds pile up LOW over the horizon (big banks there, a few puffs overhead) as in Genshin's skies.
+        float heap = uSkyClouds * mix(1.45, 0.75, smoothstep(0.05, 0.55, d.y));
+        cov = smoothstep(1.0 - heap, 1.0 - heap + uSkyEdge, b) * smoothstep(0.02, 0.1, d.y);
         vec2 sd = normalize(keyDir.xz + 1e-4) * 0.09;
         vec2 qs = q + sd;
         float bs = sky_noise(qs) * 0.62 + sky_noise(qs * 2.1 + 5.3) * 0.26 + sky_noise(qs * 4.7 + 1.7) * 0.12;

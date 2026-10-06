@@ -56,7 +56,8 @@ export interface VehicleDef {
   maker: string
   year: string
   blurb: string
-  /** Model file (Vite URL), length after normalising (m). */
+  /** Model file (Vite URL), length after normalising (m) — chosen so the WHEELBASE matches the real vehicle
+   *  (Hilux Xtra Cab 3.095 m · G500 4×4² 2.85 m · Żuk 2.70 m); the human is a 1.78 m adult (CharacterModel). */
   url: string
   length: number
   /** Which model axis points forward in the source file ('+z' = Sketchfab default; rotated to −Z in game). */
@@ -71,6 +72,11 @@ export interface VehicleDef {
   /** Lamp positions (right side; mirrored) — FALLBACK only: the lamps are found on the model itself at load
    *  (loadModels findLamps / findLampsInParts); this is used when nothing is found, then a body-box guess. */
   lamps?: { head: [number, number, number]; tail: [number, number, number] }
+  /** Driver's cabin (measured in Blender, m): seated hip height, the roof's underside above the seat, and how far
+   *  the hips sit behind the steering wheel's centre. The driver's seat x is the steering wheel's. */
+  cabin: { hip: number; roof: number; behind: number }
+  /** Draw live beam axles + diffs + driveshaft under the body (models without their own). */
+  axles?: boolean
   /** Engine voice (AudioSystem): pitch × the recorded loops (V8 low, small 4-cylinder high) and the automatic
    *  gearbox's shift speeds (m/s) — spaced to the car's own top speed so it never sits on the limiter. */
   engine: { pitch: number; gears: number[] }
@@ -90,7 +96,8 @@ export const VEHICLES: VehicleDef[] = [
     maker: 'Workhorse',
     year: '1989',
     blurb: 'The farm truck. Tough, simple, climbs anything in low range.',
-    url: pickupUrl, length: 5.1, forward: '+z', steering: true, bytes: 1_725_472,
+    url: pickupUrl, length: 5.23, forward: '+z', steering: true, axles: true, bytes: 1_754_044,
+    cabin: { hip: 0.84, roof: 1.66, behind: 0.51 },
     engine: { pitch: 1, gears: [0, 5.5, 11, 17.5, 25, 34, 60] },
     stock: { power: 120, force: 12, boost: 2.2, grip: 2.4, suspension: 36, tyre: 1, mass: 1750, paint: '#ffffff' },
   },
@@ -100,7 +107,8 @@ export const VEHICLES: VehicleDef[] = [
     maker: 'Mercedes-Benz',
     year: '2015',
     blurb: 'Portal axles, twin-turbo V8, 45 cm of ground clearance. The mountain goat.',
-    url: gwagenUrl, length: 4.8, forward: '+z', wheelRegex: /wheel(FL|FR|BL|BR)/i, paintRegex: /CarPaint/i, bytes: 2_266_000,
+    url: gwagenUrl, length: 4.68, forward: '+z', wheelRegex: /wheel(FL|FR|BL|BR)/i, paintRegex: /CarPaint/i, bytes: 1_924_644,
+    cabin: { hip: 1.35, roof: 2.2, behind: 0.49 },
     lamps: { head: [0.66, 1.08, -2.44], tail: [0.72, 1.22, 2.43] },
     engine: { pitch: 0.8, gears: [0, 7, 14, 22, 31, 42, 70] },
     stock: { power: 310, force: 18, boost: 2.0, grip: 2.8, suspension: 44, tyre: 1.15, mass: 3000, paint: '#c8d82a' },
@@ -111,7 +119,8 @@ export const VEHICLES: VehicleDef[] = [
     maker: 'FSC Lublin',
     year: '1972',
     blurb: 'A Polish delivery van with a lawnmower engine. Slow, light, oddly capable.',
-    url: zukUrl, length: 4.4, forward: '+z', bytes: 3_886_884,
+    url: zukUrl, length: 4.4, forward: '+z', axles: true, bytes: 719_432,
+    cabin: { hip: 0.98, roof: 1.8, behind: 0.42 },
     engine: { pitch: 1.22, gears: [0, 4, 8.5, 14, 20, 27, 45] },
     stock: { power: 55, force: 8, boost: 2.4, grip: 2.0, suspension: 28, tyre: 0.9, mass: 1400, paint: '#ffffff' },
   },

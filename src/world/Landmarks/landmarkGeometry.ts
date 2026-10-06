@@ -86,7 +86,14 @@ const r01 = (i: number) => {
  * WORLD TREE (Windrise's oak): the Genshin broadleaf generator at landmark scale — buttress roots, a twisting
  * trunk, five huge limbs and cloud clumps of billboarded leaf tufts (genshinTrees.ts). Far LOD = its mid level.
  */
+/** Blender world tree (assets/treeModels: scripts/blender/genshin_trees.py), when loaded: body + far detail. */
+let BLENDER_GIANT: { body: G; far: G } | null = null
+export function registerLandmarkTree(body: G, far: G): void {
+  BLENDER_GIANT = { body, far }
+}
+
 function giantTree(): G {
+  if (BLENDER_GIANT) return (LO ? BLENDER_GIANT.far : BLENDER_GIANT.body).clone()
   const s = new Soup()
   broadleafInto(s, LO ? 1 : 0, new Rng(9001), isGenshin() ? { ...WORLD_TREE, plates: true, fork: 6.5, spread: 13, limbs: 6, clumpR: 6.3, dark: 0x22604c, light: 0xc0e27a } : WORLD_TREE)
   return s.geometry('landmark.giantTree')

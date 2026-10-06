@@ -100,6 +100,65 @@ World (seed)
   REPLACE the forest's (draws flat); new species/GLBs via `registerTreeSpecies`. Measured LOW (phone projection,
   M4 × 25 ≈ Adreno 610): forest 10, autumn 9, mystic 10, borders 9 ms; CPU ×6 driving through them: 2.5–3 ms mean.
   The previous paragraph's numbers for desert / snow still hold.
+- **Blender trees**: `scripts/blender/genshin_trees.py` (run in Blender via the MCP socket) writes
+  `src/assets/models/trees/*.glb` (broadleaf 'mondstadt', maple, ancient, world_tree, spruce, fir, Liyue pine, dead), 3 LODs
+  each (`<tree>_lod0/1/2`). Crowns are leaf CLUMPS made only of cards — an outer shell of overlapping leaf-cluster
+  cards facing out + (LOD0) a darker inner shell; NO solid core (a low-poly ball read as a faceted blob from below) —
+  with spherical normals and dark-inside → light-top vertex colours. Conifers (`conifer()`) are tiers of flat
+  drooping clumps; the hero world tree adds fill clumps for one Windrise dome. ONE primitive per LOD — the part kind
+  travels in U (leaf 0..1, bark 2, core 4) because Blender's glTF exporter keeps vertex colours only on a mesh's first
+  primitive. `assets/treeModels.ts` bakes them into the vegetation format and registers them in EVERY art style
+  (`registerTreeSpecies`, `modelled: true` → always the Genshin hue set; the atlas leaf-cluster cell is the painted
+  Genshin cluster in every style but storybook). Same per-species InstancedMesh, LOD bands and impostors. Cacti,
+  joshua and mushroom trees stay code-built. `?trees=code` loads the old code-built trees (A/B). Tris L0/L1/L2:
+  broadleaf 864/366/104, maple 746/320/104, ancient 716/326/110, spruce 1246/186/74, fir 1238/176/54,
+  pine 804/344/106, dead 286/164/64; world tree 3812/1878/312. Measured seed 7, 1280×720, forest view, A/B vs code
+  trees: HIGH 853k vs 1219k tris (GPU 6.1–6.6 vs 6.35 ms), LOW 111k vs 110k tris, 64 draws both, 3.75 vs 3.54 ms.
+  Landmark snow cover tests the snow line at the landmark's foot (`aBaseY`), not per vertex.
+  BROADLEAF STANDS (scatter.ts `broadleafStand`): wherever the forest would grow a birch, each ~56 m cell grows mostly
+  ONE reference type — Mondstadt broadleaf (Birch), Slender (forks low into 3 stems), Windrise Oak (thick, wide dome),
+  Curvy (S-trunk) or Golden (Liyue tiers of gold pads) — 20 % Birch/Slender mixed in; species ids 10–13, each its own
+  InstancedMesh + impostor slot (14 of 16). Tris L0: slender 768, oak 1772, curvy 664, golden 694.
+  BARK (paint.ts): 12 soft vertical grooves + lighter ridges wrapped round the trunk axis, built as cos(12θ) from
+  complex powers of the trunk's horizontal direction (no atan → no seam), faded by fwidth; low contrast.
+  Measured seed 7 at (38, −14), A/B vs `?trees=code`: HIGH 815k vs 1189k tris, 259 vs 261 draws, 5.4 vs 5.7 ms GPU;
+  LOW 108k tris, 67 draws, 3.8 ms GPU.
+  LEAF STYLE (stylized tree packs / Genshin): the leaf-cluster atlas cell is a dense PUFF of short PINNATE SPRAYS
+  (stem + leaflet pairs, drooping, fringed outline; FoliageAtlas `drawTuftGenshin`); broadleaf palettes are a luminous
+  lime (shade stays mid green); each clump is shaded bottom → top on its own as well as across the crown (bulb
+  puffs). Leaf cards get WRAPPED light (`stylize`, vSurf < 0: shade side ≥ 40 % of the sun) and a backlit
+  translucency lift — 0 extra programs, a few ALU on card fragments.
+  LEAF STYLE v2 (matched to Genshin screenshots — the stylized-pack pass was too saturated and shiny): the card
+  texture is a fine LEAF MASS (~3000 tiny pointed leaves, even tone 0.76–1.0, fringe thinning out past the blob, no
+  stems/outlines) that mips to a soft tone; Blender leaf cards are CAMERA-FACING (treeModels.ts groups each card's
+  4 vertices → bbCenter + rotated bbOff; never seen edge-on, the crown reads as a soft volume); muted natural
+  palettes (broadleaf ~0xb8d468 lit / 0x50803a shade, golden 0xf2b444 / 0xb0681c); leaf lighting: soft wrap (shade
+  side ≥ 25 %), rim ×0.2 and backlight ×0.15 on leaves only (full rim = "shiny" crowns). Measured seed 7, A/B vs
+  `?trees=code`: HIGH 731k vs 851k tris, 5.35 vs 5.46 ms GPU; LOW 4.1 vs 4.5 ms (forest) and 4.2 vs 3.3 ms (road
+  view: camera-facing cards cover more pixels).
+  The leaf mass is IRREGULAR (a few sub-clusters out toward the cell corners, fringe thinning over a fixed
+  distance) and inner/outer card shading is nearly flat (0.94 / 0.9–1.0): a round texture on camera-facing cards
+  read as round sections. Measured golden grove HIGH 4.6–5.1 vs 3.8 ms (old trees); LOW road 2.5 vs 3.3 ms.
+  LEAF STYLE v3 (Genshin ginkgo / broadleaf close-ups): broadleaf crowns are open LEAF SPRAYS — `spray()` places
+  the camera-facing cards ALONG a few twig directions from each branch end (no ball of cards; sky between sprays);
+  the card texture is a spray of 5 thin twigs with ROUND fan leaves alternating along them, each its own width /
+  size, one flat tone (0.86–1.0), no outlines or contact shadows, all inside the cell. Warm olive / yellow-green
+  palettes, no teal hue on broadleaves, lighter grey-brown trunks. LOD0 tris: broadleaf 850, slender 674, oak 1378,
+  curvy 650, golden 588. HIGH 3.5–7.0 ms GPU across the test views (unchanged).
+- **Hillside caves** (`world/Formations/caves.ts`, live part `gameplay/caves/CaveSystem.ts`): a Cave formation on a
+  slope ≥ ~23° becomes a cave dug INTO the hill — mouth facing downhill in a rounded rock mass, a winding tunnel
+  sloping down into a big chamber (stalactites / stalagmites, a pool basin, 1–2 skylights), a narrow side passage to
+  a hidden alcove with a TREASURE CHEST (E: lid opens, full heal, "Treasure found" toast). All from the formation
+  seed (deterministic). The terrain is CARVED under the cave's air (`WorldFields.height` → `formations.caveCarve`;
+  `heightNoCave` for the horizon mesh and the rock cap); the rock cap follows the original hill +1.6 m, so outside it
+  is a rocky outcrop with grass on top. Caves keep clear of the main road, rivers, places and secondary roads.
+  LIGHT is BAKED into the rock's vertex colours in the worker (daylight fading with the walk in from the mouth,
+  pools under the skylights, a cyan glow round the crystals; moss / grass only where light reaches) — 0 runtime
+  cost. CaveSystem: crystal clusters (one InstancedMesh, HDR → bloom), the pool (still water shader), additive
+  sunbeam columns under the skylights (fade with the sun), the chest; `inside` (0..1, the baked light at the player)
+  → Game dims the sky fill (and the sun on tiers without shadow maps), closes in a dark fog, cuts aerial haze /
+  mist / god rays, opens the exposure ×1.55, the torch works at full strength in daylight. Measured seed 7 in a
+  chamber: HIGH 6.2 ms GPU / 624 k tris / 199 draws, LOW 4.0 ms / 120 k / 93 draws (4 extra draws per near cave).
 - **Streaming radii** (in chunks, Chebyshev distance from player chunk). The **render ring and LOD rings are per
   quality tier** (LOW 2 / MEDIUM 3 / HIGH 4 — `QualityTiers.ts`); the values below are HIGH:
 
@@ -142,6 +201,12 @@ margin of 0.35 chunk (LOD), so standing on a border does not thrash.
   Plus **volumetric ground mist** (skills/fog): exponential height fog integrated analytically along the view ray in
   every world material, the sky and the water (all tiers, ~0.1 ms GPU) and noise-marched drifting fog BANKS in the
   low-res shafts pass (MEDIUM/HIGH, ~0.2 ms). Per-phase `mistDensity/Base/Falloff` in `TimeOfDay.ts`.
+  **Aerial perspective** (Genshin's distance "filter", `uAerial`, in every world material's fog block, ~12 ALU, no
+  pass): from 30 m out to ~380 m surfaces lose saturation, then contrast, toward the haze — far hills, forest and
+  rocks read as soft layered silhouettes, each ridge paler than the one in front — and the haze is warmer/brighter
+  looking toward the sun, cooler away from it. It also hides where detail stops, so LOW/MEDIUM draw less: impostors
+  from 50 / 70 m, far forest to 260 / 400 m, view distance 200 / 300 m (measured: far-forest cards −29…−41 %,
+  MEDIUM triangles −30 %, LOW draws ≤ 71; desktop GPU time unchanged).
   Tone mapping: Khronos PBR Neutral (keeps the reference's saturation). Sun/moon shadows fade out at the shadow-map edge
   (`rendering/shadows/ShadowEdgeFade.ts`).
   distance, which sets the streaming radius, which sets the budget.
@@ -160,7 +225,7 @@ margin of 0.35 chunk (LOD), so standing on a border does not thrash.
   modulating the time-of-day params; rain streaks (`particles/RainParticles.ts`), tree sway (`uniforms.ts` `foliageSway`).
   Precipitation follows the biome underfoot: rain in the forest, none in the desert, SNOW on the snowfields (the same
   particle pool as soft drifting flakes; a light snowfall even under a fair sky); no puddles on sand or snow.
-- **Lights at night**: car head/brake lamps (`Car`, F switch in the truck, auto with the dark) share the single spot light
+- **Lights at night**: car head/tail/brake/reverse lamps (`Car`, F switch in the truck, auto with the dark) share the single spot light
   with the torch; street lamps on every roadside post are additive glow + road pool sprites instanced with the poles
   (`MaterialLibrary.lampGlow`) that flicker on at dusk — no extra real lights (skills/lighting fixed light pool).
 - **Arcade handling** (`VehicleSim.TruckSim.arcade`, Settings → Controls → Driving, default ARCADE): Asphalt-style —
@@ -208,6 +273,14 @@ World → loaded chunk ring (streaming radius)
 Never iterate individual trees on the CPU per frame. Trees are `InstancedMesh` per chunk per species per LOD,
 with a bounding sphere covering the chunk; the chunk decides visibility.
 
+**Trees: per-tree LOD + octahedral impostors + far forest** (skills/lod §2): past `impostors.start` (60–130 m by
+tier) each tree dithers from its mesh into a camera-facing card showing the tree baked from 64 directions
+(`rendering/impostors`, atlas baked at load), choosing its LOD by its own distance in the shaders (no chunk
+popping); the chunk only enables the mesh sets its trees can be in. Beyond the built ring a FAR FOREST of
+impostor-only trees (`world/Forest/FarForest.ts`, same deterministic scatter, own worker, 4×4-chunk blocks, seated
+on the drawn horizon surface) reaches `impostors.far` (360–900 m) and dissolves into the horizon terrain.
+Measured (RTX 4050, 1080p): GPU time within noise on every tier, LOW +8 draws (≤ 65), fewer triangles.
+
 ---
 
 ## 6. Physics (Rapier)
@@ -230,6 +303,37 @@ with a bounding sphere covering the chunk; the chunk decides visibility.
   loaded on demand (`loadVehicle`, cached). `Game.selectVehicle` swaps the car in the world live; `Game.setTuning` →
   `Car.retune` → `TruckSim.retune` changes power / force / boost / grip / springs / tyre size / mass in Rapier in
   place; paint tints the masked panels in the car shader. Saved per vehicle in Settings (`garage`).
+- **Scale**: real-world. Each car's `length` is set so its WHEELBASE matches the real vehicle (Hilux Xtra Cab 3.095 m,
+  G500 4×4² 2.85 m, Żuk 2.70 m); the player is a 1.78 m adult — a stylized human modelled in Blender at real proportions
+  (`scripts/blender/human.py`: skin-modifier body, head, hair, face, clothes by vertex colour, ~5 k tris, 124 KB; joints
+  at `CharacterModel` SRC), rigged and animated in code: idle weight shift + breathing; walk / run with planted feet,
+  heel strike → toe-off foot roll, pelvis twist + roll, counter-rotating chest, steady head, run lean, bent run arms;
+  jump with the lead knee driven up and the rear leg trailing, legs reaching down when falling. Same capsule and 1.62 m eye.
+- **Doors, cabin, axles** (models prepared in Blender: `scripts/blender/vehicle_doors.py` + `vehicle_finish.py`):
+  the front doors are separate parts (`door_FL*`/`door_FR*` with a `hinge` glTF extra, dark jamb in the opening),
+  the steering wheel is a named part on every car, the Żuk has a ~150-tri cabin, and only the base-colour texture is
+  kept (≤ 1024²; Żuk 3.9 → 0.7 MB). `Car` hangs each door on its hinge (one instanced draw on the car program +
+  its window): held by the entry animation, else latched, else swinging free (the car's acceleration and the head
+  wind; slams shut). Live beam axles + diffs + driveshaft (catalogue `axles`, models without their own) are one
+  5-instance draw that tilts with each wheel's suspension. Cost with the car in view: +5 draws (+10 on HIGH with
+  its shadow pass), ≈ +1–2 k tris, GPU/CPU within noise on every tier.
+- **Shock absorbers, air suspension, flying car** (every car): each wheel has a coil-over strut (dark damper body +
+  chrome rod + blue coil spring, instanced on the car program, +2 draws, ~2 k tris) from the hub to a mount in the
+  arch. ↑ / ↓ (touch ▲ ▼, shown only while driving) raise the body up to 1 m on its wheels (`TruckSim.ride`: the
+  Rapier suspension rest length grows; the struts and springs stretch). L (touch FLY / LAND) transforms the car
+  (`Car.fly`, 1.2 s): wheels turn flat, tuck into the arches, spin up like turbines and blue jet flames light under
+  them (1 additive instanced draw, only while flying) — `TruckSim.hoverStep` then replaces the wheels: W/S thrust
+  (≈ 38 m/s, Shift ≈ 60), A/D yaw with bank, ↑/↓ climb / sink at ≈ 9 m/s, altitude hold when released, never
+  below 0.8 m over the terrain. Landing sinks to ~1.3 m before the wheels fold back; E in the air bails out and the
+  empty car lands itself. tests/vehicle.test.ts covers lift, hover hold, climb, flight, banked turn and landing.
+- **Getting in / out** (`gameplay/vehicle/CarEntry.ts`, GTA-style): E walks the player round the car to the
+  nearer front door (path never cuts through the body), opens it (hand on the handle, stepping out of its sweep),
+  climbs in ducking under the roof line, pulls it shut (slam) — drivable from here — and slides over to the wheel
+  if it came in on the passenger side; out = push the driver's door open, climb out, push it shut (walking off
+  leaves it open). Faster than 4 m/s E is a BAIL: thrown out tumbling, door flung open on its free hinge. Poses are
+  authored in car space and solved by `CharacterModel.carPose` (two-bone IK for hands on the handle / the turning
+  steering wheel and feet on the floor); a cramped cab tucks the seated body in (≥ 75 %; catalogue `cabin`:
+  hip height, roof). ~0.02 ms CPU. tests/vehicle.test.ts covers both doors, the slide-over and the walk path.
 - **Front end** (`src/ui/MainMenu.tsx`, `Garage.tsx`, `SettingsPanel.tsx`, tokens in `ui/theme.ts`): a racing-game
   style menu over the live world (state `landing` + `screen`; the camera circles the parked car,
   `CameraController.garage`, the player is frozen). MAIN MENU: Play / Garage / Settings + the current car's card.
@@ -298,6 +402,8 @@ Chrome via puppeteer-core) teleports/drives/times the scene per shot, screenshot
 | `O` | settings (quality, AA, sharpness, resolution, pixel ratio, grain, camera, sensitivity, day length) |
 | `F` | flashlight |
 | `E` | mount / get off the BMX (touch: BIKE) — W/S pedal/brake, A/D steer, Shift faster |
+| `L` | in a car: fly ⇄ land (touch: FLY / LAND) |
+| `↑` / `↓` | in a car: raise / lower the body (air suspension); flying: climb / sink (touch: ▲ ▼) |
 | `F7` / `F8` | cycle quality preset low → ultra (disables auto) / toggle adaptive quality |
 | touch | left half: joystick (full push = sprint) · right half: look · LIGHT / JUMP / FPS / TIME / fullscreen buttons |
 | `[` / `]` | render scale down / up (within the tier's range) |

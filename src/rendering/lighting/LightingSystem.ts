@@ -86,6 +86,8 @@ export class LightingSystem {
   /** 0..1 how strongly the key body lights the scene (for god-ray strength). */
   keyStrength = 0
 
+  /** How deep in a cave the player is (0..1, Game ← CaveSystem.inside). */
+  cave = 0
   /**
    * @param flashOrigin world position of the flashlight (eye in FPP, hand in TPP)
    * @param flashTarget world point it aims at
@@ -112,7 +114,9 @@ export class LightingSystem {
     this.hemi.color.copy(p.hemiSky)
     this.hemi.groundColor.copy(p.hemiGround)
     // Lightning burst: extra sky fill in the bolt's colour for a few frames.
-    this.hemi.intensity = p.hemiIntensity + this.flash * 2.2
+    // In a cave the sky fill dies away (CaveSystem.inside); the sun too where there are no shadow maps to stop it.
+    this.hemi.intensity = (p.hemiIntensity + this.flash * 2.2) * (1 - 0.86 * this.cave)
+    if (!this.sun.castShadow) this.sun.intensity *= 1 - 0.85 * this.cave
     if (this.flash > 0.01) this.hemi.color.lerp(this.flashColor, Math.min(1, this.flash * 0.7))
 
     const f = this.flashlight
@@ -123,7 +127,7 @@ export class LightingSystem {
     const flick = 1 - 0.04 * Math.max(0, Math.sin(this.flicker * 37) * Math.sin(this.flicker * 11.3))
     // In daylight a flashlight barely registers — scale it down with the sun so the beam pool doesn't glow on a
     // sunny road; full strength at dusk/night/nightmare.
-    const daylight = sunK * (1 - tod.nightmare)
+    const daylight = sunK * (1 - tod.nightmare) * (1 - this.cave)
     f.intensity = this.spotOn ? this.flashlightIntensity * flick * (1 - 0.85 * daylight) : 0
     // No shadow re-render while off; the shadow pass is the flashlight's main cost.
     f.shadow.autoUpdate = this.flashlightOn && f.castShadow

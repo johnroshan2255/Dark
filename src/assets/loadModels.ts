@@ -3,13 +3,14 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import humanUrl from './models/characters/human.lod0.glb?url'
 import { vehicleDef, type VehicleDef } from '../gameplay/vehicle/catalogue'
+import { loadTreeModels } from './treeModels'
 
 /**
  * Loads the GLB models once at startup (parallel with Rapier init) and bakes them into plain geometry for the
  * game's own materials — no GLTF materials, scene graphs or PBR programs survive (skills/asset-optimization).
  *
- *   human   Sketchfab "Stickman" (CC-BY-4.0, ogulcantopsakal): one static T-pose mesh, no rig → rigged and
- *           animated procedurally by CharacterModel. Returned in its baked source frame (units, facing +Z).
+ *   human   our stylized human (scripts/blender/human.py): one static T-pose mesh with vertex colours, no rig → rigged
+ *           and animated procedurally by CharacterModel. Returned in its baked source frame (metres, facing +Z).
  *   vehicles the garage catalogue (gameplay/vehicle/catalogue.ts): pickup (Sketchfab, 00amza), Mercedes G500 4×4²,
  *           Żuk A06 — each baked by `bakeVehicle` (materials → vertex colours, paint mask, wheels split out or
  *           found by name, glass split off) and normalised: metres, facing −Z, origin on the ground at the
@@ -45,6 +46,26 @@ export interface TruckModel {
   paintMap: THREE.Texture | null
   /** Lamp lenses found on the model (right side; the left mirrors it): centre + half size (m, truck space). */
   lamps: { head: Lamp | null; tail: Lamp | null }
+  /** Opening front doors (cut out of the body in Blender: nodes `door_FL*` / `door_FR*` with a `hinge` extra). */
+  doors: CarDoor[]
+  /** Steering-wheel rim radius (m). */
+  steeringRadius: number
+  /** UV of a pale, flat texel in `map` (untextured parts of a textured model sample it → their own colour). */
+  neutralUv: [number, number]
+}
+
+export interface CarDoor {
+  /** −1 = left (driver, −x), +1 = right. */
+  side: -1 | 1
+  /** Door skin + trim, in door space: origin on the hinge line, closed = identity, rear edge toward +z. */
+  body: THREE.BufferGeometry
+  glass: THREE.BufferGeometry | null
+  /** Hinge point (m, truck space). */
+  hinge: [number, number, number]
+  /** Hinge → rear edge (m) and the door's bottom / top (door space y). */
+  length: number
+  bottom: number
+  top: number
 }
 
 export interface Lamp {
@@ -222,20 +243,44 @@ export async function loadModels(onProgress?: (f: number) => void, vehicleId = '
   const [h, t] = await Promise.all([
     loader.loadAsync(humanUrl, (e) => ((got[0] = e.lengthComputable ? e.loaded / e.total : 0.5), report())),
     loadVehicle(vehicleId, (f) => ((got[1] = f), report())),
+    loadTreeModels(), // Blender trees: registered before the world builds its tree library (treeModels.ts)
   ])
   return { human: bakeFirstMesh(h.scene), truck: t }
 }
 
-function bakedMeshes(scene: THREE.Object3D): { name: string; geo: THREE.BufferGeometry; mat: THREE.Material }[] {
+/** Every mesh in world space. `name` includes the parent's (a multi-material node is a Group of primitives);
+ *  `extras` = the node's glTF extras (e.g. a door's `hinge`). */
+function bakedMeshes(scene: THREE.Object3D): { name: string; geo: THREE.BufferGeometry; mat: THREE.Material; extras: Record<string, unknown> }[] {
   scene.updateMatrixWorld(true)
-  const out: { name: string; geo: THREE.BufferGeometry; mat: THREE.Material }[] = []
+  const out: { name: string; geo: THREE.BufferGeometry; mat: THREE.Material; extras: Record<string, unknown> }[] = []
   scene.traverse((o) => {
     const m = o as THREE.Mesh
     if (!m.isMesh) return
     const g = m.geometry.clone().applyMatrix4(m.matrixWorld)
-    out.push({ name: m.name, geo: g, mat: m.material as THREE.Material })
+    const parent = m.parent && m.parent !== scene ? m.parent : null
+    out.push({ name: parent ? `${m.name}|${parent.name}` : m.name, geo: g, mat: m.material as THREE.Material, extras: { ...(parent?.userData ?? {}), ...m.userData } })
   })
   return out
+}
+
+/** UV of the palest flat texel (low saturation, bright, uniform neighbourhood) — untextured parts of a textured
+ *  model (interior, axles) point all their UVs at it so the shared textured material shows their own colour. */
+function neutralTexel(tex: THREE.Texture): [number, number] {
+  const px = readPixels(tex, 128)
+  if (!px) return [0, 0]
+  const { data, w, h } = px
+  let best = -1e9, bu = 0, bv = 0
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const o = (y * w + x) * 4
+      const [, sat, val] = hsv(data[o] / 255, data[o + 1] / 255, data[o + 2] / 255)
+      let dev = 0
+      for (const d of [-4, 4, -w * 4, w * 4]) dev += Math.abs(data[o + d] - data[o]) + Math.abs(data[o + d + 1] - data[o + 1]) + Math.abs(data[o + d + 2] - data[o + 2])
+      const score = val - sat * 2 - dev / 255
+      if (score > best) (best = score), (bu = (x + 0.5) / w), (bv = (y + 0.5) / h)
+    }
+  }
+  return [bu, tex.flipY ? 1 - bv : bv]
 }
 
 function bakeFirstMesh(scene: THREE.Object3D): THREE.BufferGeometry {
@@ -380,28 +425,53 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
   const meshes = bakedMeshes(scene)
   const bodies: THREE.BufferGeometry[] = [], glasses: THREE.BufferGeometry[] = []
   const wheelParts: { geo: THREE.BufferGeometry; name: string }[] = []
+  // Doors (FL / FR: skin, trim and their window) and the steering wheel, split out by node name (Blender prep).
+  const doorParts = new Map<string, { body: THREE.BufferGeometry[]; glass: THREE.BufferGeometry[]; hinge: number[] }>()
+  const steerParts: THREE.BufferGeometry[] = []
+  // Untextured parts: on a textured model their UVs are pointed at a neutral texel once the map is known.
+  const flat: THREE.BufferGeometry[] = []
   let map: THREE.Texture | null = null
   // Lamp lenses / glows by name (untextured models place their lamps from these: findLampsInParts).
   const lampParts: { geo: THREE.BufferGeometry; color: THREE.Color }[] = []
   for (const m of meshes) {
     const { color, map: mm, glass } = matColor(m.mat)
     if (/light|lamp|glow/i.test(m.name) || /light|lamp|glow/i.test(m.mat.name)) lampParts.push({ geo: m.geo.clone(), color })
+    const doorKey = /door_(FL|FR)/i.exec(m.name)?.[1].toUpperCase()
+    let door = doorKey ? doorParts.get(doorKey) : undefined
+    if (doorKey && !door) doorParts.set(doorKey, (door = { body: [], glass: [], hinge: (m.extras.hinge as number[]) ?? [0, 0, 0] }))
     if (glass) {
-      glasses.push(paintGeometry(m.geo, new THREE.Color().setHex(0x1b2430, THREE.SRGBColorSpace), false, 0))
+      const g = paintGeometry(m.geo, new THREE.Color().setHex(0x1b2430, THREE.SRGBColorSpace), false, 0)
+      ;(door ? door.glass : glasses).push(g)
       continue
     }
     if (mm && !map) map = mm
     const textured = !!mm
-    const paint = def.paintRegex ? (def.paintRegex.test(m.mat.name) ? 1 : 0) : 1
-    const g = paintGeometry(m.geo, textured ? new THREE.Color(1, 1, 1) : color, textured, paint)
+    // Door insides / cabin interior: dark trim, never painted (textured: the texture darkened).
+    const inner = /inner|interior/i.test(m.mat.name)
+    const paint = inner ? 0 : def.paintRegex ? (def.paintRegex.test(m.mat.name) ? 1 : 0) : 1
+    const g = paintGeometry(m.geo, textured ? new THREE.Color(inner ? 0.3 : 1, inner ? 0.3 : 1, inner ? 0.3 : 1) : color, textured, paint)
+    if (!textured) flat.push(g)
     if (def.wheelRegex && def.wheelRegex.test(m.name)) wheelParts.push({ geo: g, name: m.name })
+    else if (door) door.body.push(g)
+    else if (/steering_wheel/i.test(m.name)) steerParts.push(g)
     else bodies.push(g)
+  }
+  const neutralUv: [number, number] = map ? neutralTexel(map) : [0, 0]
+  if (map) {
+    for (const g of flat) {
+      const uv = g.getAttribute('uv') as THREE.BufferAttribute
+      for (let i = 0; i < uv.count; i++) uv.setXY(i, neutralUv[0], neutralUv[1])
+    }
   }
   let body = mergeGeometries(bodies, false)!
   const glass = glasses.length ? mergeGeometries(glasses, false)! : new THREE.BufferGeometry()
+  const doorGeo = [...doorParts.entries()].map(([key, d]) => ({
+    key, hinge: new THREE.Vector3(...d.hinge),
+    body: mergeGeometries(d.body, false)!, glass: d.glass.length ? mergeGeometries(d.glass, false)! : null,
+  }))
   // Normalise: forward axis → −Z, metres, wheel bottoms on y = 0, origin at the wheelbase centre.
   const size = new THREE.Vector3()
-  const all = mergeGeometries([body, ...wheelParts.map((w) => w.geo)], false)!
+  const all = mergeGeometries([body, ...wheelParts.map((w) => w.geo), ...doorGeo.map((d) => d.body)], false)!
   const whole = new THREE.Box3().setFromBufferAttribute(all.getAttribute('position') as THREE.BufferAttribute)
   whole.getSize(size)
   const fwdLen = def.forward.endsWith('z') ? size.z : size.x
@@ -438,8 +508,11 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
   }
   // Steering wheel (pickup): the ring in front of the left seat, found in normalised space.
   let steeringWheel: THREE.BufferGeometry | null = null
-  let pivot = new THREE.Vector3(), axis = new THREE.Vector3(0, 0, -1)
-  if (def.steering) {
+  let pivot = new THREE.Vector3(), axis = new THREE.Vector3(0, 0, -1), steeringRadius = 0.19
+  if (steerParts.length) {
+    // Named in Blender (G500, Żuk): same pivot / axis solve as below.
+    steeringWheel = mergeGeometries(steerParts, false)!.applyMatrix4(norm)
+  } else if (def.steering) {
     const { triComp, boxes } = components(body)
     const steer = new Set<number>()
     const nb = new THREE.Box3()
@@ -451,26 +524,31 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
     if (steer.size) {
       steeringWheel = subset(body, (t) => steer.has(triComp[t])).applyMatrix4(norm)
       body = subset(body, (t) => !steer.has(triComp[t]))
-      const sp = steeringWheel.getAttribute('position')
-      let lx = 0, rx = 0, by = 0, ty = 0
-      for (let i = 1; i < sp.count; i++) {
-        if (sp.getX(i) < sp.getX(lx)) lx = i
-        if (sp.getX(i) > sp.getX(rx)) rx = i
-        if (sp.getY(i) < sp.getY(by)) by = i
-        if (sp.getY(i) > sp.getY(ty)) ty = i
-      }
-      const P = (i: number) => new THREE.Vector3().fromBufferAttribute(sp, i)
-      steeringWheel.computeBoundingBox()
-      pivot = steeringWheel.boundingBox!.getCenter(new THREE.Vector3())
-      axis = new THREE.Vector3().crossVectors(P(rx).sub(P(lx)), P(ty).sub(P(by))).normalize()
-      if (axis.z > 0) axis.negate()
-      steeringWheel.translate(-pivot.x, -pivot.y, -pivot.z)
     }
+  }
+  if (steeringWheel) {
+    // Pivot = rim centre; axis = rim normal, pointing down the column (away from the driver).
+    const sp = steeringWheel.getAttribute('position')
+    let lx = 0, rx = 0, by = 0, ty = 0
+    for (let i = 1; i < sp.count; i++) {
+      if (sp.getX(i) < sp.getX(lx)) lx = i
+      if (sp.getX(i) > sp.getX(rx)) rx = i
+      if (sp.getY(i) < sp.getY(by)) by = i
+      if (sp.getY(i) > sp.getY(ty)) ty = i
+    }
+    const P = (i: number) => new THREE.Vector3().fromBufferAttribute(sp, i)
+    steeringWheel.computeBoundingBox()
+    pivot = steeringWheel.boundingBox!.getCenter(new THREE.Vector3())
+    axis = new THREE.Vector3().crossVectors(P(rx).sub(P(lx)), P(ty).sub(P(by))).normalize()
+    if (axis.z > 0) axis.negate()
+    steeringRadius = (P(rx).x - P(lx).x) / 2
+    steeringWheel.translate(-pivot.x, -pivot.y, -pivot.z)
   }
   body.applyMatrix4(norm)
   glass.applyMatrix4(norm)
   for (const l of lampParts) l.geo.applyMatrix4(norm)
   for (const w of wheels) (w.c.applyMatrix4(norm), (w.r *= k), w.geo.applyMatrix4(norm))
+  for (const d of doorGeo) (d.body.applyMatrix4(norm), d.glass?.applyMatrix4(norm), d.hinge.applyMatrix4(norm))
   // Ground = wheel bottoms; origin = wheelbase centre.
   const groundY = Math.min(...wheels.map((w) => w.c.y - w.r))
   const cx = wheels.reduce((a, w) => a + w.c.x, 0) / 4, cz = wheels.reduce((a, w) => a + w.c.z, 0) / 4
@@ -480,12 +558,30 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
   for (const l of lampParts) l.geo.applyMatrix4(shift)
   for (const w of wheels) (w.c.applyMatrix4(shift), w.geo.applyMatrix4(shift))
   if (steeringWheel) pivot.applyMatrix4(shift)
+  // Doors: into door space (hinge at the origin). Closed-door bounds still count for the body box below.
+  const outline = new THREE.Box3()
+  const doors: CarDoor[] = doorGeo.map((d) => {
+    d.body.applyMatrix4(shift)
+    d.glass?.applyMatrix4(shift)
+    d.hinge.applyMatrix4(shift)
+    d.body.computeBoundingBox()
+    outline.union(d.body.boundingBox!)
+    d.body.translate(-d.hinge.x, -d.hinge.y, -d.hinge.z)
+    d.glass?.translate(-d.hinge.x, -d.hinge.y, -d.hinge.z)
+    d.body.computeBoundingBox()
+    d.body.computeBoundingSphere()
+    d.glass?.computeBoundingSphere()
+    const b = d.body.boundingBox!
+    return { side: d.hinge.x < 0 ? -1 : 1, body: d.body, glass: d.glass, hinge: d.hinge.toArray() as [number, number, number], length: b.max.z, bottom: b.min.y, top: b.max.y }
+  })
+  doors.sort((a, b) => a.side - b.side) // driver's (left) door first
   const fl = wheels.reduce((a, b) => (b.c.x + b.c.z < a.c.x + a.c.z ? b : a)) // most −x (left) and −z (front)
   const wheel = fl.geo.clone().translate(-fl.c.x, -fl.c.y, -fl.c.z)
   const pick = (sx: number, sz: number) => wheels.reduce((a, b) => (b.c.x * sx + b.c.z * sz > a.c.x * sx + a.c.z * sz ? b : a))
   const wheelPos = [pick(-1, -1), pick(1, -1), pick(-1, 1), pick(1, 1)].map((w) => [w.c.x, w.c.y, w.c.z] as [number, number, number])
   for (const g of [body, wheel, glass, steeringWheel]) if (g) (g.computeBoundingBox(), g.computeBoundingSphere())
-  const bb = body.boundingBox!
+  const bb = body.boundingBox!.clone()
+  if (doors.length) bb.union(outline)
   if (map) map.colorSpace = THREE.SRGBColorSpace
   const paintMap = map ? buildPaintMap(map) : null
   const lamps = map ? findLamps(body, map, bb.min.z, bb.max.z) : { head: null, tail: null }
@@ -509,6 +605,9 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
     map,
     paintMap,
     lamps,
+    doors,
+    steeringRadius,
+    neutralUv,
   }
 }
 

@@ -41,7 +41,7 @@ export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, 
   const heights = new Float32Array(n * n)
   const colors = new Float32Array(n * n * 3)
   const canopyOut = new Float32Array(n * n * 4)
-  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) heights[j * n + i] = fields.height(cx + off[i], cz + off[j])
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) heights[j * n + i] = fields.heightNoCave(cx + off[i], cz + off[j])
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
       const k = j * n + i

@@ -17,6 +17,7 @@ export function TouchControls({ game }: { game: Game }) {
   const phase = useStore(game.store, (s) => s.phase)
   const cam = useStore(game.store, (s) => s.settings.camera)
   const driving = useStore(game.store, (s) => s.driving)
+  const flying = useStore(game.store, (s) => s.flying)
   const lights = useStore(game.store, (s) => s.lights)
   const base = useRef<HTMLDivElement>(null)
   const knob = useRef<HTMLDivElement>(null)
@@ -129,6 +130,16 @@ export function TouchControls({ game }: { game: Game }) {
           RIDE
         </button>
         {driving && (
+          // Air suspension / flight: ▲ ▼ lift the body on the ground, climb / sink in the air; FLY ⇄ LAND (L).
+          <div style={liftCol}>
+            <button style={{ ...btn, background: flying ? 'rgba(58,140,232,0.45)' : btn.background }} data-testid="btn-fly" onPointerDown={tap('KeyL')}>
+              {flying ? 'LAND' : 'FLY'}
+            </button>
+            <button style={liftBtn} data-testid="btn-up" {...hold('ArrowUp')}>▲</button>
+            <button style={liftBtn} data-testid="btn-down" {...hold('ArrowDown')}>▼</button>
+          </div>
+        )}
+        {driving && (
           <button style={{ ...btn, background: 'rgba(232,162,58,0.35)' }} data-testid="btn-boost" {...hold('ShiftLeft')}>
             NITRO
           </button>
@@ -213,6 +224,8 @@ const btn: CSSProperties = {
   font: '600 11px ui-monospace, Menlo, monospace',
   touchAction: 'none',
 }
+const liftCol: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center' }
+const liftBtn: CSSProperties = { ...btn, width: 56, height: 48, borderRadius: 14, font: '600 16px ui-monospace, Menlo, monospace' }
 const topRight: CSSProperties = {
   position: 'absolute',
   top: 'max(8px, env(safe-area-inset-top))',

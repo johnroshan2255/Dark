@@ -55,6 +55,7 @@ export class WorldFields {
   /** Big landmarks on the high ground (giant trees, windmills, ruins, statues, towers, obelisks, ice spires). */
   readonly landmarks: LandmarkField
   private readonly hit: RoadHit = { dist: 0, height: 0, type: 0, halfWidth: 0 }
+  private readonly fmHit: RoadHit = { dist: 0, height: 0, type: 0, halfWidth: 0 }
   private readonly bw: BiomeWeights = [0, 0]
   private readonly wn: RegionWeights = new Float32Array(BIOME_COUNT)
   static readonly NET_SHOULDER = 4
@@ -99,6 +100,7 @@ export class WorldFields {
       roadDistance: (x, z) => this.roadDistance(x, z),
       riverDistance: (x, z) => this.riverDistance(x, z),
       placeNear: (x, z, m) => this.pois.near(x, z, m) !== null,
+      netRoadNear: (x, z, m) => this.network.nearest(x, z, m, this.fmHit) !== null,
       biome: (x, z) => this.biomes.weights(x, z, fmBw),
       roadCenterX: (z) => this.roadCenterX(z),
       roadHeight: (z) => this.roadHeight(z),
@@ -231,8 +233,15 @@ export class WorldFields {
     return t * t * (3 - 2 * t)
   }
 
-  /** Final terrain height (see the class comment for the layering). */
+  /** Final terrain height (see the class comment for the layering), CARVED under hillside caves (their rock mesh is
+   *  the floor there — Formations/caves.ts). */
   height(x: number, z: number): number {
+    return this.formations.caveCarve(x, z, this.heightNoCave(x, z))
+  }
+
+  /** The terrain before the cave carve: the far horizon mesh (a coarse grid sample in a cave would dip it) and the
+   *  caves' own rock cap (it follows the original hill surface). */
+  heightNoCave(x: number, z: number): number {
     const g = this.gorge(x, z, this.groundBeforePlaces(x, z))
     const snow = this.lastSnow // naturalHeight(x, z) ran inside groundBeforePlaces
     const s = this.poiWeight(x, z)

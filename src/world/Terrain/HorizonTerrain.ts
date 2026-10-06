@@ -146,6 +146,36 @@ export class HorizonTerrain {
     this.mesh.geometry.dispose()
     this.mesh.geometry = g
     this.mesh.visible = true
+    this.grid = { pos, n, res: d.res, size: d.size, cx: d.cx, cz: d.cz }
+    this.version++
+  }
+
+  /** Rebuild counter (the far forest re-seats its trees on a new horizon surface). */
+  version = 0
+  private grid: { pos: Float32Array; n: number; res: number; size: number; cx: number; cz: number } | null = null
+
+  /**
+   * Height of the DRAWN horizon surface at (x, z) (the same triangles as the mesh), or null outside it / before the
+   * first build. The far forest stands its trees on it: the warped grid is 40–70 m coarse at 200–700 m and sits a
+   * few metres under the true ground, so trees placed at the true height float over convex hills.
+   */
+  heightAt(x: number, z: number): number | null {
+    const g = this.grid
+    if (!g) return null
+    const inv = (o: number) => {
+      const t = o / (g.size * 0.5)
+      return ((Math.sign(t) * Math.sqrt(Math.min(1, Math.abs(t))) + 1) * g.res) / 2
+    }
+    const gi = inv(x - g.cx), gj = inv(z - g.cz)
+    if (gi < 0 || gj < 0 || gi >= g.res || gj >= g.res) return null
+    const i = Math.floor(gi), j = Math.floor(gj)
+    const P = (ii: number, jj: number) => g.pos[(jj * g.n + ii) * 3 + 1]
+    // Local position inside the (non-uniform) cell, in real distances.
+    const X = (ii: number) => g.pos[(j * g.n + ii) * 3], Z = (jj: number) => g.pos[(jj * g.n + i) * 3 + 2]
+    const fx = (x - X(i)) / Math.max(1e-3, X(i + 1) - X(i)), fz = (z - Z(j)) / Math.max(1e-3, Z(j + 1) - Z(j))
+    // Triangles (a, c, b) and (b, c, e) — split along b–c, as in build().
+    const a = P(i, j), b = P(i + 1, j), c = P(i, j + 1), e = P(i + 1, j + 1)
+    return fx + fz < 1 ? a + (b - a) * fx + (c - a) * fz : e + (c - e) * (1 - fx) + (b - e) * (1 - fz)
   }
 
   dispose(): void {

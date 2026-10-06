@@ -54,7 +54,10 @@ vec3 paintSurface(vec3 c, float id) {
     c *= 0.74 + 0.36 * b.g + 0.3 * (b.r - 0.5);
     c = mix(c, c * 1.35 + 0.03, smoothstep(0.25, 0.9, n.y) * 0.55);
     float m = smoothstep(0.6, 0.78, n.y + (b.a - 0.5) * 0.8);
-    c = mix(c, MOSS * (0.7 + 0.5 * b.r), m * 0.75);
+    // Moss as lit as the rock under it (baked cave darkness keeps dark floors dark, not bright green).
+    float lum = dot(c, vec3(0.3, 0.59, 0.11));
+    m *= smoothstep(0.05, 0.12, lum); // none in the dark (cave floors stay bare earth)
+    c = mix(c, MOSS * (0.7 + 0.5 * b.r) * clamp(lum / 0.16, 0.0, 1.4), m * 0.75);
   } else if (id < 1.5) {                            // WOOD boards
     float t = pu.x * 3.3;
     float fw = fwidth(t);
@@ -67,9 +70,22 @@ vec3 paintSurface(vec3 c, float id) {
     c = mix(c, MOSS * 0.9, base * smoothstep(0.35, 0.7, b.a) * 0.7);          // moss creeping up
     c = mix(c, MOSS * (0.8 + 0.5 * b.r), smoothstep(0.5, 0.75, n.y + (b.a - 0.5)) * 0.6);
   } else if (id < 2.5) {                            // BARK
-    vec4 b = texture2D(uBrush, vec2(pu.x * 1.4, pu.y * 0.22));
-    c *= (0.5 + 0.9 * b.b) * (0.9 + 0.2 * b.r);
-    c *= 0.75 + 0.25 * smoothstep(0.0, 1.6, p.y);
+    // Genshin bark: 12 fine vertical GROOVES wrapped round the trunk axis, with lighter RIDGES between them. The
+    // stripe is cos(12θ) built from the trunk's horizontal direction w = (x, z)/|.| by complex powers (w¹²) — no
+    // atan, so no seam and no derivative spike; the brush only wobbles the groove edges. Fades out with distance
+    // (fwidth) before it can shimmer. Low contrast: the light and the vertex colours carry the trunk.
+    vec2 w = normalize(p.xz + vec2(1e-5));
+    vec2 w2 = vec2(w.x * w.x - w.y * w.y, 2.0 * w.x * w.y);
+    vec2 w4 = vec2(w2.x * w2.x - w2.y * w2.y, 2.0 * w2.x * w2.y);
+    vec2 w8 = vec2(w4.x * w4.x - w4.y * w4.y, 2.0 * w4.x * w4.y);
+    float stripe = w8.x * w4.x - w8.y * w4.y;                   // cos(12θ)
+    vec4 b = texture2D(uBrush, vec2((p.x + p.z) * 0.9, p.y * 0.14));
+    float sv = stripe + (b.r - 0.5) * 0.7;
+    float fade = 1.0 - smoothstep(0.35, 1.1, fwidth(stripe));
+    float groove = smoothstep(0.45, 0.9, sv) * fade;
+    float ridge = smoothstep(0.2, 0.85, -sv) * fade;
+    c *= (0.92 + 0.14 * b.b) * (1.0 - 0.42 * groove) * (1.0 + 0.12 * ridge);
+    c *= 0.82 + 0.18 * smoothstep(0.0, 1.6, p.y);
     float side = smoothstep(-0.2, 0.8, n.x * 0.7 + n.z * 0.7) * (1.0 - smoothstep(0.2, 1.8, p.y));
     c = mix(c, MOSS * (0.8 + 0.5 * b.r), side * smoothstep(0.35, 0.65, b.a) * 0.75);
   } else if (id < 3.5) {                            // PLAIN

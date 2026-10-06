@@ -86,6 +86,9 @@ export class LandmarkSystem {
       // Billboarded leaf tufts (the world tree) expand around bbCenter in the shader: move it with the landmark.
       const bc = g.getAttribute('bbCenter')
       if (bc) bc.applyMatrix4(this.m)
+      // Snow cover tests the snow line at the landmark's FOOT (like an instanced tree's root), not per vertex — a
+      // 40 m oak on a green hill must not wear a snow cap on its crown (stylize biomeCover, 4 B/vertex).
+      g.setAttribute('aBaseY', new THREE.BufferAttribute(new Float32Array(g.getAttribute('position').count).fill(l.y), 1))
       return g
     })
     const g = mergeGeometries(parts)

@@ -36,20 +36,30 @@ export interface ChunkData {
   fmCol: Float32Array
   fmIdx: Uint32Array
   fmBounds: Float32Array
+  /** ROCK-TOP heights (world y) of the formation / crag mesh's up-facing faces on a 2 m grid covering chunk-local
+   *  [−32, 96)² (formations reach past their chunk), −1e9 where none; empty when the chunk has no rock mesh. The grass
+   *  grows on these green tops (Forest/GrassField). 64 × 64 floats = 16 KB, only on rocky chunks. */
+  fmTop: Float32Array
   /** Generation time in ms (profiling). */
   genMs: number
 }
 
+/** Rock-top grid layout (ChunkData.fmTop): chunk-local origin, cell size (m), cells per side. */
+export const FM_TOP = { origin: -32, cell: 2, res: 64 } as const
 export const TREE_STRIDE = 6
 export const PROP_STRIDE = 5
 
 /** Cactus (saguaro) and Joshua grow only in the desert (Forest/desertFlora.ts). */
 /** Maple grows in the autumn valleys; Ancient (giant violet tree) and Shroom (glowing mushroom tree) in the mystic woods
  *  (world/biomes/BiomeDefs.ts). Region species REPLACE the forest ones there, so a chunk's draw count stays flat. */
-export const TreeSpecies = { Spruce: 0, Dead: 1, Fir: 2, Pine: 3, Birch: 4, Cactus: 5, Joshua: 6, Maple: 7, Ancient: 8, Shroom: 9 } as const
-export const TREE_SPECIES_COUNT = 10
+/** Oak (Windrise), Slender (Mondstadt), Golden (Liyue) and Curvy are the broadleaf STAND types that share the Birch
+ *  slot's places (Forest/scatter.ts `broadleafStand`: one type per ~56 m stand, so a chunk adds ≤ 1–2 draws). */
+export const TreeSpecies = { Spruce: 0, Dead: 1, Fir: 2, Pine: 3, Birch: 4, Cactus: 5, Joshua: 6, Maple: 7, Ancient: 8, Shroom: 9, Oak: 10, Slender: 11, Golden: 12, Curvy: 13 } as const
+export const TREE_SPECIES_COUNT = 14
+/** The broadleaf species of the green lands (Birch + its stand types) — they share tints, hues and the autumn turn. */
+export const isBroadleaf = (sp: number): boolean => sp === TreeSpecies.Birch || sp >= TreeSpecies.Oak
 /** Trunk collider radius at scale 1, indexed by species id (see Forest/treeFactory.ts). */
-export const TRUNK_RADIUS = [0.24, 0.22, 0.28, 0.32, 0.3, 0.34, 0.3, 0.3, 0.6, 0.26] as const
+export const TRUNK_RADIUS = [0.24, 0.22, 0.28, 0.32, 0.3, 0.34, 0.3, 0.3, 0.6, 0.26, 0.62, 0.3, 0.32, 0.34] as const
 
 export const chunkKey = (cx: number, cz: number): string => `${cx},${cz}`
 

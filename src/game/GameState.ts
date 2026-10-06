@@ -30,6 +30,8 @@ export interface GameStateShape {
   dead: boolean
   /** Driving the truck (touch HUD: the JUMP button reads DRIFT). */
   driving: boolean
+  /** The car is flying (L / touch FLY: wheels turned into jets; touch shows LAND). */
+  flying: boolean
   /** Headlights on (HUD label while driving). */
   lights: boolean
   /** Front end open (the world idles behind it, camera orbiting the car): the main menu or the garage. */

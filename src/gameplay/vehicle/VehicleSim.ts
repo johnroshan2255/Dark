@@ -32,6 +32,8 @@ export interface Controls {
   /** The brake (S / stick back) is pressed, even while the throttle is held too — arcade: a tap while steering
    *  at speed starts a drift (Asphalt). */
   brake?: boolean
+  /** −1 … 1 (↓ / ↑, touch ▼ ▲): on the ground raises / lowers the body (air suspension); flying = climb / sink. */
+  lift?: number
 }
 
 export interface WheelState {
@@ -151,6 +153,10 @@ abstract class VehicleBase {
   protected abstract drive(dt: number, v: number): void
   /** After the tyre impulses of this step (velocity-level corrections, e.g. the bike's balance). */
   protected afterWheels(_dt: number, _v: number): void {}
+  /** Replaces the wheel step entirely this step (the truck's hover flight); false = drive on the wheels. */
+  protected hoverStep(_dt: number): boolean {
+    return false
+  }
 
   /** One fixed step: controls → wheel forces → raycast vehicle update. Call before world.step(). */
   step(dt: number): void {
@@ -164,6 +170,11 @@ abstract class VehicleBase {
     const moving = Math.abs(this.speed) > 0.05 || Math.abs(this.controls.throttle) > 0.01
     if (moving) this.body.wakeUp()
     this.holding = false
+    if (this.hoverStep(dt)) {
+      for (const w of this.wheels) (w.contact = false), (w.lift *= 1 - Math.min(1, dt * 6))
+      this.wheelSpeed = this.speed
+      return
+    }
     this.drive(dt, this.speed)
     this.vc.updateVehicle(dt, undefined, RAY_GROUPS, (c) => c.parent()?.handle !== this.body.handle)
     this.afterWheels(dt, this.speed)
@@ -460,7 +471,72 @@ export class TruckSim extends VehicleBase {
     return this.baseRadius * this.tune.tyre
   }
 
+  /**
+   * AIR SUSPENSION (↑ / ↓ while driving): the suspension rest length grows by `ride` (0 … RIDE_MAX m) — the wheels
+   * stay on the ground, the body rises on its struts (Car draws the shock absorbers stretching). `ride` follows
+   * `rideTarget` at 0.5 m/s; the anti-roll assist keeps the tall stance from tipping in corners.
+   */
+  ride = 0
+  rideTarget = 0
+  static readonly RIDE_MAX = 1.0
+  private updateRide(dt: number): void {
+    const l = this.controls.lift ?? 0
+    if (l) this.rideTarget = Math.min(TruckSim.RIDE_MAX, Math.max(0, this.rideTarget + l * dt * 0.6))
+    const d = this.rideTarget - this.ride
+    if (Math.abs(d) < 1e-4) return
+    this.ride += Math.sign(d) * Math.min(Math.abs(d), dt * 0.5)
+    for (let i = 0; i < 4; i++) this.vc.setWheelSuspensionRestLength(i, this.spec.suspension.rest + this.ride)
+    this.body.wakeUp()
+  }
+
+  /**
+   * HOVER FLIGHT (Car: L, the wheels turned into jets): no wheel contact; velocity-level control like a drone —
+   * W/S thrust along the heading (≈ 38 m/s, boost ≈ 60), A/D yaw (banking into the turn), ↑/↓ climb / sink
+   * (≈ 9 m/s), sideways slip damped, altitude held when nothing is pressed (gravity cancelled), never below
+   * `hoverFloor` (world y: Car keeps it ~0.7 m above the terrain). The colliders still hit trees and hills.
+   */
+  hover = false
+  hoverFloor = -1e9
+  private hoverYaw = 0
+  private holdY = 0
+  private wasHovering = false
+  protected hoverStep(dt: number): boolean {
+    if (!this.hover) return (this.wasHovering = false)
+    const c = this.controls
+    const lv = this.body.linvel()
+    const t = this.body.translation()
+    const h = this.heading
+    const fx = -Math.sin(h), fz = -Math.cos(h), rx = Math.cos(h), rz = -Math.sin(h)
+    const vf = lv.x * fx + lv.z * fz, vr = lv.x * rx + lv.z * rz
+    const top = c.boost ? 60 : 38
+    const tvf = c.throttle > 0 ? c.throttle * top : c.throttle * 14
+    const nvf = vf + (tvf - vf) * Math.min(1, dt * (Math.abs(c.throttle) > 0.01 ? 1.1 : 0.7))
+    const nvr = vr * (1 - Math.min(1, dt * 3))
+    // Altitude hold: ↑/↓ set the climb rate; let go and it servos back to the height where you let go.
+    const lift = c.lift ?? 0
+    if (!this.wasHovering || lift) this.holdY = t.y
+    this.wasHovering = true
+    this.holdY = Math.max(this.holdY, this.hoverFloor)
+    const tvy = lift ? lift * 9 : Math.max(-6, Math.min(6, (this.holdY - t.y) * 2.5))
+    // + GRAVITY·dt: the world step will take it off again (hover = weightless).
+    const nvy = lv.y + (tvy - lv.y) * Math.min(1, dt * 6) + GRAVITY * dt
+    this.body.setLinvel({ x: fx * nvf + rx * nvr, y: nvy, z: fz * nvf + rz * nvr }, true)
+    // Attitude: yaw from the stick, bank into the turn, nose dips while accelerating; roll / pitch servoed.
+    this.hoverYaw += (-c.steer * 1.6 - this.hoverYaw) * Math.min(1, dt * 5)
+    const { f, r } = this.axes()
+    const { roll, pitch } = this.attitude()
+    const wantRoll = c.steer * 0.32 * Math.min(1, Math.abs(vf) / 8 + 0.3)
+    const wantPitch = Math.max(-0.22, Math.min(0.22, -(tvf - vf) * 0.012 + (c.lift ?? 0) * 0.06))
+    const wr = (wantRoll - roll) * 4, wp = (wantPitch - pitch) * 4
+    this.body.setAngvel({ x: f[0] * wr + r[0] * wp, y: f[1] * wr + r[1] * wp + this.hoverYaw, z: f[2] * wr + r[2] * wp }, true)
+    this.drift = this.lateral = 0
+    this.drifting = false
+    for (let i = 0; i < 4; i++) this.wheelSlip[i] *= 1 - Math.min(1, dt * 6)
+    return true
+  }
+
   protected drive(dt: number, v: number): void {
+    this.updateRide(dt)
     if (this.arcade) return this.driveArcade(dt, v)
     const c = this.controls
     const vc = this.vc

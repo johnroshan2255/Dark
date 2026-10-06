@@ -7,6 +7,9 @@ import type { WorldChunk } from '../WorldChunk'
 import { LandmarkKind } from '../Landmarks/landmarks'
 import { WorldFields } from '../WorldFields'
 import { createGrassGeometry } from './grass'
+import { FM_TOP } from '../types'
+/** Patch-corner offsets checked on a rock top (GrassField.fillTile). */
+const EDGE_PROBE = [[0.9, 0.9], [-0.9, 0.9], [0.9, -0.9], [-0.9, -0.9]] as const
 import { isGenshin, isOverland } from '../../rendering/artStyle'
 import { farmFieldAt } from '../POI/pois'
 import { BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Biomes'
@@ -55,7 +58,12 @@ export function styledGrass(s: GrassSettings): GrassSettings {
   // GENSHIN (Statue of the Seven / Starfell reference): a LUSH field of thin, UPRIGHT individual blades of a fairly
   // even height (knee-ish), 1.5× the tier's blades per m², 0.72× as wide (same coverage, finer look).
   // Anime grass (Genshin meadow close-up): tall, broad-ish curving blades (×1.2 tall, ×0.95 wide, more lean).
-  if (isGenshin()) return { ...s, density: Math.round(s.density * 1.5), tall: 1.2, wide: 0.95, vary: 0.55, lean: 0.6 }
+  // Genshin field close-ups (Fontaine / Mondstadt meadows): TALL (knee-to-waist), THIN, long blades packed densely —
+  // 1.65× taller and 0.6× as wide as the tier's blade, 2× the blades per m² (thin blades → about the same blade
+  // pixels as the old 1.5× wide field, which is what grass costs).
+  // (2nd pass: 0.6× thin blades at 2× density turned into 1–2 px hatching — now fewer, WIDER RIBBONS that read one by
+  // one, leaning every way: 1.15× density, 1.6× wide, 1.5× tall, lean 1.6.)
+  if (isGenshin()) return { ...s, density: Math.round(s.density * 1.4), tall: 1.45, wide: 0.7, vary: 0.6, lean: 1.4 } // thin separate blades in loose tufts of 4 (createGrassGeometry)
   if (!isOverland()) return s
   // INDIVIDUAL blades like theirs (not card clumps): the tier's density, 1.35× taller and 1.4× wider blades so
   // the straw closes into a soft carpet, 1.3× radius. ~1.7× the tier's blade triangles.
@@ -158,7 +166,7 @@ export class GrassField {
     this.disposeLayer(L)
     L.key = key
     L.g = g
-    L.geometry = createGrassGeometry(blades, segments, tall, wide, vary, lean)
+    L.geometry = createGrassGeometry(blades, segments, tall, wide, vary, lean, isGenshin() ? 4 : 1) // Genshin: loose tufts of 4
     const count = g * g * TILE * TILE // one 1 m² patch per cell
     L.density = new THREE.InstancedBufferAttribute(new Float32Array(count), 1).setUsage(THREE.DynamicDrawUsage)
     L.geometry.setAttribute('iDensity', L.density)
@@ -220,7 +228,9 @@ export class GrassField {
     // Region grass amount (BiomeDefs.grass, blended): full meadows in the forest and the mystic woods, a little less
     // in the autumn valleys, sparse dry tufts on sand, none on snow.
     const bare = Math.max(0, blendBy(this.fields.region(x, z, _wn, h), (d) => d.grass))
-    v = (0.45 + 0.55 * (1 - this.fields.forestDensity(x, z, h))) * bare
+    // Genshin: a full carpet even near trees (its meadows never show bare soil between the blades).
+    const floor = isGenshin() ? 0.72 : 0.45
+    v = (floor + (1 - floor) * (1 - this.fields.forestDensity(x, z, h))) * bare
     if (this.corners.size > 20000) this.corners.clear()
     this.corners.set(key, v)
     return v
@@ -232,6 +242,22 @@ export class GrassField {
     const ix = Math.floor(fx), iz = Math.floor(fz)
     const u = fx - ix, v = fz - iz
     return this.corner(ix, iz) * (1 - u) * (1 - v) + this.corner(ix + 1, iz) * u * (1 - v) + this.corner(ix, iz + 1) * (1 - u) * v + this.corner(ix + 1, iz + 1) * u * v
+  }
+
+  /** Highest rock-top surface at world (x, z) from the loaded chunks' fmTop grids (own chunk + neighbours, since a
+   *  formation's mesh reaches past its chunk); −1e9 where no rock top. */
+  private rockTop(x: number, z: number): number {
+    const ci = Math.floor(x / CHUNK_SIZE), cj = Math.floor(z / CHUNK_SIZE)
+    let best = -1e9
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      const c = this.chunks.get(chunkKey(ci + di, cj + dj))
+      const t = c?.data.fmTop
+      if (!t || !t.length) continue
+      const i = Math.floor((x - (ci + di) * CHUNK_SIZE - FM_TOP.origin) / FM_TOP.cell), j = Math.floor((z - (cj + dj) * CHUNK_SIZE - FM_TOP.origin) / FM_TOP.cell)
+      if (i < 0 || j < 0 || i >= FM_TOP.res || j >= FM_TOP.res) continue
+      best = Math.max(best, t[j * FM_TOP.res + i])
+    }
+    return best
   }
 
   /** Returns false if the terrain under the tile isn't loaded yet (retried next frames). */
@@ -274,9 +300,20 @@ export class GrassField {
       const lz = wz - d.cz * CHUNK_SIZE
       const gh = sampleHeight(d.heights, lx, lz)
       const ni = Math.min(CHUNK_VERTS - 1, Math.round(lz / CELL_SIZE)) * CHUNK_VERTS + Math.min(CHUNK_VERTS - 1, Math.round(lx / CELL_SIZE))
+      // GREEN ROCK TOPS: the flat tops of crags and formations (pillar crowns, cave hills, ledges) carry the ground
+      // cover in their colour — grow the grass ON them (ChunkData.fmTop), not under them at the terrain height.
+      let rt = this.rockTop(wx, wz)
+      // Only where the WHOLE patch (±0.9 m incl. blade lean) is on the same top — no blades hanging over the rim.
+      if (rt > gh + 0.25) {
+        for (const [ex, ez] of EDGE_PROBE) {
+          if (Math.abs(this.rockTop(wx + ex, wz + ez) - rt) > 0.6) { rt = -1e9; break }
+        }
+        if (rt < -1e8) { ZERO.toArray(mats, (base + i) * 16); dens[base + i] = 0; continue }
+      }
+      const onRock = rt > gh + 0.25
       // No grass inside a cave hill / under a boulder pile / through a pillar (arches stand over the meadow).
       const fm = this.fields.formations.near(wx, wz)
-      if (fm && fm.kind !== 0 && Math.hypot(wx - fm.x, wz - fm.z) < fm.radius * (fm.kind === 2 ? 0.55 : 0.9)) {
+      if (!onRock && fm && fm.kind !== 0 && Math.hypot(wx - fm.x, wz - fm.z) < fm.radius * (fm.kind === 2 ? 0.55 : 0.9)) {
         ZERO.toArray(mats, (base + i) * 16)
         dens[base + i] = 0
         continue
@@ -295,7 +332,9 @@ export class GrassField {
       const gx = (sampleHeight(d.heights, Math.min(CHUNK_SIZE, lx + e), lz) - sampleHeight(d.heights, Math.max(0, lx - e), lz)) / (2 * e)
       const gz = (sampleHeight(d.heights, lx, Math.min(CHUNK_SIZE, lz + e)) - sampleHeight(d.heights, lx, Math.max(0, lz - e))) / (2 * e)
       const ny = 1 / Math.sqrt(1 + gx * gx + gz * gz)
-      const rockK = Math.min(1, Math.max(0, (ny - 0.8) / 0.075))
+      // (Matched to the terrain shader's cliff paint, normal.y 0.6–0.67 ≈ 48–53°: every slope still painted green
+      // keeps its grass — it used to stop at ~37° and left the green banks bare. Rock tops: always flat enough.)
+      const rockK = onRock ? 1 : Math.min(1, Math.max(0, (ny - 0.64) / 0.08))
       const fp = this.fields.pois.near(wx, wz)
       if (rockK <= 0 || gh < WorldFields.WATER + 0.5 || d.netEdge[ni] < -0.3 || (fp && farmFieldAt(fp, wx, wz))) {
         ZERO.toArray(mats, (base + i) * 16)
@@ -305,15 +344,15 @@ export class GrassField {
       // Softer near track edges and the waterline: thin out instead of a hard stop.
       const edgeK = Math.min(1, Math.max(0, (road - 0.3) / 1.2)) * Math.min(1, Math.max(0, (d.netEdge[ni] + 0.3) / 1.5))
       dens[base + i] = density * (0.35 + 0.65 * edgeK) * rockK * rockK
-      _p.set(wx, gh - 0.04, wz)
+      _p.set(wx, (onRock ? rt : gh) - 0.04, wz)
       const ang = r * 97.0
       _q.setFromAxisAngle(_up, ang)
       const sc = isOverland() ? 0.95 + hashFloat(seed, tx, tz, i * 4) * 0.1 : 0.9 + hashFloat(seed, tx, tz, i * 4) * 0.25 + verge * 0.3
       // Terrain gradient here (central differences on the chunk's own heights = the rendered mesh), turned into
       // the patch's rotated frame: local x = (cos, −sin), local z = (sin, cos) of the world axes.
       const ca = Math.cos(ang), sa = Math.sin(ang)
-      slopes[(base + i) * 2] = (gx * ca - gz * sa) / sc
-      slopes[(base + i) * 2 + 1] = (gx * sa + gz * ca) / sc
+      slopes[(base + i) * 2] = onRock ? 0 : (gx * ca - gz * sa) / sc
+      slopes[(base + i) * 2 + 1] = onRock ? 0 : (gx * sa + gz * ca) / sc
       _s.set(1, sc, 1) // XZ stays 1 so patches keep tiling
       _m.compose(_p, _q, _s).toArray(mats, (base + i) * 16)
       const o = (base + i) * 3

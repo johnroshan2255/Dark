@@ -34,6 +34,7 @@ roadside props. This skill lists the real-time techniques that get us there with
 | Forest floor & undergrowth | needle litter/moss colour under canopy; ferns + leafy bushes (2 draws / near chunk), dense on verges | `generateTerrain.ts`, `WorldChunk.ts` |
 | Painted spruce/fir silhouettes (old) | Stacked drooping star-cone SKIRTS (long/short points, tips below the base) + hanging serrated needle-FRINGE cards on each rim; narrow spire | `Forest/treeFactory.ts` (`skirt`, `conifer`) |
 | Tall pines | Long bare trunk + flat drooping pads in the top third | `treeFactory.ts` (`pine`) |
+| Genshin broadleaves + world tree (Blender) | Leaf CLUMPS of cards only (outer shell + darker inner shell, NO solid core) on the painted ~180-leaf cluster (atlas `drawTuftGenshin`, every style), spherical normals, dark-inside → light-top vertex colours; the world tree's fill clumps make one dome. Edit `scripts/blender/genshin_trees.py`, re-run in Blender | `assets/treeModels.ts`, `FoliageAtlas.ts` |
 | Roadside birch/aspen | Cumulus of lumps shaded as ONE volume (normals from crown centre) → bumpy outline, smooth light | `treeFactory.ts` (`crownLump`) |
 | Tufted verges with flowers | Grass clumped by a 5 m mask (soil shows between tussocks), taller blades, olive tips, ~10% clumps with yellow/white flower heads (shader-toggled, no extra draws) | `Forest/grass.ts`, `GrassField.ts` |
 | Leaf clusters / needle texture | Greyscale procedural atlas tinted by vertex colour (fringe, leaves, tuft, fern cells) | `materials/FoliageAtlas.ts` |

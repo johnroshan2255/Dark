@@ -24,8 +24,12 @@ export interface SpeciesDef {
   id: number
   name: string
   levels: [THREE.BufferGeometry, THREE.BufferGeometry, THREE.BufferGeometry]
+  /** Level 1's geometry in the NEAR LOD band (LOW's near trees; createTreeLibrary). */
+  near1?: THREE.BufferGeometry
   trunkRadius: number
   trunkHalfHeight: number
+  /** Blender-modelled (assets/treeModels.ts): its colours are final — always the Genshin hue set, every art style. */
+  modelled?: boolean
 }
 
 /** A flat card p0→p1 with half-width vector `side`; normals from `centre` (canopy volume). */
@@ -522,6 +526,10 @@ export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } 
     { id: TreeSpecies.Ancient, name: 'ancient', levels: build((l, r) => broadleaf(l, r, isGenshin() ? { ...ANCIENT_TREE, plates: true, fork: 3.0, spread: 5.4, limbs: 6, clumpR: 2.3 } : ANCIENT_TREE, 'ancient'), 909, 'ancient'), trunkRadius: 0.6, trunkHalfHeight: 4 },
     { id: TreeSpecies.Shroom, name: 'shroom', levels: build(shroomTree, 1010, 'shroom'), trunkRadius: 0.26, trunkHalfHeight: 2.5 },
   ]
+  // Broadleaf STAND types (scatter.ts): code-built fallbacks are copies of the birch (the Blender models replace them).
+  const birchDef = species.find((s) => s.id === TreeSpecies.Birch)!
+  for (const [id, name] of [[TreeSpecies.Oak, 'oak'], [TreeSpecies.Slender, 'slender'], [TreeSpecies.Golden, 'golden'], [TreeSpecies.Curvy, 'curvy']] as const)
+    species.push({ ...birchDef, id, name, levels: birchDef.levels.map((g) => g.clone()) as SpeciesDef['levels'] })
   // Registered species (e.g. GLB models, `registerTreeSpecies`) replace the built-in one with the same id.
   for (const extra of EXTRA_SPECIES) {
     const i = species.findIndex((s) => s.id === extra.id)
@@ -529,7 +537,14 @@ export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } 
     if (i >= 0) species[i] = extra
     else species.push(extra)
   }
-  return { species, dispose: () => species.forEach((s) => s.levels.forEach((g) => g.dispose())) }
+  // Per-tree LOD bands (uniforms.ts uTreeLod): level 0 = band 1 (near), level 1 = band 2 (mid), level 2 = band 3
+  // (the legacy far mesh, never faded). `near1` = level 1's geometry tagged as the NEAR band — LOW's near trees.
+  const band = (g: THREE.BufferGeometry, b: number) => g.setAttribute('aLodBand', new THREE.BufferAttribute(new Float32Array(g.getAttribute('position').count).fill(b), 1))
+  for (const s of species) {
+    s.levels.forEach((g, l) => band(g, l + 1))
+    s.near1 = band(s.levels[1].clone(), 1)
+  }
+  return { species, dispose: () => species.forEach((s) => (s.levels.forEach((g) => g.dispose()), s.near1?.dispose())) }
 }
 
 function desert(fn: (s: Soup, level: number, rng: Rng) => void, name: string): (level: number, rng: Rng) => THREE.BufferGeometry {

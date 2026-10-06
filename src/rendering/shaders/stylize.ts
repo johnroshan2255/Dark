@@ -159,6 +159,7 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       uStoryLight: u.uStoryLight,
       uUpView: u.uUpView,
       uFogMax: u.uFogMax,
+      uAerial: u.uAerial,
       uLandHaze: u.uLandHaze,
       uFarEdge: u.uFarEdge,
       uCullFade: u.uCullFade,
@@ -191,7 +192,7 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       )
     if (o.biomeCover) {
       vs = vs
-        .replace('#include <common>', `#include <common>\n${BIOME_GLSL}\nvarying vec2 vBiomeW; varying float vSnowUp;`)
+        .replace('#include <common>', `#include <common>\n${BIOME_GLSL}\nvarying vec2 vBiomeW; varying float vSnowUp;${o.key === 'landmark' ? '\nattribute float aBaseY;' : ''}`)
         .replace(
           '#include <fog_vertex>',
           `#include <fog_vertex>
@@ -203,6 +204,7 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
             vec3 bOrigin = (modelMatrix * vec4(transformed, 1.0)).xyz;
             vec3 bN = mat3(modelMatrix) * objectNormal;
           #endif
+          ${o.key === 'landmark' ? 'bOrigin.y = aBaseY; // merged landmarks: the snow line at the foot (LandmarkSystem)' : ''}
           vBiomeW = biomeWithSnowLine(bOrigin.xz, bOrigin.y);
           vSnowUp = normalize(bN).y;
         }`,
@@ -252,7 +254,8 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       `#include <common>
 ${decl('uniform vec3 uKeyDirView;')}${decl('uniform vec3 uKeyColor;')}uniform vec3 uScatterColor; uniform float uScatterAmount; uniform float uRim; uniform float uToon; uniform float uTimeS; uniform vec2 uWindS;
 uniform vec2 uSkyHaze;
-uniform float uFogMax; uniform vec3 uLandHaze; uniform vec2 uFarEdge; uniform vec2 uCullFade; uniform vec2 uNearFade; uniform float uWet;
+uniform float uFogMax; uniform vec3 uLandHaze; uniform vec2 uFarEdge; uniform vec2 uCullFade; uniform vec2 uNearFade; uniform float uWet; uniform vec4 uAerial;
+${fs.includes('uSkySunDir') ? '' : 'uniform vec3 uSkySunDir; uniform vec3 uSkySunColor; uniform float uSkySunVis;'}
 float skyHaze(float d) { return uSkyHaze.x * (1.0 - exp(-max(d - 12.0, 0.0) / uSkyHaze.y)); }
 varying vec3 vFogSky; varying vec3 vWPos;
 ${fs.includes('uSkyMist') ? '' : MIST_GLSL}
@@ -268,6 +271,9 @@ ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
       THREE.ShaderChunk.lights_lambert_pars_fragment.replace(
         'float dotNL = saturate( dot( geometryNormal, directLight.direction ) );',
         `float dotNL = saturate( dot( geometryNormal, directLight.direction ) );
+  ${o.surface === 'atlas' ? `// LEAF CARDS (vSurf < 0): softly WRAPPED light — a long gentle gradient across the crown (Genshin's soft
+  // volume), the far side still ~40 % lit (dark gaps between puffs read as holes); no cel step on leaves.
+  if (vSurf < -0.5) dotNL = mix(0.4, 1.0, smoothstep(-0.5, 0.95, dot(geometryNormal, directLight.direction))); else` : ''}
   dotNL = mix(dotNL, ${gen ? 'smoothstep(-0.05, 0.5, dotNL) * 0.6 + dotNL * 0.4' : 'smoothstep(0.0, 0.16, dotNL) * 0.82 + dotNL * 0.18'}, uToon * ${(o.toon ?? 1).toFixed(2)});`, // Genshin scenery: a SOFT terminator (the hard cel step is for characters)
       ),
     )
@@ -380,7 +386,7 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
         rel = vec2(fract(fp.x) - 0.5, fract(fy) - 0.5);
       }
       float top = smoothstep(0.05, 0.5, rel.y);
-      cliffTilt = vec3((st_hash(cell + 3.1) - 0.5) * 1.3, (st_hash(cell + 5.7) - 0.3) * 0.5 + top * 0.8, (st_hash(cell + 9.2) - 0.5) * 1.3)${gen ? ' * 0.5' : ''}; // Genshin: gentle facets
+      cliffTilt = vec3((st_hash(cell + 3.1) - 0.5) * 1.3, (st_hash(cell + 5.7) - 0.3) * 0.5 + top * 0.8, (st_hash(cell + 9.2) - 0.5) * 1.3)${gen ? ' * 0.12' : ''}; // Genshin: smooth rock — barely any facet tilt
       if (cliff > 0.01) {
         float region = fine ? st_noise(wp * 0.008 + vec2(vWorldPos.y * 0.01)) : n1;
         ${gen ? `// GENSHIN (reference-matched): warm light-grey stone (lit ≈ 170,166,150 on screen); the blue comes from the
@@ -540,7 +546,10 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   vec3 V = normalize(vViewPosition);
   float ndv = clamp(dot(normal, V), 0.0, 1.0);
   float back = pow(clamp(dot(-V, uKeyDirView), 0.0, 1.0), 2.0);
-  outgoingLight += uKeyColor * diffuseColor.rgb * pow(1.0 - ndv, 3.0) * (0.3 + back * 1.4) * uRim${story ? ' * (1.0 - uStoryAmt)' : ''};${o.surface === 'atlas' ? `
+  outgoingLight += uKeyColor * diffuseColor.rgb * pow(1.0 - ndv, 3.0) * (0.3 + back * 1.4) * uRim${story ? ' * (1.0 - uStoryAmt)' : ''}${o.surface === 'atlas' ? ' * (vSurf < -0.5 ? 0.2 : 1.0)' : ''};${o.surface === 'atlas' ? `
+  // (Leaves keep only a trace of the rim — a full rim made every crown edge glow, the "shiny" look.)
+  // Leaves seen against the sun GLOW through (translucency): a warm lift on the backlit side of every crown.
+  if (vSurf < -0.5) outgoingLight += uKeyColor * diffuseColor.rgb * back * 0.15;
   // Emissive mushrooms (vGlow): their own light on top of the lit colour — bright in the shade, glowing at night,
   // bloom picks it up on MEDIUM+ (LOW: no bloom, a bright flat colour).
   outgoingLight = mix(outgoingLight, max(outgoingLight, diffuseColor.rgb * 1.9), vGlow);` : ''}
@@ -578,10 +587,25 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   float rim = smoothstep(uFarEdge.x, uFarEdge.y, vFogDepth);
   fogFactor = max(min(fogFactor, uFogMax), rim);
   fogCol = mix(fogCol * uLandHaze, fogCol, rim);
+  // AERIAL PERSPECTIVE (Genshin): the haze is brighter and warmer looking toward the sun (light scattered forward
+  // through the air), cooler and bluer away from it — and, before the tint covers anything, distant surfaces lose
+  // saturation and contrast toward the haze, so far hills, trees and rocks read as soft layered silhouettes (each
+  // ridge paler than the one in front) instead of sharp small detail. Near field (< uAerial.x) untouched. ~12 ALU.
+  { vec3 vd = normalize(vWPos - cameraPosition);
+    float toSun = pow(max(dot(vd, normalize(uSkySunDir)), 0.0), 5.0) * uSkySunVis * uAerial.w;
+    fogCol = mix(fogCol * vec3(0.94, 0.98, 1.06), fogCol * 0.7 + uSkySunColor * 0.45, toSun);
+    float ap = smoothstep(uAerial.x, uAerial.y, vFogDepth) * uAerial.z * ${(o.fogAmount ?? 1).toFixed(3)};
+    float lum = dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+    float hazeLum = dot(fogCol, vec3(0.2126, 0.7152, 0.0722));
+    // Saturation falls off first — toward the HAZE's hue (sky blue by day), not grey: far land goes blue (Genshin).
+    vec3 hazeHue = fogCol / max(hazeLum, 1e-3);
+    vec3 c = mix(gl_FragColor.rgb, hazeHue * lum, ap * 0.6);
+    gl_FragColor.rgb = mix(c, c * 0.55 + hazeLum * 0.45, ap * 0.7); // then contrast: shadows lift, lights settle
+  }
   // Volumetric ground mist (height fog integrated along the view ray; sky/skyShader MIST_GLSL): pools in the
   // valleys and over the water, thins up the hills. Composited with the distance fog as two transmittances.
   { vec3 wd = vWPos - cameraPosition; float wl = max(length(wd), 1e-3);
-    float mist = mistAmount(wd / wl, wl) * ${(o.fogAmount ?? 1).toFixed(3)};
+    float mist = mistAmount(wd / wl, wl) * ${(o.fogAmount ?? 1).toFixed(3)}${o.key === 'grass' ? ' * smoothstep(10.0, 45.0, wl)' : ''}; // (near grass: no grey veil)
     fogFactor = 1.0 - (1.0 - fogFactor) * (1.0 - mist); }
   gl_FragColor.rgb = mix(gl_FragColor.rgb, fogCol, fogFactor);
 #endif`,

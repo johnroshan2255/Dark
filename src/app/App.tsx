@@ -144,7 +144,7 @@ function LockHint({ game }: { game: Game }) {
   if (locked) return null
   return (
     <div style={{ position: 'fixed', bottom: 24, width: '100%', textAlign: 'center', pointerEvents: 'none', fontSize: 13, opacity: 0.8 }}>
-      Click to play · WASD / Shift / Space · E bike / car · F flashlight · T day⇄night · G next time · N nightmare · V camera · O settings · F3 FPS · F4 chunks · F5 freeze culling · F6 physics
+      Click to play · WASD / Shift / Space · E bike / car · L fly · ↑↓ lift · F flashlight · T day⇄night · G next time · N nightmare · V camera · O settings · F3 FPS · F4 chunks · F5 freeze culling · F6 physics
     </div>
   )
 }

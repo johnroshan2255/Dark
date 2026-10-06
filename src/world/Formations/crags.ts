@@ -124,8 +124,9 @@ function addCrag(
   const T = TIERS.length
   const cx: number[] = [], cz: number[] = []
   for (let t = 0; t < T; t++) {
-    const lean = t === 0 ? 0 : (hf(50 + t) - 0.4) * 0.22 * wd * t
-    const side = t === 0 ? 0 : (hf(55 + t) - 0.5) * 0.25 * ws
+    // (Genshin: much smaller kinks — smooth, rounded rock masses, not stacked sharp blocks.)
+    const lean = t === 0 ? 0 : (hf(50 + t) - 0.4) * (gen ? 0.08 : 0.22) * wd * t
+    const side = t === 0 ? 0 : (hf(55 + t) - 0.5) * (gen ? 0.08 : 0.25) * ws
     cx.push(lx + dx * lean + sx * side)
     cz.push(lz + dz * lean + sz * side)
   }
@@ -137,10 +138,10 @@ function addCrag(
     for (let k = 0; k < N; k++) {
       const hx = DIRS[k * 2], hz = DIRS[k * 2 + 1]
       const ca = hx * rc - hz * rs, cb = hx * rs + hz * rc
-      const jit = gen ? 0.88 + 0.18 * hf(10 + t * N + k) : 0.68 + 0.5 * hf(10 + t * N + k) // irregular outline (Genshin: near-convex slabs)
+      const jit = gen ? 0.94 + 0.08 * hf(10 + t * N + k) : 0.68 + 0.5 * hf(10 + t * N + k) // irregular outline (Genshin: near-convex slabs)
       const a = ca * wd * tierS * jit, b = cb * ws * tierS * jit
       const ox = dx * a + sx * b, oz = dz * a + sz * b
-      const y = yb + yspan * fy + (t === T - 1 ? (hf(40 + k) - 0.5) * 2 * jag : t > 0 ? (hf(30 + t * N + k) - 0.5) * 0.12 * yspan : 0)
+      const y = yb + yspan * fy + (t === T - 1 ? (hf(40 + k) - 0.5) * 2 * jag : t > 0 ? (hf(30 + t * N + k) - 0.5) * (gen ? 0.04 : 0.12) * yspan : 0)
       P.push(cx[t] + ox, y, cz[t] + oz)
       const ol = Math.sqrt(ox * ox + oz * oz) || 1
       RN.push(ox / ol, oz / ol)
@@ -173,7 +174,7 @@ function addCrag(
   // the flat face normal with the vertex's radial (or up) direction → readable planes, but soft painted shading
   // instead of hard toy facets.
   // Facet share of the shading normal: Genshin's rock reads as soft rounded slabs (more radial), else planes.
-  const faceK = fields.palette === 2 ? 0.3 : 0.55
+  const faceK = fields.palette === 2 ? 0.0 : 0.55 // Genshin: fully rounded (radial) shading — smooth rock, no facets
   const tri = (a: number, b: number, c: number, ca: number[], cb: number[], cc: number[], ox: number, oz: number, cap: boolean) => {
     let A = a, B = b, C = c, CA = ca, CB = cb, CC = cc
     const px = (i: number) => (i < 0 ? capX : P[i * 3]), py = (i: number) => (i < 0 ? capY : P[i * 3 + 1]), pz = (i: number) => (i < 0 ? capZ : P[i * 3 + 2])
@@ -190,6 +191,10 @@ function addCrag(
       out.pos.push(px(i), py(i), pz(i))
       let mx: number, my: number, mz: number
       if (cap || i < 0) (mx = nx * 0.5), (my = ny * 0.5 + 0.5), (mz = nz * 0.5)
+      else if (faceK === 0) { // rounded: radial out, tilting up toward the top tier (a dome, not a cylinder)
+        const fy = (py(i) - yb) / yspan
+        mx = RN[i * 2]; my = -0.15 + 0.75 * fy * fy; mz = RN[i * 2 + 1]
+      }
       else (mx = nx * faceK + RN[i * 2] * (1 - faceK)), (my = ny * faceK), (mz = nz * faceK + RN[i * 2 + 1] * (1 - faceK))
       const ml = Math.sqrt(mx * mx + my * my + mz * mz) || 1
       out.nor.push(mx / ml, my / ml, mz / ml)

@@ -6,6 +6,7 @@ import { globalUniforms, GUST_GLSL, SWAY_GLSL } from '../shaders/uniforms'
 import { createBrushTexture } from './BrushTexture'
 import { isGenshin, isOverland, isStorybook } from '../artStyle'
 import { createFoliageAtlas } from './FoliageAtlas'
+import { createImpostorMaterial } from '../impostors/Impostors'
 
 /**
  * Camera-facing foliage TUFTS (fluffy trees): vertices with a non-zero `bbOff` are expanded around `bbCenter`
@@ -14,8 +15,49 @@ import { createFoliageAtlas } from './FoliageAtlas'
  */
 function billboardable(m: THREE.MeshLambertMaterial): THREE.MeshLambertMaterial {
   m.onBeforeCompile = (shader) => {
+    shader.uniforms.uTreeLod = globalUniforms.uTreeLod
+    // PER-TREE LOD CROSSFADE (uTreeLod): band 1 (near mesh) dithers out across [x, y] of the tree's distance,
+    // band 2 (low-poly) dithers in there and out across [z, w] where the impostor takes over with the
+    // complementary pattern. Band 0 (plants, props, landmarks — no attribute) and 3 (legacy far mesh) never fade.
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform vec4 uTreeLod; varying float vLodBand; varying float vTreeD;')
+      .replace(
+        '#include <alphatest_fragment>',
+        `if (uTreeLod.x >= 0.0 && vLodBand > 0.5 && vLodBand < 2.5) {
+          float g = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+          float k1 = smoothstep(uTreeLod.x, uTreeLod.y, vTreeD);
+          if (vLodBand < 1.5 ? g < k1 : (g >= k1 || g < smoothstep(uTreeLod.z, uTreeLod.w, vTreeD))) discard;
+        }
+        #include <alphatest_fragment>`,
+      )
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\nattribute vec3 bbCenter; attribute vec2 bbOff;\nuniform float uTimeS; uniform vec2 uWindS; uniform vec2 uNearFade;\n${GUST_GLSL}\n${SWAY_GLSL}`)
+      .replace('#include <common>', `#include <common>\nattribute vec3 bbCenter; attribute vec2 bbOff; attribute float aLodBand; varying float vLodBand; varying float vTreeD;\nuniform float uTimeS; uniform vec2 uWindS; uniform vec2 uNearFade; uniform vec4 uTreeLod;\n${GUST_GLSL}\n${SWAY_GLSL}`)
+      // A tree wholly outside its band this frame (fully dithered away) is dropped HERE: off-clip, before the sway,
+      // the billboarding and the per-vertex sky fog — chunks straddling a band edge draw both meshes, but only the
+      // trees actually in the crossfade pay the vertex shader.
+      .replace(
+        '#include <beginnormal_vertex>',
+        `#ifdef USE_INSTANCING
+        if (uTreeLod.x >= 0.0 && aLodBand > 0.5 && aLodBand < 2.5) {
+          float dI = distance(cameraPosition, (modelMatrix * vec4(instanceMatrix[3].xyz, 1.0)).xyz);
+          float k1 = smoothstep(uTreeLod.x, uTreeLod.y, dI);
+          if (aLodBand < 1.5 ? k1 >= 1.0 : (k1 <= 0.0 || smoothstep(uTreeLod.z, uTreeLod.w, dI) >= 1.0)) {
+            gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+            return;
+          }
+        }
+        #endif
+        #include <beginnormal_vertex>`,
+      )
+      .replace(
+        '#include <fog_vertex>',
+        `#include <fog_vertex>
+        vLodBand = aLodBand;
+        vTreeD = 0.0;
+        #ifdef USE_INSTANCING
+          vTreeD = distance(cameraPosition, (modelMatrix * vec4(instanceMatrix[3].xyz, 1.0)).xyz);
+        #endif`,
+      )
       // Instance hue palettes (autumn reds, limes…) tint the LEAVES; bark keeps its colour (only the instance's
       // brightness): a red stand must not have pink trunks. Bark = the atlas's BARK surface texel (SURFACE_UV).
       .replace(
@@ -102,6 +144,8 @@ export class MaterialLibrary {
   readonly landmark = stylize(billboardable(
     new THREE.MeshLambertMaterial({ vertexColors: true, map: this.atlas, alphaTest: 0.42, side: THREE.DoubleSide }),
   ), { key: 'landmark', rim: isOverland() ? 0.5 : isGenshin() ? 0.45 : 1.1, noFlip: true, surface: 'atlas', wet: true, biomeCover: 'foliage' })
+  /** Distant trees: octahedral impostor cards (rendering/impostors) — one program, atlas baked at load. */
+  readonly impostor = createImpostorMaterial()
   /** OVERLAND: soft plain-colour boulders (no stone paint strokes); otherwise smooth painted STONE. */
   readonly rock = isOverland()
     ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock' })

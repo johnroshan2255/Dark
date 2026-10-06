@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { CaveSystem } from '../gameplay/caves/CaveSystem'
 import { ART, isGenshin, isOverland, type ArtStyle } from '../rendering/artStyle'
 import { downscaleTexture, loadModels, loadVehicle, type GameModels } from '../assets/loadModels'
 import { tuningFor, vehicleDef, type VehicleTuning } from '../gameplay/vehicle/catalogue'
@@ -59,6 +60,8 @@ import { WindDrift } from '../rendering/particles/WindDrift'
 import { BiomeMap } from '../rendering/biome/BiomeMap'
 import { applyBiomeAir } from '../rendering/weather/BiomeAir'
 import { GameLoop } from './GameLoop'
+import { bakeImpostors, useImpostorAtlas, type ImpostorAtlas } from '../rendering/impostors/Impostors'
+import { TREE_FADE } from '../world/WorldManager'
 import { createStore, type GameStateShape, type Store } from './GameState'
 import { loadSettings, saveSettings, type Settings } from './Settings'
 import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../world/Biomes'
@@ -125,6 +128,10 @@ export class Game {
   readonly horizon: HorizonTerrain
   /** Giant trees, windmills, ruins, statues, towers… on the high ground, drawn out to the skyline. */
   readonly landmarks: LandmarkSystem
+  /** Hillside caves: crystals, pools, sunbeams, chests and the in-the-dark factor (gameplay/caves). */
+  readonly caves: CaveSystem
+  private readonly caveFog = new THREE.Color(0.03, 0.045, 0.055)
+  private readonly aerialBase = globalUniforms.uAerial.value.z
   readonly monsters: MonsterSystem
   readonly lightning: Lightning
   private respawnTimer = 0
@@ -224,6 +231,7 @@ export class Game {
       settingsOpen: false,
       dead: false,
       driving: false,
+      flying: false,
       lights: false,
       landing: opts.play !== true,
       screen: 'menu',
@@ -252,12 +260,15 @@ export class Game {
     this.cameraCtl = new CameraController(physics, this.world.fields, this.character, this.blobShadow)
     this.cameraCtl.mode = this.settings.camera
     this.horizon = new HorizonTerrain(opts.seed)
+    this.world.farForest.ground = this.horizon // far trees stand on the drawn horizon hills
     this.landmarks = new LandmarkSystem(this.world.fields.landmarks, this.materials.landmark, physics)
+    this.caves = new CaveSystem(this.world.fields)
     this.bike = new Bike(this.materials.character, this.player, this.character, this.world.fields, physics, this.input)
     this.bike.parkNear(spawn, this.player.yaw, 2.4)
     this.car = new Car(this.materials.character, models.truck, physics, this.world.fields, this.player, this.character, this.input, this.tuning(models.truck.id))
     this.car.sim.arcade = this.settings.handling === 'arcade' // realistic simulation by default (VehicleSim); arcade = Asphalt-style option
     this.car.autoAccel = this.settings.autoAccelerate
+    this.wireCar()
     this.destruction = new Destruction(physics, this.materials.character)
     this.destruction.vehicle = {
       body: () => (this.car.driving ? this.car.sim.body : null),
@@ -300,7 +311,7 @@ export class Game {
 
     this.physicsDebug = new PhysicsDebug(physics)
     this.envRoot.name = 'environment'
-    this.envRoot.add(this.destruction.mesh, this.drift.points, this.sky.mesh, this.bike.root, this.car.root, this.vehicleFx.points, this.rain.points, this.horizon.mesh, this.landmarks.group, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
+    this.envRoot.add(this.caves.group, this.destruction.mesh, this.drift.points, this.sky.mesh, this.bike.root, this.car.root, this.vehicleFx.points, this.rain.points, this.horizon.mesh, this.landmarks.group, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
     // Not in the water's mirror: the water itself, near-field grass, particles, the torch beam, debug helpers.
     this.reflection.hide.push(this.water.mesh, this.world.grass.root, this.drift.points, this.vehicleFx.points, this.rain.points, this.ash.points, this.beam.mesh, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
 
@@ -340,22 +351,20 @@ export class Game {
       else s.set({ flashlight: this.lighting.toggleFlashlight() })
     })
     i.onPress('KeyE', () => {
+      // A cave chest in reach (on foot) opens first: full heal + a treasure.
+      if (!this.car.driving && !this.bike.riding && this.caves.tryOpen(this.player.renderPosition)) {
+        this.health.revive()
+        return
+      }
       // One key for everything (touch: BIKE/CAR button). Riding → get off the bike first (the truck can't be
       // entered from the saddle); otherwise the truck takes priority when both are near.
+      // The car animates getting in / out itself (CarEntry); its events below play the door and engine.
       if (this.bike.riding) this.bike.toggle()
-      else if (this.car.driving || this.car.near) {
-        const wasDriving = this.car.driving
-        this.car.toggle()
-        // Door, then the engine catching (in) / dying (out).
-        if (this.car.driving !== wasDriving) {
-          this.audio.play('door', 0.7)
-          this.audio.play(this.car.driving ? 'engineStart' : 'engineStop', 0.8)
-        }
-        this.cameraCtl.vehicle = this.car.driving ? { distance: 8, pivot: 2.3 } : null
-        if (this.car.driving) this.car.lights = this.darkness > 0.5 // lights come on with the dark; off by day
-        s.set({ driving: this.car.driving, lights: this.car.lights })
-      } else this.bike.toggle()
+      else if (this.car.occupied || this.car.near) this.car.toggle()
+      else this.bike.toggle()
     })
+    // L (touch FLY / LAND): the flying car — wheels turn into jets; ↑ / ↓ climb and sink (on the ground: lift the body).
+    i.onPress('KeyL', () => this.car.toggleFly())
     i.onPress('BracketLeft', () => this.updateSettings({ resolution: Math.max(0.5, this.post.renderScale - 0.1) }))
     i.onPress('BracketRight', () => this.updateSettings({ resolution: Math.min(1, this.post.renderScale + 0.1) }))
     // F7: cycle tier manually. F8: back to auto quality.
@@ -388,6 +397,26 @@ export class Game {
   // ---------------------------------------------------------------- settings & quality
 
   /** The car's engine voice; in arcade the gearbox's shift points stretch to the arcade top speed. */
+/** The car's events: door sounds (open / slam), engine start / stop and the driving camera + HUD when the driver
+   *  takes / leaves the wheel (Car + CarEntry animate the getting in and out). */
+  private wireCar(): void {
+    const car = this.car
+    car.onEvent = (e) => {
+      if (car !== this.car) return
+      if (e === 'doorOpen') this.audio.play('door', 0.35, 1.25)
+      else if (e === 'doorSlam') this.audio.play('door', 0.75)
+      else if (e === 'drive') {
+        this.audio.play(car.driving ? 'engineStart' : 'engineStop', 0.8)
+        this.cameraCtl.vehicle = car.driving ? { distance: 8, pivot: 2.3 } : null
+        if (car.driving) car.lights = this.darkness > 0.5 // lights come on with the dark; off by day
+        this.store.set({ driving: car.driving, lights: car.lights, flying: car.driving && car.flyMode })
+      } else if (e === 'fly') {
+        this.audio.play('boost', 0.6, 0.8)
+        this.store.set({ flying: car.flyMode })
+      }
+    }
+  }
+
   private engineVoice(car: Car): { pitch: number; gears: number[] } {
     const e = vehicleDef(car.modelId).engine
     if (!car.sim.arcade) return e
@@ -464,6 +493,7 @@ export class Game {
     this.store.set({ held: this.heldSummary(name) })
     this.quality = q
     this.world.setQuality(q)
+    this.syncImpostors()
     this.lighting.setQuality(q)
     this.monsters.budget = q.monsters
     this.monsters.rig.castShadow = q.objectShadows
@@ -727,6 +757,7 @@ export class Game {
           if (!this.camera) return
           // Landing page: slow orbit around the parked car (the garage turntable); no look input.
           this.cameraCtl.garage = this.store.get().landing ? this.car.pos : null
+          this.cameraCtl.ignoreBody = this.car.occupied ? this.car.sim.body : null
           this.cameraCtl.update(dt, this.camera, p, this.lighting.flashlightOn)
           // BOOST feedback: the field of view widens (speed rush) while the boost is pushing the truck.
           const cam = this.camera
@@ -805,6 +836,10 @@ export class Game {
           const bw = this.world.fields.biome(p.renderPosition.x, p.renderPosition.z, this.bw, p.renderPosition.y)
           const rw = this.world.fields.region(p.renderPosition.x, p.renderPosition.z, this.rw, p.renderPosition.y)
           applyBiomeAir(this.tod.current, bw[0], bw[1], rw[Biome.Autumn], rw[Biome.Mystic])
+          // CAVES: how deep in the dark the player stands → the lights dim (sky fill, sun on tiers without shadows),
+          // the torch works at full strength; fog / exposure / haze below.
+          this.caves.update(dt, time, p.renderPosition, this.lighting.keyStrength * (1 - this.tod.nightmare) * THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.0, 0.25))
+          this.lighting.cave = this.caves.inside
           this.lighting.update(dt, p.renderPosition, c.flashOrigin, c.flashTarget)
           this.ash.update(time, cam.position, THREE.MathUtils.smoothstep(this.tod.nightmare, 0.2, 0.9), this.renderer?.domElement.height ?? 800)
           const darkness = (this.darkness = 1 - THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.05, 0.45) * (1 - this.tod.nightmare))
@@ -831,7 +866,7 @@ export class Game {
             const sim = car.sim, slip = Math.max(...sim.wheelSlip)
             this.audio.frame({
               dt, darkness, nightmare: this.tod.nightmare, menu: this.store.get().landing, rain: this.weather.rain * (1 - bw[0]) * (1 - bw[1]),
-              car: { engineOn: car.driving, distance: car.pos.distanceTo(cam.position), pan: pan(car.pos.x, car.pos.z), speed: sim.speed, wheelSpeed: sim.wheelSpeed, throttle: sim.controls.throttle, boost: sim.arcade ? sim.nitroOn : sim.controls.boost, slip, engine: this.engineVoice(car) },
+              car: { engineOn: car.driving, distance: car.pos.distanceTo(cam.position), pan: pan(car.pos.x, car.pos.z), speed: sim.speed, wheelSpeed: sim.wheelSpeed, throttle: sim.controls.throttle, boost: (sim.arcade ? sim.nitroOn : sim.controls.boost) || car.flying, slip, engine: this.engineVoice(car) },
               bike: { riding: bike.riding, distance: bike.root.position.distanceTo(cam.position), pan: pan(bike.root.position.x, bike.root.position.z), speed: bs.speed, throttle: Math.max(0, bs.controls.throttle) },
             })
             // Footsteps exactly when a foot plants (CharacterModel counts the touchdowns) — sound matches the feet.
@@ -869,6 +904,15 @@ export class Game {
           this.fog.near = Math.min(tp.fogStart, this.fog.far * 0.55)
           globalUniforms.uFogMax.value = tp.fogMax
           globalUniforms.uLandHaze.value.copy(tp.landHaze)
+          // In a cave: a dark, close fog (the far end of the chamber fades into black) and no aerial haze.
+          const cave = this.caves.inside
+          if (cave > 0.001) {
+            this.fog.color.lerp(this.caveFog, cave)
+            this.fog.near += (4 - this.fog.near) * cave
+            this.fog.far += (75 - this.fog.far) * cave
+            globalUniforms.uFogMax.value += (1 - globalUniforms.uFogMax.value) * cave
+          }
+          globalUniforms.uAerial.value.z = this.aerialBase * (1 - cave)
           globalUniforms.uFarEdge.value.set(farR * 0.7, farR * 0.96)
           const detailEdge = Math.min(q.viewDistance, q.renderRadius * CHUNK_SIZE + 24)
           globalUniforms.uCullFade.value.set(detailEdge * 0.74, detailEdge)
@@ -879,7 +923,7 @@ export class Game {
           else globalUniforms.uNearFade.value.set(1.4, 3.0)
           if (this.scene?.background instanceof THREE.Color) this.scene.background.copy(tp.fogColor)
           // Volumetric ground mist (materials + sky + water: analytic; shafts pass: drifting banks).
-          skyUniforms.uSkyMist.value.set(tp.mistDensity * (1 - 0.35 * bw[0]), tp.mistBase, tp.mistFalloff, cam.position.y)
+          skyUniforms.uSkyMist.value.set(tp.mistDensity * (1 - 0.35 * bw[0]) * (1 - this.caves.inside), tp.mistBase, tp.mistFalloff, cam.position.y)
           this.mistColor.copy(tp.fogColor).lerp(this.lighting.sun.color, 0.12 * this.lighting.keyStrength).multiplyScalar(1.05)
           this.post.setMist(skyUniforms.uSkyMist.value.x, tp.mistBase, tp.mistFalloff, cam.position.y, this.mistColor, time, globalUniforms.uWind.value)
           this.sky.update(this.tod, cam, time)
@@ -887,8 +931,10 @@ export class Game {
           this.world.visibility.maxDistance = Math.min(q.viewDistance, q.renderRadius * CHUNK_SIZE + 24) + 20
           this.water.update(time, cam.position, this.fog.near, this.fog.far, this.lighting.keyDir, this.lighting.sun.color, this.weather.rain)
           this.post.applyGrading(tp, time)
+          // Eye adaptation in the dark of a cave (Genshin opens the exposure in caves: dark, but readable).
+          this.post.material.uniforms.uExposure.value *= 1 + 0.55 * this.caves.inside
           const k = this.lighting.keyStrength
-          this.post.updateGodRays(cam, this.lighting.sun, this.lighting.keyDir, tp.rays * k, tp.shafts * k, this.fog.near, this.fog.far, this.quality.sunShadowExtent * 1.2)
+          this.post.updateGodRays(cam, this.lighting.sun, this.lighting.keyDir, tp.rays * k * (1 - this.caves.inside), tp.shafts * k * (1 - this.caves.inside), this.fog.near, this.fog.far, this.quality.sunShadowExtent * 1.2)
           globalUniforms.uTime.value = time
           globalUniforms.uCameraPos.value.copy(cam.position)
           globalUniforms.uPlayerPos.value.copy(p.renderPosition)
@@ -959,18 +1005,18 @@ export class Game {
     this.selecting = loadVehicle(id, (f) => this.store.set({ vehicleLoading: f }))
       .then((model) => {
         const pos = this.car.pos.clone(), heading = this.car.heading
-        if (this.car.driving) this.car.toggle()
-        this.car.dispose()
+        this.car.dispose() // (forceOut: an occupant is put beside it, no animation)
         this.car = new Car(this.materials.character, model, this.physics, this.world.fields, this.player, this.character, this.input, this.tuning(id))
         this.car.park(pos.x, pos.z, heading)
         this.car.sim.arcade = this.settings.handling === 'arcade'
         this.car.autoAccel = this.settings.autoAccelerate
+        this.wireCar()
         this.envRoot.add(this.car.root)
         this.car.castShadow = this.quality.objectShadows
         this.car.setMap(this.quality.name === 'low' && model.map ? downscaleTexture(model.map, 512) : model.map)
         this.settings = { ...this.settings, garage: { ...this.settings.garage, vehicle: id } }
         saveSettings(this.settings)
-        this.store.set({ settings: this.settings, vehicle: id, vehicleLoading: null, driving: false })
+        this.store.set({ settings: this.settings, vehicle: id, vehicleLoading: null, driving: false, flying: false })
       })
       .catch((e: unknown) => {
         console.error(e)
@@ -1000,6 +1046,34 @@ export class Game {
     this.health.revive()
     this.monsters.scatter()
     this.store.set({ dead: false })
+  }
+
+  private impostorAtlas: ImpostorAtlas | null = null
+  private impostorAtlasSize = 0
+  /**
+   * Octahedral impostors (rendering/impostors): bake the tree atlas at the tier's size (once; again only if the
+   * size changes — ~30–80 ms GPU), pick the 1- or 3-view shader, set the per-tree LOD distances and turn the
+   * per-tree LOD + far forest on.
+   */
+  private syncImpostors(): void {
+    const r = this.renderer
+    if (!r) return
+    const q = this.quality, im = q.impostors
+    const mat = this.materials.impostor
+    if (mat.userData.blend !== im.blend) {
+      mat.userData.blend = im.blend
+      mat.needsUpdate = true
+    }
+    if (!this.impostorAtlas || this.impostorAtlasSize !== im.atlas) {
+      this.impostorAtlas?.dispose()
+      this.impostorAtlas = bakeImpostors(r, this.world.treeSpecies.map((s) => ({ id: s.id, geometry: s.levels[0] })), this.materials.atlas, im.atlas)
+      this.impostorAtlasSize = im.atlas
+      useImpostorAtlas(mat, this.impostorAtlas)
+    }
+    const l1 = Math.min(q.trees.lod1, im.start) // ≥ start: near mesh → impostor directly
+    globalUniforms.uTreeLod.value.set(l1, l1 + TREE_FADE, im.start, im.start + TREE_FADE)
+    globalUniforms.uImpFar.value.set(im.far * 0.6, im.far) // the forest thins out across the last 40 %
+    this.world.setImpostors(true)
   }
 
   /** Called once R3F has created renderer/scene/camera. Returns a detach function. */
