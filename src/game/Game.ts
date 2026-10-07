@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { CaveSystem } from '../gameplay/caves/CaveSystem'
+import { MOUTH_X } from '../world/Formations/caves'
 import { ART, isGenshin, isOverland, type ArtStyle } from '../rendering/artStyle'
 import { downscaleTexture, loadModels, loadVehicle, type GameModels } from '../assets/loadModels'
 import { tuningFor, vehicleDef, type VehicleTuning } from '../gameplay/vehicle/catalogue'
@@ -83,6 +84,8 @@ export interface GameOptions {
   car?: string
   /** Skip the landing page (tests / screenshots). */
   play?: boolean
+  /** Start somewhere else than the road spawn: 'cave' = outside the nearest hillside cave mouth (?at=). */
+  at?: string
 }
 
 /**
@@ -130,7 +133,7 @@ export class Game {
   readonly landmarks: LandmarkSystem
   /** Hillside caves: crystals, pools, sunbeams, chests and the in-the-dark factor (gameplay/caves). */
   readonly caves: CaveSystem
-  private readonly caveFog = new THREE.Color(0.03, 0.045, 0.055)
+  private readonly caveFog = new THREE.Color(0.02, 0.045, 0.085) // the Chasm's blue haze (sRGB ≈ 32, 57, 84 in the refs)
   private readonly aerialBase = globalUniforms.uAerial.value.z
   readonly monsters: MonsterSystem
   readonly lightning: Lightning
@@ -294,6 +297,7 @@ export class Game {
       if (home) this.player.pitch = 0.04
       this.character.yaw = this.player.yaw
     }
+    if (opts.at === 'cave') this.spawnAtCave()
     this.monsters = new MonsterSystem(this.world.fields, this.player, this.health, this.audio)
     this.lightning = new Lightning(this.world.fields, this.player, this.health, this.audio)
     this.monsters.enabled = this.lightning.enabled = this.settings.monsters
@@ -511,6 +515,7 @@ export class Game {
     globalUniforms.uSurfaceDetail.value = q.fx.surface ? 1 : 0
     this.vehicleFx.budget = q.particles.vehicle
     this.rainBudget = q.particles.rain
+    this.caves.fxShare = q.particles.rain
     this.reflection.scale = q.reflections
     this.reflection.every = q.reflectionEvery
     this.post.setAO(q.ao.scale, q.ao.samples, q.ao.radius)
@@ -1036,6 +1041,18 @@ export class Game {
   }
 
   /** Back on the road near where you fell, full health; nearby monsters retreat. */
+  /** ?at=cave: start 16 m outside the nearest hillside cave mouth (to the origin), looking in. */
+  private spawnAtCave(): void {
+    const f = this.world.fields
+    const cave = f.formations.cavesNear(0, 0, 3000).sort((a, b) => Math.hypot(a.x, a.z) - Math.hypot(b.x, b.z))[0]
+    if (!cave) return
+    const c = Math.cos(cave.rot), s = Math.sin(cave.rot) // local +x = into the hill
+    const x = cave.x + (MOUTH_X - 16) * c, z = cave.z + (MOUTH_X - 16) * s
+    this.player.teleport(new THREE.Vector3(x, f.surface(x, z) + 0.05, z))
+    this.player.yaw = this.character.yaw = Math.atan2(-c, -s)
+    this.player.pitch = 0
+  }
+
   respawn(): void {
     const p = this.player.curr
     const z = p.z

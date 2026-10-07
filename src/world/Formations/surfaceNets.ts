@@ -9,6 +9,10 @@ export interface VoxelMesh {
   positions: Float32Array
   normals: Float32Array
   indices: Uint32Array
+  /** Baked ambient occlusion per vertex (1 = open, → 0 in crevices / under ledges): free space along the normal. */
+  ao: Float32Array
+  /** Convex EDGE per vertex (0 = flat or hollow … 1 = a sharp ridge / block corner): the rock is thin under it. */
+  edge: Float32Array
 }
 
 /**
@@ -20,6 +24,8 @@ export function surfaceNets(
   min: [number, number, number],
   size: [number, number, number],
   step: number,
+  /** Normal sampling distance (m; default half a cell). Smaller = crisper facets where the field has sharp edges. */
+  nEps = step * 0.5,
 ): VoxelMesh {
   const [nx, ny, nz] = size
   const sx = nx + 1, sy = ny + 1, sz = nz + 1
@@ -81,7 +87,9 @@ export function surfaceNets(
   // Smooth normals from the field's gradient at each vertex (central differences of the SDF itself).
   const positions = new Float32Array(pos)
   const normals = new Float32Array(pos.length)
-  const e = step * 0.5
+  const ao = new Float32Array(pos.length / 3)
+  const edge = new Float32Array(pos.length / 3)
+  const e = nEps
   for (let p = 0; p < positions.length; p += 3) {
     const x = positions[p], y = positions[p + 1], z = positions[p + 2]
     let gx = sdf(x + e, y, z) - sdf(x - e, y, z)
@@ -90,6 +98,38 @@ export function surfaceNets(
     const l = Math.hypot(gx, gy, gz) || 1
     gx /= l; gy /= l; gz /= l
     normals[p] = gx; normals[p + 1] = gy; normals[p + 2] = gz
+    // AO: how much of 1.2 m and 3 m along the normal is free (rock closing in → the gap between blocks, a ledge's
+    // underside, a cave's corners go dark — the contact shadow that makes stylized rock read as solid).
+    const a1 = sdf(x + gx * 1.2, y + gy * 1.2, z + gz * 1.2) / 1.2, a2 = sdf(x + gx * 3, y + gy * 3, z + gz * 3) / 3
+    const o = Math.min(1, Math.max(0, (0.5 * a1 + 0.5 * a2 - 0.2) / 0.75))
+    ao[p / 3] = o * o * (3 - 2 * o)
+    // EDGE: 0.9 m into the rock, how deep is it? Under a flat face 0.9 m; under a ridge or a block's corner less (the
+    // other face is near) → the edges of the plates and ledges, where Genshin's painted rock catches the light.
+    const b = -sdf(x - gx * 0.9, y - gy * 0.9, z - gz * 0.9) / 0.9
+    edge[p / 3] = Math.min(1, Math.max(0, (0.92 - b) * 2.2))
   }
-  return { positions, normals, indices: new Uint32Array(idx) }
+  return { positions, normals, indices: new Uint32Array(idx), ao, edge }
+}
+
+/**
+ * Drop the mesh's small DISCONNECTED pieces (< `minTris` triangles): surface nets leaves a few crumbs where rough
+ * surfaces nearly pinch (rock floating in a cave's air, specks off a pillar). Union-find over the indices; the
+ * vertex arrays are kept (unreferenced vertices cost nothing to draw), only the index list shrinks.
+ */
+export function dropIslands(m: VoxelMesh, minTris: number): VoxelMesh {
+  const n = m.positions.length / 3, par = new Int32Array(n)
+  for (let i = 0; i < n; i++) par[i] = i
+  const find = (a: number): number => { while (par[a] !== a) a = par[a] = par[par[a]]; return a }
+  const ix = m.indices
+  for (let t = 0; t < ix.length; t += 3) {
+    const a = find(ix[t]), b = find(ix[t + 1]), c = find(ix[t + 2])
+    par[b] = a
+    par[find(c)] = a
+  }
+  const count = new Map<number, number>()
+  for (let t = 0; t < ix.length; t += 3) { const r = find(ix[t]); count.set(r, (count.get(r) ?? 0) + 1) }
+  if (count.size < 2) return m
+  const keep: number[] = []
+  for (let t = 0; t < ix.length; t += 3) if ((count.get(find(ix[t])) ?? 0) >= minTris) keep.push(ix[t], ix[t + 1], ix[t + 2])
+  return { ...m, indices: new Uint32Array(keep) }
 }

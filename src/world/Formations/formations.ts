@@ -1,6 +1,7 @@
 import { hash4, hashFloat } from '../noise/rng'
-import { surfaceNets, type VoxelMesh } from './surfaceNets'
-import { cavePlan, caveFloorAt, caveFootprint, caveRock, MOUTH_X, toLocal } from './caves'
+import { dropIslands, surfaceNets, type VoxelMesh } from './surfaceNets'
+import { CARVE_REACH, cavePlan, caveFloorAt, caveFootprint, caveRock, MOUTH_X, toLocal } from './caves'
+import { stoneOffset } from './stone'
 
 /**
  * ROCK FORMATIONS — the landmarks a heightfield can't make (Genshin's arches, caves, karst pillars, overhangs):
@@ -16,6 +17,8 @@ import { cavePlan, caveFloorAt, caveFootprint, caveRock, MOUTH_X, toLocal } from
  */
 export const FormationKind = { Arch: 0, Cave: 1, Pillars: 2, Outcrop: 3 } as const
 export const FORMATION_REGION = 340
+/** Bed height of the formations' layered stone (stoneOffset / stoneBed with the formation's seed). */
+export const FORMATION_BED = 3.2
 /** Road segment length (m): each may hold one formation ON the road (arch over it / tunnel through a hill /
  *  pillars beside it) — landmarks you drive through, not only ones you see from a hilltop. */
 export const ROAD_SEGMENT = 240
@@ -176,7 +179,7 @@ export class FormationField {
         if (!f.hill || Math.abs(x - f.x) > f.radius || Math.abs(z - f.z) > f.radius) continue
         const [lx, lz] = toLocal(f, x, z, this._l)
         const p = cavePlan(f)
-        if (caveFootprint(p, lx, lz) > 1.5) continue
+        if (caveFootprint(p, lx, lz) > CARVE_REACH) continue
         const floor = f.y + caveFloorAt(p, lx, lz) - 2.2
         if (h > floor) return floor
       }
@@ -242,8 +245,9 @@ const smin = (a: number, b: number, k: number) => {
 /** Signed distance of a formation in its local frame (origin on the base, y up, x along its axis). */
 export function formationSdf(f: Formation): (x: number, y: number, z: number) => number {
   const s = f.seed
+  // Layered, jointed stone (stoneOffset: ledges + blocks, Genshin's cliffs) over a softer large-scale lumpiness.
   const rough = (x: number, y: number, z: number, amp: number) =>
-    noise3(s, x * 0.12, y * 0.12, z * 0.12) * amp + noise3(s + 7, x * 0.35, y * 0.35, z * 0.35) * amp * 0.35
+    stoneOffset(s, x, y, z, amp * 1.6, FORMATION_BED) + noise3(s, x * 0.12, y * 0.12, z * 0.12) * amp * 0.5 + noise3(s + 7, x * 0.35, y * 0.35, z * 0.35) * amp * 0.15
   switch (f.kind) {
     case FormationKind.Arch: {
       // A vertical half-ring (torus in the x–y plane) whose feet sink into the ground, thickest at the feet.
@@ -319,7 +323,7 @@ function bounds(f: Formation): [[number, number, number], [number, number, numbe
 }
 
 /**
- * The formation's mesh in WORLD coordinates (rotated, on its base), at voxel size `step` (1.5 m near-detail;
+ * The formation's mesh in WORLD coordinates (rotated, on its base), at voxel size `step` (1 m near-detail, 1.25 m for hillside caves;
  * LOW builds 2.5 m — the shape is smooth, so coarse voxels mostly cost silhouette detail).
  */
 export function buildFormation(f: Formation, step: number, ground?: (x: number, z: number) => number): VoxelMesh {
@@ -351,7 +355,7 @@ export function buildFormation(f: Formation, step: number, ground?: (x: number, 
     sdf = formationSdf(f)
   }
   const size: [number, number, number] = [Math.ceil((hi[0] - lo[0]) / step), Math.ceil((hi[1] - lo[1]) / step), Math.ceil((hi[2] - lo[2]) / step)]
-  const m = surfaceNets(sdf, lo, size, step)
+  const m = dropIslands(surfaceNets(sdf, lo, size, step, f.hill ? 0.3 : step * 0.5), 150) // caves: crisp plate faces
   for (let i = 0; i < m.positions.length; i += 3) {
     const x = m.positions[i], z = m.positions[i + 2], nx = m.normals[i], nz = m.normals[i + 2]
     m.positions[i] = f.x + x * c - z * sn

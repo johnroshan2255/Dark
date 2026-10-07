@@ -1,6 +1,5 @@
 import * as THREE from 'three'
 import { isOverland } from '../../rendering/artStyle'
-import { hash4 } from '../noise/rng'
 import { createFenceGeometry, createLampGlowGeometry, createPoleGeometry } from '../Road/propMeshes'
 import { createPoiGeometries } from '../POI/poiGeometry'
 import { createDesertUndergrowth, createRegionUndergrowth, createTreeLibrary, createUndergrowth, type SpeciesDef } from './treeFactory'
@@ -39,14 +38,30 @@ export interface PropGeometries {
 }
 
 /**
- * Boulder: lumpy low-poly rock with SOFT painted shading (refer/ + forest-house study): normals bent toward
- * the rock's centre so it lights as one rounded volume, a warm-grey vertical gradient in the vertex colours;
+ * Boulder: a chiselled low-poly stone (flat facets and top, ROCK_PLANES) with soft painted shading: normals part
+ * facet, part bent toward the rock's centre, a warm-grey vertical gradient in the vertex colours;
  * brush strokes, pale tops and ragged moss caps are painted by the STONE surface shader (shaders/paint.ts).
  */
-/** The boulder's deterministic lumpy shape (shared by the meshes and the physics hull). */
+/**
+ * The boulder's CHISELLED cut planes (Genshin's stones: a few big flat facets, a flat top, clean edges — not a lumpy
+ * blob): unit normal + distance. Every sphere direction is projected onto the nearest plane → a convex polytope.
+ */
+const ROCK_PLANES: [number, number, number, number][] = [
+  [0, 1, 0, 0.6], [0, -1, 0, 0.55],
+  [0.9, 0.35, 0.25, 0.8], [-0.7, 0.45, 0.55, 0.78], [-0.55, 0.3, -0.78, 0.84], [0.35, 0.42, -0.85, 0.8],
+  [0.12, 0.1, 0.98, 0.9], [-0.98, 0.05, -0.1, 0.86], [0.8, -0.12, -0.55, 0.9], [0.55, 0.05, 0.8, 0.95],
+].map(([x, y, z, h]) => { const l = Math.hypot(x, y, z); return [x / l, y / l, z / l, h] })
+
+/** The boulder's deterministic shape (shared by the meshes and the physics hull): the cut polytope along (x, y, z). */
 function rockVertex(x: number, y: number, z: number, out: THREE.Vector3): THREE.Vector3 {
-  const k = 0.72 + (hash4(Math.round(x * 100), Math.round(y * 100), Math.round(z * 100)) / 4294967296) * 0.5
-  return out.set(x * k * 1.15, Math.max(y * k * 0.62, -0.25), z * k)
+  const l = Math.hypot(x, y, z) || 1
+  const dx = x / l, dy = y / l, dz = z / l
+  let r = 1.1
+  for (const [nx, ny, nz, h] of ROCK_PLANES) {
+    const c = dx * nx + dy * ny + dz * nz
+    if (c > 1e-3) r = Math.min(r, h / c)
+  }
+  return out.set(dx * r * 1.15, Math.max(dy * r * 0.8, -0.25), dz * r)
 }
 
 /**
@@ -89,10 +104,11 @@ function makeRock(detail = 1): THREE.BufferGeometry {
   // OVERLAND: blue-grey, soft (normals bent to the centre like the painted rocks) — their boulders are low-poly
   // but softly shaded, not hard-faceted.
   const over = isOverland()
-  const body = srgb(over ? 0x505a72 : 0x7a7a80), top = srgb(over ? 0x8c98ac : 0x9c9a96), tmp = new THREE.Color(), v = new THREE.Vector3(), n = new THREE.Vector3()
+  const body = srgb(over ? 0x505a72 : 0x857d74), top = srgb(over ? 0x8c98ac : 0xaaa294), tmp = new THREE.Color(), v = new THREE.Vector3(), n = new THREE.Vector3()
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i)
-    n.fromBufferAttribute(nor, i).multiplyScalar(0.35).add(v.clone().setY(v.y - 0.1).normalize().multiplyScalar(0.65)).normalize()
+    // Facets read (Genshin's chiselled stones), softened toward the centre so the edges don't sparkle.
+    n.fromBufferAttribute(nor, i).multiplyScalar(over ? 0.35 : 0.62).add(v.clone().setY(v.y - 0.1).normalize().multiplyScalar(over ? 0.65 : 0.38)).normalize()
     nor.setXYZ(i, n.x, n.y, n.z)
     tmp.copy(body).lerp(top, THREE.MathUtils.smoothstep(v.y, -0.2, 0.5))
     tmp.toArray(col, i * 3)

@@ -16,7 +16,7 @@ import { ART_STYLES } from '../rendering/artStyle'
 
 /**
  * Every new game gets a fresh random world unless ?seed= is given (co-op joiners receive the host's
- * seed the same way). URL options: ?seed=<n|text> &tier=low|medium|high &adaptive=0 &hour=<0-24> &look=<style> &car=<id> &play=1
+ * seed the same way). URL options: ?seed=<n|text> &tier=low|medium|high &adaptive=0 &hour=<0-24> &look=<style> &car=<id> &play=1 &at=cave
  * &stress=<ms, dev>.
  */
 function readOptions(): GameOptions {
@@ -33,6 +33,7 @@ function readOptions(): GameOptions {
     look: ART_STYLES.find((a) => a === p.get('look')),
     car: p.get('car') ?? undefined,
     play: p.get('play') === '1',
+    at: p.get('at') ?? undefined,
   }
 }
 

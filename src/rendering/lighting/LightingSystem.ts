@@ -10,6 +10,11 @@ import { isGenshin } from '../artStyle'
  * Light COUNT never changes at runtime — lights are dimmed, not removed — so shader programs
  * compiled at startup stay valid. See skills/lighting & skills/shadows.
  */
+/** The cave fill (hemisphere light deep in a cave): intensity, cool sky-side and near-black ground-side colours. */
+const CAVE_FILL = 1.0
+const CAVE_SKY = new THREE.Color(0x7aa0d8)
+const CAVE_GROUND = new THREE.Color(0x0a0f18)
+
 export class LightingSystem {
   readonly root = new THREE.Group()
   readonly sun = new THREE.DirectionalLight()
@@ -114,8 +119,14 @@ export class LightingSystem {
     this.hemi.color.copy(p.hemiSky)
     this.hemi.groundColor.copy(p.hemiGround)
     // Lightning burst: extra sky fill in the bolt's colour for a few frames.
-    // In a cave the sky fill dies away (CaveSystem.inside); the sun too where there are no shadow maps to stop it.
-    this.hemi.intensity = (p.hemiIntensity + this.flash * 2.2) * (1 - 0.86 * this.cave)
+    // In a cave the sky fill gives way to the CAVE FILL (CaveSystem.inside): a dim cool light from above, the same by
+    // day and night (Genshin's caverns: blue-lit rock — ledge tops and the upper faces of the plates catch it, the
+    // undersides fall dark, so the walls read in the dark); the sun dies too where no shadow maps stop it.
+    this.hemi.intensity = (p.hemiIntensity + this.flash * 2.2) * (1 - this.cave) + CAVE_FILL * this.cave
+    if (this.cave > 0.001) {
+      this.hemi.color.lerp(CAVE_SKY, this.cave)
+      this.hemi.groundColor.lerp(CAVE_GROUND, this.cave)
+    }
     if (!this.sun.castShadow) this.sun.intensity *= 1 - 0.85 * this.cave
     if (this.flash > 0.01) this.hemi.color.lerp(this.flashColor, Math.min(1, this.flash * 0.7))
 

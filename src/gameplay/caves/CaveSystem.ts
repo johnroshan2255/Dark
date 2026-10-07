@@ -1,20 +1,26 @@
 import * as THREE from 'three'
 import type { WorldFields } from '../../world/WorldFields'
 import type { Formation } from '../../world/Formations/formations'
-import { caveAir, caveLight, cavePlan, type CavePlan } from '../../world/Formations/caves'
+import { caveAir, caveLight, cavePlan, CrystalHue, type CavePlan } from '../../world/Formations/caves'
 import { hash4 } from '../../world/noise/rng'
+import { CRYSTAL_RGB, createCrystalGeometry, createCrystalMaterial, createFlowerGeometry, createFlowerMaterial, createGlowMaterial, createMistMaterial, GlowKind, SHARD_RGB } from './caveFx'
 
 /**
  * CAVES, the live part (the rock, its baked darkness and the carved terrain come from the chunk workers —
  * world/Formations/caves.ts). For each hillside cave within ~260 m of the player:
- *   - CRYSTAL clusters on the walls: one InstancedMesh of elongated octahedra, unlit HDR cyan (bloom on MEDIUM+)
- *   - the POOL in the chamber's basin: a still, dark teal water disc with a slow shimmer and a fresnel sheen
+ *   - CRYSTAL clusters (caveFx.ts, Genshin's ores): quartz prisms fanned out of a socket of dark rock shards, a cut-gem
+ *     HDR shader (cyan / deep blue in the chamber, violet amethyst guarding the treasure); haloes, twinkling stars,
+ *     motes of light rising through the chamber, a few CRYSTALFLIES, luminous flowers on the floor, a low glowing mist
+ *     — the "other world" inside the hill
+ *   - the POOL in the chamber's basin: glowing turquoise water with a slow shimmer, a bright rim and a fresnel sheen
  *   - SUNBEAMS under the skylights: soft additive light columns (fade with the sun; none at night)
  *   - the TREASURE CHEST in the hidden alcove, a golden sparkle over it until it is opened (E: lid swings open,
  *     full heal, +1 treasure)
  * and `inside` (0..1): how deep in the dark the player stands (the baked cave light at their position, smoothed) —
  * Game dims the sky fill, the fog closes in and darkens, the exposure opens up, the torch works at full strength.
- * Cost per cave: 4 draws (crystals, pool, beams, chest) only while near; ~1.5 k triangles; built once (~1 ms).
+ * Cost per cave (only while within ~260 m): 8 draws (crystals, glow points, flowers, mist, pool, beams, chest ×2 + sparkle);
+ * ~5 k triangles + ≤ 190 point sprites (motes / flies scale with the tier's particle share; LOW: smaller haloes, no
+ * mist — both are additive overdraw); built once (~2 ms). Measured (M4, 844×390 LOW, in the chamber): 0.97–1.39 ms GPU vs 1.05–1.16 before (within run-to-run noise).
  */
 interface CaveEntry {
   f: Formation
@@ -24,8 +30,6 @@ interface CaveEntry {
   beamMat: THREE.ShaderMaterial | null
   chest: { lid: THREE.Object3D; sparkle: THREE.Mesh; pos: THREE.Vector3; open: number; id: number } | null
 }
-
-const CRYSTAL_COLOR = new THREE.Color(1.15, 1.45, 1.6)
 
 export class CaveSystem {
   readonly group = new THREE.Group()
@@ -39,40 +43,38 @@ export class CaveSystem {
   private readonly caves = new Map<number, CaveEntry>()
   private readonly list: Formation[] = []
   private scanT = 0
-  private readonly crystalGeo: THREE.BufferGeometry
-  private readonly crystalMat = new THREE.MeshBasicMaterial({ color: CRYSTAL_COLOR, vertexColors: true, toneMapped: true, fog: true })
+  /** Particle share of the quality tier (`particles.rain`: 0.35 LOW … 1): motes and crystalflies per cave. */
+  fxShare = 1
+  private readonly crystalGeo = createCrystalGeometry()
+  private readonly crystalMat = createCrystalMaterial()
+  private readonly glowMat = createGlowMaterial()
+  private readonly flowerGeo = createFlowerGeometry()
+  private readonly flowerMat = createFlowerMaterial()
+  private readonly mistMat = createMistMaterial()
   private readonly poolMat: THREE.ShaderMaterial
   private readonly chestMat = new THREE.MeshLambertMaterial({ vertexColors: true })
   private readonly sparkleMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(3, 2.2, 0.8), transparent: true, opacity: 0.8, depthWrite: false, blending: THREE.AdditiveBlending })
-  private readonly _cl: [number, number] = [0, 0]
+  private readonly _cl: [number, number, number] = [0, 0, 0]
 
   constructor(private readonly fields: WorldFields) {
     this.group.name = 'caves'
-    // Crystal: an elongated octahedron, base at y = 0 (grows out of the wall along +y).
-    const g = new THREE.OctahedronGeometry(0.5, 0).toNonIndexed()
-    g.scale(0.5, 1.6, 0.5).translate(0, 0.55, 0)
-    // Vertex colour: a deep blue base growing into a glowing pale-cyan tip (the base is buried in the wall).
-    const cp = g.getAttribute('position'), cc = new Float32Array(cp.count * 3)
-    for (let i = 0; i < cp.count; i++) {
-      const t = Math.min(1, Math.max(0, cp.getY(i) / 1.35))
-      cc.set([0.04 + 0.22 * t, 0.2 + 0.85 * t, 0.5 + 0.85 * t], i * 3)
-    }
-    g.setAttribute('color', new THREE.BufferAttribute(cc, 3))
-    this.crystalGeo = g
     this.poolMat = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
-      uniforms: { uTime: { value: 0 }, uGlow: { value: new THREE.Color(0.05, 0.3, 0.38) } },
-      vertexShader: /* glsl */ `varying vec3 vW; void main() { vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+      uniforms: { uTime: { value: 0 }, uGlow: { value: new THREE.Color(0.06, 0.5, 0.56) } },
+      vertexShader: /* glsl */ `varying vec3 vW; varying vec2 vUv; void main() { vUv = uv; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
       fragmentShader: /* glsl */ `
-        uniform float uTime; uniform vec3 uGlow; varying vec3 vW;
+        uniform float uTime; uniform vec3 uGlow; varying vec3 vW; varying vec2 vUv;
         void main() {
           vec3 V = normalize(cameraPosition - vW);
           float fres = pow(1.0 - max(V.y, 0.0), 3.0);
-          // Slow caustic shimmer: two drifting sine lattices.
+          // Glowing turquoise water (Genshin's cave pools light the chamber): caustic shimmer, a bright rim at the shore.
           float c = sin(vW.x * 2.1 + uTime * 0.7) * sin(vW.z * 1.7 - uTime * 0.55) + sin((vW.x + vW.z) * 1.3 + uTime * 0.4) * 0.6;
-          vec3 col = vec3(0.01, 0.05, 0.06) + uGlow * (0.35 + 0.15 * c) + vec3(0.25, 0.45, 0.5) * fres * 0.5;
-          gl_FragColor = vec4(col, 0.82 + 0.15 * fres);
+          float r = length(vUv * 2.0 - 1.0);
+          float deep = 1.0 - smoothstep(0.0, 0.85, r);
+          vec3 col = vec3(0.01, 0.05, 0.06) + uGlow * (0.45 + 0.25 * c) * (0.7 + 0.5 * (1.0 - deep)) + vec3(0.3, 0.55, 0.6) * fres * 0.5;
+          col += vec3(0.25, 0.9, 0.85) * smoothstep(0.82, 0.98, r) * 0.6;
+          gl_FragColor = vec4(col, 0.85 + 0.12 * fres);
         }`,
     })
   }
@@ -126,8 +128,10 @@ export class CaveSystem {
     }
     this.inside += (target - this.inside) * (1 - Math.exp(-dt * 2.2)) // the eye adapts over ~½ s
     this.poolMat.uniforms.uTime.value = time
-    // Crystals breathe a little.
-    this.crystalMat.color.copy(CRYSTAL_COLOR).multiplyScalar(0.85 + 0.15 * Math.sin(time * 1.3))
+    this.crystalMat.uniforms.uTime.value = time
+    this.glowMat.uniforms.uTime.value = time
+    this.flowerMat.uniforms.uTime.value = time
+    this.mistMat.uniforms.uTime.value = time
   }
 
   /** E near a closed chest: open it. Returns true when a chest was opened (the reward is the caller's). */
@@ -154,27 +158,120 @@ export class CaveSystem {
     root.matrixAutoUpdate = false
     let k = 0
     const rnd = () => hash4(f.seed, 7301, k++, 5) / 4294967296
-    // ---- crystals: 3–5 per cluster, fanned around the wall normal ----
-    const mats: THREE.Matrix4[] = []
+    // ---- crystal clusters: a tall main crystal, 4–6 smaller ones fanned out, 2–3 dark rock shards at the root ----
+    const mats: THREE.Matrix4[] = [], cols: number[] = [], glow: number[] = []
+    const gp: number[] = [], gk: number[] = [], gs: number[] = [], gz: number[] = [], gc: number[] = []
+    const sprite = (x: number, y: number, z: number, kind: number, size: number, c: readonly number[], k = 1) => {
+      gp.push(x, y, z); gk.push(kind); gs.push(rnd()); gz.push(size); gc.push(c[0] * k, c[1] * k, c[2] * k)
+    }
     const q = new THREE.Quaternion(), q2 = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), n = new THREE.Vector3(), tilt = new THREE.Vector3()
-    for (const [x, y, z, nx, ny, nz] of plan.crystals) {
+    const add = (x: number, y: number, z: number, dir: THREE.Vector3, w: number, len: number, rgb: readonly number[], isCrystal: boolean) => {
+      q.setFromUnitVectors(up, dir)
+      q2.setFromAxisAngle(dir, rnd() * Math.PI * 2)
+      mats.push(new THREE.Matrix4().compose(new THREE.Vector3(x, y, z), q2.multiply(q), new THREE.Vector3(w, len, w)))
+      cols.push(rgb[0], rgb[1], rgb[2]); glow.push(isCrystal ? 1 : 0)
+    }
+    for (const [x, y, z, nx, ny, nz, hue] of plan.crystals) {
       n.set(nx, ny, nz).normalize()
-      const cnt = 3 + Math.floor(rnd() * 3)
+      // Grow upward-ish (Genshin's clusters stand up out of the rock, never hang sideways like spikes).
+      const grow = n.clone().lerp(up, ny > -0.3 ? 0.45 : 0.1).normalize()
+      const rgb = CRYSTAL_RGB[hue] ?? CRYSTAL_RGB[CrystalHue.Cyan]
+      const rx = x - n.x * 0.25, ry = y - n.y * 0.25, rz = z - n.z * 0.25 // rooted in the rock
+      const main = 1.3 + rnd() * 0.7
+      add(rx, ry, rz, grow, main * (1 + rnd() * 0.25), main, rgb, true)
+      const cnt = 4 + Math.floor(rnd() * 3)
       for (let i = 0; i < cnt; i++) {
-        tilt.set(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).multiplyScalar(0.9).add(n).normalize()
-        q.setFromUnitVectors(up, tilt)
-        q2.setFromAxisAngle(tilt, rnd() * Math.PI)
-        const sz = (i === 0 ? 0.9 : 0.4 + rnd() * 0.4) * (0.7 + rnd() * 0.5)
-        // Rooted ~0.5 m inside the wall (the rough rock mesh ±0.5 m around the SDF never leaves them floating).
-        mats.push(new THREE.Matrix4().compose(new THREE.Vector3(x - n.x * 0.55 + (rnd() - 0.5) * 0.5, y - n.y * 0.55 + (rnd() - 0.5) * 0.5, z - n.z * 0.55 + (rnd() - 0.5) * 0.5), q2.multiply(q), new THREE.Vector3(sz, sz * (1 + rnd() * 0.8), sz)))
+        tilt.set(rnd() - 0.5, rnd() * 0.3, rnd() - 0.5).multiplyScalar(1.4).add(grow).normalize()
+        const sz = 0.5 + rnd() * 0.55
+        const off = 0.12 + rnd() * 0.18
+        add(rx + (tilt.x - grow.x) * off, ry + (tilt.y - grow.y) * off, rz + (tilt.z - grow.z) * off, tilt.clone(), sz * (1.1 + rnd() * 0.4), sz, rgb, true)
       }
+      for (let i = 0; i < 3; i++) {
+        tilt.set(rnd() - 0.5, 0.2, rnd() - 0.5).normalize().lerp(grow, 0.25).normalize()
+        add(rx + (rnd() - 0.5) * 0.4, ry + (rnd() - 0.5) * 0.4, rz + (rnd() - 0.5) * 0.4, tilt.clone(), 1.9 + rnd(), 0.32 + rnd() * 0.2, SHARD_RGB, false)
+      }
+      // Halo around the cluster + a twinkling star near the main crystal's tip.
+      // (Halo pixels are additive overdraw: smaller on LOW.)
+      sprite(rx + grow.x * 0.9, ry + grow.y * 0.9, rz + grow.z * 0.9, GlowKind.Halo, 3.2 * (0.6 + 0.4 * this.fxShare), rgb, 0.5)
+      sprite(rx + grow.x * main * 1.05, ry + grow.y * main * 1.05, rz + grow.z * main * 1.05, GlowKind.Sparkle, 0.8, [1.6, 1.7, 1.8])
     }
     if (mats.length) {
       const im = new THREE.InstancedMesh(this.crystalGeo, this.crystalMat, mats.length)
       mats.forEach((m, i) => im.setMatrixAt(i, m))
+      im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cols), 3)
+      im.geometry = this.crystalGeo.clone() // + this cave's per-instance aGlow (crystal 1 / rock shard 0)
+      im.geometry.setAttribute('aGlow', new THREE.InstancedBufferAttribute(new Float32Array(glow), 1))
       im.name = 'cave.crystals'
       im.computeBoundingSphere()
       root.add(im)
+    }
+    // ---- the chamber's floor: luminous flowers, motes of light, crystalflies, a low glowing mist ----
+    const floorAt = (x: number, z: number): number | null => {
+      let y = plan.floor + 3
+      if (caveAir(plan, f.seed, x, y, z) >= 0) return null
+      for (let i = 0; i < 40 && caveAir(plan, f.seed, x, y, z) < 0; i++) y -= 0.2
+      return y > plan.floor - 1.2 ? y : null // not down in the pool basin
+    }
+    const ch = plan.chamber, cr = plan.cr
+    const fm: THREE.Matrix4[] = [], fc: number[] = []
+    const nFlowers = 14 + Math.round(30 * this.fxShare)
+    for (let i = 0, tries = 0; i < nFlowers && tries < nFlowers * 4; tries++) {
+      const a = rnd() * Math.PI * 2, d = Math.sqrt(rnd()) * 0.85
+      const x = ch[0] + Math.cos(a) * d * cr[0], z = ch[2] + Math.sin(a) * d * cr[2]
+      if (Math.hypot((x - plan.pool[0]) / plan.pool[2], (z - plan.pool[1]) / plan.pool[3]) < 1.15) continue
+      const y = floorAt(x, z)
+      if (y === null) continue
+      const s = 0.8 + rnd() * 0.7
+      fm.push(new THREE.Matrix4().compose(new THREE.Vector3(x, y - 0.03, z), new THREE.Quaternion().setFromAxisAngle(up, rnd() * 6.28), new THREE.Vector3(s, s, s)))
+      const hue = rnd() < 0.6 ? CrystalHue.Cyan : rnd() < 0.6 ? CrystalHue.Blue : CrystalHue.Violet
+      fc.push(...CRYSTAL_RGB[hue])
+      i++
+    }
+    if (fm.length) {
+      const fl = new THREE.InstancedMesh(this.flowerGeo, this.flowerMat, fm.length)
+      fm.forEach((m, i) => fl.setMatrixAt(i, m))
+      fl.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(fc), 3)
+      fl.name = 'cave.flowers'
+      fl.computeBoundingSphere()
+      root.add(fl)
+    }
+    const nMotes = Math.round(110 * this.fxShare), nFlies = Math.max(2, Math.round(5 * this.fxShare))
+    for (let i = 0; i < nMotes; i++) {
+      const a = rnd() * Math.PI * 2, d = Math.sqrt(rnd()) * 0.8
+      const hue = rnd() < 0.7 ? CrystalHue.Cyan : CrystalHue.Violet
+      sprite(ch[0] + Math.cos(a) * d * cr[0], plan.floor + rnd() * 1.5, ch[2] + Math.sin(a) * d * cr[2], GlowKind.Mote, 0.09 + rnd() * 0.08, CRYSTAL_RGB[hue], 1.3)
+    }
+    for (let i = 0; i < nFlies; i++) {
+      const a = rnd() * Math.PI * 2, d = rnd() * 0.5
+      const hue = [CrystalHue.Cyan, CrystalHue.Violet, CrystalHue.Blue][i % 3]
+      sprite(ch[0] + Math.cos(a) * d * cr[0], plan.floor + 1.6 + rnd() * 1.6, ch[2] + Math.sin(a) * d * cr[2], GlowKind.Fly, 0.45, CRYSTAL_RGB[hue], 1.4)
+    }
+    {
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.Float32BufferAttribute(gp, 3))
+      g.setAttribute('aKind', new THREE.Float32BufferAttribute(gk, 1))
+      g.setAttribute('aSeed', new THREE.Float32BufferAttribute(gs, 1))
+      g.setAttribute('aSize', new THREE.Float32BufferAttribute(gz, 1))
+      g.setAttribute('aColor', new THREE.Float32BufferAttribute(gc, 3))
+      g.boundingSphere = new THREE.Sphere(new THREE.Vector3(ch[0], plan.floor + 3, ch[2]), 45)
+      const pts = new THREE.Points(g, this.glowMat)
+      pts.name = 'cave.glow'
+      pts.renderOrder = 6
+      // Sprite size: metres → pixels at 1 m (drawing-buffer height × the projection's y scale / 2).
+      pts.onBeforeRender = (renderer, _s, camera) => {
+        renderer.getDrawingBufferSize(_buf)
+        this.glowMat.uniforms.uScale.value = _buf.y * 0.5 * camera.projectionMatrix.elements[5]
+      }
+      root.add(pts)
+    }
+    if (this.fxShare >= 0.5) {
+      // Mist: a chamber-wide additive layer (overdraw) — MEDIUM and up.
+      const mist = new THREE.Mesh(new THREE.CircleGeometry(1, 32).rotateX(-Math.PI / 2), this.mistMat)
+      mist.scale.set(cr[0] * 1.05, 1, cr[2] * 1.05)
+      mist.position.set(ch[0], plan.floor + 0.55, ch[2])
+      mist.name = 'cave.mist'
+      mist.renderOrder = 4
+      root.add(mist)
     }
     // ---- pool ----
     const [px, pz, prx, prz] = plan.pool
@@ -245,7 +342,7 @@ export class CaveSystem {
     this.group.remove(e.root)
     e.root.traverse((o) => {
       const m = o as THREE.Mesh
-      if (m.isMesh && m.geometry !== this.crystalGeo) m.geometry.dispose()
+      if ((m.isMesh || (o as THREE.Points).isPoints) && m.geometry !== this.crystalGeo && m.geometry !== this.flowerGeo) m.geometry.dispose()
     })
     e.beamMat?.dispose()
   }
@@ -266,6 +363,8 @@ function chestBox(w: number, h: number, d: number, lid: boolean): THREE.BufferGe
   g.computeVertexNormals()
   return g
 }
+
+const _buf = new THREE.Vector2()
 
 function mergeCylinders(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
   const ps: number[] = [], ns: number[] = [], idx: number[] = []

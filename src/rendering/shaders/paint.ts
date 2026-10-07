@@ -57,6 +57,7 @@ vec3 paintSurface(vec3 c, float id) {
     // Moss as lit as the rock under it (baked cave darkness keeps dark floors dark, not bright green).
     float lum = dot(c, vec3(0.3, 0.59, 0.11));
     m *= smoothstep(0.05, 0.12, lum); // none in the dark (cave floors stay bare earth)
+    m *= 1.0 - smoothstep(1.12, 1.3, c.b / max(c.r, 1e-3)); // nor on cool blue stone (cave walls, snow rock)
     c = mix(c, MOSS * (0.7 + 0.5 * b.r) * clamp(lum / 0.16, 0.0, 1.4), m * 0.75);
   } else if (id < 1.5) {                            // WOOD boards
     float t = pu.x * 3.3;

@@ -157,7 +157,7 @@ export class MaterialLibrary {
    */
   readonly cliffRock = isOverland()
     ? this.rock
-    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', rim: 0.25, surface: SURFACE.stone, cliffStone: true, toon: 0.35, cullFade: true, wet: true, biomeCover: 'rock' })
+    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', rim: 0.25, surface: SURFACE.stone, cliffStone: true, toon: 0.6, cullFade: true, wet: true, biomeCover: 'rock' })
   /** Grass layers (GrassField): near (dense, curved blades) and far (sparse, wide) — same program, own bands. */
   readonly grassNearU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
   readonly grassFarU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }

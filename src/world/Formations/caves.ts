@@ -1,5 +1,6 @@
 import { hash4 } from '../noise/rng'
 import type { Formation } from './formations'
+import { plateOffset, plateTone, stoneOffset } from './stone'
 
 /**
  * HILLSIDE CAVES (Genshin's overworld caves): a dark arched MOUTH in a hillside / cliff, a WINDING tunnel sloping
@@ -24,6 +25,13 @@ export interface CavePlan {
   chamber: [number, number, number]
   cr: [number, number, number]
   floor: number
+  /**
+   * The chamber's VAULT (Genshin's caverns: sheer walls, then a high dark roof): upright walls `wallH` m tall around
+   * an irregular plan (bays: the radius × 1 + l0·sin(3a + l1) + l2·sin(5a + l3)), then a dome `roofH` m high.
+   */
+  wallH: number
+  roofH: number
+  lobes: [number, number, number, number]
   /** Side passage (chamber edge → alcove) and the alcove (centre on its floor, radius). */
   side: [[number, number, number], [number, number, number]]
   alcove: [number, number, number]
@@ -36,8 +44,10 @@ export interface CavePlan {
   /** Stalactites (hanging, [x, top y, z, r, length]) and stalagmites ([x, base y, z, r, height]). */
   stalactites: [number, number, number, number, number][]
   stalagmites: [number, number, number, number, number][]
-  /** Crystal clusters on the walls: position + outward normal (local). */
-  crystals: [number, number, number, number, number, number][]
+  /** Crystal clusters on the walls: position + outward normal (local) + hue (CrystalHue). */
+  crystals: [number, number, number, number, number, number, number][]
+  /** Fallen blocks at the foot of the walls: centre, half sizes, yaw (angular rounded boxes, part of the collider). */
+  rubble: [number, number, number, number, number, number, number][]
   /** Cumulative tunnel length at each path point (light falls off with the walk in). */
   along: number[]
   /** Local bounds of the air (x/z) for the footprint, with the cap margin. */
@@ -46,8 +56,24 @@ export interface CavePlan {
 }
 
 export const MOUTH_X = -26
+/** Crystal colours (Genshin's ores): cyan Crystal Chunk, deep-blue Magical Crystal, violet Amethyst. */
+export const CrystalHue = { Cyan: 0, Blue: 1, Violet: 2 } as const
 const CAP_H = 1.6
 const CAP_MARGIN = 3
+/**
+ * The terrain is carved (deep below the floor) out to CARVE_REACH m beyond the air's footprint: a terrain triangle
+ * spans ≤ 2.8 m, so the steep sliver between a carved and an uncarved grid point stays ≥ 1.7 m clear of the rough
+ * air (it reaches ~1.5 m past the footprint) — no terrain blades inside the cave. Below the natural ground, the rock
+ * is SOLID out to SOLID_REACH (> CARVE_REACH + 2.8), so the carve never shows as a pit beyond the cap's rough rim.
+ */
+export const CARVE_REACH = 4.5
+const SOLID_REACH = 7.6
+/** The chamber's wall radius / its plan radius (cr): the bays reach out to ~VAULT × 1.16. */
+const VAULT = 0.84
+/** The interior walls' plates (plateOffset): plate size in plan and bed height, m. */
+const WALL_CELL = 3.4, WALL_BED = 2.6
+/** Bed height of the cave's outer stone (stoneOffset / stoneBed with seed + 5). */
+export const STONE_BED = 3.4
 
 const plans = new Map<number, CavePlan>()
 
@@ -70,6 +96,8 @@ export function cavePlan(f: Formation): CavePlan {
   const last = path[path.length - 1]
   const floor = last[1] - rng(1, 2)
   const chamber: [number, number, number] = [last[0] + cr[0] * 0.85, floor + cr[1] * 0.6, last[2] + rng(-3, 3)]
+  const wallH = rng(5, 7), roofH = cr[1] * 1.55 - wallH
+  const lobes: [number, number, number, number] = [rng(0.05, 0.1), rnd() * 6.28, rng(0.03, 0.06), rnd() * 6.28]
   // Side passage to the hidden alcove (off the chamber's far side, left or right).
   const side = rnd() < 0.5 ? -1 : 1
   const sa: [number, number, number] = [chamber[0] + cr[0] * 0.35, floor, chamber[2] + side * cr[2] * 0.7]
@@ -82,22 +110,22 @@ export function cavePlan(f: Formation): CavePlan {
   const pool: [number, number, number, number] = [chamber[0] + rng(-0.1, 0.35) * cr[0], chamber[2] - side * rng(0.2, 0.4) * cr[2], rng(3.8, 5.5), rng(3.2, 4.5)]
   const waterY = floor - 0.45
   // Stalactites over the chamber, stalagmites around its edge.
-  const ceil = (x: number, z: number) => chamber[1] + cr[1] * Math.sqrt(Math.max(0, 1 - ((x - chamber[0]) / cr[0]) ** 2 - ((z - chamber[2]) / cr[2]) ** 2))
+  const ceil = (x: number, z: number) => floor + wallH + roofH * Math.sqrt(Math.max(0, 1 - ((x - chamber[0]) / (cr[0] * VAULT)) ** 2 - ((z - chamber[2]) / (cr[2] * VAULT)) ** 2))
   const stalactites: [number, number, number, number, number][] = []
   for (let i = 0; i < 12; i++) {
     const a = rnd() * Math.PI * 2, d = Math.sqrt(rnd()) * 0.75
     const x = chamber[0] + Math.cos(a) * d * cr[0], z = chamber[2] + Math.sin(a) * d * cr[2]
     if (holes.some(([hx, hz, hr]) => Math.hypot(x - hx, z - hz) < hr + 2.5)) continue
-    stalactites.push([x, ceil(x, z) + 0.6, z, rng(0.9, 1.5), rng(2.5, 5.5)])
+    stalactites.push([x, ceil(x, z) + 0.8, z, rng(1.0, 1.7), rng(3, 6.5)])
   }
   const stalagmites: [number, number, number, number, number][] = []
   for (let i = 0; i < 10; i++) {
-    const a = rnd() * Math.PI * 2, d = rng(0.6, 0.85)
+    const a = rnd() * Math.PI * 2, d = rng(0.45, 0.68)
     const x = chamber[0] + Math.cos(a) * d * cr[0], z = chamber[2] + Math.sin(a) * d * cr[2]
     if (Math.hypot(x - pool[0], z - pool[1]) < Math.max(pool[2], pool[3]) + 1.5) continue
     if (x < chamber[0] - cr[0] * 0.5 && Math.abs(z - last[2]) < 6) continue // keep the way in clear
     if (Math.hypot(x - sa[0], z - sa[2]) < 5) continue // and the side passage
-    stalagmites.push([x, floor - 0.4, z, rng(0.8, 1.3), rng(1.8, 4)])
+    stalagmites.push([x, floor - 0.4, z, rng(0.9, 1.5), rng(2, 4.5)])
   }
   const along = [0]
   for (let i = 1; i < path.length; i++) along.push(along[i - 1] + Math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1], path[i][2] - path[i - 1][2]))
@@ -107,10 +135,11 @@ export function cavePlan(f: Formation): CavePlan {
   grow(chamber[0], chamber[2], Math.max(cr[0], cr[2]))
   grow(alcove[0], alcove[2], 5)
   p = {
-    path, radius, chamber, cr, floor, side: [sa, alcove], alcove, alcoveR: rng(4.2, 5.2), holes, pool, waterY,
-    stalactites, stalagmites, crystals: [], along, min: [mnx - CAP_MARGIN - 2, mnz - CAP_MARGIN - 2], max: [mxx + CAP_MARGIN + 2, mxz + CAP_MARGIN + 2],
+    path, radius, chamber, cr, floor, wallH, roofH, lobes, side: [sa, alcove], alcove, alcoveR: rng(4.2, 5.2), holes, pool, waterY,
+    stalactites, stalagmites, crystals: [], rubble: [], along, min: [mnx - SOLID_REACH - 1.5, mnz - SOLID_REACH - 1.5], max: [mxx + SOLID_REACH + 1.5, mxz + SOLID_REACH + 1.5],
   }
   p.crystals = placeCrystals(p, rnd, s)
+  p.rubble = placeRubble(p, rnd, s)
   if (plans.size > 64) plans.clear()
   plans.set(f.seed, p)
   return p
@@ -124,6 +153,22 @@ const segT = (x: number, y: number, z: number, a: number[], b: number[]) => {
 const ell = (x: number, y: number, z: number, a: number, b: number, c: number) => {
   const k0 = Math.hypot(x / a, y / b, z / c), k1 = Math.hypot(x / (a * a), y / (b * b), z / (c * c))
   return k1 > 1e-6 ? (k0 * (k0 - 1)) / k1 : -Math.min(a, b, c)
+}
+/** Rounded box: centre offset (x, y, z), half sizes (a, b, c), corner radius r. */
+const rbox = (x: number, y: number, z: number, a: number, b: number, c: number, r: number) => {
+  const qx = Math.abs(x) - a + r, qy = Math.abs(y) - b + r, qz = Math.abs(z) - c + r
+  return Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0) - r
+}
+/**
+ * A faceted SPIKE (stalactite / stalagmite): a hexagonal pyramid, base radius r at h = 0 tapering to a blunt tip at
+ * h = L (h = height along it), rotated by `rot` about its axis — chunky facets like Genshin's, not a smooth drip.
+ */
+const spike = (x: number, h: number, z: number, r: number, L: number, rot: number) => {
+  const c = Math.cos(rot), s = Math.sin(rot)
+  const u = Math.abs(x * c + z * s), v = Math.abs(-x * s + z * c)
+  const hex = Math.max(u * 0.866 + v * 0.5, v)
+  const t = Math.min(1, Math.max(0, h / L))
+  return Math.max((hex - (r * (1 - t) + 0.12)) * 0.9, -h - 1, h - L)
 }
 const smin = (a: number, b: number, k: number) => {
   const h = Math.max(0, Math.min(1, 0.5 + (0.5 * (b - a)) / k))
@@ -146,13 +191,26 @@ function noise3(seed: number, x: number, y: number, z: number): number {
  */
 export function caveAir(p: CavePlan, seed: number, x: number, y: number, z: number, rough = 1): number {
   let d = 1e9
+  // The floor of the nearest air piece: the roughness fades out toward it (a walkable floor, rough walls and roof).
+  // And its radius (narrow passages get gentler relief: a 2.4 m passage must stay walkable) and its wall distance
+  // (where the FLOOR is the nearer surface the relief stays off: no rock rising out of the floor).
+  // The walking routes keep a smooth CORE (each piece shrunk by `m` m, same floor) that the relief can never close:
+  // ≥ 3.2 m of headroom and ≥ 2.7 m of width through the tunnel, the side passage and the alcove.
+  let near = 1e9, fl0 = p.floor, r0 = 10, sh0 = 0, core = 1e9
+  const track = (sh: number, fl: number, R: number, m: number) => {
+    const di = Math.max(sh, fl - y)
+    if (di < near) (near = di), (fl0 = fl), (r0 = R), (sh0 = sh)
+    if (m > 0) core = Math.min(core, Math.max(sh + m, fl - y))
+    return di
+  }
   for (let i = 0; i < p.path.length - 1; i++) {
     const a = p.path[i], b = p.path[i + 1]
     const R = (p.radius[i] + p.radius[i + 1]) / 2
     const t = segT(x, y - 0.55 * R, z, a, b)
     const cx = a[0] + (b[0] - a[0]) * t, cy = a[1] + (b[1] - a[1]) * t + 0.55 * R, cz = a[2] + (b[2] - a[2]) * t
     const fl = a[1] + (b[1] - a[1]) * t
-    d = smin(d, Math.max(Math.hypot(x - cx, y - cy, z - cz) - R, fl - y), 2.5)
+    const di = track(Math.hypot(x - cx, y - cy, z - cz) - R, fl, R, R * 0.55)
+    d = smin(d, di, 2.5)
   }
   // Last tunnel point → chamber (wide throat).
   {
@@ -161,10 +219,18 @@ export function caveAir(p: CavePlan, seed: number, x: number, y: number, z: numb
     const R = p.radius[p.radius.length - 1] * 1.15
     const t = segT(x, y - 0.55 * R, z, a, b)
     const cx = a[0] + (b[0] - a[0]) * t, cy = a[1] + (b[1] - a[1]) * t + 0.55 * R, cz = a[2] + (b[2] - a[2]) * t
-    d = smin(d, Math.max(Math.hypot(x - cx, y - cy, z - cz) - R, a[1] + (b[1] - a[1]) * t - y), 3)
+    const fl = a[1] + (b[1] - a[1]) * t
+    const di = track(Math.hypot(x - cx, y - cy, z - cz) - R, fl, R, R * 0.55)
+    d = smin(d, di, 3)
   }
   const c = p.chamber, cr = p.cr
-  d = smin(d, Math.max(ell(x - c[0], y - c[1], z - c[2], cr[0], cr[1], cr[2]), p.floor - y), 3)
+  {
+    // The VAULT: sheer walls (an elliptic cylinder with bays) up to wallH, then the dome; flat floor.
+    const dx = x - c[0], dz = z - c[2], a = Math.atan2(dz * cr[0], dx * cr[2]), lb = p.lobes
+    const bay = VAULT * (1 + lb[0] * Math.sin(3 * a + lb[1]) + lb[2] * Math.sin(5 * a + lb[3]))
+    const di = track(ell(dx, Math.max(0, y - p.floor - p.wallH), dz, cr[0] * bay, p.roofH, cr[2] * bay), p.floor, 10, 0)
+    d = smin(d, di, 2.2)
+  }
   // Pool basin (below the floor).
   d = Math.min(d, ell(x - p.pool[0], y - p.floor, z - p.pool[1], p.pool[2], 1.6, p.pool[3]))
   // Side passage (narrow, 2.4 m) and the alcove.
@@ -173,16 +239,32 @@ export function caveAir(p: CavePlan, seed: number, x: number, y: number, z: numb
     const R = 2.4
     const t = segT(x, y - 1.3, z, a, b)
     const cx = a[0] + (b[0] - a[0]) * t, cy = a[1] + (b[1] - a[1]) * t + 1.3, cz = a[2] + (b[2] - a[2]) * t
-    d = smin(d, Math.max(Math.hypot(x - cx, y - cy, z - cz) - R, a[1] + (b[1] - a[1]) * t - y), 1.5)
+    const fl = a[1] + (b[1] - a[1]) * t
+    const di = track(Math.hypot(x - cx, y - cy, z - cz) - R, fl, R, 0.45)
+    d = smin(d, di, 1.5)
     const al = p.alcove
-    d = smin(d, Math.max(ell(x - al[0], y - al[1] - 1.6, z - al[2], p.alcoveR, 3.4, p.alcoveR), al[1] - y), 1.5)
+    const da = track(ell(x - al[0], y - al[1] - 1.6, z - al[2], p.alcoveR, 3.4, p.alcoveR), al[1], p.alcoveR, 1.8)
+    d = smin(d, da, 1.5)
   }
   // Skylights: vertical shafts from the ceiling to the sky.
   for (const [hx, hz, hr] of p.holes) {
     if (y > c[1]) d = Math.min(d, Math.hypot(x - hx, z - hz) - hr * (1 + 0.15 * Math.max(0, y - c[1] - cr[1]) / 10))
   }
-  return rough ? d + noise3(seed + 11, x * 0.22, y * 0.22, z * 0.22) * 0.9 + noise3(seed + 12, x * 0.6, y * 0.6, z * 0.6) * 0.3 : d
+  // Far from the wall (the relief is ≤ ~2.6 m) the rough field can't change sign: skip it (most of the grid).
+  if (!rough || d > 6 || d < -6) return d
+  // PLATED walls (Genshin's cave stone, plateOffset: upright angular plates ±1.7 m, ledges, each face its own tilt),
+  // biased INTO the rock (+0.25·amp: the air never bulges more than ~1 m past its plan — the terrain carve reaches
+  // CARVE_REACH beyond it) + a little noise; full ≥ 2.5 m above the floor, ~12 % on it (≤ ±0.2 m: the player's
+  // 0.45 m autostep climbs it); gentler in narrow passages (r0).
+  const wall = Math.min(1, Math.max(0, (sh0 - (fl0 - y) + 1.5) / 1.5))
+  const k = (0.12 + 0.88 * Math.min(1, Math.max(0, (y - fl0 - 0.3) / 2.2)) * wall) * Math.min(1, Math.max(0.18, (r0 - 1.9) / 2.6))
+  const amp = 3.4
+  const rd = d + (plateOffset(seed + 21, x, y, z, amp, WALL_CELL, WALL_BED) + amp * 0.25 + noise3(seed + 11, x * 0.22, y * 0.22, z * 0.22) * 0.3 + noise3(seed + 12, x * 0.7, y * 0.7, z * 0.7) * 0.12) * k
+  return Math.min(rd, core)
 }
+
+/** The shade of the wall plate at a local point (0..1): its block's own tone (plateTone, same cells as caveAir). */
+export const caveWallTone = (seed: number, x: number, y: number, z: number) => plateTone(seed + 21, x, y, z, WALL_CELL, WALL_BED)
 
 /** Horizontal distance (m) to the cave's air footprint (negative inside). */
 export function caveFootprint(p: CavePlan, x: number, z: number): number {
@@ -231,25 +313,41 @@ export function caveRock(f: Formation, ground: (x: number, z: number) => number)
     const fp = caveFootprint(p, x, z)
     // The cap THICKENS toward the mouth into a rock FACE in the hillside (≈ 2 m of roof over the opening, fading back
     // to the 1.6 m cap ~14 m in), and widens there, so the mouth is a dark arch in a cliff, not a free-standing gate.
-    let rock = Math.max(y - (ground(x, z) + CAP_H), fp - CAP_MARGIN)
-    // The mouth: a ROUNDED rock mass bulging out of the hillside around the opening (merges into the cap and the
-    // slope behind), with a low overhanging brow — a dark arch in a rocky face, not a free-standing block.
-    const mass = ell(x - (mx + 7), y - (m[1] + R0 * 0.9), z - m[2], 10, 1.55 * R0 + 5, R0 + 11)
-    const brow = ell(x - (mx + 0.8), y - (m[1] + 1.55 * R0 + 0.8), z - m[2], 2.4, 2, R0 + 2.5)
-    rock = smin(rock, smin(mass, brow, 2), 3)
-    rock += noise3(s + 5, x * 0.12, y * 0.12, z * 0.12) * 1.1 + noise3(s + 6, x * 0.35, y * 0.35, z * 0.35) * 0.35
+    const g = ground(x, z)
+    let rock = Math.max(y - (g + CAP_H), fp - CAP_MARGIN)
+    // The mouth: a CLIFF FACE standing out of the hillside (a rounded block, its front a near-vertical wall a little
+    // ahead of the opening, merging into the cap and the slope behind) with an OVERHANGING LEDGE above the opening —
+    // Genshin's cave mouths are a dark recess under a layered rock shelf, not an arch or a dome.
+    const top = m[1] + 1.55 * R0 + 3.2
+    const face = rbox(x - (mx + 9), y - (m[1] + top) * 0.5 + 1, z - m[2], 10.5, (top - m[1]) * 0.5 + 2, R0 + 10, 3)
+    const shelf = rbox(x - (mx + 0.5), y - (m[1] + 1.55 * R0 + 1.6), z - m[2], 3.2, 1.1, R0 + 5.5, 0.8)
+    rock = smin(rock, Math.min(face, shelf), 2.5)
+    rock += stoneOffset(s + 5, x, y, z, 3.2, STONE_BED) + noise3(s + 6, x * 0.35, y * 0.35, z * 0.35) * 0.3
+    // Solid under the natural ground out to SOLID_REACH (0.3 m down: hidden under the uncarved terrain).
+    rock = Math.min(rock, Math.max(y - (g - 0.3), fp - SOLID_REACH))
     let d = Math.max(rock, -caveAir(p, s, x, y, z))
-    for (const [sx, top, sz, r, L] of p.stalactites) d = smin(d, ell(x - sx, y - (top - L * 0.5), z - sz, r, L * 0.55, r), 0.6)
-    for (const [sx, base, sz, r, L] of p.stalagmites) d = smin(d, ell(x - sx, y - (base + L * 0.4), z - sz, r * 1.15, L * 0.6, r * 1.15), 0.6)
+    // The ENTRANCE APRON: in front of the mouth the rock is cut down to the hillside's own surface (widening outward),
+    // so the floor runs up the slope straight into the tunnel — no lip to climb (the player autosteps 0.45 m).
+    const ent = Math.max(Math.abs(z - m[2]) - (R0 + 0.4) - Math.max(0, mx + 1 - x) * 0.6, x - (mx + 1), g - y, y - (g + 1.45 * R0))
+    d = Math.max(d, -ent)
+    for (const [sx, top, sz, r, L] of p.stalactites) d = smin(d, spike(x - sx, top - y, z - sz, r, L, sx + sz), 0.5)
+    for (const [sx, base, sz, r, L] of p.stalagmites) d = smin(d, spike(x - sx, y - base, z - sz, r * 1.2, L, sx - sz), 0.5)
+    for (const [bx, by, bz, hx, hy, hz, yaw] of p.rubble) {
+      const dx = x - bx, dz = z - bz
+      if (dx * dx + dz * dz > (hx + hz + 1) ** 2) continue
+      const c = Math.cos(yaw), s = Math.sin(yaw)
+      d = Math.min(d, rbox(dx * c + dz * s, y - by, -dx * s + dz * c, hx, hy, hz, 0.22))
+    }
     return d
   }
 }
 
 /**
  * Baked LIGHT at a local point inside the cave (0 = black, 1 = daylight): daylight from the mouth fading with the
- * walk in, pools of light under the skylights; + the cyan GLOW of nearby crystals (returned separately).
+ * walk in, pools of light under the skylights; + the GLOW of nearby crystals (returned separately: [1] cyan / blue,
+ * [2] violet) — the pool of coloured light each cluster casts on the rock around it.
  */
-export function caveLight(p: CavePlan, x: number, y: number, z: number, out: [number, number]): [number, number] {
+export function caveLight(p: CavePlan, x: number, y: number, z: number, out: [number, number, number]): [number, number, number] {
   // Distance walked in along the tunnel (nearest segment), the chamber at the far end.
   let best = 1e9, walk = 0
   for (let i = 0; i < p.path.length - 1; i++) {
@@ -265,19 +363,26 @@ export function caveLight(p: CavePlan, x: number, y: number, z: number, out: [nu
   let sky = 0
   for (const [hx, hz, hr] of p.holes) sky += Math.exp(-Math.max(0, Math.hypot(x - hx, z - hz) - hr) / 2.4)
   out[0] = Math.min(1, ent + 0.9 * sky)
-  let glow = 0
-  for (const c of p.crystals) glow += Math.exp(-Math.hypot(x - c[0], y - c[1], z - c[2]) / 1.1) // a small pool of cyan around each cluster
-  out[1] = Math.min(0.7, glow)
+  let glow = 0, violet = 0
+  for (const c of p.crystals) {
+    const g = Math.exp(-Math.hypot(x - c[0], y - c[1], z - c[2]) / 1.8) // a pool of light around each cluster
+    if (c[6] === CrystalHue.Violet) violet += g
+    else glow += g
+  }
+  out[1] = Math.min(0.9, glow)
+  out[2] = Math.min(0.9, violet)
   return out
 }
 
 /** Crystal clusters: march from the chamber / alcove centres in hashed directions to the wall (air SDF ≥ 0). */
-function placeCrystals(p: CavePlan, rnd: () => number, seed: number): [number, number, number, number, number, number][] {
-  const out: [number, number, number, number, number, number][] = []
-  const starts: [number[], number][] = [[[p.chamber[0], p.floor + 2.5, p.chamber[2]], 14], [[p.alcove[0], p.alcove[1] + 1.5, p.alcove[2]], 5]]
-  for (const [o, n] of starts) {
+function placeCrystals(p: CavePlan, rnd: () => number, seed: number): [number, number, number, number, number, number, number][] {
+  const out: [number, number, number, number, number, number, number][] = []
+  // The chamber: cyan with a few deep-blue clusters; the treasure alcove: violet amethyst (a different light guards it).
+  const starts: [number[], number, boolean][] = [[[p.chamber[0], p.floor + 2.5, p.chamber[2]], 16, false], [[p.alcove[0], p.alcove[1] + 1.5, p.alcove[2]], 6, true]]
+  for (const [o, n, alcove] of starts) {
     for (let i = 0; i < n; i++) {
-      const a = rnd() * Math.PI * 2, e = (rnd() - 0.35) * 1.1
+      // Mostly aimed low (Genshin's clusters grow out of the ground at the foot of the walls), a quarter up the walls.
+      const a = rnd() * Math.PI * 2, e = rnd() < 0.75 ? -0.12 - rnd() * 0.5 : rnd() * 0.6
       const dx = Math.cos(a) * Math.cos(e), dy = Math.sin(e), dz = Math.sin(a) * Math.cos(e)
       let t = 0.5
       for (let k = 0; k < 60 && t < 30; k++) {
@@ -293,8 +398,41 @@ function placeCrystals(p: CavePlan, rnd: () => number, seed: number): [number, n
       const gy = caveAir(p, seed, x, y + e2, z) - caveAir(p, seed, x, y - e2, z)
       const gz = caveAir(p, seed, x, y, z + e2) - caveAir(p, seed, x, y, z - e2)
       const gl = Math.hypot(gx, gy, gz) || 1
-      out.push([x, y, z, -gx / gl, -gy / gl, -gz / gl])
+      out.push([x, y, z, -gx / gl, -gy / gl, -gz / gl, alcove ? CrystalHue.Violet : rnd() < 0.22 ? CrystalHue.Blue : CrystalHue.Cyan])
     }
+  }
+  return out
+}
+
+/**
+ * FALLEN BLOCKS at the foot of the chamber's walls (Genshin's caverns always have a talus of angular blocks where the
+ * wall meets the floor): march from the centre at knee height to the wall, set a block half into it. Kept clear of
+ * the way in, the side passage, the pool and the crystals (the player's routes stay open).
+ */
+function placeRubble(p: CavePlan, rnd: () => number, seed: number): [number, number, number, number, number, number, number][] {
+  const out: [number, number, number, number, number, number, number][] = []
+  const rng = (a: number, b: number) => a + (b - a) * rnd()
+  const c = p.chamber, last = p.path[p.path.length - 1], throat = [c[0] - p.cr[0] * 0.6, c[2]], sa = p.side[0]
+  const segD = (x: number, z: number, a: number[], b: number[]) => {
+    const t = segT(x, 0, z, [a[0], 0, a[1]], [b[0], 0, b[1]])
+    return Math.hypot(x - (a[0] + (b[0] - a[0]) * t), z - (a[1] + (b[1] - a[1]) * t))
+  }
+  for (let i = 0; i < 26; i++) {
+    const a = rnd() * Math.PI * 2, dx = Math.cos(a), dz = Math.sin(a), y = p.floor + 0.8
+    let t = 2
+    for (let k = 0; k < 60 && t < 30; k++) {
+      const d = caveAir(p, seed, c[0] + dx * t, y, c[2] + dz * t)
+      if (d >= 0) break
+      t += Math.max(0.25, -d * 0.8)
+    }
+    const sz = rng(0.7, 1.6)
+    const x = c[0] + dx * (t - sz * 0.4), z = c[2] + dz * (t - sz * 0.4)
+    if (t >= 30 || segD(x, z, [last[0], last[2]], throat) < 7 || segD(x, z, [sa[0], sa[2]], [p.alcove[0], p.alcove[2]]) < sz + 3.5) continue
+    if (Math.hypot(x - p.alcove[0], z - p.alcove[2]) < p.alcoveR + 2) continue
+    if (Math.hypot(x - p.pool[0], z - p.pool[1]) < Math.max(p.pool[2], p.pool[3]) + 1.5) continue
+    if (p.crystals.some((q) => Math.hypot(x - q[0], z - q[2]) < sz + 1.8)) continue
+    if (out.some((q) => Math.hypot(x - q[0], z - q[2]) < (sz + q[3]) * 0.7)) continue
+    out.push([x, p.floor + sz * rng(0.1, 0.4), z, sz * rng(0.9, 1.4), sz * rng(0.6, 1.0), sz * rng(0.8, 1.2), rnd() * Math.PI])
   }
   return out
 }
