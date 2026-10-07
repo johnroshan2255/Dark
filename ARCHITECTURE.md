@@ -151,7 +151,13 @@ World (seed)
   a hidden alcove with a TREASURE CHEST (E: lid opens, full heal, "Treasure found" toast). All from the formation
   seed (deterministic). The terrain is CARVED under the cave's air (`WorldFields.height` → `formations.caveCarve`;
   `heightNoCave` for the horizon mesh and the rock cap); the rock cap follows the original hill +1.6 m, so outside it
-  is a rocky outcrop with grass on top. Caves keep clear of the main road, rivers, places and secondary roads.
+  is a rocky outcrop with grass on top. Where the hill above is too low for the chamber's vault (a ridge, a
+  shoulder), the cap is RAISED over the air (`caveRoof`: the air's top on a 2 m grid + 3.2 m, flanks falling ~48°,
+  plus a smooth ≥ 1.9 m core the stone relief can't gouge) — the cave becomes a rocky knoll instead of its air
+  bursting out through the hill (sky cracks, the blue interior plates showing outside) or a sub-voxel roof meshing
+  with holes. SDF scan of 20 seeds: open-air breaches 2.9 k → ~0.1 k m² (only the skylights' ragged rims), roofs
+  < 1.6 m 663 → 14 m². Cost: cave mesh build 320 → 450 ms once in the worker, 10–12 k → 17–18 k tris per cave.
+  Caves keep clear of the main road, rivers, places and secondary roads.
   LIGHT is BAKED into the rock's vertex colours in the worker (daylight fading with the walk in from the mouth,
   pools under the skylights, a cyan glow round the crystals; moss / grass only where light reaches) — 0 runtime
   cost. CaveSystem: crystal clusters (one InstancedMesh, HDR → bloom), the pool (still water shader), additive
@@ -326,6 +332,28 @@ Measured (RTX 4050, 1080p): GPU time within noise on every tier, LOW +8 draws (�
   (≈ 38 m/s, Shift ≈ 60), A/D yaw with bank, ↑/↓ climb / sink at ≈ 9 m/s, altitude hold when released, never
   below 0.8 m over the terrain. Landing sinks to ~1.3 m before the wheels fold back; E in the air bails out and the
   empty car lands itself. tests/vehicle.test.ts covers lift, hover hold, climb, flight, banked turn and landing.
+- **Amphibious boat** (every car; `gameplay/vehicle/BoatHull.ts`, `Car.toggleBoat`, `TruckSim.driveBoat`): O while
+  driving (touch BOAT / CAR) turns the car into a jet boat in 2.2 s, the WHEELS being the gadget — the body rises
+  0.22 m on the air suspension, each wheel folds flat, slides in under the car spinning like a turbine disc and
+  spreads into a thin disc, the keel pack forms out of the four discs (the tyres vanish into it) and telescopes out,
+  the sides swing up about the chines, the bow lowers like a drawbridge, the transom and jet nozzle fold out (a clunk
+  as each part locks) and cyan LED strips along the rub rails scan bow → stern, then glow (+3 additive draws); O
+  again reverses it. ONE hull asset (`scripts/blender/boat_hull.py` → `boat_hull.lod0.glb`, 696
+  tris, 6 parts + hinge pivots as glTF extras, vertex colours) is FITTED per car at load (width from body / tyres,
+  keel 0.22 m below the tyres, floor above the floating waterline so no water shows inside, gunwale over the door
+  sills, bow 1.6 m ahead of the bumper). Afloat (`WorldManager.waterAt`: liquid water only — not frozen, not desert):
+  buoyancy at 6 bilge points (draft 0.36 m, damped, small travelling waves → it bobs, pitches, rolls), a water jet
+  (≈ 54 km/h, Shift ≈ 79) vs hull drag, keel side grip, nozzle steering (it yaws on the screen too), lift shifted
+  forward over the planing hump (bow up ~7°) and outboard in turns (banks into them). On land it crawls on its keel
+  (≤ 16 km/h) — drive in and out up a beach. Rules: O is refused while flying ("Land first"); L from the boat folds
+  the hull as the wheels become jets; landing (L) over water puts the hull out on the way down; afloat, E (get out)
+  and O (wheels) are refused with a HUD notice. VehicleFx adds bow spray, the jet's rooster tail, a foam wake and a
+  splash on hard water entry (same tier-capped point pool; spray falls and turns to foam). Cost with the hull out:
+  +6 draws on the car's program (0 new programs; +6 in the shadow pass where objects cast), +696 tris, 6 surface
+  lookups + 6 point forces per physics step; measured seed 7 on the open lake (RTX 4050 laptop, 1280×720): LOW
+  GPU 3.4–5.0 ms / CPU ≈ 2 ms planing with spray, HIGH 3.7–5.3 ms / ≈ 4.3 ms — within the noise of driving there.
+  tests/vehicle.test.ts covers floating, planing, boost, banked turn, reverse, sinking without the hull, the land
+  crawl and driving out up a beach.
 - **Getting in / out** (`gameplay/vehicle/CarEntry.ts`, GTA-style): E walks the player round the car to the
   nearer front door (path never cuts through the body), opens it (hand on the handle, stepping out of its sweep),
   climbs in ducking under the roof line, pulls it shut (slam) — drivable from here — and slides over to the wheel

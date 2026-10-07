@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import humanUrl from './models/characters/human.lod0.glb?url'
+import hullUrl from './models/vehicles/boat_hull.lod0.glb?url'
 import { vehicleDef, type VehicleDef } from '../gameplay/vehicle/catalogue'
 import { loadTreeModels } from './treeModels'
 
@@ -15,6 +16,8 @@ import { loadTreeModels } from './treeModels'
  *           Żuk A06 — each baked by `bakeVehicle` (materials → vertex colours, paint mask, wheels split out or
  *           found by name, glass split off) and normalised: metres, facing −Z, origin on the ground at the
  *           wheelbase centre. Loaded on demand and cached (`loadVehicle`).
+ *   hull    the amphibious boat hull every car deploys (scripts/blender/boat_hull.py; gameplay/vehicle/BoatHull.ts):
+ *           6 parts in normalised hull space with their hinge pivots, vertex colours only (~41 KB, loaded once).
  * Credits: ASSET_LIST.md § Credits.
  */
 export interface TruckModel {
@@ -52,6 +55,15 @@ export interface TruckModel {
   steeringRadius: number
   /** UV of a pale, flat texel in `map` (untextured parts of a textured model sample it → their own colour). */
   neutralUv: [number, number]
+  /** That texel's colour (linear; white for flat-coloured models) — parts with a set colour divide it out. */
+  neutralColor: [number, number, number]
+  /** The amphibious hull (shared by every car; fitted to this one by BoatHull). */
+  hull: HullAsset
+}
+
+/** Boat hull parts in normalised hull space (scripts/blender/boat_hull.py): geometry + hinge pivot (glTF space). */
+export interface HullAsset {
+  parts: Map<string, { geo: THREE.BufferGeometry; pivot: [number, number, number] }>
 }
 
 export interface CarDoor {
@@ -224,15 +236,31 @@ export function loadVehicle(id: string, onProgress?: (f: number) => void): Promi
   let p = vehicleCache.get(def.id)
   if (!p) {
     let total = def.bytes
-    p = new GLTFLoader()
-      .loadAsync(def.url, (e) => {
-        if (e.lengthComputable) total = e.total
-        onProgress?.(Math.min(1, e.loaded / total))
-      })
-      .then((g) => bakeVehicle(g.scene, def))
+    const car = new GLTFLoader().loadAsync(def.url, (e) => {
+      if (e.lengthComputable) total = e.total
+      onProgress?.(Math.min(1, e.loaded / total))
+    })
+    p = Promise.all([car, loadHull()]).then(([g, hull]) => ({ ...bakeVehicle(g.scene, def), hull }))
     vehicleCache.set(def.id, p)
   } else onProgress?.(1)
   return p
+}
+
+let hullPromise: Promise<HullAsset> | null = null
+
+/** Load (once) the amphibious hull: its parts by node name (`hull_*`), each with its `pivot` extra. */
+export function loadHull(): Promise<HullAsset> {
+  hullPromise ??= new GLTFLoader().loadAsync(hullUrl).then((g) => {
+    const parts: HullAsset['parts'] = new Map()
+    for (const m of bakedMeshes(g.scene)) {
+      const name = /hull_\w+/.exec(m.name)?.[0]
+      if (!name) continue
+      for (const a of Object.keys(m.geo.attributes)) if (a !== 'position' && a !== 'normal' && a !== 'color') m.geo.deleteAttribute(a)
+      parts.set(name, { geo: m.geo, pivot: (m.extras.pivot as [number, number, number] | undefined) ?? [0, 0, 0] })
+    }
+    return { parts }
+  })
+  return hullPromise
 }
 
 /** @param onProgress 0..1 over both downloads (bytes). */
@@ -265,11 +293,11 @@ function bakedMeshes(scene: THREE.Object3D): { name: string; geo: THREE.BufferGe
 
 /** UV of the palest flat texel (low saturation, bright, uniform neighbourhood) — untextured parts of a textured
  *  model (interior, axles) point all their UVs at it so the shared textured material shows their own colour. */
-function neutralTexel(tex: THREE.Texture): [number, number] {
+function neutralTexel(tex: THREE.Texture): { uv: [number, number]; color: [number, number, number] } {
   const px = readPixels(tex, 128)
-  if (!px) return [0, 0]
+  if (!px) return { uv: [0, 0], color: [1, 1, 1] }
   const { data, w, h } = px
-  let best = -1e9, bu = 0, bv = 0
+  let best = -1e9, bu = 0, bv = 0, bo = 0
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const o = (y * w + x) * 4
@@ -277,10 +305,11 @@ function neutralTexel(tex: THREE.Texture): [number, number] {
       let dev = 0
       for (const d of [-4, 4, -w * 4, w * 4]) dev += Math.abs(data[o + d] - data[o]) + Math.abs(data[o + d + 1] - data[o + 1]) + Math.abs(data[o + d + 2] - data[o + 2])
       const score = val - sat * 2 - dev / 255
-      if (score > best) (best = score), (bu = (x + 0.5) / w), (bv = (y + 0.5) / h)
+      if (score > best) (best = score), (bu = (x + 0.5) / w), (bv = (y + 0.5) / h), (bo = o)
     }
   }
-  return [bu, tex.flipY ? 1 - bv : bv]
+  const lin = (c: number) => new THREE.Color().setRGB(c / 255, 0, 0, THREE.SRGBColorSpace).r
+  return { uv: [bu, tex.flipY ? 1 - bv : bv], color: [lin(data[bo]), lin(data[bo + 1]), lin(data[bo + 2])] }
 }
 
 function bakeFirstMesh(scene: THREE.Object3D): THREE.BufferGeometry {
@@ -421,7 +450,7 @@ function findLampsInParts(parts: { geo: THREE.BufferGeometry; color: THREE.Color
  * (`def.wheelRegex`) or split out of the body by shape (parts touching the ground, round in side view), and the
  * whole thing is normalised: metres (`def.length`), facing −Z, origin on the ground at the wheelbase centre.
  */
-function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
+function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel, 'hull'> {
   const meshes = bakedMeshes(scene)
   const bodies: THREE.BufferGeometry[] = [], glasses: THREE.BufferGeometry[] = []
   const wheelParts: { geo: THREE.BufferGeometry; name: string }[] = []
@@ -456,7 +485,8 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
     else if (/steering_wheel/i.test(m.name)) steerParts.push(g)
     else bodies.push(g)
   }
-  const neutralUv: [number, number] = map ? neutralTexel(map) : [0, 0]
+  const neutral = map ? neutralTexel(map) : { uv: [0, 0] as [number, number], color: [1, 1, 1] as [number, number, number] }
+  const neutralUv = neutral.uv
   if (map) {
     for (const g of flat) {
       const uv = g.getAttribute('uv') as THREE.BufferAttribute
@@ -608,6 +638,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): VehicleModel {
     doors,
     steeringRadius,
     neutralUv,
+    neutralColor: neutral.color,
   }
 }
 

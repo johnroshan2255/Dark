@@ -401,7 +401,7 @@ export class TruckSim extends VehicleBase {
    * toward upright and the stick yaws it a little.
    */
   protected afterWheels(dt: number, v: number): void {
-    if (!this.arcade) return
+    if (!this.arcade || this.boat >= 0.5) return
     const { f, u, r } = this.axes()
     const lv = this.body.linvel(), w = this.body.angvel()
     const contacts = this.wheels.filter((x) => x.contact).length
@@ -502,6 +502,8 @@ export class TruckSim extends VehicleBase {
   private wasHovering = false
   protected hoverStep(dt: number): boolean {
     if (!this.hover) return (this.wasHovering = false)
+    this.wet = 0
+    this.afloat = false
     const c = this.controls
     const lv = this.body.linvel()
     const t = this.body.translation()
@@ -535,8 +537,153 @@ export class TruckSim extends VehicleBase {
     return true
   }
 
+  /**
+   * AMPHIBIOUS BOAT (Car: O — the hull unfolds from under the car, BoatHull). `boat` = how far the hull is out (0..1,
+   * Car animates it); from 0.5 the boat handling below replaces the car's. BUOYANCY: each hull point under the water
+   * (`water(x, z)` = the liquid surface there, −∞ where dry / frozen / desert; + small travelling waves) pushes up
+   * by its share of the weight × depth / `hullDraft`, damped by its own vertical speed (ζ ≈ 0.55) — so the boat
+   * floats `hullDraft` deep and bobs, pitches and rolls by itself; at speed a dynamic lift (+30 %) raises it onto
+   * the plane. IN THE WATER: a water jet (≈ 54 km/h, boost ≈ 79) against quadratic + linear hull drag, the keel
+   * kills sideways slip (a short carving slide in hard turns), the nozzle yaws the stern (authority grows with speed
+   * and thrust, a little at idle), the bow rises over the planing hump (~7 m/s) and settles, banks into turns.
+   * ON THE KEEL (land, shallows: the retracted wheels still carry it, raised so the keel meets the ground): a hull
+   * dragged along — ≤ 16 km/h. Afloat = < 2 wheel contacts and ≥ 20 % of the hull wet. Cost: 6 surface queries +
+   * 6 point forces per step while the hull is out. Tested in tests/vehicle.test.ts.
+   */
+  boat = 0
+  /** Buoyancy points (chassis space) and the hull's resting depth (m) — set by Car from BoatHull. */
+  hullPts: [number, number, number][] = []
+  hullDraft = 0.36
+  /** Liquid water surface at (x, z) (world y), or −Infinity where there is none. */
+  water: (x: number, z: number) => number = () => -Infinity
+  /** Share of the hull points in the water (0..1), floating free of the ground, and the downward speed of the
+   *  last hit on the water (m/s, VehicleFx splash — the reader zeroes it). */
+  wet = 0
+  afloat = false
+  splash = 0
+  private waveT = 0
+
+  private buoyancy(dt: number): void {
+    this.waveT += dt
+    const n = this.hullPts.length
+    const wasWet = this.wet
+    this.wet = 0
+    if (!n) return
+    const m = this.tune.mass
+    const t = this.body.translation(), q = this.body.rotation(), lv = this.body.linvel(), w = this.body.angvel()
+    const com = this.body.worldCom()
+    const plane = 1 + 0.3 * Math.min(1, Math.max(0, this.speed - 3) / 10)
+    // Hydrodynamic lift moves along the hull: over the planing hump (~7 m/s) it pushes the bow up (trim θ ≈
+    // 0.15·trim rad), settling to ~2° on the plane; steering shifts it outboard so the boat banks INTO the turn.
+    const handling = this.boat >= 0.5
+    const vs = Math.max(0, this.speed)
+    const trim = handling ? 0.6 * (vs / 7) * Math.exp(1 - vs / 7) + 0.15 * Math.min(1, vs / 14) : 0
+    const bank = handling ? this.controls.steer * 0.06 * Math.min(1, vs / 9) : 0
+    let wet = 0, hit = 0
+    for (const p of this.hullPts) {
+      rotate(q, p[0], p[1], p[2], _rv)
+      const px = t.x + _rv[0], py = t.y + _rv[1], pz = t.z + _rv[2]
+      const level = this.water(px, pz)
+      if (level === -Infinity) continue
+      const d = level + this.wave(px, pz) - py
+      if (d <= 0) continue
+      wet++
+      const vy = lv.y + w.z * (px - com.x) - w.x * (pz - com.z) // (ω × r)·y
+      hit = Math.min(hit, vy)
+      // Weight share × depth / draft (dynamic lift at speed), minus damping c·v (c = 2ζω, ω = √(g / draft)).
+      const shift = 1 + (p[2] < -0.5 ? trim : p[2] > 0.5 ? -trim : 0) + (p[0] < 0 ? bank : -bank)
+      const k = Math.max(-0.5, (Math.min(d, 1.2) / this.hullDraft) * plane * shift - (8.2 / GRAVITY) * vy)
+      _fv.y = ((k * m * GRAVITY) / n) * this.boat
+      _pv.x = px; _pv.y = py; _pv.z = pz
+      this.body.addForceAtPoint(_fv, _pv, true)
+    }
+    this.wet = wet / n
+    if (wasWet === 0 && this.wet > 0 && hit < -2.5) this.splash = -hit
+  }
+
+  /** Small travelling waves on the water surface (m): the floating boat bobs and rocks a little at rest. */
+  private wave(x: number, z: number): number {
+    const t = this.waveT
+    return 0.05 * Math.sin(t * 1.7 + x * 0.37 + z * 0.11) + 0.035 * Math.sin(t * 2.6 - z * 0.29 + x * 0.17)
+  }
+
+  private driveBoat(dt: number, v: number): void {
+    const c = this.controls, vc = this.vc, m = this.tune.mass
+    const contacts = this.wheels.filter((x) => x.contact).length
+    this.afloat = contacts < 2 && this.wet > 0.2
+    this.drift = this.lateral = 0
+    this.drifting = this.nitroOn = false
+    for (let i = 0; i < 4; i++) this.wheelSlip[i] *= 1 - Math.min(1, dt * 6)
+    const av = Math.abs(v)
+    // ON THE KEEL: the hidden wheels crawl it along (a hull dragged over the ground), brakes hold it on dry land.
+    let engine = 0, brake = 0
+    if (c.parked || (Math.abs(c.throttle) < 0.01 && av < 1)) {
+      brake = 1
+      if (this.wet < 0.2) this.hold()
+    } else if (c.throttle > 0.01) engine = v < 4.5 ? c.throttle * m * 5 : 0
+    else if (c.throttle < -0.01) {
+      if (v > 0.5) brake = -c.throttle
+      else engine = v > -2.5 ? c.throttle * m * 3 : 0
+    }
+    this.steerAngle += (c.steer * (0.55 / (1 + av * 0.12)) - this.steerAngle) * Math.min(1, dt * 5)
+    for (let i = 0; i < 4; i++) {
+      vc.setWheelEngineForce(i, engine / 4)
+      vc.setWheelBrake(i, (brake * m * GRAVITY * 0.5 * dt) / 4)
+      vc.setWheelSideFrictionStiffness(i, 0.55)
+      if (i < 2) vc.setWheelSteering(i, -this.steerAngle)
+    }
+    const { f, u, r } = this.axes()
+    // Capsized (on its side / roof at a crawl for 2 s): set back upright (game rule, as on land).
+    this.upsideDown = u[1] < 0.35 && av < 2 ? this.upsideDown + dt : 0
+    if (this.upsideDown > 2) {
+      const t = this.body.translation()
+      this.place(t.x, t.y + 1.2, t.z, this.heading)
+      this.upsideDown = 0
+      return
+    }
+    if (this.wet < 0.05) return
+    // ---- IN THE WATER: jet thrust vs hull drag along the (horizontal) heading, the keel's side grip ----
+    const fl = Math.hypot(f[0], f[2]) || 1
+    const fx = f[0] / fl, fz = f[2] / fl, rx = -fz, rz = fx
+    const lv = this.body.linvel()
+    const vf = lv.x * fx + lv.z * fz, vr = lv.x * rx + lv.z * rz
+    const wet = Math.min(1, this.wet * 1.5)
+    let thrust = 0
+    if (c.throttle > 0.01) thrust = (c.boost ? 13.5 : 7) * c.throttle // tops out ≈ 15 m/s, boost ≈ 22
+    else if (c.throttle < -0.01) thrust = (vf > 1 ? 6 : 3.2) * c.throttle // the jet's reverse bucket: brake, then back up
+    const drag = 0.0211 * vf * Math.abs(vf) + 0.15 * vf
+    const ax = (thrust - drag) * wet, ar = -vr * 3.2 * wet
+    this.body.addForce({ x: (fx * ax + rx * ar) * m, y: 0, z: (fz * ax + rz * ar) * m }, true)
+    // Steering (velocity level, like the hover): the nozzle swings the stern. Trim and bank come from the
+    // buoyancy (lift shifted along / across the hull); here only the water's damping of roll and pitch rates.
+    const w = this.body.angvel()
+    const wu = w.x * u[0] + w.y * u[1] + w.z * u[2]
+    const wf = w.x * f[0] + w.y * f[1] + w.z * f[2]
+    const wr = w.x * r[0] + w.y * r[1] + w.z * r[2]
+    const auth = Math.min(1, 0.2 + Math.abs(vf) / 9 + Math.max(0, c.throttle) * 0.3)
+    const yawT = -c.steer * 1.1 * auth * (vf < -0.5 ? -1 : 1)
+    const dYaw = (yawT - wu) * Math.min(1, dt * 3) * wet
+    const dRoll = -wf * 1.2 * dt * wet
+    const dPitch = -wr * 1.2 * dt * wet
+    this.body.setAngvel({
+      x: w.x + u[0] * dYaw + f[0] * dRoll + r[0] * dPitch,
+      y: w.y + u[1] * dYaw + f[1] * dRoll + r[1] * dPitch,
+      z: w.z + u[2] * dYaw + f[2] * dRoll + r[2] * dPitch,
+    }, true)
+  }
+
+  /** Afloat the wheels stand still — the engine note follows the jet (throttle and speed) instead. */
+  step(dt: number): void {
+    super.step(dt)
+    if (this.afloat) this.wheelSpeed = Math.sign(this.speed || 1) * Math.max(Math.abs(this.speed), Math.max(0, this.controls.throttle) * 9)
+  }
+
   protected drive(dt: number, v: number): void {
     this.updateRide(dt)
+    if (this.boat > 0) this.buoyancy(dt)
+    else (this.wet = 0), (this.afloat = false)
+    if (this.boat >= 0.5) return this.driveBoat(dt, v)
+    this.afloat = false
     if (this.arcade) return this.driveArcade(dt, v)
     const c = this.controls
     const vc = this.vc
@@ -650,6 +797,17 @@ export class TruckSim extends VehicleBase {
     }
   }
 }
+
+/** v' = q v q* (Rapier quaternion) into `out`. */
+function rotate(q: { x: number; y: number; z: number; w: number }, x: number, y: number, z: number, out: number[]): void {
+  const ix = q.w * x + q.y * z - q.z * y, iy = q.w * y + q.z * x - q.x * z, iz = q.w * z + q.x * y - q.y * x, iw = -q.x * x - q.y * y - q.z * z
+  out[0] = ix * q.w + iw * -q.x + iy * -q.z - iz * -q.y
+  out[1] = iy * q.w + iw * -q.y + iz * -q.x - ix * -q.z
+  out[2] = iz * q.w + iw * -q.z + ix * -q.y - iy * -q.x
+}
+const _rv = [0, 0, 0]
+const _fv = { x: 0, y: 0, z: 0 }
+const _pv = { x: 0, y: 0, z: 0 }
 
 /** Arcade top speed (m/s) for a setup: stock 120 kW ≈ 48 m/s (173 km/h), nitro × 1.32. */
 export function arcadeTopSpeed(t: TruckTune): number {

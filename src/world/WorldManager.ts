@@ -12,6 +12,7 @@ import { chunkKey, ICE_SNOW, type ChunkData } from './types'
 import { WorldChunk, type ChunkDetail } from './WorldChunk'
 import { styledGrass, GrassField } from './Forest/GrassField'
 import { WorldFields } from './WorldFields'
+import type { BiomeWeights } from './Biomes'
 import { groundPalette } from '../rendering/artStyle'
 import { sampleHeight } from './Terrain/generateTerrain'
 import { FarForest } from './Forest/FarForest'
@@ -115,6 +116,30 @@ export class WorldManager {
     // Frozen water in the snow: the surface is the ice (same rule as the physics heightfield).
     const vi = Math.min(CHUNK_RES, Math.round(lz / CELL_SIZE)) * (CHUNK_RES + 1) + Math.min(CHUNK_RES, Math.round(lx / CELL_SIZE))
     return c.data.biome[vi * 2 + 1] > ICE_SNOW ? WorldFields.WATER : h
+  }
+
+  /**
+   * The LIQUID water surface at (x, z): WorldFields.WATER over a lake / river bed, −Infinity where there is none —
+   * dry ground, frozen in the snow (ice: `groundAt`), the dry basins of the desert (the Water shader's rule).
+   * Loaded chunk data, else the fields (a car beyond the ring). The boat's buoyancy asks 6× per step.
+   */
+  waterAt(x: number, z: number): number {
+    const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE)
+    const c = this.chunks.get(chunkKey(cx, cz))
+    let h: number, desert: number, snow: number
+    if (c) {
+      const lx = x - cx * CHUNK_SIZE, lz = z - cz * CHUNK_SIZE
+      h = sampleHeight(c.data.heights, lx, lz)
+      const vi = Math.min(CHUNK_RES, Math.round(lz / CELL_SIZE)) * (CHUNK_RES + 1) + Math.min(CHUNK_RES, Math.round(lx / CELL_SIZE))
+      desert = c.data.biome[vi * 2]
+      snow = c.data.biome[vi * 2 + 1]
+    } else {
+      h = this.fields.height(x, z)
+      const bw = this.fields.biome(x, z, _wbw)
+      desert = bw[0]
+      snow = bw[1]
+    }
+    return h < WorldFields.WATER && snow <= ICE_SNOW && desert < 0.4 ? WorldFields.WATER : -Infinity
   }
 
   /**
@@ -317,3 +342,6 @@ export class WorldManager {
     this.farForest.dispose()
   }
 }
+
+/** Scratch biome weights for `waterAt` beyond the loaded chunks. */
+const _wbw: BiomeWeights = [0, 0]

@@ -11,6 +11,7 @@ import { chunkKey } from '../../world/types'
 import { STOCK_TRUCK, TruckSim, type TruckTune } from './VehicleSim'
 import { vehicleDef, type VehicleTuning } from './catalogue'
 import { CarEntry, type EntryPhase } from './CarEntry'
+import { BoatHull, DRAFT, KEEL } from './BoatHull'
 
 /**
  * A drivable car of the garage (catalogue.ts; models baked by assets/loadModels) — a SIMULATED vehicle (VehicleSim
@@ -25,8 +26,14 @@ import { CarEntry, type EntryPhase } from './CarEntry'
  * wheel's suspension travel / spin / steering angle, the steering wheel in the driver's hands, the doors, live beam
  * axles (models without their own), and the lamps (head, tail, brake, reverse). Parked outside the physics ring it
  * is frozen (no ground collider to rest on) and wakes when its chunk's colliders exist again.
+ * BOAT (O) and JET (L): the wheels retract and the amphibious hull unfolds from under the car (BoatHull: keel pack
+ * drops and telescopes out, sides swing up, the bow lowers like a drawbridge, the transom and jet nozzle fold out,
+ * a clunk as each part locks) — afloat it is a jet boat (VehicleSim TruckSim.driveBoat); on land it crawls on its
+ * keel. O is refused while flying; L from the boat folds the hull away as the wheels turn into jets; landing over
+ * water puts the hull out first; afloat you can't drop the wheels or step out (the HUD says why).
  * Draws: body + wheels + steering wheel + 2 doors + axles (textured Lambert, all instanced → ONE program, 7 draws)
- * + glass ×3 (shared vertex-colour program, hidden in first person so you can see out) + lamps (1 additive draw).
+ * + glass ×3 (shared vertex-colour program, hidden in first person so you can see out) + lamps (1 additive draw)
+ * + the hull's 6 parts while it is out (same program).
  * CPU per frame ≈ 0.05 ms (matrices, door hinge, entry pose IK); memory: geometry only (+ 1 small axle mesh).
  */
 /** Steering-wheel turn at full lock (rad, ≈ 135° each way) — follows the driver's hands, not the speed-limited road wheels. */
@@ -46,7 +53,11 @@ interface Door {
   latched: boolean
 }
 
-export type CarEvent = 'doorOpen' | 'doorSlam' | 'drive' | 'out' | 'fly'
+export type CarEvent = 'doorOpen' | 'doorSlam' | 'drive' | 'out' | 'fly' | 'boat' | 'clunk' | 'hint'
+
+/** Boat transformation time (s, each way) and the points where a hull part locks home (a clunk). */
+const BOAT_TIME = 2.2
+const CLUNKS = [0.3, 0.5, 0.72, 0.85, 0.96]
 
 export class Car {
   readonly root = new THREE.Group()
@@ -79,7 +90,15 @@ export class Car {
   /** Flying (L): wanted on / off, and the transformation 0 (wheels) … 1 (jets) — fixed-step. */
   private flyOn = false
   private fly = 0
+  /** Boat (O): hull wanted out, and the deployment 0 (car) … 1 (boat) — fixed-step. */
+  private boatOn = false
+  private boatDeploy = 0
+  private rideByBoat = false
+  readonly hull: BoatHull
+  /** The last refusal / notice for the HUD ('hint' event). */
+  hint = ''
   private turbine = 0
+  private discSpin = 0
   private time = 0
   private readonly hubs = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()]
   /** Getting in / out (GTA-style sequence) — also poses the seated driver. */
@@ -268,6 +287,11 @@ export class Car {
     this.body.add(this.jets)
     const t = tuning ?? { ...STOCK_TRUCK, paint: '#ffffff' }
     this.sim = new TruckSim(physics, truck, t)
+    // The amphibious hull, fitted to this car, on the body's program; its bilge points float the sim.
+    this.hull = new BoatHull(truck, this.bodyMat)
+    this.body.add(this.hull.root)
+    this.sim.hullPts = this.hull.floatPoints
+    this.sim.hullDraft = DRAFT
     this.applyLook(t)
     // LAMPS: two head + two tail + two reverse quads (additive, HDR when lit → bloom) ON the model's own lenses:
     // found in the texture at load (loadModels findLamps: pale lenses facing forward, red ones facing back), else the
@@ -400,8 +424,10 @@ export class Car {
     this.bodyMat.needsUpdate = true
   }
 
-  park(x: number, z: number, heading: number): void {
-    this.sim.place(x, this.fields.surface(x, z), z, heading)
+  /** Park at (x, z) on the solid ground (a cave's rock floor too); `nearY` = a height near there (e.g. the car's own
+   *  before a swap) so the ground is found under a cave roof — else from above the uncarved hill. */
+  park(x: number, z: number, heading: number, nearY?: number): void {
+    this.sim.place(x, this.solid(x, z, nearY ?? this.fields.heightNoCave(x, z) + 1.4), z, heading)
     this.readPose(this.curP, this.curQ)
     this.prevP.copy(this.curP)
     this.prevQ.copy(this.curQ)
@@ -423,6 +449,7 @@ export class Car {
   toggle(): boolean {
     const p = this.player
     if (this.driving) {
+      if (this.sim.afloat) return this.say("You can't get out on the water — reach the shore first")
       const v = this.sim.body.linvel()
       // Fast, or up in the air: jump out (GTA bail) — the empty car comes down and lands on its own.
       if (Math.hypot(v.x, v.z) > BAIL_SPEED || (this.sim.hover && this.altitude() > 1.3)) {
@@ -432,7 +459,7 @@ export class Car {
       }
       if (this.entry.phase !== 'seated') return false // still pulling the door shut / sliding over
       this.flyOn = false
-      this.sim.rideTarget = 0 // the air suspension lets the body down to step out
+      if (!this.boatOn) this.sim.rideTarget = 0 // the air suspension lets the body down to step out
       this.setDriving(false)
       this.entry.exit()
       return true
@@ -465,7 +492,7 @@ export class Car {
     this.root.updateMatrixWorld()
     const d0 = this.doors[0]
     const feet = this.toWorld(d0 ? _v.set(d0.pivot.position.x + d0.side * 0.7, 0, d0.pivot.position.z + d0.length + 0.3) : _v.set(-this.half.x - 0.7, 0, 0))
-    feet.y = this.fields.surface(feet.x, feet.z) + 0.05
+    feet.y = this.solid(feet.x, feet.z, this.pos.y) + 0.05
     this.release(feet)
     if (wasDriving) this.onEvent?.('drive')
   }
@@ -479,7 +506,7 @@ export class Car {
     const x = this.pos.x - c * (this.track * 0.5 + 1.2), z = this.pos.z + s * (this.track * 0.5 + 1.2)
     this.setDriving(false)
     this.entry.reset()
-    this.release(_v.set(x, this.fields.surface(x, z) + 0.2, z))
+    this.release(_v.set(x, this.solid(x, z, this.pos.y) + 0.2, z))
     const v = this.sim.body.linvel()
     const out = 1.6 // pushed away from the door (left side)
     p.bail(v.x * 0.85 - c * out, v.y, v.z * 0.85 + s * out)
@@ -497,6 +524,12 @@ export class Car {
     this.driving = on
     if (on) this.player.yaw = this.heading
     this.onEvent?.('drive')
+  }
+
+  /** The solid ground at (x, z) near height `nearY` (PhysicsWorld.groundBelow: terrain or a cave's rock floor — the
+   *  height field is carved below caves, so placing by it dropped the player / car into the cave floor). */
+  private solid(x: number, z: number, nearY: number): number {
+    return this.physics.groundBelow(x, z, nearY + 0.6, this.fields.surface(x, z))
   }
 
   /** Hand control back to the player, standing at `feet` (world). */
@@ -530,7 +563,9 @@ export class Car {
     c.boost = drive && (i.down('ShiftLeft') || i.down('ShiftRight'))
     // ↑ / ↓ (touch ▲ ▼): the air suspension on the ground, climb / sink in the air.
     c.lift = drive ? (i.down('ArrowUp') ? 1 : 0) - (i.down('ArrowDown') ? 1 : 0) : 0
+    if (this.boatOn && !this.flyOn) c.lift = 0 // the boat holds its own ride height
     this.flyStep(dt)
+    this.boatStep(dt)
     // Nobody driving: the brakes lock only once it has (nearly) stopped — a car bailed out of keeps rolling.
     c.parked = !drive && Math.abs(this.sim.speed) < 1.5
     // Only simulate where the ground has colliders (the physics ring follows the player AND runs ahead of a
@@ -559,14 +594,83 @@ export class Car {
   toggleFly(): boolean {
     if (!this.driving) return false
     this.flyOn = !this.flyOn
+    const wasBoat = this.boatOn
+    if (this.flyOn) this.boatOn = false // boat → jet: the hull folds away while the wheels turn into jets
+    else {
+      // Landing over the water: the hull comes out on the way down, so it touches down as a boat.
+      const t = this.sim.body.translation()
+      if (this.sim.water(t.x, t.z) - this.fields.surface(t.x, t.z) > 0.8) this.boatOn = true
+    }
     this.onEvent?.('fly')
+    if (this.boatOn !== wasBoat) this.onEvent?.('boat')
     return true
+  }
+
+  /** Boat mode wanted (O): the touch button reads CAR. */
+  get boatMode(): boolean {
+    return this.boatOn
+  }
+
+  /** Floating on the water (the hull carries it, not the wheels). */
+  get afloat(): boolean {
+    return this.sim.afloat
+  }
+
+  /** O while driving: deploy the hull (car → boat) or fold it away (boat → car). Refused while flying (land first)
+   *  and while afloat (no ground for the wheels). */
+  toggleBoat(): boolean {
+    if (!this.driving) return false
+    if (this.flyOn || this.fly > 0) return this.say('Land first — the hull only deploys on the ground or the water')
+    if (this.boatOn && this.sim.afloat) return this.say('Find shallow water or the shore to drop the wheels')
+    this.boatOn = !this.boatOn
+    this.onEvent?.('boat')
+    return true
+  }
+
+  /** A notice for the HUD (always "nothing happened"). */
+  private say(text: string): false {
+    this.hint = text
+    this.onEvent?.('hint')
+    return false
+  }
+
+  /**
+   * The boat transformation (BOAT_TIME each way, BoatHull.pose draws it): the buoyancy ramps in as the keel comes
+   * out (TruckSim takes over the handling from half-way); on land the body rises on the air suspension by the
+   * keel's depth so the keel, not the retracted tyres, meets the ground — and comes back down once it's folded away.
+   */
+  private boatStep(dt: number): void {
+    const before = this.boatDeploy
+    const want = this.boatOn && !this.flyOn
+    this.boatDeploy = want ? Math.min(1, before + dt / BOAT_TIME) : Math.max(0, before - dt / BOAT_TIME)
+    this.sim.boat = smooth(0.2, 0.5, this.boatDeploy)
+    if (want || this.boatDeploy > 0) {
+      if (!this.sim.hover) this.sim.rideTarget = -KEEL
+      this.rideByBoat = true
+    } else if (this.rideByBoat) {
+      this.sim.rideTarget = 0
+      this.rideByBoat = false
+    }
+    for (const k of CLUNKS) if ((before - k) * (this.boatDeploy - k) < 0) this.onEvent?.('clunk')
+  }
+
+  /** The ground or the water surface under (x, z), whichever is higher (world y) — what the hover keeps above. */
+  private floorAt(x: number, z: number): number {
+    return Math.max(this.fields.surface(x, z), this.sim.water(x, z))
+  }
+
+  /** Hull FX spots in world space (rendered pose): bow shoulder k (0 left, 1 right) at the waterline, nozzle exit. */
+  bowSprayWorld(k: number, out: THREE.Vector3): THREE.Vector3 {
+    return out.copy(this.hull.bowSpray[k]).applyMatrix4(this.root.matrixWorld)
+  }
+  nozzleWorld(out: THREE.Vector3): THREE.Vector3 {
+    return out.copy(this.hull.nozzleExit).applyMatrix4(this.root.matrixWorld)
   }
 
   /** Height of the car's ground plane above the terrain (m). */
   private altitude(): number {
     const t = this.sim.body.translation()
-    return t.y - this.fields.surface(t.x, t.z)
+    return t.y - this.floorAt(t.x, t.z)
   }
 
   /**
@@ -583,7 +687,7 @@ export class Car {
     const hover = this.fly > 0.55
     this.sim.hover = hover
     const t = this.sim.body.translation()
-    this.sim.hoverFloor = this.flyOn ? this.fields.surface(t.x, t.z) + 0.8 : -1e9
+    this.sim.hoverFloor = this.flyOn ? this.floorAt(t.x, t.z) + 0.8 : -1e9
     if (hover && !this.flyOn) c.lift = Math.min(c.lift ?? 0, high ? -0.6 : -0.3) // coming in to land
   }
 
@@ -611,22 +715,37 @@ export class Car {
     // its arch, spins up like a turbine, and the jet lights under it.
     const f = this.fly
     const tilt = smooth(0, 0.45, f) * (Math.PI / 2), tuck = smooth(0.3, 0.75, f), jet = smooth(0.6, 1, f)
+    // BOAT — THE WHEELS ARE THE GADGET (BoatHull.pose carries on from them): each wheel folds flat, slides in under
+    // the car on its strut spinning like a turbine disc, spreads into a thin disc, and sinks into the keel pack that
+    // forms out of the four discs — no tyres left showing on the boat.
+    const b = this.boatDeploy
+    const fold = smooth(0, 0.22, b), slide = smooth(0.12, 0.4, b), spread = smooth(0.22, 0.42, b), gone = smooth(0.42, 0.6, b)
+    const flat = Math.max(tilt, fold * (Math.PI / 2))
+    this.discSpin += dt * 16 * Math.sin(Math.PI * slide)
     this.time += dt
     this.turbine += dt * 28 * jet
     this.wheelPos.forEach(([x, y, z], k) => {
       const rightSide = k === 1 || k === 3
-      const spin = -w[k].spin - this.turbine
+      const spin = -w[k].spin * (1 - fold) - this.turbine - this.discSpin
       // Right wheels = the left wheel turned 180° (rim faces out); their spin reverses accordingly.
-      _e.set(rightSide ? -spin : spin, (rightSide ? Math.PI : 0) - w[k].steer * (1 - tilt / (Math.PI / 2)), 0, 'YXZ')
+      _e.set(rightSide ? -spin : spin, (rightSide ? Math.PI : 0) - w[k].steer * (1 - flat / (Math.PI / 2)), 0, 'YXZ')
       // Bigger tyres: scaled about the hub, hub raised so the tread stays on the ground (as in the sim).
-      this.hubs[k].set(x - Math.sign(x) * tuck * this.inboard * 0.8, y + w[k].lift + (this.tyre - 1) * this.wheelRadius + tuck * this.wheelRadius * 0.55, z)
-      _q.setFromEuler(_e).premultiply(_q2.setFromAxisAngle(_z, rightSide ? -tilt : tilt))
-      _m.compose(this.hubs[k], _q, _s.setScalar(this.tyre))
+      const hx = x - Math.sign(x) * tuck * 0.8 * this.inboard
+      const hy = y + w[k].lift + (this.tyre - 1) * this.wheelRadius + tuck * this.wheelRadius * 0.55
+      this.hubs[k].set(hx + (x * 0.42 - hx) * slide, hy + (this.hull.discY - hy) * slide, z)
+      _q.setFromEuler(_e).premultiply(_q2.setFromAxisAngle(_z, rightSide ? -flat : flat))
+      // Spread into a disc: thinner along the axle, wider across; then shrink away inside the keel pack.
+      const sc = this.tyre * Math.max(1e-3, 1 - gone)
+      _m.compose(this.hubs[k], _q, _s.set(sc * (1 - 0.65 * spread), sc * (1 + 0.45 * spread), sc * (1 + 0.45 * spread)))
       this.wheels.setMatrixAt(k, _m)
     })
     this.wheels.instanceMatrix.needsUpdate = true
+    this.wheels.visible = gone < 1
     this.updateGear()
+    // The struts pull the wheels in; once the wheels are gone, so is the running gear (inside the hull).
+    this.rods.visible = this.springs.visible = this.axles.visible = gone < 1
     this.updateJets(jet)
+    this.hull.pose(this.boatDeploy, this.hands)
     // Steering wheel: D (right) turns it clockwise as the driver sees it = +rotation about the column axis,
     // which points forward/down away from the driver (verified numerically: D moves the rim's top to +X).
     const c = this.sim.controls
@@ -671,7 +790,7 @@ export class Car {
       e.reset()
       const d = this.doors[e.door]
       if (d && d.angle > 0.02) d.latched = false
-      feet.y = this.fields.surface(feet.x, feet.z) + 0.05
+      feet.y = this.solid(feet.x, feet.z, this.pos.y) + 0.05
       this.release(feet)
       return
     }
@@ -819,6 +938,7 @@ export class Car {
     this.steering?.dispose()
     for (const m of this.doorMeshes) m.dispose()
     for (const m of [this.axles, this.rods, this.springs, this.jets]) (m.geometry.dispose(), m.dispose())
+    this.hull.dispose()
     this.jetMat.dispose()
     this.bodyMat.dispose()
   }

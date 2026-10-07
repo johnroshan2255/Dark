@@ -18,6 +18,7 @@ export function TouchControls({ game }: { game: Game }) {
   const cam = useStore(game.store, (s) => s.settings.camera)
   const driving = useStore(game.store, (s) => s.driving)
   const flying = useStore(game.store, (s) => s.flying)
+  const boat = useStore(game.store, (s) => s.boat)
   const lights = useStore(game.store, (s) => s.lights)
   const base = useRef<HTMLDivElement>(null)
   const knob = useRef<HTMLDivElement>(null)
@@ -130,13 +131,29 @@ export function TouchControls({ game }: { game: Game }) {
           RIDE
         </button>
         {driving && (
-          // Air suspension / flight: ▲ ▼ lift the body on the ground, climb / sink in the air; FLY ⇄ LAND (L).
+          // Air suspension / flight: ▲ ▼ lift the body on the ground, climb / sink in the air; FLY ⇄ LAND (L);
+          // BOAT ⇄ CAR (O: the hull unfolds — refused in the air, the HUD says "Land first").
           <div style={liftCol}>
+            <button
+              style={{ ...btn, background: boat ? 'rgba(42,166,160,0.5)' : btn.background, opacity: flying ? 0.45 : 1 }}
+              data-testid="btn-boat"
+              onPointerDown={(e) => {
+                e.stopPropagation()
+                e.preventDefault()
+                game.car.toggleBoat()
+              }}
+            >
+              {boat ? 'CAR' : 'BOAT'}
+            </button>
             <button style={{ ...btn, background: flying ? 'rgba(58,140,232,0.45)' : btn.background }} data-testid="btn-fly" onPointerDown={tap('KeyL')}>
               {flying ? 'LAND' : 'FLY'}
             </button>
-            <button style={liftBtn} data-testid="btn-up" {...hold('ArrowUp')}>▲</button>
-            <button style={liftBtn} data-testid="btn-down" {...hold('ArrowDown')}>▼</button>
+            {(!boat || flying) && (
+              <>
+                <button style={liftBtn} data-testid="btn-up" {...hold('ArrowUp')}>▲</button>
+                <button style={liftBtn} data-testid="btn-down" {...hold('ArrowDown')}>▼</button>
+              </>
+            )}
           </div>
         )}
         {driving && (
@@ -159,7 +176,16 @@ export function TouchControls({ game }: { game: Game }) {
         <button style={small} onPointerDown={tap('F3')}>FPS</button>
         <button style={small} onPointerDown={tap('KeyT')} data-testid="btn-daynight">{phase === 'NIGHT' || phase === 'DUSK' ? '☀' : '☾'}</button>
         <button style={small} onPointerDown={tap('KeyV')} data-testid="btn-cam">{cam === 'tpp' ? 'FPP' : 'TPP'}</button>
-        <button style={small} onPointerDown={tap('KeyO')} data-testid="btn-settings">⚙</button>
+        <button
+          style={small}
+          onPointerDown={(e) => {
+            e.stopPropagation()
+            game.openSettings(!game.store.get().settingsOpen)
+          }}
+          data-testid="btn-settings"
+        >
+          ⚙
+        </button>
         <button
           style={small}
           onPointerDown={(e) => {
