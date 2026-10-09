@@ -3,7 +3,7 @@ import { DebugHud } from '../debug/DebugHud'
 import { Game, type GameOptions } from '../game/Game'
 import { useStore } from '../game/GameState'
 import { TouchControls } from '../input/TouchControls'
-import { TIERS, type TierName } from '../rendering/quality/QualityTiers'
+import { FEATURE_LEVELS, TIERS, type Level, type TierName } from '../rendering/quality/QualityTiers'
 import { seedFromString } from '../world/noise/rng'
 import { GameHud } from '../ui/GameHud'
 import { SettingsPanel } from '../ui/SettingsPanel'
@@ -17,6 +17,7 @@ import { ART_STYLES } from '../rendering/artStyle'
 /**
  * Every new game gets a fresh random world unless ?seed= is given (co-op joiners receive the host's
  * seed the same way). URL options: ?seed=<n|text> &tier=low|medium|high &adaptive=0 &hour=<0-24> &look=<style> &car=<id> &play=1 &at=cave
+ * &grass=off|low|medium|high|ultra (grass level on any preset)
  * &stress=<ms, dev>.
  */
 function readOptions(): GameOptions {
@@ -34,6 +35,7 @@ function readOptions(): GameOptions {
     car: p.get('car') ?? undefined,
     play: p.get('play') === '1',
     at: p.get('at') ?? undefined,
+    grass: FEATURE_LEVELS.grass.find((l) => l === p.get('grass')) as Level | undefined,
   }
 }
 

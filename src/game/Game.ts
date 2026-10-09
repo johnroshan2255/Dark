@@ -42,6 +42,7 @@ import {
   heldLevels,
   nextHoldStep,
   type Feature,
+  type Level,
   type QualitySettings,
   type TierName,
 } from '../rendering/quality/QualityTiers'
@@ -86,6 +87,8 @@ export interface GameOptions {
   play?: boolean
   /** Start somewhere else than the road spawn: 'cave' = outside the nearest hillside cave mouth (?at=). */
   at?: string
+  /** Grass level override on any preset (?grass=low|medium|high|ultra|off, not persisted) — e.g. HIGH grass on a LOW phone. */
+  grass?: Level
 }
 
 /**
@@ -514,7 +517,7 @@ export class Game {
   applyQuality(name: TierName, reason: string): void {
     // The preset + the player's per-feature overrides (Settings → Graphics).
     if (this.quality.name !== name) this.held = [] // a different preset starts from its own levels
-    let q = resolveQuality(name, this.settings.gfx)
+    let q = resolveQuality(name, this.opts.grass ? { ...this.settings.gfx, grass: this.opts.grass } : this.settings.gfx)
     this.presetFeatures = q.features // the preset + player overrides, before Hold-60 reductions (cached: per-frame checks)
     if (this.held.length) q = resolveQuality(name, heldLevels(q.features, this.held)) // Hold 60: runtime reductions
     this.store.set({ held: this.heldSummary(name) })
@@ -965,6 +968,8 @@ export class Game {
           this.post.updateGodRays(cam, this.lighting.sun, this.lighting.keyDir, tp.rays * k * (1 - this.caves.inside), tp.shafts * k * (1 - this.caves.inside), this.fog.near, this.fog.far, this.quality.sunShadowExtent * 1.2)
           globalUniforms.uTime.value = time
           globalUniforms.uCameraPos.value.copy(cam.position)
+          { const th = this.post.target.height > 1 ? this.post.target.height : this.renderer?.domElement.height ?? 720
+            globalUniforms.uGrassPx.value = (2 * Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2)) / th }
           globalUniforms.uPlayerPos.value.copy(p.renderPosition)
           globalUniforms.uKeyDirView.value.copy(this.lighting.keyDir).transformDirection(cam.matrixWorldInverse)
           globalUniforms.uStoryAmt.value = tp.painted

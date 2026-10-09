@@ -109,6 +109,10 @@ FAR layer (32 % of the blades, single wide triangles) to the edge, crossfaded bl
 interpolated from an 8 m meadow grid (`iDensity`), per-patch terrain gradient (`iSlope`, blades stand on the slope —
 flat patches made terraced rows on hillsides), per-blade random thresholds for thinning and the ragged edge.
 Measured HIGH: grass 240 k → 126 k triangles (scene 483 k → 371 k); LOW scene 154 k → 99–126 k.
+2026-10-09 (one grass for all styles, blue-noise ranks, view-cone cull, pixel-aware width, 4-tri flowers in the near
+layer only, no color/normal attributes): grass triangles LOW 23.7 k → 12.7 k, MED 48.7 k → 33.4 k, HIGH 136 k → 108 k
+(bright; genshin/overland were 1.2–1.6× bright and now equal it). Blades never drop below ~1.2 px (`uGrassPx` from
+the render target height, so it follows render scale / hold-60).
 
 **Hold 60 fps** (Settings → Graphics, default on; `Game.held`, `QualityTiers.nextHoldStep`): on a preset the player
 CHOSE, adaptive quality keeps running — render scale first (down to 0.65), then features one level at a time, the

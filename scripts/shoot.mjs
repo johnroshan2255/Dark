@@ -1,5 +1,5 @@
 // Headless-Chrome screenshot / probe harness (dev-only: needs `npm run dev` and window.__game).
-//   npm run shot -- <outdir> <shots.json>        env: PORT (5173), W/H (1280×720)
+//   npm run shot -- <outdir> <shots.json>        env: PORT (5173), W/H (1280×720), CPU_THROTTLE (n× slower CPU)
 // shots.json: [{ name, seed, tier, hour, look, x, z, yaw, pitch, cam: 'fpp'|'tpp', drive, keys, keysMs, wait, eval }]
 //   x: 'ROAD' places the shot on the main road at z (+ dx metres to the side)
 //   x/z teleport the player (yaw/pitch aim; forward = (−sin yaw, −cos yaw)), `drive` parks the truck there and gets in,
@@ -25,6 +25,8 @@ const browser = await puppeteer.launch({
   defaultViewport: { width: W, height: H, deviceScaleFactor: 1 },
 })
 const page = await browser.newPage()
+// CPU_THROTTLE=<n>: slow the page's CPU n× (Chrome DevTools throttling) — phone-class main thread (skills/mobile §10).
+if (process.env.CPU_THROTTLE) await page.emulateCPUThrottling(Number(process.env.CPU_THROTTLE))
 page.on('pageerror', (e) => console.log('[pageerror]', e.message))
 page.on('console', (m) => { const t = m.text(); if (/error|warn|GL_|WebGL/i.test(t)) console.log('[console]', t.slice(0, 300)) })
 

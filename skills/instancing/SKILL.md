@@ -136,10 +136,11 @@ export function writeInstanceMatrices(mesh: THREE.InstancedMesh, d: Float32Array
 - **Count trick**: allocate capacity once (`new InstancedMesh(geo, mat, 512)`), set `mesh.count = used`. Hide
   one instance by swapping it with the last and decrementing `count` — no reallocation.
 - **Grass field (implemented: `src/world/Forest/GrassField.ts`, `grass.ts`)** — NOT per chunk: a G×G window of
-  8 m tiles around the player mapped toroidally onto slots of ONE InstancedMesh (1 draw call, cost ∝ radius²).
-  Tiles entering the window are refilled nearest-first (4/frame, partial `addUpdateRange` uploads). Clumps of
-  5–8 curved tapered blades (3 tris each), base colour = the terrain colour underneath (reads as a carpet, not
-  tufts), few dry tufts, wind + distance shrink in the vertex shader, backlit translucency in the fragment.
+  4 m tiles of 1 m² patches around the player mapped toroidally onto slots of ONE InstancedMesh per layer (near / far,
+  cost ∝ radius²), refilled nearest-first with partial `addUpdateRange` uploads. Patches sit on an exact grid; the blade
+  layout is periodic blue noise in rank order (even spacing + even thinning); per-blade turn / jitter / height from an
+  integer world hash; a per-patch view-cone cull in the vertex shader skips the ~⅔ of the field behind / beside the
+  camera. Same grass in every art style (art-direction GRASS row).
 - **Trees (implemented: `src/world/Forest/treeFactory.ts`)** — 5 procedural species × 3 levels. Near chunks: one
   InstancedMesh per species present; FAR chunks merge species (conifers → one mesh with spruce's far geometry,
   birches → one) so a far chunk costs ≤ 2 tree draws. All levels of a group share one instance-attribute set.

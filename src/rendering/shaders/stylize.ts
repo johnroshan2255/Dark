@@ -329,11 +329,7 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   // Painted meadow beyond the real grass (Genshin): on green ground, soft blade streaks + the same rolling
   // wind-gust bands as the grass, so the meadow reads continuous to the horizon.
   float green = smoothstep(0.0, 0.03, diffuseColor.g - diffuseColor.b) * smoothstep(0.0, 0.02, diffuseColor.g - diffuseColor.r * 0.8) * (1.0 - vBiome.x - vBiome.y);
-  ${gen ? `// ANIME GRASS GROUND (Genshin): the meadow floor takes the same lime hue as the grass blades (world/Forest/grass.ts,
-  // ground colour → lime at the same brightness) — the blades' roots and the ground between them are ONE colour, so
-  // a sparser field (LOW / phones) still reads as a continuous lawn instead of blades on olive soil.
-  { float gl = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.223, 0.546, 0.061) * (gl / 0.442), 0.6 * green); }` : ''}
+  // (Grass is the same in every style and takes the ground's own colour — no per-style ground tint under it.)
   if (fine && green > 0.0) {
     float streak = st_noise(vec2(wp.x * 6.0 + wp.y * 1.5, wp.y * 6.0 - wp.x * 1.5));
     diffuseColor.rgb *= 1.0 + green * ((streak - 0.5) * 0.14 + windGust(wp, uTimeS, uWindS) * 0.14);

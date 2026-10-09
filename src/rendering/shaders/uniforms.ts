@@ -11,6 +11,8 @@ export const globalUniforms = {
   /** Grass fade distances from the camera: x = start, y = end (m). Per quality tier. */
   uGrassFade: { value: new THREE.Vector2(30, 42) },
   uCameraPos: { value: new THREE.Vector3() },
+  /** Size of one rendered pixel per metre of distance (2·tan(fov/2) / render-target height): grass keeps blades ≥ ~1.2 px. */
+  uGrassPx: { value: 0.002 },
   /** Player feet (grass parts around it). */
   uPlayerPos: { value: new THREE.Vector3(0, -1e4, 0) },
   /** Key light (sun/moon) direction in VIEW space and its colour × intensity — grass translucency. */
