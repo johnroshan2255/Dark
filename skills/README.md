@@ -34,6 +34,7 @@ The floor is ≥ 60 fps on a ~₹15k phone and an Intel UHD laptop.
 | [`postprocessing`](postprocessing/SKILL.md) | Read before adding any fullscreen effect, render target, bloom/SSAO, or changing how the frame reaches the screen — DARK uses one combined grading pass. |
 | [`procedural-world`](procedural-world/SKILL.md) | Read before adding or changing any generated content (terrain, road, forest, props, caves, POIs, monster spawns) or anything that must be identical across co-op clients. |
 | [`profiling`](profiling/SKILL.md) | Read before optimizing anything or when fps drops — how to measure CPU vs GPU cost, read the F3 HUD, use DevTools/Spector.js, and detect memory leaks. |
+| [`realistic-vehicle-system`](realistic-vehicle-system/SKILL.md) | Read before adding ANY car (any class: hatch, sedan, sports, SUV, pickup, off-roader, van, EV, multi-axle) or changing any part of one — Blender/MCP naming standard, spec sheet → simulation data, engine/gearbox/diffs, tyres and surfaces, brakes/ABS, steering, aids, suspension types, visuals, HUD/audio/camera, co-op — and its cost per tier. |
 | [`react-three-fiber`](react-three-fiber/SKILL.md) | Read before writing any R3F component, useFrame callback, or deciding whether something belongs in React or in the imperative hot path. |
 | [`shaders`](shaders/SKILL.md) | Read before writing or patching any GLSL — choosing onBeforeCompile vs ShaderMaterial vs RawShaderMaterial, sharing uniforms, vegetation wind, and keeping the program count low. |
 | [`shadows`](shadows/SKILL.md) | Read before enabling castShadow/receiveShadow on anything, changing shadow map settings, or adding fake/baked shadows — defines the one-directional-shadow strategy. |
@@ -56,6 +57,7 @@ The floor is ≥ 60 fps on a ~₹15k phone and an Intel UHD laptop.
 | Any new feature (budget per tier) | mobile → webgl |
 | Frame rate dropped | profiling → mobile → webgl → memory |
 | React component for a game system | react-three-fiber → threejs |
+| New car (any class) or a change to how cars drive, look or sound | realistic-vehicle-system → physics → asset-optimization → `npm run validate:assets` |
 | Co-op / networking | multiplayer → procedural-world (seed determinism) |
 
 Skills describe planned files marked *(planned)*; everything else they cite exists in `src/`.
