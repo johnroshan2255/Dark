@@ -345,4 +345,81 @@ for (const [deg, want] of [[12, true], [18, true], [32, false]] as const) {
   check('the walk to the door never cuts through the car', !f.inside && far.door === 1)
 }
 
+// ---- the amphibious boat (Car O: BoatHull + TruckSim.driveBoat) ---------------------------------------------
+{
+  /** A lake: bed at `bed` (m), the water surface at y = 0 everywhere, an optional beach ramp rising toward −Z out
+   *  of the water from z = −4. Returns the world. */
+  const lake = (bed: number, beachDeg = 0): PhysicsWorld => {
+    const p = new PhysicsWorld(R)
+    const ground = p.world.createRigidBody(R.RigidBodyDesc.fixed())
+    p.world.createCollider(R.ColliderDesc.cuboid(400, 0.5, 400).setTranslation(0, bed - 0.5, 0).setCollisionGroups(group(Groups.Terrain, 0xffff)).setFriction(0.9), ground)
+    if (beachDeg > 0) {
+      const t = (beachDeg * Math.PI) / 180, L = 60
+      const q = { x: Math.sin(t / 2), y: 0, z: 0, w: Math.cos(t / 2) }
+      const off = { y: 0.5 * Math.cos(t) - L * Math.sin(t), z: 0.5 * Math.sin(t) + L * Math.cos(t) }
+      p.world.createCollider(R.ColliderDesc.cuboid(8, 0.5, L).setRotation(q).setTranslation(0, bed - off.y, -4 - off.z).setCollisionGroups(group(Groups.Terrain, 0xffff)).setFriction(0.9), ground)
+    }
+    return p
+  }
+  /** The pickup's hull as BoatHull fits it: bilge points ±0.58 m, at y −0.09, bow shoulder → transom; draft 0.36. */
+  const boat = (p: PhysicsWorld, water: (x: number, z: number) => number, y: number, z = 0): TruckSim => {
+    const t = new TruckSim(p, TRUCK)
+    t.hullPts = [-2.09, 0.25, 2.65].flatMap((hz) => [[-0.58, -0.09, hz], [0.58, -0.09, hz]] as [number, number, number][])
+    t.hullDraft = 0.36
+    t.water = water
+    t.boat = 1
+    t.rideTarget = 0.22 // Car: −KEEL
+    t.place(0, y, z, 0)
+    return t
+  }
+  const sea = () => 0
+  {
+    const p = lake(-8)
+    const t = boat(p, sea, -0.3)
+    let maxRoll = 0
+    run(p, t, 5, {}, (s) => { if (s > 2) maxRoll = Math.max(maxRoll, Math.abs(t.attitude().roll)) })
+    const y = pos(t).y, att = t.attitude()
+    check('boat floats at its draft, level, bobbing on the waves', t.afloat && y > -0.45 && y < -0.1 && Math.abs(att.pitch) < 0.06 && maxRoll < 0.06 && Math.abs(t.body.linvel().y) < 0.4, `y ${y.toFixed(2)} m, pitch ${(att.pitch * 57.3).toFixed(1)}°, max roll ${(maxRoll * 57.3).toFixed(1)}°`)
+    let maxPitch = 0, minUp = 1
+    run(p, t, 12, { throttle: 1 }, () => ((maxPitch = Math.max(maxPitch, t.attitude().pitch)), (minUp = Math.min(minUp, t.axesUp()))))
+    const top = t.speed
+    check('jet: ~50–60 km/h, the bow rises onto the plane', top > 12.5 && top < 17 && maxPitch > 0.04 && maxPitch < 0.25 && minUp > 0.95, `${(top * 3.6).toFixed(0)} km/h, max bow-up ${(maxPitch * 57.3).toFixed(1)}°`)
+    run(p, t, 6, { throttle: 1, boost: true })
+    check('boost: ~75–85 km/h on the water', t.speed > 19 && t.speed < 24 && t.axesUp() > 0.95, `${(t.speed * 3.6).toFixed(0)} km/h`)
+    run(p, t, 3, { throttle: 1 })
+    const h = turned(t)
+    let bank = 0
+    run(p, t, 3, { throttle: 1, steer: 1 }, () => (h.step(), (bank = Math.max(bank, t.attitude().roll))))
+    check('D turns right, banking into the turn, never capsizes', h.total() < -1.2 && bank > 0.04 && t.axesUp() > 0.9 && Math.abs(t.lateral) < 4, `${(h.total() * 57.3).toFixed(0)}°, bank ${(bank * 57.3).toFixed(1)}°`)
+    run(p, t, 2, { throttle: 1 })
+    const z0 = pos(t).z
+    let stop = NaN
+    run(p, t, 8, { throttle: -1 }, () => { if (Number.isNaN(stop) && t.speed < 0.5) stop = Math.abs(pos(t).z - z0) })
+    check('reverse bucket stops it, then it backs up', stop > 5 && stop < 45 && t.speed < -1, `stopped in ${stop.toFixed(0)} m, then ${(t.speed * 3.6).toFixed(0)} km/h`)
+    t.boat = 0
+    run(p, t, 4, {})
+    check('hull folded away in deep water: it sinks', pos(t).y < -6, `y ${pos(t).y.toFixed(1)} m`)
+    p.dispose()
+  }
+  {
+    const p = lake(0)
+    const t = boat(p, () => -Infinity, 0)
+    run(p, t, 2, {})
+    const ride = pos(t).y
+    run(p, t, 5, { throttle: 1 })
+    check('on land: rides up on the keel and only crawls (≤ 16 km/h)', ride > 0.12 && ride < 0.32 && t.speed > 2 && t.speed < 4.8 && !t.afloat, `ride +${ride.toFixed(2)} m, ${(t.speed * 3.6).toFixed(0)} km/h`)
+    p.dispose()
+  }
+  {
+    // Out of a lake 2.5 m deep up a 10° beach: floats, the bed comes up under the wheels, it drives out on its keel.
+    const p = lake(-2.5, 10)
+    const t = boat(p, (x, z) => (z > -4 - 2.5 / Math.tan(0.1745) ? 0 : -Infinity), -0.3, 14)
+    run(p, t, 2, {})
+    const floating = t.afloat
+    run(p, t, 16, { throttle: 1 })
+    check('drives out of the water up the beach', floating && !t.afloat && pos(t).y > 0.6 && t.axesUp() > 0.9, `y ${pos(t).y.toFixed(2)} m at z ${pos(t).z.toFixed(0)}`)
+    p.dispose()
+  }
+}
+
 process.exit(failures ? 1 : 0)

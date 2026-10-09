@@ -99,7 +99,7 @@ export class Bike {
     private readonly player: PlayerController,
     private readonly character: CharacterModel,
     private readonly fields: WorldFields,
-    physics: PhysicsWorld,
+    private readonly physics: PhysicsWorld,
     private readonly input: Input,
   ) {
     this.root.name = 'bmx'
@@ -152,10 +152,15 @@ export class Bike {
     this.sim.enabled = false
   }
 
+  /** The solid ground at (x, z) near height `nearY`: terrain or a cave's rock floor (PhysicsWorld.groundBelow). */
+  private solid(x: number, z: number, nearY: number): number {
+    return this.physics.groundBelow(x, z, nearY + 0.6, this.fields.surface(x, z))
+  }
+
   /** Park the bike on the verge `side` m to the right of the player, facing along its yaw. */
   parkNear(p: THREE.Vector3, yaw: number, side = 2.2): void {
     this.parked.set(p.x + Math.cos(yaw) * side, 0, p.z - Math.sin(yaw) * side)
-    this.parked.y = this.fields.surface(this.parked.x, this.parked.z)
+    this.parked.y = this.solid(this.parked.x, this.parked.z, p.y)
     this.parkedHeading = yaw
   }
 
@@ -206,7 +211,7 @@ export class Bike {
   private getOff(): void {
     const p = this.player
     const t = this.sim.body.translation()
-    this.parked.set(t.x, this.fields.surface(t.x, t.z), t.z)
+    this.parked.set(t.x, this.solid(t.x, t.z, t.y), t.z)
     this.parkedHeading = this.sim.heading
     this.state = 'parked'
     this.fallenLean = -0.28 // back on its kickstand
@@ -268,7 +273,7 @@ export class Bike {
       this.fallenFor += dt
       const lv = this.sim.body.linvel()
       if (this.fallenFor > 1.5 && Math.hypot(lv.x, lv.y, lv.z) < 0.3) {
-        this.parked.set(t.x, this.fields.surface(t.x, t.z), t.z)
+        this.parked.set(t.x, this.solid(t.x, t.z, t.y), t.z)
         this.parkedHeading = this.sim.heading
         this.sim.enabled = false
         this.state = 'parked'

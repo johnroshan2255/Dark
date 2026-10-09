@@ -1,6 +1,6 @@
 import { hash4, hashFloat } from '../noise/rng'
 import { dropIslands, surfaceNets, type VoxelMesh } from './surfaceNets'
-import { CARVE_REACH, cavePlan, caveFloorAt, caveFootprint, caveRock, MOUTH_X, toLocal } from './caves'
+import { CARVE_REACH, cavePlan, caveFloorAt, caveFootprint, caveRock, caveRoof, MOUTH_X, toLocal } from './caves'
 import { stoneOffset } from './stone'
 
 /**
@@ -348,7 +348,8 @@ export function buildFormation(f: Formation, step: number, ground?: (x: number, 
       return H[j * nx + i] * (1 - u) * (1 - v) + H[j * nx + i + 1] * u * (1 - v) + H[(j + 1) * nx + i] * (1 - u) * v + H[(j + 1) * nx + i + 1] * u * v
     }
     lo = [p.min[0], Math.min(p.floor, p.alcove[1], ...p.path.map((q) => q[1])) - 4, p.min[1]]
-    hi = [p.max[0], Math.min(60, Math.max(top, p.chamber[1] + p.cr[1]) + 4), p.max[1]]
+    // Up to the raised roof over the air (caveRoof) too — a box lid below it would leave the knoll open on top.
+    hi = [p.max[0], Math.min(60, Math.max(top, p.chamber[1] + p.cr[1], caveRoof(p, f.seed).max) + 4), p.max[1]]
     sdf = caveRock(f, hl)
   } else {
     ;[lo, hi] = bounds(f)

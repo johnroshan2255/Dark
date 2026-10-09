@@ -87,8 +87,17 @@ export class MonsterSystem {
     return this.stalkers.length + this.striders.length
   }
 
+  /** The solid ground near height `nearY` (Game: PhysicsWorld.groundBelow — a cave's rock floor, not the carved
+   *  height field under it); null = the height field. */
+  solid: ((x: number, z: number, nearY: number) => number) | null = null
+
   private ground(x: number, z: number): number {
     return this.fields.surface(x, z)
+  }
+
+  /** Where a walker stands: the solid ground found from its own height (follows a cave floor step by step). */
+  private walkGround(x: number, z: number, nearY: number): number {
+    return this.solid ? this.solid(x, z, nearY) : this.fields.surface(x, z)
   }
 
   /** Point `dist` from the player, avoiding the camera's forward cone (spawn out of view). */
@@ -246,7 +255,7 @@ export class MonsterSystem {
     m.speed += (speed - m.speed) * Math.min(1, dt * 4)
     m.pos.x += Math.sin(m.yaw) * m.speed * dt
     m.pos.z += Math.cos(m.yaw) * m.speed * dt
-    m.pos.y = this.ground(m.pos.x, m.pos.z)
+    m.pos.y = this.walkGround(m.pos.x, m.pos.z, m.pos.y)
     m.phase += dt * (1.5 + m.speed * 1.4)
     m.twitch = Math.max(0, m.twitch - dt)
     if (this.rng.next() < dt * 0.6) m.twitch = 0.25

@@ -235,6 +235,7 @@ export class Game {
       dead: false,
       driving: false,
       flying: false,
+      boat: false,
       lights: false,
       landing: opts.play !== true,
       screen: 'menu',
@@ -257,7 +258,10 @@ export class Game {
 
     this.character = new CharacterModel(this.materials.character, models.human)
     // Feet on the slope, the fallen body on the ground: the loaded chunk heights (cheap, = the rendered mesh).
-    this.character.ground = (x, z) => this.world.groundAt(x, z) ?? this.world.fields.height(x, z)
+    // The ground under the feet as the colliders see it: the terrain, or a cave's rock floor (the height field is
+    // carved 2+ m below it there — feet IK on that pulled the body into the cave floor). Cast from just above the
+    // player (below any tunnel roof); the height field where nothing is streamed in.
+    this.character.ground = (x, z) => this.physics.groundBelow(x, z, this.player.curr.y + 0.6, this.world.groundAt(x, z) ?? this.world.fields.height(x, z))
     this.character.onStep = (x, z, fx, fz) => this.trails.stamp(x, z, fx, fz, 0.22, 0.12, 0.9)
     this.character.yaw = this.player.yaw
     this.cameraCtl = new CameraController(physics, this.world.fields, this.character, this.blobShadow)
@@ -299,6 +303,7 @@ export class Game {
     }
     if (opts.at === 'cave') this.spawnAtCave()
     this.monsters = new MonsterSystem(this.world.fields, this.player, this.health, this.audio)
+    this.monsters.solid = (x, z, nearY) => this.physics.groundBelow(x, z, nearY + 0.6, this.world.fields.surface(x, z))
     this.lightning = new Lightning(this.world.fields, this.player, this.health, this.audio)
     this.monsters.enabled = this.lightning.enabled = this.settings.monsters
     this.audio.setEnabled(this.settings.sound)
@@ -348,7 +353,11 @@ export class Game {
       this.weather.force = order[(order.indexOf(this.weather.force) + 1) % order.length]
     })
     i.onPress('KeyV', () => this.toggleCamera())
-    i.onPress('KeyO', () => this.openSettings(!s.get().settingsOpen))
+    // O: while driving the BOAT (the hull unfolds — Car.toggleBoat); otherwise the settings (also the toolbar ⚙).
+    i.onPress('KeyO', () => {
+      if (this.car.driving && !s.get().settingsOpen) this.car.toggleBoat()
+      else this.openSettings(!s.get().settingsOpen)
+    })
     i.onPress('KeyF', () => {
       // On foot / bike: the torch. In the truck: the headlights (the torch stays as it was).
       if (this.car.driving) s.set({ lights: (this.car.lights = !this.car.lights) })
@@ -368,6 +377,7 @@ export class Game {
       else this.bike.toggle()
     })
     // L (touch FLY / LAND): the flying car — wheels turn into jets; ↑ / ↓ climb and sink (on the ground: lift the body).
+    // From the boat too (the hull folds away); landing over water puts the hull out.
     i.onPress('KeyL', () => this.car.toggleFly())
     i.onPress('BracketLeft', () => this.updateSettings({ resolution: Math.max(0.5, this.post.renderScale - 0.1) }))
     i.onPress('BracketRight', () => this.updateSettings({ resolution: Math.min(1, this.post.renderScale + 0.1) }))
@@ -405,6 +415,8 @@ export class Game {
    *  takes / leaves the wheel (Car + CarEntry animate the getting in and out). */
   private wireCar(): void {
     const car = this.car
+    // The boat floats on the liquid water (none where it's dry, frozen or desert) — loaded chunk data, cheap.
+    car.sim.water = (x, z) => this.world.waterAt(x, z)
     car.onEvent = (e) => {
       if (car !== this.car) return
       if (e === 'doorOpen') this.audio.play('door', 0.35, 1.25)
@@ -413,12 +425,23 @@ export class Game {
         this.audio.play(car.driving ? 'engineStart' : 'engineStop', 0.8)
         this.cameraCtl.vehicle = car.driving ? { distance: 8, pivot: 2.3 } : null
         if (car.driving) car.lights = this.darkness > 0.5 // lights come on with the dark; off by day
-        this.store.set({ driving: car.driving, lights: car.lights, flying: car.driving && car.flyMode })
+        this.store.set({ driving: car.driving, lights: car.lights, flying: car.driving && car.flyMode, boat: car.boatMode })
       } else if (e === 'fly') {
         this.audio.play('boost', 0.6, 0.8)
         this.store.set({ flying: car.flyMode })
-      }
+      } else if (e === 'boat') {
+        this.audio.play('boost', 0.35, 0.6) // hydraulics
+        this.store.set({ boat: car.boatMode })
+      } else if (e === 'clunk') this.audio.play('door', 0.5, 0.55) // a hull part locking home
+      else if (e === 'hint') this.notify(car.hint)
     }
+  }
+
+  /** A short notice in the HUD toast (refused actions: "Land first", …). Read per frame by GameHud. */
+  readonly notice = { text: '', until: 0 }
+  notify(text: string, ms = 2600): void {
+    this.notice.text = text
+    this.notice.until = performance.now() + ms
   }
 
   private engineVoice(car: Car): { pitch: number; gears: number[] } {
@@ -871,7 +894,7 @@ export class Game {
             const sim = car.sim, slip = Math.max(...sim.wheelSlip)
             this.audio.frame({
               dt, darkness, nightmare: this.tod.nightmare, menu: this.store.get().landing, rain: this.weather.rain * (1 - bw[0]) * (1 - bw[1]),
-              car: { engineOn: car.driving, distance: car.pos.distanceTo(cam.position), pan: pan(car.pos.x, car.pos.z), speed: sim.speed, wheelSpeed: sim.wheelSpeed, throttle: sim.controls.throttle, boost: (sim.arcade ? sim.nitroOn : sim.controls.boost) || car.flying, slip, engine: this.engineVoice(car) },
+              car: { engineOn: car.driving, distance: car.pos.distanceTo(cam.position), pan: pan(car.pos.x, car.pos.z), speed: sim.speed, wheelSpeed: sim.wheelSpeed, throttle: sim.controls.throttle, boost: (sim.arcade ? sim.nitroOn : sim.controls.boost) || car.flying || (car.afloat && Math.abs(sim.speed) > 3), slip, engine: this.engineVoice(car) },
               bike: { riding: bike.riding, distance: bike.root.position.distanceTo(cam.position), pan: pan(bike.root.position.x, bike.root.position.z), speed: bs.speed, throttle: Math.max(0, bs.controls.throttle) },
             })
             // Footsteps exactly when a foot plants (CharacterModel counts the touchdowns) — sound matches the feet.
@@ -1012,7 +1035,7 @@ export class Game {
         const pos = this.car.pos.clone(), heading = this.car.heading
         this.car.dispose() // (forceOut: an occupant is put beside it, no animation)
         this.car = new Car(this.materials.character, model, this.physics, this.world.fields, this.player, this.character, this.input, this.tuning(id))
-        this.car.park(pos.x, pos.z, heading)
+        this.car.park(pos.x, pos.z, heading, pos.y)
         this.car.sim.arcade = this.settings.handling === 'arcade'
         this.car.autoAccel = this.settings.autoAccelerate
         this.wireCar()
@@ -1021,7 +1044,7 @@ export class Game {
         this.car.setMap(this.quality.name === 'low' && model.map ? downscaleTexture(model.map, 512) : model.map)
         this.settings = { ...this.settings, garage: { ...this.settings.garage, vehicle: id } }
         saveSettings(this.settings)
-        this.store.set({ settings: this.settings, vehicle: id, vehicleLoading: null, driving: false, flying: false })
+        this.store.set({ settings: this.settings, vehicle: id, vehicleLoading: null, driving: false, flying: false, boat: false })
       })
       .catch((e: unknown) => {
         console.error(e)

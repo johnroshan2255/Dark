@@ -97,6 +97,24 @@ export class PhysicsWorld {
     return this.chunkBodies.has(key)
   }
 
+  private groundRay: RAPIER.Ray | null = null
+  /**
+   * The SOLID ground under (x, z) as the colliders see it — terrain heightfield AND static rock (cave floors, arches,
+   * outcrops) — by a ray cast down from `fromY` (≤ 8 m). Use it to put things ON the ground: under a hillside cave
+   * the terrain is carved 2+ m below the rock floor (`WorldFields.surface` / `groundAt` are that carved hole), so
+   * anything placed by the height field sinks into the cave's floor. Start the ray below any roof (a cave tunnel
+   * is ≥ 2 m tall: player feet + ~0.6 m). Vehicles and the player are ignored. `fallback` where nothing is hit
+   * (no collider streamed in there). One ray: ~1–3 µs.
+   */
+  groundBelow(x: number, z: number, fromY: number, fallback: number): number {
+    const ray = (this.groundRay ??= new this.R.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }))
+    ray.origin.x = x
+    ray.origin.y = fromY
+    ray.origin.z = z
+    const hit = this.world.castRay(ray, 8, true, undefined, group(0xffff, Groups.Terrain | Groups.Static))
+    return hit ? fromY - hit.timeOfImpact : fallback
+  }
+
   /** Heightfield + trunk cylinders on one fixed body (compound, one broad-phase entry per collider). */
   addChunk(key: string, d: ChunkData): void {
     if (this.chunkBodies.has(key)) return

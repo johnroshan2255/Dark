@@ -300,21 +300,86 @@ export function caveFloorAt(p: CavePlan, x: number, z: number): number {
   return Math.min(best, p.alcove[1])
 }
 
+/** Rock kept over the cave's air (m): ≥ 2 voxels (1.25 m) plus the stone relief, so the roof always meshes closed. */
+const ROOF_T = 3.2
+/** The raised roof's flanks fall ~1.1 m per m (a steep rocky knoll) and reach ≤ DOME_REACH m past the air. */
+const DOME_SLOPE = 1.1, DOME_REACH = 7
+
+const roofs = new Map<number, ((x: number, z: number) => number) & { max: number }>()
+/**
+ * The cave's ROOF height (local) per column: the top of its air + ROOF_T, falling away at DOME_SLOPE beyond it — on a
+ * 2 m grid. Where the hill above the cave is lower than this (a tall chamber vault under a ridge or a shoulder), the
+ * rock cap is RAISED to it (caveRock): the cave reads as a rocky knoll on the hillside instead of its air bursting out
+ * through the hill (open cracks to the sky, the blue interior plates showing outside) or a roof thinner than a voxel
+ * (holes in the mesh). The skylight shafts stay open (their air cuts through any rock); nothing is raised in front of
+ * the mouth (its brow and apron are designed). Cached per cave; ~20 k air samples once per build (worker).
+ */
+export function caveRoof(p: CavePlan, seed: number): ((x: number, z: number) => number) & { max: number } {
+  const hit = roofs.get(seed)
+  if (hit) return hit
+  const G = 2, x0 = p.min[0], z0 = p.min[1]
+  const nx = Math.ceil((p.max[0] - x0) / G) + 1, nz = Math.ceil((p.max[1] - z0) / G) + 1
+  const top = new Float32Array(nx * nz).fill(-Infinity)
+  const yHi = Math.max(p.chamber[1] + p.cr[1] * 1.6, p.alcove[1] + 7, ...p.path.map((q, i) => q[1] + 2.6 * p.radius[i])) + 4
+  const yLo = Math.min(p.floor, p.alcove[1], ...p.path.map((q) => q[1])) - 2
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+    const lx = x0 + i * G, lz = z0 + j * G
+    if (lx < MOUTH_X + 3 || caveFootprint(p, lx, lz) > 3.5) continue
+    if (caveAir(p, seed, lx, yHi, lz) < 0) continue // a skylight shaft: open to the sky on purpose
+    for (let y = yHi; y > yLo; y -= 0.5) if (caveAir(p, seed, lx, y, lz) < 0) { top[j * nx + i] = y + 0.5; break }
+  }
+  // Roof = max over the air columns within DOME_REACH of (their top + ROOF_T − slope · distance); one cell of slack so
+  // the bilinear lookup between grid points never dips under the air.
+  const roof = new Float32Array(nx * nz).fill(-Infinity)
+  const R = Math.ceil(DOME_REACH / G) + 1
+  let max = -Infinity
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+    if (x0 + i * G < MOUTH_X + 1) continue
+    let v = -Infinity
+    for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
+      const ii = i + di, jj = j + dj
+      if (ii < 0 || jj < 0 || ii >= nx || jj >= nz) continue
+      const t = top[jj * nx + ii]
+      if (t === -Infinity) continue
+      v = Math.max(v, t + ROOF_T - DOME_SLOPE * Math.max(0, Math.hypot(di, dj) * G - G))
+    }
+    roof[j * nx + i] = v
+    max = Math.max(max, v)
+  }
+  const fn = ((x: number, z: number) => {
+    const fx = (x - x0) / G, fz = (z - z0) / G
+    if (fx < 0 || fz < 0 || fx > nx - 1 || fz > nz - 1) return -Infinity
+    const i = Math.min(nx - 2, Math.floor(fx)), j = Math.min(nz - 2, Math.floor(fz)), u = fx - i, w = fz - j
+    const a = roof[j * nx + i], b = roof[j * nx + i + 1], c = roof[(j + 1) * nx + i], d = roof[(j + 1) * nx + i + 1]
+    // Missing corners (no air near) → the lowest present one (never raises rock where there is no cave).
+    const lo = Math.min(...[a, b, c, d].filter((q) => q > -Infinity))
+    if (lo === Infinity) return -Infinity
+    const k = (q: number) => (q === -Infinity ? lo - 4 : q)
+    return k(a) * (1 - u) * (1 - w) + k(b) * u * (1 - w) + k(c) * (1 - u) * w + k(d) * u * w
+  }) as ((x: number, z: number) => number) & { max: number }
+  fn.max = max
+  roofs.set(seed, fn)
+  return fn
+}
+
 /**
  * The cave formation's ROCK (negative inside): the hill-hugging CAP over the footprint (= the original ground +1.6 m,
- * `ground` gives it in local coordinates), an arched BROW and flanking rocks around the mouth, minus the air, plus
- * the stalactites and stalagmites.
+ * `ground` gives it in local coordinates) — RAISED over the air where the hill is too low (caveRoof) — an arched BROW
+ * and flanking rocks around the mouth, minus the air, plus the stalactites and stalagmites.
  */
 export function caveRock(f: Formation, ground: (x: number, z: number) => number): (x: number, y: number, z: number) => number {
   const p = cavePlan(f), s = f.seed
   const m = p.path[0], R0 = p.radius[0]
   const mx = MOUTH_X
+  const roof = caveRoof(p, s)
   return (x, y, z) => {
     const fp = caveFootprint(p, x, z)
     // The cap THICKENS toward the mouth into a rock FACE in the hillside (≈ 2 m of roof over the opening, fading back
     // to the 1.6 m cap ~14 m in), and widens there, so the mouth is a dark arch in a cliff, not a free-standing gate.
     const g = ground(x, z)
     let rock = Math.max(y - (g + CAP_H), fp - CAP_MARGIN)
+    // Never less than ROOF_T of rock over the air: a knoll rises where the hill above the cave is too low.
+    if (fp < DOME_REACH + 1) rock = Math.min(rock, Math.max(y - roof(x, z), fp - DOME_REACH - 1))
     // The mouth: a CLIFF FACE standing out of the hillside (a rounded block, its front a near-vertical wall a little
     // ahead of the opening, merging into the cap and the slope behind) with an OVERHANGING LEDGE above the opening —
     // Genshin's cave mouths are a dark recess under a layered rock shelf, not an arch or a dome.
@@ -323,6 +388,9 @@ export function caveRock(f: Formation, ground: (x: number, z: number) => number)
     const shelf = rbox(x - (mx + 0.5), y - (m[1] + 1.55 * R0 + 1.6), z - m[2], 3.2, 1.1, R0 + 5.5, 0.8)
     rock = smin(rock, Math.min(face, shelf), 2.5)
     rock += stoneOffset(s + 5, x, y, z, 3.2, STONE_BED) + noise3(s + 6, x * 0.35, y * 0.35, z * 0.35) * 0.3
+    // A smooth CORE the stone relief can't gouge: ≥ 1.9 m of solid rock over the air everywhere (> 1.5 voxels: the
+    // roof meshes closed — the ±3 m plates used to cut it to a few cm, cracks of sky in the ceiling).
+    if (fp < DOME_REACH + 1) rock = Math.min(rock, Math.max(y - (roof(x, z) - ROOF_T + 1.9), fp - DOME_REACH - 1))
     // Solid under the natural ground out to SOLID_REACH (0.3 m down: hidden under the uncarved terrain).
     rock = Math.min(rock, Math.max(y - (g - 0.3), fp - SOLID_REACH))
     let d = Math.max(rock, -caveAir(p, s, x, y, z))

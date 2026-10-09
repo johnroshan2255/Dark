@@ -123,6 +123,12 @@ export function GameHud({ game }: { game: Game }) {
           lastTreasures.current = n
           if (n > 0) (toast.current.textContent = `✦ Treasure found  ·  ${n}`), (toastUntil.current = performance.now() + 3200)
         }
+        // Game notices (a refused O / E in the boat, "Land first") take the same toast.
+        const note = game.notice
+        if (note.until > toastUntil.current) {
+          toast.current.textContent = note.text
+          toastUntil.current = note.until
+        }
         toast.current.style.opacity = performance.now() < toastUntil.current ? '1' : '0'
       }
       if (hpBar.current) {
