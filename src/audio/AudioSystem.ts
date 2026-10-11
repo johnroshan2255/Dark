@@ -49,7 +49,14 @@ export interface SoundFrame {
   rain: number
   /** `throttle` signed (−1 = full reverse / brake); `wheelSpeed` = rim speed of the wheels (burnouts, drifts);
    *  `engine` = the car's voice (catalogue: pitch, gearbox shift speeds). */
-  car: { engineOn: boolean; distance: number; pan: number; speed: number; wheelSpeed: number; throttle: number; boost: boolean; slip: number; engine: { pitch: number; gears: number[] } }
+  car: { engineOn: boolean; distance: number; pan: number; speed: number; wheelSpeed: number; throttle: number; boost: boolean; slip: number; engine: { pitch: number; gears: number[] }
+    /** Simulation handling: the drivetrain's own engine — rpm as 0..1 of idle → redline, load −1..1, a shift in
+     *  progress, an EV (motor whine: no idle). Present ⇒ the note follows it; absent ⇒ the arcade's fake gearbox. */
+    sim?: { rpm: number; load: number; shifting: boolean; electric: boolean }
+    /** Simulation handling: the tyres' own noise — slide 0..1 (sideways slip angle), spin 0..1 (wheelspin / a
+     *  locked wheel), the share of the contact on HARD ground (asphalt, ice), GRAVEL (dirt roads) and SOFT ground
+     *  (grass, sand, snow). Present ⇒ squeal only on hard ground, a scrub on loose ground. */
+    tyres?: { slide: number; spin: number; hard: number; gravel: number; soft: number } }
   bike: { riding: boolean; distance: number; pan: number; speed: number; throttle: number }
 }
 
@@ -71,6 +78,8 @@ export class AudioSystem {
   private musicBus: GainNode | null = null
   private sfx: GainNode | null = null
   private noise: AudioBuffer | null = null
+  /** TYRE SCRUB on loose ground (synthesized: looping noise → band-pass): gravel crunch high, grass / sand low. */
+  private scrub: { gain: GainNode; filter: BiquadFilterNode; pan: StereoPannerNode } | null = null
   private readonly buffers = new Map<SoundName, AudioBuffer>()
   private readonly loops = new Map<SoundName, Loop>()
   private loading = false
@@ -117,6 +126,23 @@ export class AudioSystem {
         d[i] = last * 3.5
       }
       this.noise = buf
+      // White-ish noise for the scrub (the brown buffer above has no crunch).
+      const wbuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate)
+      const wd = wbuf.getChannelData(0)
+      for (let i = 0; i < wd.length; i++) wd[i] = (Math.random() * 2 - 1) * (Math.random() < 0.04 ? 2.2 : 0.7) // + grit
+      const ws = ctx.createBufferSource()
+      ws.buffer = wbuf
+      ws.loop = true
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'bandpass'
+      filter.frequency.value = 900
+      filter.Q.value = 0.8
+      const sg = ctx.createGain()
+      sg.gain.value = 0
+      const sp = ctx.createStereoPanner()
+      ws.connect(filter).connect(sg).connect(sp).connect(this.sfx)
+      ws.start()
+      this.scrub = { gain: sg, filter, pan: sp }
       this.ctx = ctx
       void this.load()
     } catch {
@@ -214,7 +240,26 @@ export class AudioSystem {
     // drop it), each car's own shift points and pitch; a reverse gear; the load (throttle) sets how hard it
     // sounds — coasting is quieter and lower than pulling at the same speed. Gear changes dip the note for
     // ~0.15 s (the clutch), then it picks up lower in the next gear. Two layers: idle crossfading into drive.
-    if (c.engineOn && !f.menu) {
+    if (c.engineOn && !f.menu && c.sim) {
+      // The SIM owns the rpm and the gear: the note only follows them (no second gearbox here).
+      const s = c.sim
+      const target = (s.electric ? 0.05 : 0.18) + 0.82 * clamp01(s.rpm)
+      this.rpm += (target - this.rpm) * Math.min(1, f.dt * 25)
+      const load = clamp01(s.load)
+      const a = att(c.distance)
+      const drive = sstep(0.12, 0.4, this.rpm)
+      const P = c.engine.pitch
+      const clutch = s.shifting ? 0.6 : 1
+      const idleG = s.electric ? 0 : (1 - drive) * 0.55 * a
+      const driveG = (0.12 + 0.36 * this.rpm + 0.32 * load) * drive * a * clutch * (s.load < -0.2 ? 0.7 : 1)
+      const driveRate = P * (0.45 + this.rpm * 0.85)
+      this.set('engineIdle', idleG, P * (0.9 + this.rpm * 0.6), c.pan)
+      this.set('engineDrive', driveG, driveRate, c.pan)
+      this.set('boost', 0, 1, c.pan, 0.15)
+      this.tyres(c, a, f.dt)
+      const d = this.debug
+      d.rpm = this.rpm; d.gear = 0; d.idle = idleG; d.drive = driveG; d.driveRate = driveRate; d.load = load; d.shifting = s.shifting
+    } else if (c.engineOn && !f.menu) {
       const G = c.engine.gears
       const v = Math.min(Math.abs(c.wheelSpeed), Math.abs(c.speed) + 25)
       const reversing = c.speed < -0.3 || (c.throttle < -0.05 && c.speed < 0.5)
@@ -251,6 +296,7 @@ export class AudioSystem {
       d.rpm = this.rpm; d.gear = this.gear; d.idle = idleG; d.drive = driveG; d.driveRate = driveRate; d.load = load; d.shifting = this.shiftT > 0
     } else {
       for (const n of ['engineIdle', 'engineDrive', 'boost', 'skid'] as const) this.set(n, 0, 1, 0, 0.25)
+      if (this.scrub && this.ctx) this.scrub.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.2)
       this.rpm = 0.2
       this.gear = 0
       this.debug.idle = this.debug.drive = 0
@@ -266,6 +312,36 @@ export class AudioSystem {
       this.set('roll', 0, 1, 0, 0.3)
       this.set('freewheel', 0, 1, 0, 0.3)
     }
+  }
+
+  /**
+   * TYRES (Simulation handling): a rubber SQUEAL only where the ground is hard (asphalt, ice) — louder and higher
+   * with the slide angle and the speed, sharper for wheelspin / lock-up — and a SCRUB on loose ground: a gravel
+   * crunch on dirt roads, a low hiss on grass, sand and snow, swelling with the slide and the speed. Nothing at a
+   * crawl. Without the sim's tyre data (arcade) the old slip-driven squeal plays.
+   */
+  private tyres(c: SoundFrame['car'], a: number, dt: number): void {
+    const t = c.tyres
+    if (!t) {
+      this.set('skid', sstep(0.18, 0.75, c.slip) * 0.75 * a, 0.9 + 0.2 * c.slip, c.pan, 0.05)
+      return
+    }
+    const v = Math.abs(c.speed)
+    const moving = sstep(1.2, 6, v)
+    const slideK = sstep(0.12, 0.6, t.slide), spinK = sstep(0.15, 0.7, t.spin)
+    const squeal = Math.max(slideK, spinK * 0.85) * t.hard * Math.max(moving, spinK * 0.6)
+    this.set('skid', squeal * 0.85 * a, 0.82 + 0.28 * t.slide + 0.12 * spinK + 0.1 * clamp01(v / 25), c.pan, 0.06)
+    if (this.scrub && this.ctx) {
+      const loose = t.gravel + t.soft
+      const amount = Math.max(slideK, spinK * 0.9, 0.12 * clamp01(v / 20)) * loose * Math.max(moving, spinK * 0.5)
+      const now = this.ctx.currentTime
+      this.scrub.gain.gain.setTargetAtTime(amount * 0.55 * a, now, 0.07)
+      const gravel = loose > 0 ? t.gravel / loose : 0
+      this.scrub.filter.frequency.setTargetAtTime((380 + 1500 * gravel) * (0.8 + 0.5 * clamp01(v / 20)), now, 0.1)
+      this.scrub.filter.Q.setTargetAtTime(0.6 + 0.6 * gravel, now, 0.2)
+      this.scrub.pan.pan.setTargetAtTime(Math.max(-1, Math.min(1, c.pan)), now, 0.1)
+    }
+    void dt
   }
 
   private noiseSource(ctx: AudioContext, offset = 0): AudioBufferSourceNode {

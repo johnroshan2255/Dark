@@ -274,6 +274,7 @@ export class Game {
     this.bike.parkNear(spawn, this.player.yaw, 2.4)
     this.car = new Car(this.materials.character, models.truck, physics, this.world.fields, this.player, this.character, this.input, this.tuning(models.truck.id))
     this.car.sim.arcade = this.settings.handling === 'arcade' // realistic simulation by default (VehicleSim); arcade = Asphalt-style option
+    this.car.driveSettings(this.settings.gearbox, this.settings.aids, this.input.touch, this.settings.offroadAssist)
     this.car.autoAccel = this.settings.autoAccelerate
     this.wireCar()
     this.destruction = new Destruction(physics, this.materials.character)
@@ -379,6 +380,11 @@ export class Game {
     // L (touch FLY / LAND): the flying car — wheels turn into jets; ↑ / ↓ climb and sink (on the ground: lift the body).
     // From the boat too (the hull folds away); landing over water puts the hull out.
     i.onPress('KeyL', () => this.car.toggleFly())
+    // Simulation handling: X / Z gears (manual gearbox), Q low range, K locking differentials.
+    i.onPress('KeyX', () => this.car.shift(1))
+    i.onPress('KeyZ', () => this.car.shift(-1))
+    i.onPress('KeyQ', () => this.car.toggleLowRange())
+    i.onPress('KeyK', () => this.car.cycleLockers())
     i.onPress('BracketLeft', () => this.updateSettings({ resolution: Math.max(0.5, this.post.renderScale - 0.1) }))
     i.onPress('BracketRight', () => this.updateSettings({ resolution: Math.min(1, this.post.renderScale + 0.1) }))
     // F7: cycle tier manually. F8: back to auto quality.
@@ -444,6 +450,19 @@ export class Game {
     this.notice.until = performance.now() + ms
   }
 
+  /** The drivetrain's engine for the sound (Simulation handling on the wheels), reused object — no allocation. */
+  private readonly simVoice = { rpm: 0, load: 0, shifting: false, electric: false }
+  private engineSim(car: Car): typeof this.simVoice | undefined {
+    const D = car.sim.real
+    if (!D) return undefined
+    const P = D.R.power, v = this.simVoice
+    v.rpm = (D.we - P.wIdle) / Math.max(1, P.wRedline - P.wIdle)
+    v.load = D.load
+    v.shifting = D.shifting
+    v.electric = P.kind === 'electric'
+    return v
+  }
+
   private engineVoice(car: Car): { pitch: number; gears: number[] } {
     const e = vehicleDef(car.modelId).engine
     if (!car.sim.arcade) return e
@@ -499,6 +518,7 @@ export class Game {
     }
     this.cameraCtl.mode = this.settings.camera as CameraMode
     this.car.sim.arcade = this.settings.handling === 'arcade'
+    this.car.driveSettings(this.settings.gearbox, this.settings.aids, this.input.touch, this.settings.offroadAssist)
     this.car.autoAccel = this.settings.autoAccelerate
     this.audio.setEnabled(this.settings.sound)
     this.audio.setMusic(this.settings.music)
@@ -526,6 +546,8 @@ export class Game {
     this.monsters.rig.castShadow = q.objectShadows
     this.bike.castShadow = q.objectShadows
     this.car.castShadow = q.objectShadows
+    this.car.tyreShear = q.name === 'high' || q.name === 'ultra' // tread shear in corners (a few ALU per tyre vertex)
+    this.car.gloss = q.name !== 'low'
     // LOW: half-size truck texture (1024² → 512², ~4 MB less GPU memory). Flat-coloured models have none.
     const map = this.models.truck.map
     if (map && this.car.modelId === this.models.truck.id) {
@@ -885,6 +907,7 @@ export class Game {
           this.weather.apply(tp, globalUniforms.uWind.value)
           // No puddles on snow or sand: the snowfield and the desert stay dry underfoot.
           globalUniforms.uWet.value = this.weather.wet * (1 - bw[0]) * (1 - bw[1])
+          this.car.wetness = globalUniforms.uWet.value // wet asphalt / mud / grass grip less (drivetrain tyres)
           this.lightning.storm = this.weather.rain
           // SOUND: the mixer follows the vehicles, weather and time of day; footsteps by stride length.
           {
@@ -894,7 +917,7 @@ export class Game {
             const sim = car.sim, slip = Math.max(...sim.wheelSlip)
             this.audio.frame({
               dt, darkness, nightmare: this.tod.nightmare, menu: this.store.get().landing, rain: this.weather.rain * (1 - bw[0]) * (1 - bw[1]),
-              car: { engineOn: car.driving, distance: car.pos.distanceTo(cam.position), pan: pan(car.pos.x, car.pos.z), speed: sim.speed, wheelSpeed: sim.wheelSpeed, throttle: sim.controls.throttle, boost: (sim.arcade ? sim.nitroOn : sim.controls.boost) || car.flying || (car.afloat && Math.abs(sim.speed) > 3), slip, engine: this.engineVoice(car) },
+              car: { engineOn: car.driving, distance: car.pos.distanceTo(cam.position), pan: pan(car.pos.x, car.pos.z), speed: sim.speed, wheelSpeed: sim.wheelSpeed, throttle: sim.controls.throttle, boost: (sim.arcade ? sim.nitroOn : sim.controls.boost) || car.flying || (car.afloat && Math.abs(sim.speed) > 3), slip, engine: this.engineVoice(car), sim: this.engineSim(car), tyres: car.sim.tyreNoise() ?? undefined },
               bike: { riding: bike.riding, distance: bike.root.position.distanceTo(cam.position), pan: pan(bike.root.position.x, bike.root.position.z), speed: bs.speed, throttle: Math.max(0, bs.controls.throttle) },
             })
             // Footsteps exactly when a foot plants (CharacterModel counts the touchdowns) — sound matches the feet.
@@ -1037,10 +1060,13 @@ export class Game {
         this.car = new Car(this.materials.character, model, this.physics, this.world.fields, this.player, this.character, this.input, this.tuning(id))
         this.car.park(pos.x, pos.z, heading, pos.y)
         this.car.sim.arcade = this.settings.handling === 'arcade'
+        this.car.driveSettings(this.settings.gearbox, this.settings.aids, this.input.touch, this.settings.offroadAssist)
         this.car.autoAccel = this.settings.autoAccelerate
         this.wireCar()
         this.envRoot.add(this.car.root)
         this.car.castShadow = this.quality.objectShadows
+        this.car.tyreShear = this.quality.name === 'high' || this.quality.name === 'ultra'
+        this.car.gloss = this.quality.name !== 'low'
         this.car.setMap(this.quality.name === 'low' && model.map ? downscaleTexture(model.map, 512) : model.map)
         this.settings = { ...this.settings, garage: { ...this.settings.garage, vehicle: id } }
         saveSettings(this.settings)

@@ -28,6 +28,8 @@ export function GameHud({ game }: { game: Game }) {
   const speedo = useRef<HTMLDivElement>(null)
   const speedNum = useRef<HTMLSpanElement>(null)
   const nitroBar = useRef<HTMLDivElement>(null)
+  const gearEl = useRef<HTMLSpanElement>(null)
+  const aidsEl = useRef<HTMLDivElement>(null)
   const dead = useStore(game.store, (st) => st.dead)
   const fpsCap = useStore(game.store, (st) => st.fpsCap)
   useEffect(() => {
@@ -83,10 +85,23 @@ export function GameHud({ game }: { game: Game }) {
         if (on) {
           const kmh = `${Math.round(Math.abs(sim.speed) * 3.6)}`
           if (speedNum.current && speedNum.current.textContent !== kmh) speedNum.current.textContent = kmh
+          // Simulation handling: the bar is the TACHOMETER (red past 92 % of the redline), with the gear and the
+          // aids / low range / lockers lamps — all read from the drivetrain, written only when they change.
+          const D = sim.real
           if (nitroBar.current) {
-            nitroBar.current.style.transform = `scaleX(${sim.arcade ? sim.nitro.toFixed(3) : '0'})`
-            nitroBar.current.style.background = sim.nitroOn ? '#ffd24a' : sim.drifting ? '#7fe8ff' : '#3fb8ff'
+            if (D) {
+              const f = Math.min(1, D.rpm / (D.R.power.wRedline * 30 / Math.PI))
+              nitroBar.current.style.transform = `scaleX(${f.toFixed(3)})`
+              nitroBar.current.style.background = f > 0.92 ? '#ff4a3a' : D.R.power.kind === 'electric' ? '#5af0a0' : '#f2f2f2'
+            } else {
+              nitroBar.current.style.transform = `scaleX(${sim.arcade ? sim.nitro.toFixed(3) : '0'})`
+              nitroBar.current.style.background = sim.nitroOn ? '#ffd24a' : sim.drifting ? '#7fe8ff' : '#3fb8ff'
+            }
           }
+          const gear = D ? D.gearLabel : ''
+          if (gearEl.current && gearEl.current.textContent !== gear) gearEl.current.textContent = gear
+          const lamps = D ? [D.absOn && 'ABS', D.tcsOn && 'TCS', D.escOn && 'ESC', D.lowRange && 'LOW', D.locks.size > 0 && (D.R.drive.layout === 'part-time-4WD' && D.locks.size === 1 ? '4WD' : 'LOCK')].filter(Boolean).join(' · ') : ''
+          if (aidsEl.current && aidsEl.current.textContent !== lamps) aidsEl.current.textContent = lamps
         }
       }
       for (let i = 0; i < MAX_PLACES; i++) {
@@ -184,8 +199,9 @@ export function GameHud({ game }: { game: Game }) {
       </div>
       <div ref={banner} style={bannerStyle} />
       <div ref={speedo} style={speedoStyle}>
-        <div><span ref={speedNum} style={speedNumStyle}>0</span><span style={speedUnit}>km/h</span></div>
+        <div><span ref={gearEl} style={gearStyle} /><span ref={speedNum} style={speedNumStyle}>0</span><span style={speedUnit}>km/h</span></div>
         <div style={nitroTrack}><div ref={nitroBar} style={nitroFill} /></div>
+        <div ref={aidsEl} style={aidsStyle} />
       </div>
       {fpsCap && <div style={capStyle} data-testid="fps-cap">⚠ Your browser is limiting the game to 30 fps — turn off Low Power Mode / battery saver for 60 fps.</div>}
     </>
@@ -195,6 +211,8 @@ export function GameHud({ game }: { game: Game }) {
 const speedoStyle: CSSProperties = { position: 'fixed', left: '50%', bottom: 18, transform: 'translateX(-50%)', display: 'none', flexDirection: 'column', alignItems: 'center', gap: 4, zIndex: 9, pointerEvents: 'none', color: '#fff', textShadow: '0 2px 6px rgba(0,0,0,0.7)', font: '800 13px system-ui, sans-serif' }
 const speedNumStyle: CSSProperties = { fontSize: 34, fontStyle: 'italic', letterSpacing: -1, fontVariantNumeric: 'tabular-nums' }
 const speedUnit: CSSProperties = { marginLeft: 4, opacity: 0.8 }
+const gearStyle: CSSProperties = { marginRight: 10, fontSize: 18, color: '#ffd24a', fontVariantNumeric: 'tabular-nums' }
+const aidsStyle: CSSProperties = { minHeight: 14, fontSize: 11, letterSpacing: 1, color: '#ffb84a' }
 const nitroTrack: CSSProperties = { width: 180, height: 8, borderRadius: 4, background: 'rgba(0,0,0,0.45)', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.35)' }
 const nitroFill: CSSProperties = { width: '100%', height: '100%', transformOrigin: 'left center', background: '#3fb8ff', transform: 'scaleX(1)' }
 const deathStyle: CSSProperties = { position: 'fixed', inset: 0, zIndex: 20, display: 'grid', placeContent: 'center', textAlign: 'center', color: '#f2d0d0', font: '600 14px system-ui, sans-serif', background: 'radial-gradient(rgba(60,0,0,0.35), rgba(10,0,0,0.85))', pointerEvents: 'none' }

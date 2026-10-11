@@ -115,6 +115,15 @@ export function SettingsPanel({ game }: { game: Game }) {
         <Row label="Driving">
           <Seg testid="handling" value={st.handling} onChange={(v) => set({ handling: v })} opts={[{ label: 'Simulation', value: 'sim' }, { label: 'Arcade (Asphalt-style)', value: 'arcade' }]} />
         </Row>
+        <Row label="Gearbox (simulation)">
+          <Seg testid="gearbox" value={st.gearbox} onChange={(v) => set({ gearbox: v })} opts={[{ label: 'Automatic', value: 'auto' }, { label: 'Manual (X / Z)', value: 'manual' }]} />
+        </Row>
+        <Row label="Driving aids (simulation)">
+          <Seg testid="aids" value={st.aids} onChange={(v) => set({ aids: v })} opts={[{ label: 'Car default', value: 'auto' }, { label: 'Off', value: 'off' }, { label: 'Standard', value: 'std' }, { label: 'Full', value: 'full' }]} />
+        </Row>
+        <Row label="Off-road assist (simulation)">
+          <Seg testid="offroad" value={st.offroadAssist} onChange={(v) => set({ offroadAssist: v })} opts={[{ label: 'On — more torque, 80° walls', value: true }, { label: 'Off — the real machine', value: false }]} />
+        </Row>
         <Row label="Auto accelerate (touch)">
           <Seg value={st.autoAccelerate} onChange={(v) => set({ autoAccelerate: v })} opts={[{ label: 'On', value: true }, { label: 'Off', value: false }]} />
         </Row>
@@ -123,7 +132,7 @@ export function SettingsPanel({ game }: { game: Game }) {
         </Row>
         <div style={{ ...label, marginTop: 18, marginBottom: 8 }}>Keys</div>
         <div style={keys}>
-          {[['W A S D', 'Drive / walk'], ['S + steer', 'Drift (tap at speed)'], ['Shift', 'Nitro · sprint'], ['Space', 'Drift (truck) · jump'], ['E', 'Get in / out'], ['F', 'Headlights · torch'], ['V', 'Camera'], ['T · G', 'Day / night · next time'], ['N', 'Nightmare'], ['O', 'Settings'], ['R', 'Weather'], ['F3', 'FPS overlay']].map(([k, v]) => (
+          {[['W A S D', 'Drive / walk'], ['S + steer', 'Drift (tap at speed)'], ['Shift', 'Nitro · sprint'], ['Space', 'Drift (truck) · jump'], ['E', 'Get in / out'], ['X · Z', 'Gear up / down (manual)'], ['Q', 'Low range'], ['K', 'Lock differentials'], ['F', 'Headlights · torch'], ['V', 'Camera'], ['T · G', 'Day / night · next time'], ['N', 'Nightmare'], ['O', 'Settings'], ['R', 'Weather'], ['F3', 'FPS overlay']].map(([k, v]) => (
             <div key={k} style={keyRow}><span style={keyCap}>{k}</span><span>{v}</span></div>
           ))}
         </div>

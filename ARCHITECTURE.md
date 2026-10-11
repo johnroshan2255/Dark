@@ -234,7 +234,41 @@ margin of 0.35 chunk (LOD), so standing on a border does not thrash.
 - **Lights at night**: car head/tail/brake/reverse lamps (`Car`, F switch in the truck, auto with the dark) share the single spot light
   with the torch; street lamps on every roadside post are additive glow + road pool sprites instanced with the poles
   (`MaterialLibrary.lampGlow`) that flicker on at dusk — no extra real lights (skills/lighting fixed light pool).
-- **Arcade handling** (`VehicleSim.TruckSim.arcade`, Settings → Controls → Driving, default ARCADE): Asphalt-style —
+- **Realistic drivetrain** (Simulation handling, the default; skills/realistic-vehicle-system): every garage car is
+  its real spec sheet (`gameplay/vehicle/specs.ts`: 1989 Hilux 22R-E pickup, G500 4×4², Żuk A06) resolved against
+  the model's measured wheelbase / track (`drivetrain/spec.ts`) into `drivetrain/Drivetrain.ts`: engine torque
+  curve (petrol / turbo / diesel / EV) with idle control, limiter and engine braking → auto-clutch, torque
+  converter, CVT or direct drive (velocity constraints with torque capacity) → stepped gearbox with a shift map
+  (load-checked upshifts, kickdown, anti-hunting) or manual X / Z → open / LSD / Torsen / viscous / locked diffs,
+  part-time and permanent 4WD, low range (Q) and lockers (K) → each wheel's ω → combined-slip tyre forces on the
+  surface under it (`drivetrain/surface.ts`: road asphalt, gravel / trail dirt, region grass / sand / snow, frozen
+  water ice, the weather's wetness) → applied at the contact points. Rapier does springs and contacts only (tyre
+  friction 0); the car runs at real gravity (body gravity scale 9.81/20) with its spec mass, COM and inertia,
+  per-axle springs from ride frequency, anti-roll bars and bump stops. Brakes with dynamic bias, EBD, ABS; TCS
+  (brake + engine + launch control), ESC, counter-steer (Settings → Controls → Driving aids); static hold and
+  hill-start assist. The HUD shows tacho, gear and aid lamps; the engine sound follows the sim's rpm; wheel spin,
+  dust and brake / reverse lamps read the sim. Boat and flight hand Rapier back to the legacy setup. Measured:
+  +0.015–0.04 ms CPU per physics step (Node, 4 wheels, 8 substeps), no allocation per step; no GPU change.
+  `tests/drivetrain.test.ts` (56 checks over the 3 cars: 0–100 and top speed vs published, shifts, parking on
+  15°, TCS, 35° low-range climb, skidpad, braking, ESC, drop, boat handoff).
+  BRAKE HARDWARE (`scripts/blender/vehicle_brakes.py` via the Blender MCP socket, `scripts/blender/bl.mjs`):
+  `caliper_FL…RR` per corner — disc + hat + caliper (G500 all round, pickup front) or drum (pickup rear, Żuk) —
+  steering and riding with the wheel, never spinning; +2 draws (one per axle, no shadow pass), +1.1–1.3 k tris;
+  the same pass brought the G500 inside the vehicle budget (39.5 k tris, 12 materials: planar decimate + merged
+  near-black materials).
+  RIDE + LOOK: each wheel rides deterministic GROUND ROUGHNESS (bumps, ruts, stones by surface — the terrain mesh is
+  smooth at wheel scale) through its suspension, so the springs and dampers visibly work on every road (dirt road,
+  45 km/h: ±5–9 cm per wheel, body roll ±3–6°). Wheels rebuilt in Blender (`scripts/blender/vehicle_realism.py`:
+  knobby tread + steel / alloy rims, 2.4–2.9 k tris each) with baked Cycles AO in every part's vertex colours; the
+  car shader flattens and bulges each tyre from its real load (`tyreW` attribute, `uTyre[4]`; tread shear on
+  HIGH), coats the lower body and tyres in dirt from the ground it drives on, and adds paint gloss on MEDIUM+
+  (a soft terminator instead of the cel step). Tris: pickup 17.4 k, Żuk 23.6 k, G500 39.7 k (budget 40 k).
+  Measured seed 7, RTX 4050 laptop: no fps change (144 capped), GPU within noise (4.6–6.3 ms HIGH, 2.8 ms LOW).
+  DRIFT + KIT: handbrake slides can be caught and held (no shifts mid-slide, handbrake declutches, full lock into
+  a slide, pickup rear LSD, each car's real aids by default — the 1989 pickup and the Żuk have no TCS / ESC);
+  tests/drivetrain.test.ts checks catch (all) and hold (pickup). Every car carries real kit built in Blender
+  (`scripts/blender/vehicle_details.py`: racks, spares, jerrycans, lights, snorkel, sliders, flaps; 560–1270 tris).
+- **Arcade handling** (`VehicleSim.TruckSim.arcade`, Settings → Controls → Driving): Asphalt-style —
   Rapier keeps suspension, contacts and crashes; `driveArcade` adds a scripted longitudinal force (0→100 km/h ≈ 3.7 s,
   top ≈ 163 km/h stock = `arcadeTopSpeed(tune)`, nitro ×1.32 / ×1.7 accel), straight-down downforce; `afterWheels`
   SETS the yaw rate from the stick (radius 5.5 + 0.2 v + 0.02 v² m) and ROTATES the velocity toward the nose without
@@ -242,7 +276,8 @@ margin of 0.35 chunk (LOD), so standing on a border does not thrash.
   30–40° (the velocity follows the nose at its own yaw rate), fills the NITRO bar (also air time, smashed props).
   Air: self-levelling. Touch: auto-accelerate, NITRO + held DRIFT buttons. Chase camera re-centres behind the
   travel direction 1.2 s after the last look input; FOV widens with speed. HUD: speedometer + nitro bar.
-  'Realistic' keeps the old model; tests/vehicle.test.ts covers both.
+  The legacy realistic model remains for cars without a spec and under the boat / hover; tests/vehicle.test.ts
+  covers arcade and legacy, tests/drivetrain.test.ts the drivetrain.
 - **Sound** (`src/audio/AudioSystem.ts`, files in `src/assets/audio/`, credits in ASSET_LIST.md): a WebAudio mixer —
   master (Settings → Audio → Sound mutes everything) → music bus (Theme music) + effects bus. Persistent loops follow
   the game each frame (`frame()`): engine idle + drive layers through a simulated gearbox driven by the wheels' rim
@@ -431,6 +466,8 @@ Chrome via puppeteer-core) teleports/drives/times the scene per shot, screenshot
 | `F` | flashlight |
 | `E` | mount / get off the BMX (touch: BIKE) — W/S pedal/brake, A/D steer, Shift faster |
 | `L` | in a car: fly ⇄ land (touch: FLY / LAND) |
+| `X` / `Z` | in a car (Simulation, manual gearbox): gear up / down |
+| `Q` / `K` | in a car (Simulation): low range / lock differentials (2H ⇄ 4H on the pickup) |
 | `↑` / `↓` | in a car: raise / lower the body (air suspension); flying: climb / sink (touch: ▲ ▼) |
 | `F7` / `F8` | cycle quality preset low → ultra (disables auto) / toggle adaptive quality |
 | touch | left half: joystick (full push = sprint) · right half: look · LIGHT / JUMP / FPS / TIME / fullscreen buttons |

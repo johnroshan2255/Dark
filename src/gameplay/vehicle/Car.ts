@@ -12,6 +12,13 @@ import { STOCK_TRUCK, TruckSim, type TruckTune } from './VehicleSim'
 import { vehicleDef, type VehicleTuning } from './catalogue'
 import { CarEntry, type EntryPhase } from './CarEntry'
 import { BoatHull, DRAFT, KEEL } from './BoatHull'
+import { resolveSpec } from './drivetrain/spec'
+import { zeroTyre } from '../../assets/loadModels'
+import { sampleSurface } from './drivetrain/surface'
+import { surfaceMix } from './drivetrain/tyre'
+
+/** Dirt colour per surface (asphalt dust, dirt, grass mud, desert sand, snow slush, ice). */
+const DIRT_COLS: [number, number, number][] = [[0.4, 0.38, 0.35], [0.36, 0.27, 0.18], [0.27, 0.21, 0.14], [0.66, 0.53, 0.36], [0.78, 0.8, 0.84], [0.6, 0.65, 0.7]]
 
 /**
  * A drivable car of the garage (catalogue.ts; models baked by assets/loadModels) — a SIMULATED vehicle (VehicleSim
@@ -63,6 +70,7 @@ export class Car {
   readonly root = new THREE.Group()
   private readonly body = new THREE.Group()
   private readonly wheels: THREE.InstancedMesh
+  private readonly brakes: (THREE.InstancedMesh | null)[]
   private readonly wheelPos: [number, number, number][]
   private readonly track: number
   private readonly half: { x: number; y: number; z: number }
@@ -159,26 +167,89 @@ export class Car {
     const mat = new THREE.MeshLambertMaterial({ ...(truck.map ? { map: truck.map } : {}), vertexColors: true })
     const paint = this.paint
     const paintMask = { value: truck.paintMap }
+    const tyre = this.tyreU
+    tyre.uTyreR.value = truck.wheelRadius
+    this.rimRatio = truck.rim
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uPaint = paint
       shader.uniforms.uPaintMask = paintMask
+      Object.assign(shader.uniforms, tyre)
+      // TYRE DEFORMATION (skills/realistic-vehicle-system §8.9; only where `tyreW` > 0 — the wheels' rubber, one
+      // instance per wheel): the contact patch flattens by the wheel's squash (from its real load), the sidewall
+      // bulges out over the bottom, and on HIGH the tread shears sideways with the cornering force. Then DIRT: a
+      // mud / dust coat by height above the ground (wheels, sills, arches), broken up by noise, in the colour of
+      // the ground the car last drove on (vehicle_realism.py bakes the AO into the vertex colours).
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nattribute float paintMask; varying float vPaint;')
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPaint = paintMask;')
+        .replace('#include <common>', `#include <common>
+attribute float paintMask; varying float vPaint;
+attribute float tyreW; varying float vTyre; varying vec3 vDirtP;
+uniform vec4 uTyre[4]; uniform float uTyreShear[4]; uniform float uTyreR;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+vPaint = paintMask;
+vTyre = tyreW;
+if (tyreW > 0.0) {
+  int wi = min(gl_InstanceID, 3);
+  vec4 ty = uTyre[wi];
+  float plane = uTyreR - ty.w;
+  float d = dot(transformed, ty.xyz);
+  transformed -= ty.xyz * max(d - plane, 0.0) * tyreW;                     // flat contact patch
+  float band = smoothstep(plane - 0.45 * uTyreR, plane, d);
+  transformed.x += sign(transformed.x) * ty.w * 0.7 * band * tyreW;        // sidewall bulge
+  transformed.x += uTyreShear[wi] * band * tyreW;                          // cornering shear (0 below HIGH)
+}`)
+        .replace('#include <worldpos_vertex>', `#include <worldpos_vertex>
+{ vec4 wp = vec4(transformed, 1.0);
+  #ifdef USE_INSTANCING
+  wp = instanceMatrix * wp;
+  #endif
+  vDirtP = (modelMatrix * wp).xyz; }`)
       // Paint REPLACES the panel's hue (keeps its shading/luminance) so a red coat on a blue textured van is red,
       // not black; white = the model's own colours (stock look).
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint;${truck.paintMap ? '\nuniform sampler2D uPaintMask;' : ''}`)
+        .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint; varying float vTyre; varying vec3 vDirtP;
+uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss;
+float carCoat = 0.0;
+float dirtHash(vec3 p) { return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(dirtHash(i), dirtHash(i + vec3(1,0,0)), f.x), mix(dirtHash(i + vec3(0,1,0)), dirtHash(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(dirtHash(i + vec3(0,0,1)), dirtHash(i + vec3(1,0,1)), f.x), mix(dirtHash(i + vec3(0,1,1)), dirtHash(i + vec3(1,1,1)), f.x), f.y), f.z); }${truck.paintMap ? '\nuniform sampler2D uPaintMask;' : ''}`)
         .replace('#include <color_fragment>', `#include <color_fragment>
         { float lum = dot(diffuseColor.rgb, vec3(0.3, 0.59, 0.11));
           float isWhite = step(2.95, uPaint.r + uPaint.g + uPaint.b);
           // Textured models: only the body-paint texels (paint mask from the texture's dominant body hue) — rims,
           // tyres, glass, chrome, lights, seats and rust keep their own colours.
           float m = vPaint${truck.paintMap ? ' * texture2D(uPaintMask, vMapUv).r' : ''};
-          diffuseColor.rgb = mix(diffuseColor.rgb, uPaint * (lum * 1.3 + 0.08), m * (1.0 - isWhite)); }`)
+          diffuseColor.rgb = mix(diffuseColor.rgb, uPaint * (lum * 1.3 + 0.08), m * (1.0 - isWhite));
+          // DIRT: thick on the tyres and the lowest 30 cm, fading out by ~0.9 m; splashes broken up by noise.
+          float h = vDirtP.y - uGroundY;
+          float n = dirtNoise(vDirtP * 3.1) * 0.6 + dirtNoise(vDirtP * 9.0) * 0.4;
+          float coat = (1.0 - smoothstep(0.12, 0.9, h + (n - 0.5) * 0.35)) * smoothstep(0.25, 0.65, n + 0.25 * uDirt);
+          coat = max(coat * uDirt, vTyre * 0.3 * uDirt);
+          // Tyres take grey-brown dust, not mud paint.
+          vec3 dcol = mix(uDirtCol, vec3(0.42, 0.4, 0.37), vTyre * 0.6) * (0.75 + 0.35 * n);
+          carCoat = clamp(coat, 0.0, 0.85);
+          diffuseColor.rgb = mix(diffuseColor.rgb, dcol, carCoat); }`)
+        // GLOSS (MEDIUM+): painted metal catches the sun as a highlight and the sky at grazing angles (Fresnel);
+        // rubber and the dirt coat stay matte. Fog applies after it, like the rest of the colour.
+        .replace('#include <tonemapping_fragment>', `{
+  vec3 Vg = normalize(vViewPosition);
+  float fres = pow(1.0 - max(dot(normal, Vg), 0.0), 4.0);
+  float shine = uGloss * (0.35 + 0.65 * vPaint) * (1.0 - vTyre) * (1.0 - carCoat);
+  vec3 g = vec3(0.0);
+  #if NUM_DIR_LIGHTS > 0
+  vec3 Lg = directionalLights[0].direction;
+  g += directionalLights[0].color * pow(max(dot(normal, normalize(Lg + Vg)), 0.0), 56.0) * 0.32 * step(0.0, dot(normal, Lg));
+  #endif
+  #ifdef USE_FOG
+  g += fogColor * fres * 0.2;
+  #endif
+  gl_FragColor.rgb += g * shine;
+}
+#include <tonemapping_fragment>`)
     }
-    mat.customProgramCacheKey = () => `truck-paint-${truck.map ? 'tex' : 'flat'}${truck.paintMap ? '-mask' : ''}`
-    this.bodyMat = stylize(mat, { key: 'truck', rim: 0.45 })
+    mat.customProgramCacheKey = () => `truck-paint2-${truck.map ? 'tex' : 'flat'}${truck.paintMap ? '-mask' : ''}`
+    // A machine, not a cartoon: a soft terminator (toon 0.3) and a faint rim — real light and the baked AO shape it.
+    this.bodyMat = stylize(mat, { key: 'truck', rim: 0.14, toon: 0.3 })
     this.bodyMat.name = 'lib/truck'
     // Body as a 1-instance InstancedMesh: it then shares the wheels' (instanced) program → 1 truck program, not 2.
     const bodyMesh = new THREE.InstancedMesh(truck.body, this.bodyMat, 1)
@@ -194,6 +265,16 @@ export class Car {
     this.wheels.castShadow = true
     this.wheels.frustumCulled = false // instances move with the body; the truck is one small object
     this.body.add(this.wheels)
+    // BRAKES (Blender `caliper_*`, scripts/blender/vehicle_brakes.py): disc + hat + caliper or a drum behind each
+    // wheel, on the car program — hub, steering and suspension like the wheel, never the spin (a plain disc looks
+    // the same turning). One draw per axle (right = left turned 180°); no shadow pass (inside the wheel).
+    this.brakes = [truck.brakes.front, truck.brakes.rear].map((g) => {
+      if (!g) return null
+      const m = new THREE.InstancedMesh(g, this.bodyMat, 2)
+      m.frustumCulled = false
+      this.body.add(m)
+      return m
+    })
     // Steering wheel (split out of the body at load, when the model has one): turns with the driver's input.
     this.steering = truck.steeringWheel ? new THREE.InstancedMesh(truck.steeringWheel, this.bodyMat, 1) : null
     this.steeringPivot = new THREE.Vector3(...truck.steeringPivot)
@@ -241,7 +322,7 @@ export class Car {
       g.setAttribute('color', new THREE.BufferAttribute(col, 3))
       g.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
       g.setAttribute('paintMask', new THREE.BufferAttribute(new Float32Array(n), 1))
-      return g
+      return zeroTyre(g)
     }
     const inst = (g: THREE.BufferGeometry, n: number) => {
       const m = new THREE.InstancedMesh(g, this.bodyMat, n)
@@ -253,8 +334,9 @@ export class Car {
     const cyl = () => new THREE.CylinderGeometry(1, 1, 1, 8, 1, false).rotateZ(Math.PI / 2).toNonIndexed() // unit, along X
     this.hasAxles = !!def.axles
     this.axles = inst(gear(cyl(), [0.025, 0.025, 0.025]), 9)
+    // Damper: chrome shaft into a dark body; coil springs in black powder coat (no toy-blue).
     this.rods = inst(gear(cyl(), [0.62, 0.64, 0.68]), 4)
-    this.springs = inst(gear(coilGeometry(), [0.12, 0.42, 1.0]), 4)
+    this.springs = inst(gear(coilGeometry(), [0.045, 0.045, 0.05]), 4)
     for (let k = 0; k < 9; k++) this.axles.setMatrixAt(k, _zero)
     // Struts stand just inboard of each tyre, from the hub up to a mount in the wheel arch (above the tyre).
     truck.wheel.computeBoundingBox()
@@ -287,6 +369,10 @@ export class Car {
     this.body.add(this.jets)
     const t = tuning ?? { ...STOCK_TRUCK, paint: '#ffffff' }
     this.sim = new TruckSim(physics, truck, t)
+    // The real machine (skills/realistic-vehicle-system): its spec sheet resolved against this model's measured
+    // wheelbase and track drives Simulation handling; the tyres read the world's surfaces and the weather.
+    this.sim.setDrivetrain(resolveSpec(def.spec, { wheelPos: truck.wheelPos, half: truck.half }), { ...def.stock })
+    this.sim.surface = (x, z, out) => sampleSurface(this.fields, x, z, this.wetness, out)
     // The amphibious hull, fitted to this car, on the body's program; its bilge points float the sim.
     this.hull = new BoatHull(truck, this.bodyMat)
     this.body.add(this.hull.root)
@@ -360,12 +446,14 @@ export class Car {
   updateLamps(darkness: number): void {
     const c = this.sim.controls
     const v = this.sim.speed
-    this.braking = this.driving && ((c.throttle < -0.01 && v > 0.5) || (c.handbrake && Math.abs(v) > 1))
+    // Simulation handling: the lamps follow the drivetrain (brake pedal / regen, reverse gear), never the keys.
+    const D = this.sim.real
+    this.braking = this.driving && (D ? D.braking : (c.throttle < -0.01 && v > 0.5) || (c.handbrake && Math.abs(v) > 1))
     const u = this.lampMat.uniforms
     u.uHead.value = this.lights ? 1 : 0
     u.uTail.value = this.lights ? 1 : 0
     u.uBrake.value = this.braking ? 1 : 0
-    u.uRev.value = this.driving && v < -0.3 ? 1 : 0
+    u.uRev.value = this.driving && (D ? D.gear < 0 || D.selector === 'R' : v < -0.3) ? 1 : 0
     u.uDark.value = darkness
   }
 
@@ -548,6 +636,95 @@ export class Car {
     return v.applyMatrix4(this.root.matrixWorld)
   }
 
+  /** Ground wetness 0..1 (Game sets it from the weather): wet asphalt, mud and grass grip less. */
+  wetness = 0
+
+  /** Tyre-deformation uniforms (per wheel: wheel-local down + squash; sideways shear) and the dirt coat. */
+  private readonly tyreU = {
+    uTyre: { value: [0, 1, 2, 3].map(() => new THREE.Vector4(0, -1, 0, 0)) },
+    uTyreShear: { value: [0, 0, 0, 0] },
+    uTyreR: { value: 0.4 },
+    uDirt: { value: 0.55 },
+    uDirtCol: { value: new THREE.Color(0.3, 0.22, 0.14) },
+    uGroundY: { value: 0 },
+    uGloss: { value: 1 },
+  }
+  /** Shear on HIGH+ (Game sets it from the quality tier). */
+  tyreShear = false
+  /** Paint gloss (MEDIUM+; LOW = matte, no extra ALU worth the phone's time). */
+  set gloss(on: boolean) {
+    this.tyreU.uGloss.value = on ? 1 : 0
+  }
+  private readonly squash = [0, 0, 0, 0]
+  private readonly dirtTarget = new THREE.Color()
+  private readonly dirtMix = surfaceMix()
+  private dirtT = 0
+  /** Rim radius / tyre radius (where the rubber starts; the squash scales with the sidewall). */
+  private readonly rimRatio: number
+
+  /**
+   * DIRT (per frame, cheap): the coat thickens while driving off-road (≈ +0.012 / s at 10 m/s), slowly cleans on
+   * asphalt and in the rain; its colour drifts toward the ground under the car (mud, desert dust, snow slush).
+   */
+  private updateDirt(dt: number): void {
+    const u = this.tyreU
+    u.uGroundY.value = this.root.position.y
+    this.dirtT -= dt
+    if (this.dirtT <= 0) {
+      this.dirtT = 0.5
+      sampleSurface(this.fields, this.pos.x, this.pos.z, this.wetness, this.dirtMix)
+      const w = this.dirtMix.w
+      this.dirtTarget.setRGB(0, 0, 0)
+      for (let i = 0; i < DIRT_COLS.length; i++) {
+        const c = DIRT_COLS[i]
+        this.dirtTarget.r += w[i] * c[0]; this.dirtTarget.g += w[i] * c[1]; this.dirtTarget.b += w[i] * c[2]
+      }
+    }
+    const v = Math.abs(this.sim.speed)
+    const off = 1 - this.dirtMix.w[0]
+    const d = u.uDirt.value + dt * (off * 0.012 * Math.min(2, v / 10) - (1 - off) * 0.002 * Math.min(1, v / 10) - this.wetness * 0.01)
+    u.uDirt.value = Math.max(0.3, Math.min(0.95, d))
+    if (v > 1) u.uDirtCol.value.lerp(this.dirtTarget, Math.min(1, dt * 0.05 * Math.min(2, v / 8)))
+  }
+
+  /** Settings → Controls (Simulation handling): gearbox mode and aids level ('auto' = the class default; Full on
+   *  touch). */
+  driveSettings(gearbox: 'auto' | 'manual', aids: 'auto' | 'off' | 'std' | 'full', touch: boolean, offroadAssist = true): void {
+    this.sim.offroadAssist = offroadAssist
+    const D = this.sim.drivetrain
+    if (!D) return
+    D.manual = gearbox === 'manual' && D.stepped
+    D.aids = aids === 'auto' ? (touch ? 'full' : D.R.aids) : aids
+  }
+
+  /** X / Z (manual gearbox): one gear up / down; a refused shift (over-rev) says so. */
+  shift(dir: 1 | -1): void {
+    const D = this.sim.drivetrain
+    if (!this.driving || !D || this.sim.arcade || !D.manual) return
+    if (dir > 0) D.shiftUp()
+    else D.shiftDown()
+    if (D.refused) this.say('Too fast for that gear')
+  }
+
+  /** Q: low range (≤ 8 km/h; the cars that have one). */
+  toggleLowRange(): void {
+    const D = this.sim.drivetrain
+    if (!this.driving || !D || this.sim.arcade) return
+    if (D.R.drive.low <= 1) return void this.say('This car has no low range')
+    if (!D.toggleLow(this.sim.speed)) return void this.say('Slow down to engage low range')
+    this.say(D.lowRange ? 'Low range' : 'High range')
+  }
+
+  /** K: lockers in turn (centre → rear → front → open) — part-time 4WD: 2H ⇄ 4H. */
+  cycleLockers(): void {
+    const D = this.sim.drivetrain
+    if (!this.driving || !D || this.sim.arcade) return
+    if (!D.R.drive.lockers.length) return void this.say('No locking differentials on this car')
+    D.cycleLockers()
+    const pt = D.R.drive.layout === 'part-time-4WD'
+    this.say(D.locks.size === 0 ? (pt ? '2H — rear-wheel drive' : 'Differentials open') : pt && D.locks.size === 1 ? (D.lowRange ? '4L' : '4H — four-wheel drive') : `Locked: ${[...D.locks].join(' + ')}`)
+  }
+
   /** Fixed step (60 Hz), called inside physics.advance before world.step(). */
   fixedUpdate(dt: number): void {
     const i = this.input
@@ -709,6 +886,7 @@ export class Car {
     this.pos.lerpVectors(this.prevP, this.curP, alpha)
     this.root.position.copy(this.pos)
     this.root.quaternion.slerpQuaternions(this.prevQ, this.curQ, alpha)
+    this.updateDirt(dt)
     this.near = !this.occupied && !p.tumbling && p.knock < 0.05 && Math.hypot(p.curr.x - this.pos.x, p.curr.z - this.pos.z) < 4
     const w = this.sim.wheels
     // FLYING CAR transformation (`fly` 0 → 1): each wheel turns flat (rim facing down), tucks up and in under
@@ -731,16 +909,35 @@ export class Car {
       _e.set(rightSide ? -spin : spin, (rightSide ? Math.PI : 0) - w[k].steer * (1 - flat / (Math.PI / 2)), 0, 'YXZ')
       // Bigger tyres: scaled about the hub, hub raised so the tread stays on the ground (as in the sim).
       const hx = x - Math.sign(x) * tuck * 0.8 * this.inboard
-      const hy = y + w[k].lift + (this.tyre - 1) * this.wheelRadius + tuck * this.wheelRadius * 0.55
+      // TYRE SQUASH from the wheel's real load (skills/realistic-vehicle-system §8.9): s0 = 12 % of the sidewall at
+      // the static load, up to 2.5 s0 (load transfer, landings, stones); the hub drops by it so the flattened
+      // patch stays on the ground. Eased over ~40 ms (the shader shows it, the physics radius is unchanged).
+      const s0 = 0.12 * (1 - this.rimRatio) * this.wheelRadius
+      const load = w[k].contact ? this.sim.wheelLoad(k) / Math.max(1, this.sim.wheelLoadStatic(k)) : 0
+      this.squash[k] += (Math.min(2.5 * s0, s0 * load) * (1 - fold) - this.squash[k]) * Math.min(1, dt * 25)
+      const hy = y + w[k].lift + (this.tyre - 1) * this.wheelRadius + tuck * this.wheelRadius * 0.55 - this.squash[k] * this.tyre
       this.hubs[k].set(hx + (x * 0.42 - hx) * slide, hy + (this.hull.discY - hy) * slide, z)
       _q.setFromEuler(_e).premultiply(_q2.setFromAxisAngle(_z, rightSide ? -flat : flat))
+      // The shader flattens toward the ground: the car's down in the (spinning) wheel's own frame.
+      _v.set(0, -1, 0).applyQuaternion(_q3.copy(_q).invert())
+      this.tyreU.uTyre.value[k].set(_v.x, _v.y, _v.z, this.squash[k])
+      // Tread shear (HIGH+): the patch trails opposite the cornering force (right wheels are turned 180°).
+      const Fz = Math.max(1, this.sim.wheelLoad(k))
+      this.tyreU.uTyreShear.value[k] = this.tyreShear && w[k].contact ? -Math.max(-1, Math.min(1, this.sim.wheelSide(k) / Fz)) * 0.03 * (rightSide ? -1 : 1) : 0
       // Spread into a disc: thinner along the axle, wider across; then shrink away inside the keel pack.
       const sc = this.tyre * Math.max(1e-3, 1 - gone)
       _m.compose(this.hubs[k], _q, _s.set(sc * (1 - 0.65 * spread), sc * (1 + 0.45 * spread), sc * (1 + 0.45 * spread)))
       this.wheels.setMatrixAt(k, _m)
+      const br = this.brakes[k >> 1]
+      if (br) {
+        _e.set(0, (rightSide ? Math.PI : 0) - w[k].steer, 0, 'YXZ')
+        br.setMatrixAt(k & 1, _m.compose(this.hubs[k], _q.setFromEuler(_e), _s.setScalar(this.tyre)))
+      }
     })
     this.wheels.instanceMatrix.needsUpdate = true
     this.wheels.visible = gone < 1
+    // The brakes stay behind the wheels only while they are wheels (folded for flight / the boat: hidden).
+    for (const br of this.brakes) if (br) (br.instanceMatrix.needsUpdate = true), (br.visible = flat < 0.02 && tuck < 0.02)
     this.updateGear()
     // The struts pull the wheels in; once the wheels are gone, so is the running gear (inside the hull).
     this.rods.visible = this.springs.visible = this.axles.visible = gone < 1
@@ -935,6 +1132,7 @@ export class Car {
     this.lampMat.dispose()
     this.sim.dispose()
     this.wheels.dispose()
+    for (const b of this.brakes) b?.dispose()
     this.steering?.dispose()
     for (const m of this.doorMeshes) m.dispose()
     for (const m of [this.axles, this.rods, this.springs, this.jets]) (m.geometry.dispose(), m.dispose())
@@ -981,6 +1179,7 @@ const BAIL_SPEED = 4
 const _e = new THREE.Euler()
 const _m = new THREE.Matrix4()
 const _q = new THREE.Quaternion()
+const _q3 = new THREE.Quaternion()
 const _v = new THREE.Vector3()
 const _t = new THREE.Vector3()
 const _p = new THREE.Vector3()

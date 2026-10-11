@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { TruckModel } from '../../assets/loadModels'
+import { zeroTyre, type TruckModel } from '../../assets/loadModels'
 
 /**
  * THE AMPHIBIOUS HULL (O while driving — Car.toggleBoat): a welded-aluminium jet-boat hull that unfolds from under
@@ -106,7 +106,7 @@ export class BoatHull {
       g.setAttribute('paintMask', new THREE.BufferAttribute(new Float32Array(pos.count), 1))
       g.computeVertexNormals() // the piecewise fit bends the faces: re-derive (split vertices keep the hard edges)
       g.computeBoundingSphere()
-      const mesh = new THREE.InstancedMesh(g, material, 1)
+      const mesh = new THREE.InstancedMesh(zeroTyre(g), material, 1)
       mesh.frustumCulled = false
       mesh.castShadow = true
       mesh.name = name

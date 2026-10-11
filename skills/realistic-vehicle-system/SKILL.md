@@ -29,7 +29,9 @@ engineering defaults to tune against the tests (§10).
 
 One hero car is in the world at a time, always near the camera: a third of the screen in the chase view, all of
 the garage turntable. Each car may spend more triangles, shader ALU and sim CPU than any prop. Its limits, whatever
-the car: **one shader program, ≤ ~15 draws, ≈ 0.15 ms CPU per frame including its physics**, on every tier.
+the car: **one shader program, ≤ ~18 draws on HIGH (≤ ~16 on LOW/MEDIUM: no skid marks, no anti-roll-bar draws),
+≈ 0.15 ms CPU per frame including its physics**, on every tier. The shared effects draw and the boat hull (drawn
+only while deployed, §8.11) are counted separately.
 
 ## 2. Architecture
 
@@ -73,6 +75,9 @@ Use it for:
 - **Bikes:** `skills/physics` (`BikeSim`).
 - **Arcade handling** (scripted grip, nitro, drift, air suspension, the flying car): a separate mode that stays as
   it is. Never "realism-fix" it.
+- **Boat mode** (the amphibious hull, `BoatHull.ts`; buoyancy and water-jet handling in `VehicleSim`): it takes
+  over the Rapier setup as soon as the hull moves (boat > 0) and the handling from `boat ≥ 0.5` (§8.11). Don't
+  route it through the drivetrain.
 - **Per-car code paths** (`if (car.id === …)`): everything a car needs is data in its `VehicleSpec`.
 - **A new physics engine, soft-body tyres, or a skinned/rigged car:** raycast suspension plus our powertrain/tyre
   code plus render-side kinematics is the model (ARCHITECTURE.md §1).
@@ -88,7 +93,8 @@ planned rows are CEILINGS to verify with `npm run shot` + F3.
 | Glass ×≤ 3 + lamps ×1 | ≤ 4 | small | — | blended / additive | — |
 | Running gear instances (struts, axles, arms, calipers, needles) | 3–4 (+ shadow pass) | ≈ 2–3 k | in the 0.05 ms | within noise | < 50 KB |
 | Raycast suspension, 4–8 wheels | — | — | ≈ 0.05 ms / step | — | small |
-| **Powertrain + tyres + aids** (8 substeps × wheels) | — | — | ≤ +0.03 ms / step (4 wheels) | — | < 10 KB |
+| **Powertrain + tyres + aids** (8 substeps × wheels) | — | — | measured +0.015–0.04 ms / step (4 wheels; sim.step 22–48 µs vs legacy 6–9 µs, Node, RTX 4050 laptop CPU) | — | < 10 KB |
+| **Brake hardware** (`caliper_*`, one draw per axle, no shadow pass) | +2 | +1.1–1.3 k (≈ 280–330 per corner) | ≈ 0 (4 matrix composes) | within noise (hidden behind solid rims) | +60–70 KB GLB |
 | **Surface sampling** (1 wheel per step) | — | — | ≤ +0.005 ms | — | — |
 | **Material classes** | +0 | +0 | +0 | LOW +0; MED/HIGH ≤ +0.05 ms | +1 float / vertex |
 | **Tyre deformation** | +0 | +0 (≥ 24 tread segments) | ≈ +0.005 ms | ≈ 15 ALU / wheel vertex | +1 float / vertex |
@@ -107,9 +113,13 @@ Tier rules:
 - **One program per car.** Every opaque car part is an `InstancedMesh` on one material. A feature goes into its
   `onBeforeCompile` behind a `#define` plus `customProgramCacheKey`, never into a second material.
 - **Every geometry on a program needs every attribute it reads.** Three.js doesn't reset a missing attribute's
-  generic value. New attributes (`matClass`, `tyreW`, `zone`) go on every car geometry, with zeros where unused.
-- **`gl_InstanceID` restarts at 0 per draw.** Gate per-wheel uniform arrays with a per-vertex flag and clamp the
-  index to the wheel count.
+  generic value. New attributes (`matClass`, `tyreW`, `wheelIdx`, `zone`) go on every car geometry, with zeros where unused.
+- **`gl_InstanceID` restarts at 0 per draw.** With one wheel mesh per axle (§2) it is NOT the wheel index. Bake the
+  wheel index into a `wheelIdx` attribute (per instance, or per-vertex axle base + `gl_InstanceID` for a per-axle
+  mesh), gate per-wheel uniform arrays with a per-vertex flag, and clamp the index to the wheel count.
+- **No per-draw uniforms on a shared material.** three.js re-uploads material uniforms only when the material
+  changes between draws, so setting a uniform in `onBeforeRender` silently fails across the car's parts. Per-part
+  data goes into attributes, or into a per-car uniform array indexed by an attribute.
 - **No env maps on LOW, no PMREM per frame.** Reflections use the analytic sky colour (`skyColor(dir)` in the
   stylize shaders). Mirrors are sky-coloured, never rendered.
 - **Baking keeps base colour only.** Surface response comes from geometry plus per-vertex material classes, never
@@ -155,7 +165,7 @@ model, not from hand-typed numbers):
 |---|---|---|
 | `body` (any unnamed mesh) | everything rigid with the chassis | paint material name contains `paint` |
 | `wheel_<A><S>` | wheel + tyre + brake disc. A = `F`, `R`, or `M1`, `M2`… for middle axles; S = `L`/`R`; `_in` for an inner dual | `B` is accepted as an alias for `R` (rear) |
-| `caliper_<A><S>` | caliper + knuckle bits | steers and lifts with the wheel, never spins |
+| `caliper_<A><S>` | brake hardware: disc + hat + caliper, or drum + backing plate (`scripts/blender/vehicle_brakes.py`) | steers and lifts with the wheel, never spins; caliper at 12 o'clock (symmetric: the right side is the left turned 180°, one geometry per axle); vertex colours on one material `brake_hw` |
 | `door_<FL|FR|RL|RR>` | door skin + trim + its window | extra `hinge` [x,y,z] (+ `axis`, default vertical); sliding door: extra `slide` [dx,dy,dz] |
 | `hood`, `trunk` / `tailgate` | opening panels | extra `hinge` + `axis` (horizontal) |
 | `steering_wheel` | rim + spokes | pivot and column axis found from its ring |
@@ -374,27 +384,44 @@ full throttle on grip 0.15; "locked" wheels kept rolling). Gears, burnouts, ABS 
 
 **Power unit:**
 - **Combustion:** `T = thr·T_curve(rpm) − (1 − thr)·T_fric(rpm)`, with `T_fric = (0.05 + 0.15·rpm/redline)·T_peak`
-  (engine braking). Idle PI control (never stalls); rev limiter 50 ms fuel cut; turbo boost fraction with lag τ and a
-  blow-off event.
-- **Electric:** `T = thr·min(T_max, P/ω)`. Lift-off regen `−regen·T_max` (0.1–0.3), blended with the friction brakes
-  under pedal. No idle, no clutch, no limiter bounce (smooth cut at max motor rpm).
+  (engine braking). `thr` = a progressive pedal map `1 − (1 − pedal)²` (half pedal ≈ 75 % demand — a linear map
+  can't beat engine friction against a torque converter at part throttle: the G500 crawled at 6 km/h on 25 %).
+  Idle P control (never stalls); rev limiter 50 ms fuel cut; turbo boost builds from ½ the onset rpm to the onset
+  with the throttle, lagging by τ (an off-boost turbo engine keeps its NA base curve — penalise it once, not twice).
+  A manual shift lifts off (upshift) or blips to match revs (downshift).
+- **Electric:** `T = thr·min(T_max, P/ω)`. Lift-off regen `−regen·T_max·sign(ω)·clamp((|v| − 0.5)/1.5, 0, 1)`
+  (regen 0.1–0.3): it fades out between 2 and 0.5 m/s and never reverses ω (like the brakes, §8.7); the friction
+  brakes and hill hold take over below that. Blended with the friction brakes under pedal. No idle, no clutch, no limiter bounce (smooth cut at max motor rpm).
 - **Scaling:** the curve is scaled so its peak power = the garage power slider.
 
 **Coupling:**
-- **Auto-clutch** (manual / DCT): `T_c = clamp(k·(ω_e − ω_in), ±1.3·T_peak)·engagement`. Engagement ramps 0→1
-  from idle to the launch rpm (≈ 0.6 × torque rpm at full throttle). LOCK when engaged and slip < 20 rpm (engine +
-  gearbox become one inertia, `I_e·g²` reflected) to avoid chatter. 0 in N and mid-shift.
-- **Torque converter** (auto): multiplication `2.0 → 1.0` over speed ratio 0 → 0.85, then lock-up. Creeps at idle.
+- **Auto-clutch** (manual / DCT): a velocity CONSTRAINT `ω_e = G·Σa_i·ω_i` (a_i = each wheel's share of the gearbox
+  output through the diffs) solved as an impulse each substep and clamped to the clutch's torque capacity
+  `1.3·T_peak·engagement` — locked, slipping or open with no stiff spring (a spring `k·Δω` stable at 8 substeps
+  leaves ~250 rpm of permanent slip). Engagement bites over a narrow band just under the launch rpm
+  (`0.85…1.0 × launch`, launch ≈ 0.75 × torque rpm at full throttle, just over idle when creeping): ramping it
+  from idle parks the engine at ~1350 rpm with no torque (0–100 was 22 s instead of 15). 0 in N and mid-shift.
+- **Torque converter** (auto): the impeller absorbs `T_imp = (ω_e/K)²·sign(ω_e)`, so the engine has a load at stall.
+  Size the capacity factor from the stall speed (published, else ≈ 1.1–1.3 × torqueRpm at full throttle):
+  `K_stall = ω_stall/√T_peak`, rising ≈ 1.5× towards SR 0.85. Turbine torque = `T_imp × TR(SR)`, with the
+  multiplication `TR` 2.0 → 1.0 over speed ratio SR = ω_turbine/ω_e 0 → 0.85, `× (1 − SR²)` (no torque at 1:1, engine
+  braking past it), then lock-up from 2nd (the clutch constraint). DARK holds the car at a standstill off the pedals
+  (auto hold, §8.6 static hold) instead of creeping.
 - **CVT:** converter at launch, then the ratio slews (≤ 1 ratio/s) to hold `rpm_target = lerp(1.3·idle, 0.9·powerRpm, thr)`.
 - **EV:** direct.
 
 **Shift logic** (stepped transmissions; rpm thresholds, `thr` smoothed):
 
 ```
-upRpm(thr)   = lerp(0.42, 0.93, thr^0.8) · redline        downRpm(thr) = lerp(0.24, 0.55, thr) · redline
-upshift   rpm > upRpm  AND rpm·g[n+1]/g[n] > downRpm + 0.08·redline     (hysteresis → no hunting)
+upRpm(thr)   = lerp(0.42, 0.93, thr^0.8) · redline        downRpm(thr) = lerp(0.24, 0.42, thr) · redline
+upshift   rpm > upRpm AND, at the pedal the NEXT gear needs for the same pull (demand × g[n]/g[n+1] × T(rpm)/T(rpm')),
+          rpm' = rpm·g[n+1]/g[n] > downRpm(that pedal) + 0.10·redline      (load check → no hunting on a grade)
+          (at ≥ 0.93·redline it always goes up)
 downshift rpm < downRpm AND rpm·g[n−1]/g[n] < 0.9·redline               (never over-rev)
-kickdown  throttle +0.5 within 0.2 s → down 1–2 gears if the result < 0.85·redline
+anti-hunt no part-throttle upshift 2.5 s after a downshift, no downshift 1.5 s after an upshift (unless the revs
+          demand it: > 0.9 / < 0.25 × redline)
+kickdown  the RAW pedal +0.5 within 0.2 s → down 1–2 gears if the result < 0.85·redline (the ramped pedal never
+          jumps 0.5 — detect on the input)
 hold      |lat g| > 0.4, airborne, any driven κ > 0.25, 0.8 s after a shift; early downshift on climbs > 12°;
           engine-brake gear downhill (pitch < −8°, throttle 0)
 diesel    shift points × 0.85 (redline-relative curves still apply)
@@ -410,14 +437,28 @@ diesel    shift points × 0.85 (redline-relative curves still apply)
 - `torsen`: the slower side gets up to TBR × the faster side's torque.
 - `viscous`: `T_b = c·Δω`.
 - `locked`: both wheels take their inertia-weighted mean ω.
-- **Layouts** compose these per axle and between axles. **Low range** multiplies the ratio (only ≤ 8 km/h).
+- **Layouts** compose these per axle and between axles. **Low range** multiplies the ratio (only ≤ 8 km/h) and
+  locks the centre (part-time: 4L; permanent 4×4s with a centre locker lock it with low range, like the G-Class).
   Lockers are toggled by the player. Never hand-write "traction split by load": diffs plus tyres produce it.
+- **As impulses:** every diff is a friction clutch between its two sides — the impulse that would equalise their
+  speeds, `Δω/(1/I_a + 1/I_b)`, clamped to the diff's torque capacity × h (open 0, LSD preload + bias·T_in, Torsen
+  (TBR − 1)/(TBR + 1)·T_in, viscous c·Δω, locked unclamped). Unconditionally stable at any stiffness.
 
 **Wheel ω stability:** slip stiffness (≈ B·C·D·Fz) makes the low-speed wheel time constant ≪ 1 ms. Use all three:
 1. 8 substeps;
-2. overshoot caps `|Fx| ≤ |ωr − v_x|·I_w/(r²·h)` and `|Fy| ≤ m_share·|v_y|/h`;
-3. a slip floor `max(|v_x|, 1.5 m/s)` + relaxation length σ 0.3–0.5 m, blending to static friction below 1 m/s with
-   no throttle (with hill hold, a parked car stays parked).
+2. overshoot caps: `Fx·s ≤ s·((ωr − v_x)·I_eff/(r²·h) + T_other/r)` with s = sign(ωr − v_x), I_eff = I_w + the engine
+   reflected through a locked clutch (`I_e·G²·a_i`) and T_other = the wheel's drive / brake / diff torque of the
+   last substep — capping on the slip term alone starves a crawl (the G500's rear tyres gave half their grip on a
+   35° climb); `|Fy| ≤ m_share·|v_y|/dt` (the frame step: the body only moves in the physics step);
+3. a slip floor `max(|v_x|, 1.5 m/s)` + relaxation length σ 0.3–0.5 m.
+
+**Static hold** (below 0.8 m/s, fully below 0.16, with the brake, the handbrake, P, or no throttle): per wheel
+`F = −m_share·(v_hold/dt + g_t)`, capped at μ·Fz, where v_hold is the patch velocity from the body's TRAVEL AND
+YAW ONLY and g_t gravity in the contact plane. Cancelling the full patch velocity (incl. pitch / roll rate) pivots
+the body about its tyres every step and it walks — 1–7 cm per 6 s on 15°, even uphill; with travel + yaw: 0.0 cm.
+Full gain: Rapier's spring impulse has already acted in this step, any less creeps. **Hill-start assist:** for
+1.5 s after the hold lets go (still < 1.5 m/s), the static force may only push the way the car drives — it never
+rolls back before the clutch bites.
 
 **Outputs:** `rpm`, `gear` (−1 R, 0 N, 1…n; EV shows D), `selector`, `shifting`, `load`, `clutch`, `boost`, `regen`,
 `lowRange`, `locks`, and per wheel `ω`, `κ`, `α`, `Fz`, `surface`.
@@ -427,14 +468,19 @@ diesel    shift points × 0.85 (redline-relative curves still apply)
 **Tyre forces** (contact frame, per wheel, per substep):
 
 ```
-κ  = (ω·r − v_x)/max(|v_x|, 1.5)      α_ss = atan2(v_y, max(|v_x|, 1.5));   α += (|v_x|/σ)(α_ss − α)·h
-μ  = tyreKind.μ · surface.μ · grip scale · (1 − 0.1·(Fz/Fz_static − 1))       (load sensitivity)
-MF(s) = sin(C·atan(B·s − E·(B·s − atan(B·s))))
-Fx0 = μ·Fz·MF(κ; B 10, C 1.9, E 0.97)                          (verified dry-tarmac set; peak near κ ≈ 0.1)
-Fy0 = −μ·Fz·0.95·MF(α; B 10·kind.stiff·surface.stiff, C 1.3, E 0.97)   (verified lateral set; peak per tyre kind)
-friction ellipse: k = hypot(Fx0/μFz, Fy0/μFz); k > 1 → divide both by k;  then the §8.6 caps
-rolling resistance: torque on ω, c_rr·Fz·r·sign(ω), faded out below 0.1 rad/s
+κ  = (ω·r − v_x)/max(|v_x|, 1.5)      α_ss = atan2(v_y, max(|v_x|, 1.5));   α += ((|v| + 0.5)/σ)(α_ss − α)·h
+μ  = tyreKind.μ · surface.μ · grip scale · max(0.6, 1 − 0.1·(Fz/Fz_static − 1))   (load sensitivity)
+combined slip (Pacejka similarity): ρx = κ/κ_p, ρy = tan α / tan α_p, ρ = hypot(ρx, ρy)
+  C = (1.6·ρx² + 1.3·ρy²)/ρ²,  B = tan(π/2C)  (peak at ρ = 1),  F = μ·Fz·sin(C·atan(B·ρ))
+  Fx = F·ρx/ρ,  Fy = −0.95·F·ρy/ρ                 κ_p = 0.10 (× 1.3 off-road), α_p = kind peak / surface stiffness
+then the §8.6 caps; rolling resistance: friction torque on ω (c_rr·Fz·r), never reversing it
 ```
+
+Why not the published dry-tarmac set (B 10, C 1.9, E 0.97) with a lateral twin (C 1.3, E 0.97) and a friction
+ellipse: that longitudinal curve peaks at κ ≈ 0.18, the lateral one with E 0.97 never peaks at all (no breakaway),
+and an ellipse lets a locked wheel keep ~70 % side grip (it steers instead of skidding straight). The similarity
+method points the force along the slip vector: a locked wheel slides along its velocity, a spinning one loses side
+grip. A locked wheel keeps ~65 % of the peak.
 
 This produces, with no special cases:
 - understeer from entering too fast;
@@ -443,6 +489,15 @@ This produces, with no special cases:
 - locked wheels skidding straight;
 - handbrake turns;
 - bogging in sand.
+
+**Ground roughness** (`tyre.ts` `roughness`): the terrain mesh is smooth at wheel scale (heights every 2 m), so
+without it the springs have nothing to work on and the suspension looks dead. Each wheel rides a deterministic bump
+height h(x, z) of its surface — rolling noise (2.6 m + 0.8 m wavelengths) ± amplitude (asphalt 7 mm, dirt 35, grass
+50, sand 30, snow 25, ice 4) plus sparse round stones on stony ground (dirt, grass) — by growing its Rapier rest
+length by h (the spring sees the ground raised exactly as a taller ray hit would), lifting the rendered wheel by h,
+and feeding dh/dt to the damper as a force at the hard point (Rapier's damper only sees its ray). Measured: on a
+dirt road at 45 km/h each wheel moves ±5–9 cm on its own, the body rolls ±3–6° and pitches 3°. Tests run on a
+smooth ground (roughness 0).
 
 **Surfaces** are deterministic and sampled one wheel per step. In DARK: road distance, biome weights, frozen water,
 weather `wet`.
@@ -460,9 +515,25 @@ Blend by weights, never jump. The same lookup drives smoke/dust colour, surface 
 
 **Brakes:**
 - **Brake torque:** `T_b = pedal · maxDecel·g·m·r · share` (bias split per axle), applied to ω, never reversing it.
+  ABS cars get 15 % headroom (the ABS uses it); without ABS the system is sized just under lock-up (× 0.92).
+- **Bias for the DYNAMIC load:** `front = static front share + (COM height / wheelbase) × maxDecel` (0.5–0.85). Sized
+  on the static share, a tall car's front brakes run out of torque before its front tyres run out of grip (the
+  G500: 0.71 g instead of 0.9).
+- **EBD / proportioning:** rear brake torque × clamp(Fz/Fz_static, 0.35, 1) — under hard braking a tall car's rear
+  goes light (G500: 3.1 of 7.7 kN per tyre) and full rear pressure locks it and yaws the car around.
 - **ABS (verified):** μ peaks at 8–30 % slip, target ≈ 15 %, cycling up to 15–20 Hz. Rule: κ < −0.15 → release
   (× 0.25) until κ > −0.06; off below 2 m/s.
-- **Handbrake:** rear axle, 1.5 × its grip torque, bypasses ABS.
+- **Handbrake:** rear axle, 1.5 × its grip torque, bypasses ABS. Pulling it OPENS the auto-clutch (a driver's left
+  foot goes down with the lever: the engine keeps its revs, the clutch bites again on release and kicks the slide
+  on), and stands TCS and ESC back while it is held.
+- **Drifting** (measured, aids off): a handbrake flick at 50 km/h can be CAUGHT (counter-steer + lift → straight)
+  and HELD (balanced throttle + proportional counter-steer: the LSD pickup 15–57° for 2.3 s). What it took:
+  (1) no gear changes while sliding (rear slip > 9°) or 1.2 s after the handbrake — a kickdown into 1st mid-slide
+  spun every car; (2) full mechanical lock when steering INTO a slide (the speed-sensitive lock is for steering
+  into a turn — with it a slide couldn't be caught above walking pace) at the crawl rack rate; (3) a rear LSD where
+  the real car had one (an open diff spins only the inside wheel); (4) the REAL car's aids as its default: a 1989
+  pickup or a 1972 van has no TCS / ESC (spec `aids`), so they slide like the real thing; touch still defaults to
+  Full.
 - **Parked (P):** ω pinned to 0 + static friction + hill hold.
 - **EV:** regen first, friction for the rest. Brake lamps follow the total deceleration from pedal/regen, never
   the ABS cycling.
@@ -482,7 +553,7 @@ Blend by weights, never jump. The same lookup drives smoke/dust colour, surface 
 | Aid | Rule | Off / Std / Full |
 |---|---|---|
 | ABS | above (only if the car has it) | off / on / on |
-| TCS | driven κ > 0.15 (0.25 off-road / low range) → torque × (1 − k(κ − 0.15)), attack 30 ms, release 200 ms | off / on / on |
+| TCS | BRAKE a driven wheel faster than the slowest driven one (across the axle or the centre: an open diff feeding a light wheel); ENGINE: PI on the mean driven slip SPEED vs max(1.5·κ_p·v, 0.4 m/s), off while rolling back against the drive (a hill beating the tyres: cutting power deadlocks the climb); LAUNCH CONTROL: clutch / converter output ≤ 0.95 × the driven tyres' μ·Fz·r | off / on / on |
 | ESC | `r_ref = v·δ/(L(1 + K·v²))`, K ≈ 0.003, clamped to μg/v; oversteer > 0.08 rad/s → brake the outer front; understeer → brake the inner rear + trim throttle | off / off / on |
 | Counter-steer | above | off / on / on |
 
@@ -541,29 +612,73 @@ f = √(k/s_w)/2π    ζ = c/(2√(k·s_w))    sag = s_w·g/k      →  k = s_w(
 
 Tie-rods follow the steer angle. Anti-roll bars are drawn on HIGH.
 
-**Tyre deformation** (visual only):
-- Per wheel: `squash = clamp(s0·Fz/Fz_static, 0, 3·s0)` (s0 0.018 m road, 0.03–0.045 off-road / tall sidewalls)
-  and `shear = clamp(Fy/max(Fz, 1), −1, 1)·0.03` (HIGH).
+**Tyre deformation** (visual only; implemented — `Car.ts` shader + `tyreW` from the loader, `rim` extra):
+- Per wheel: `squash = clamp(s0·Fz/Fz_static, 0, 2.5·s0)`, s0 = 12 % of the sidewall height ((1 − rim ratio)·r:
+  ≈ 2.3 cm on the trucks' 31–36″ tyres), eased over ~40 ms, and `shear = −clamp(Fy/max(Fz, 1), −1, 1)·0.03` (HIGH;
+  the patch trails opposite the cornering force; negated on the right wheels).
 - Lower the rendered hub by `squash`.
 - Shader inputs: `uTyre[k] = vec4(wheel-local down, squash/scale)`, `uTyreR` = tread radius, per-vertex
-  `tyreW = smoothstep(rimR, tyreR, radial distance)`:
+  `tyreW = smoothstep(rimR, tyreR, radial distance)`, and `wheelIdx` (§6; 0 on non-wheel geometry):
 
 ```glsl
-// `flat` is reserved in GLSL ES 3.0 — don't use it as a name. Clamp the index to the wheel count.
+// `flat` is reserved in GLSL ES 3.0 — don't use it as a name. Index by the baked `wheelIdx` (§6): gl_InstanceID
+// alone restarts per draw. Clamp the index to the wheel count.
 if (tyreW > 0.0) {
-  vec4 ty = uTyre[min(gl_InstanceID, WHEELS - 1)];
+  int wi = min(int(wheelIdx + 0.5), WHEELS - 1);
+  vec4 ty = uTyre[wi];
   float plane = uTyreR - ty.w;
   float d = dot(transformed, ty.xyz);
   transformed -= ty.xyz * max(d - plane, 0.0) * tyreW;                       // flat contact patch
   float band = smoothstep(plane - 0.35 * uTyreR, plane, d);
   transformed.x += sign(transformed.x) * ty.w * 0.6 * band * tyreW;          // sidewall bulge
   #ifdef TYRE_SHEAR
-  transformed.x += uTyreShear[min(gl_InstanceID, WHEELS - 1)] * band * tyreW;
+  transformed.x += uTyreShear[wi] * band * tyreW;                           // negated for right wheels (§2)
   #endif
 }
 ```
 
 Normals are computed before `begin_vertex`, so repeat the test in `beginnormal_vertex` to bend them.
+
+**Off-road assist** (gameplay, Settings, on by default; off = the real machine, which every realism test drives):
+engine torque × 1.6 (× 2.2 on steep ground); on a slope over ~20° (contact normals) the part-time 4×4 goes into
+4H / a permanent one locks its centre, the axles lock, 1st is held below 50 km/h, TCS and launch control run
+whatever the aids, and a SLOPE LIMITER at the COM cancels the steeper part of the slope (uphill force + press into
+the ground) so the tyres meet at most ~26° — less when the driven tyres can't hold that (a rear-drive van on grass)
+— and the static hold only cancels what is left. Nothing acts below the COM, so it never back-flips; every car
+crawls an 80° wall in 1st on asphalt and grass and holds still on it (tests). Gotcha found on the way: the
+auto-righting rule ("up axis < 0.35 for 2 s") must require the wheels OFF the ground — on an 80° wall a climbing
+car's up axis is 0.17. Also: the auto-clutch now launches at the torque peak at full throttle (0.75 × left the
+1989 pickup unable to pull away on 26°).
+
+**Tyre noise**: a rubber squeal only on hard ground (asphalt, ice), from the worst slide angle and wheelspin /
+lock, nothing at a crawl; on loose ground a synthesized SCRUB (looping noise → band-pass: a gravel crunch on dirt,
+a low hiss on grass / sand / snow) — `TruckSim.tyreNoise()` → `AudioSystem` `car.tyres`.
+
+**Paint grade** (catalogue `grade`): toy-bright model textures are graded toward weathered real paint at load
+(saturation × 0.5–0.55, brightness × 0.88–0.9), rust and grime kept.
+
+**Working-vehicle details** (`scripts/blender/vehicle_details.py`, after the wheels): kit per car in metres from the
+wheels and the body (heights / widths measured locally: a central strip for the roof, the sill band for sliders,
+so antennas and mirrors don't throw it): pickup — LED light bar on the cage, spotlights + winch on the bull bar,
+spare + jerrycans + toolbox in the bed, rock sliders, snorkel, tow hitch; G500 — the rear spare in a
+hard cover, roof rack on feet with jerrycans and a bag; Żuk — roof rack with a tarp load and crates,
+ladder, rear step (mud flaps were tried and removed: black slabs at game distance). One `acc_*` part per car (560–1270 tris) on the wheels' vertex-coloured material
+(no extra material), never painted; AO re-baked (kit albedo × AO; wheels and brakes keep theirs). Re-imported
+parts must have an ACTIVE colour attribute and the shared material's colour node must read their name ('Color'),
+or the exporter drops their COLOR_0 (white tyres). Totals: pickup 18.7 k, Żuk 24.2 k, G500 38.6 k (its hidden
+underbody details decimated 0.7) — all ≤ 40 k, ≤ 12 materials.
+
+**Real wheels and finish** (`scripts/blender/vehicle_realism.py`): every car's wheels are rebuilt in Blender at the
+model's size — a revolved carcass with a bulging sidewall, staggered tread blocks + shoulder lugs (mud-terrain /
+all-terrain / road by the car), and a steel (dish, vents, lug nuts), alloy (spokes: the brakes show) or capped
+rim — 2.4–2.9 k tris per wheel, named `wheel_<FL|FR|RL|RR>` with a `rim` extra. Then Cycles AMBIENT OCCLUSION is
+baked into every part's vertex colours (glass-only parts hidden so the cabin gets light); the loader multiplies it
+into the material colour (scene extra `vertex_ao`), divides the neutral texel's tint out of untextured parts and
+keeps untextured interiors dark. In the car shader: a soft terminator (stylize toon 0.3, rim 0.14 — the cel look
+made the cars read as toys), a DIRT coat by height above the ground (thick on tyres and the lowest 30 cm, broken
+by noise, thickening off-road, washed by rain, tinted by the ground under the car — mud, desert dust, snow slush)
+and paint GLOSS on MEDIUM+ (sun highlight + sky Fresnel; none under dirt or on rubber). Coil springs are black,
+not toy-blue.
 
 **Openings:** each door/hood/trunk swings on its hinge (or slides) from the extras. It is held by the entry
 animation, latched shut, or swinging free from the car's acceleration and the wind, and slams.
@@ -601,7 +716,15 @@ animation, latched shut, or swinging free from the car's acceleration and the wi
 - **Haptics (verified):** `navigator.vibrate` works on Android Chrome only (iOS Safari has no Vibration API).
   Short pulses on shifts, ABS, landings and crashes; optional, behind a setting.
 
-### 8.11 Damage (optional) and co-op
+### 8.11 Damage (optional), boat mode and co-op
+
+- **Boat mode** (O while driving, `Car.toggleBoat`; hull `BoatHull.ts`, handling in `VehicleSim`): `sim.boat`
+  0 → 1 follows the hull deploy. As soon as the hull moves (boat > 0) — and while flying — `TruckSim` switches
+  Rapier back to the LEGACY setup (world gravity 20, collider masses, Rapier tyre friction): the buoyancy, the keel
+  crawl and the hover were tuned for it. The drivetrain keeps its state; from boat 0.5 the boat handling drives
+  (buoyancy, the water jet, the keel on land raised by `KEEL`). Back to boat = 0 (not flying) the drivetrain setup
+  returns, each wheel's ω set to the ground speed and the box back in gear. The handoff is the same for every car;
+  the only per-car boat data is the fitted hull. Tested: keel crawl ≤ 16 km/h with the hull out, drives off after.
 
 - **Damage:** contact impulses → dent amount per zone (front/rear/left/right), drawn as a vertex offset weighted by
   a baked `zone` attribute (+0 draws). A lamp goes dark when its zone passes a threshold. Mechanical effects only
@@ -630,24 +753,29 @@ animation, latched shut, or swinging free from the car's acceleration and the wi
 
 | Concern | Where | Status |
 |---|---|---|
-| Catalogue (model, tuning, paints, voice; add `spec`) | `src/gameplay/vehicle/catalogue.ts` | exists; `spec` planned |
-| Model bake / normalise / part splitting | `src/assets/loadModels.ts` `bakeVehicle` | exists; reads `wheelRegex`, `door_FL/FR` + `hinge`, `steering_wheel`, lamps, glass, `inner`. Planned: the full §8.2 standard (rear doors, hood/trunk, calipers, empties, `lamp_ind_*`) |
-| Blender prep scripts | `scripts/blender/vehicle_doors.py`, `vehicle_finish.py` | exist |
-| Sim | `src/gameplay/vehicle/VehicleSim.ts` (`VehicleBase`, `TruckSim`) | exists (legacy power-curve + Rapier friction, arcade). Planned: `model: 'drivetrain'`, powertrain in `src/gameplay/vehicle/drivetrain/`, driven by `VehicleSpec` |
-| Render | `src/gameplay/vehicle/Car.ts` (one instanced program: body, wheels, steering, doors, axles, struts, lamps) | exists; linkages per type, calipers, deformation, gauges planned |
+| Spec sheets | `src/gameplay/vehicle/specs.ts` (`SPECS`: Node-importable), referenced by `catalogue.ts` `spec` | exists: pickup (1989 Hilux 22R-E / W56 / RF1A), G500 4×4² (M176 / 7G-Tronic / 3 lockers), Żuk A06 |
+| Spec → numbers | `src/gameplay/vehicle/drivetrain/spec.ts` (`resolveSpec`, class defaults, tyre sizes, torque curves) | exists |
+| Drivetrain | `drivetrain/Drivetrain.ts` (engine, clutch / converter / CVT / EV, shift map, diffs, tyres, brakes, ABS / EBD / TCS / ESC, static hold), `drivetrain/tyre.ts` (combined slip, surfaces), `drivetrain/surface.ts` (DARK's road / region / ice / wet sampling) | exists; render-free, Rapier-free |
+| Sim glue | `VehicleSim.ts` `TruckSim`: `setDrivetrain`, `configure('drivetrain' \| 'legacy')`, `afterReal` (contacts, ARB, bump stops, forces at the patches, aero), `real` | exists; Simulation handling on the wheels; arcade / legacy / boat / hover unchanged |
+| Model bake / normalise / part splitting | `src/assets/loadModels.ts` `bakeVehicle` | exists; reads `wheelRegex`, `door_FL/FR` + `hinge`, `steering_wheel`, lamps, glass, `inner`, `caliper_*` (→ `brakes` per axle, vertex colours kept). Planned: rear doors, hood/trunk, empties, `lamp_ind_*` |
+| Blender prep scripts | `scripts/blender/vehicle_doors.py`, `vehicle_finish.py`, `vehicle_brakes.py` (disc + hat + caliper / drum per corner, budget pass), `bl.mjs` (runs a script over the MCP socket) | exist |
+| Render | `src/gameplay/vehicle/Car.ts` (one instanced program: body, wheels, brakes, steering, doors, axles, struts, lamps) | exists; wheel spin = the drivetrain's ∫ω, lamps from its brake / gear; linkages per type, deformation, gauges planned |
+| Controls / settings | `Car.shift` / `toggleLowRange` / `cycleLockers` / `driveSettings`; keys X Z Q K (`Game`); Settings → Controls: Gearbox (auto / manual), Driving aids (car default / off / std / full) | exists; touch buttons for gears / low / lockers planned |
 | Entry / exit animation | `src/gameplay/vehicle/CarEntry.ts` | exists (front doors) |
-| Effects / audio / HUD | `rendering/particles/VehicleFx.ts`, `audio/AudioSystem.ts` (fakes a gearbox today), `ui/GameHud.tsx` | exist; read sim outputs when the drivetrain lands |
-| Tests | `tests/vehicle.test.ts` (Node + real Rapier, `check(name, ok, detail)`) | exists; universal suite planned |
+| Effects / audio / HUD | `rendering/particles/VehicleFx.ts` (per-wheel slip), `audio/AudioSystem.ts` (`car.sim`: rpm / load / shift from the drivetrain; the fake gearbox stays for arcade), `ui/GameHud.tsx` (tacho bar, gear, ABS / TCS / ESC / LOW / 4WD / LOCK lamps) | exists |
+| Boat mode | `src/gameplay/vehicle/BoatHull.ts` (hull fit + deploy pose), `VehicleSim` `boat` (buoyancy, jet), `Car.boatStep` | exists; handoff per §8.11 |
+| Tests | `tests/drivetrain.test.ts` (`npm run test:drivetrain`, part of `npm test`: the universal suite, 56 checks over the 3 cars), `tests/vehicle.test.ts` (arcade, legacy, bike, boat, flight, entry) | exist |
 
 DARK specifics:
 - **Rapier `@dimforge/rapier3d-compat` 0.21:** `DynamicRayCastVehicleController`. Forces go in before
   `world.step`; velocity edits only in `afterWheels`. Retune in place, never rebuild the body. Wheel rays see
   `Terrain | Static` only. Keep CCD, `keepAbove` and the physics-ring freeze.
 - **World `GRAVITY = 20`:** the realistic model uses the body gravity scale (§8.8); arcade keeps 20.
-- **Settings default handling is `'sim'`;** it maps to the drivetrain model once the universal suite passes. Arcade
-  stays.
-- **Keys in use:** E F G L N O R T V, arrows, Space, Shift, F3–F8, [ ]. Free for cars: X Z (gears), Q (low range),
-  K (lockers), H (hazards).
+- **Settings default handling is `'sim'`** = the drivetrain (the legacy realistic model remains only for cars with no
+  `spec` and for the boat / hover). Arcade stays. The garage sliders scale the spec relative to the car's stock
+  tuning (power, mass, grip, springs as √, tyre size); arcade keeps reading them directly.
+- **Keys in use:** E F G L N O R T V X Z Q K, arrows, Space, Shift, F3–F8, [ ]. Free for cars: H (hazards).
+  Shift in Simulation = nitrous (engine torque × 1 + (boost − 1)/2).
 - **Validator:** `npm run validate:assets` with NO directory argument (with a directory, cars are judged by the 5 k
   prop budget). The car's line must say `vehicles lod0 ✓`.
 
@@ -674,34 +802,46 @@ DARK specifics:
 
 ## 10. Verification
 
-**Universal suite** (`tests/vehicle.test.ts`): `for (const def of VEHICLES)`, every expected value computed from
-the car's own spec:
+**Universal suite** (`tests/drivetrain.test.ts`): for every car in `SPECS` (models measured from the loader), every
+expected value computed from the car's own spec. Implemented now (56 checks, all passing): settle level, heave
+frequency (damped, ± 12 %), parked on 15° (< 2 cm), hill hold, 0–100, top speed, redline, upshift rpm, kickdown (or
+none when the gear below would over-rev), steady 5° climb, TCS off / on launch on grip 0.15, 35° in low range with
+the car's lockers, skidpad, handbrake slide, braking distance (no-ABS target × 0.92), ABS steering, ESC lane change
+on dirt, 1.5 m drop, boat handoff. Not yet: the items below marked (planned).
 
 - **Static:**
   - settles level (ride height ± 2 cm, roll/pitch < 1°);
   - parked on 15°: < 0.02 m drift in 6 s;
-  - 0.5 m/s straight for 10 s: lateral < 0.05 m/s, no κ/α oscillation.
-- **Springs:** heave frequency ± 10 % of each axle's spec f; roll gradient within the class range; dive 1.5–3° at 1 g.
+  - 0.5 m/s straight for 10 s: lateral < 0.05 m/s, no κ/α oscillation (planned).
+- **Springs:** heave frequency ± 12 % of the axles' damped frequencies; roll gradient within the class range and
+  dive 1.5–3° at 1 g (planned).
 - **Powertrain:**
   - top speed = min(gearing `v_top`, drag limit) ± 5 %, and ± 10 % of `published.topSpeed`;
   - 0–100 ± 15 % of `published.zeroTo100`;
   - stepped boxes shift at upRpm(1) ± 5 %, ≤ 1 shift in 10 s on a steady 5° climb, kickdown within 0.3 s, never
     above the redline;
-  - CVT holds rpm_target ± 5 %;
-  - EV: no shifts, regen decelerates on lift.
+  - CVT holds rpm_target ± 5 % (planned: no CVT car yet);
+  - EV: no shifts, regen decelerates on lift, and the car comes to rest on the flat without rolling backwards
+    (planned: no EV yet);
+  - auto: full-throttle stall rpm with the brake held = the spec's ± 10 % (planned); off the pedals it holds still.
 - **Traction:**
   - launch on grip 0.15 → wheelspin (rim > 1.5 × ground) with TCS off, κ < 0.3 with TCS on;
-  - low range (if any) climbs 35° where high range fails;
-  - an open diff with one wheel lifted barely moves; with the locker it climbs.
+  - low range (if any) climbs 35° with the car's lockers engaged;
+  - an open diff with one wheel lifted barely moves; with the locker it climbs (planned).
 - **Grip:**
-  - skidpad lateral ≈ μ·g ± 15 % on asphalt; surfaces in the table's ratios ± 20 %;
+  - skidpad lateral ≈ μ·g ± 25 % on asphalt (tall AT-tyred trucks sit at the low end); surfaces in the table's
+    ratios ± 20 % (planned);
   - handbrake slides the rear (|α| > 15°) without rollover.
 - **Brakes:**
-  - ABS 100→0 stops straight (< 3°), distance ± 15 % of `v²/(2·maxDecel·g)`;
+  - 80→0 stops straight (< 3°) in −15 … +25 % of `v²/(2·a·g)`, a = maxDecel (× 0.92 without ABS; the pedal ramp
+    adds a few %);
   - braking while steering turns > 15° with ABS;
   - ESC (Full) lane change at 25 m/s on dirt < 35° slip.
 - **Body:** 1.5 m drop never passes through the ground.
-- **Feedback:** audio rpm = sim rpm ± 2 % through every shift; HUD gear = sim gear; 0 React re-renders per frame.
+- **Boat handoff:** deploy → retract, on land and in water: no torque reaches the wheels while `boat ≥ 0.5`, and the
+  car drives off normally afterwards.
+- **Feedback:** audio rpm = sim rpm ± 2 % through every shift; HUD gear = sim gear; 0 React re-renders per frame
+  (planned as tests; the code reads the sim directly: `TruckSim.real`).
 - **Arcade:** every existing arcade test unchanged.
 
 **Visual + cost:** `npm run dev`, then `npm run shot -- <outdir> <shots.json>`, per car (`"query": "car=<id>"`):
@@ -718,7 +858,8 @@ the car's own spec:
 ```
 
 - Compare with `main`; record the per-tier delta in ARCHITECTURE.md §6. Side-by-side against
-  `refer/roads/road-power-lines-truck.png`.
+  `refer/roads/forest-road-evening-hero.png` (required, CLAUDE.md) and `refer/roads/road-power-lines-truck.png`
+  (vehicle scale and read on the road).
 - In game: F3 (the program count must not rise), F6 (rays, colliders), `window.__game.car.sim` in DevTools.
 - Phone: `npm run dev:lan`, LOW, automatic + manual; every touch button works.
 - Probe ideas headless first: bundle a scratch `.ts` with rolldown as `test:vehicle` does.

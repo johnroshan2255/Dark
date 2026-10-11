@@ -59,6 +59,13 @@ export interface TruckModel {
   neutralColor: [number, number, number]
   /** The amphibious hull (shared by every car; fitted to this one by BoatHull). */
   hull: HullAsset
+  /** Brake hardware per axle (Blender `caliper_FL` / `caliper_RL`: disc + hat + caliper, or drum + backing plate),
+   *  in hub space of the LEFT wheel — the right side is it turned 180° (calipers at 12 o'clock: symmetric). null =
+   *  the model has none. Vertex-coloured; drawn hub + steer + suspension, never spinning (Car). */
+  brakes: { front: THREE.BufferGeometry | null; rear: THREE.BufferGeometry | null }
+  /** Rim radius / tyre radius of the wheel (glTF extra `rim` on `wheel_*`; scripts/blender/vehicle_realism.py) —
+   *  where the rubber starts for the tyre-deformation shader (`tyreW` attribute on the wheel, 0 everywhere else). */
+  rim: number
 }
 
 /** Boat hull parts in normalised hull space (scripts/blender/boat_hull.py): geometry + hinge pivot (glTF space). */
@@ -384,16 +391,54 @@ function matColor(mat: THREE.Material): { color: THREE.Color; map: THREE.Texture
   return { color, map, glass }
 }
 
-/** Geometry with only position/normal/uv/color/paintMask (so bodies merge), colour baked, uv kept only with a map. */
-function paintGeometry(g: THREE.BufferGeometry, color: THREE.Color, keepUv: boolean, paint: number): THREE.BufferGeometry {
+/**
+ * REAL PAINT (catalogue `grade`): a model's texture painted in toy-bright colours is graded toward weathered real
+ * paint — saturation × sat (around each texel's own luminance) and brightness × gain — keeping its rust, grime and
+ * detail. In place, once at load (after the paint mask and lamps have read the original), full resolution.
+ */
+function gradeTexture(tex: THREE.Texture, sat: number, gain: number): void {
+  const img = tex.image as (CanvasImageSource & { width: number; height: number }) | undefined
+  if (!img || !img.width || typeof document === 'undefined') return
+  const c = document.createElement('canvas')
+  c.width = img.width
+  c.height = img.height
+  const g = c.getContext('2d', { willReadFrequently: true })!
+  g.drawImage(img, 0, 0)
+  const px = g.getImageData(0, 0, c.width, c.height)
+  const d = px.data
+  for (let i = 0; i < d.length; i += 4) {
+    const l = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]
+    d[i] = (l + (d[i] - l) * sat) * gain
+    d[i + 1] = (l + (d[i + 1] - l) * sat) * gain
+    d[i + 2] = (l + (d[i + 2] - l) * sat) * gain
+  }
+  g.putImageData(px, 0, 0)
+  tex.image = c
+  tex.needsUpdate = true
+}
+
+/** A `tyreW` attribute of zeros (geometry drawn on the car program that is not a tyre). */
+export function zeroTyre(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  if (!g.getAttribute('tyreW')) g.setAttribute('tyreW', new THREE.BufferAttribute(new Float32Array(g.getAttribute('position').count), 1))
+  return g
+}
+
+/** Geometry with only position/normal/uv/color/paintMask (so bodies merge), colour baked, uv kept only with a map.
+ *  `keepColor`: multiply the source's own vertex colours in (parts authored with them, e.g. `caliper_*`). */
+function paintGeometry(g: THREE.BufferGeometry, color: THREE.Color, keepUv: boolean, paint: number, keepColor = false): THREE.BufferGeometry {
   const out = g.index ? g.toNonIndexed() : g.clone()
+  const src = keepColor ? (out.getAttribute('color') as THREE.BufferAttribute | undefined) : undefined
+  const srcCol = src ? Array.from({ length: src.count }, (_, i) => [src.getX(i), src.getY(i), src.getZ(i)]) : null
   for (const name of Object.keys(out.attributes)) if (!['position', 'normal', 'uv'].includes(name)) out.deleteAttribute(name)
   const n = out.getAttribute('position').count
   if (!out.getAttribute('normal')) out.computeVertexNormals()
   if (!keepUv) out.deleteAttribute('uv')
   if (!out.getAttribute('uv')) out.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(n * 2), 2))
   const col = new Float32Array(n * 3)
-  for (let i = 0; i < n; i++) color.toArray(col, i * 3)
+  for (let i = 0; i < n; i++) {
+    color.toArray(col, i * 3)
+    if (srcCol) for (let k = 0; k < 3; k++) col[i * 3 + k] *= srcCol[i][k]
+  }
   out.setAttribute('color', new THREE.BufferAttribute(col, 3))
   out.setAttribute('paintMask', new THREE.BufferAttribute(new Float32Array(n).fill(paint), 1))
   return out
@@ -451,12 +496,19 @@ function findLampsInParts(parts: { geo: THREE.BufferGeometry; color: THREE.Color
  * whole thing is normalised: metres (`def.length`), facing −Z, origin on the ground at the wheelbase centre.
  */
 function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel, 'hull'> {
+  // Models prepared by vehicle_realism.py carry baked AMBIENT OCCLUSION in their vertex colours (scene extra
+  // `vertex_ao`): multiplied into every part's material colour. (Older models' vertex colours are not trusted.)
+  const vertexAo = !!scene.userData.vertex_ao
   const meshes = bakedMeshes(scene)
+  let rim = 0.6
   const bodies: THREE.BufferGeometry[] = [], glasses: THREE.BufferGeometry[] = []
   const wheelParts: { geo: THREE.BufferGeometry; name: string }[] = []
   // Doors (FL / FR: skin, trim and their window) and the steering wheel, split out by node name (Blender prep).
   const doorParts = new Map<string, { body: THREE.BufferGeometry[]; glass: THREE.BufferGeometry[]; hinge: number[] }>()
   const steerParts: THREE.BufferGeometry[] = []
+  // Brake hardware (`caliper_<FL|FR|RL|RR>`, scripts/blender/vehicle_brakes.py): kept out of the body and of the
+  // wheel search (a drum is round and near the ground); the left corners become the per-axle geometry.
+  const brakeParts = new Map<string, THREE.BufferGeometry[]>()
   // Untextured parts: on a textured model their UVs are pointed at a neutral texel once the map is known.
   const flat: THREE.BufferGeometry[] = []
   let map: THREE.Texture | null = null
@@ -473,12 +525,20 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
       ;(door ? door.glass : glasses).push(g)
       continue
     }
+    const brakeKey = /caliper_(FL|FR|RL|RR|BL|BR)/i.exec(m.name)?.[1].toUpperCase().replace('B', 'R')
+    if (brakeKey) {
+      const g = paintGeometry(m.geo, color, !!mm, 0, true)
+      if (!mm) flat.push(g)
+      brakeParts.set(brakeKey, [...(brakeParts.get(brakeKey) ?? []), g])
+      continue
+    }
+    if (typeof m.extras.rim === 'number') rim = m.extras.rim as number
     if (mm && !map) map = mm
     const textured = !!mm
     // Door insides / cabin interior: dark trim, never painted (textured: the texture darkened).
     const inner = /inner|interior/i.test(m.mat.name)
-    const paint = inner ? 0 : def.paintRegex ? (def.paintRegex.test(m.mat.name) ? 1 : 0) : 1
-    const g = paintGeometry(m.geo, textured ? new THREE.Color(inner ? 0.3 : 1, inner ? 0.3 : 1, inner ? 0.3 : 1) : color, textured, paint)
+    const paint = inner || /^(wheel_|caliper_|acc_)/i.test(m.name) ? 0 : def.paintRegex ? (def.paintRegex.test(m.mat.name) ? 1 : 0) : 1
+    const g = paintGeometry(m.geo, textured ? new THREE.Color(inner ? 0.3 : 1, inner ? 0.3 : 1, inner ? 0.3 : 1) : inner ? color.clone().multiplyScalar(0.35) : color, textured, paint, (vertexAo && !inner) || /^wheel_/i.test(m.name)) // (a big-triangle cabin liner would draw AO gradients as X shapes)
     if (!textured) flat.push(g)
     if (def.wheelRegex && def.wheelRegex.test(m.name)) wheelParts.push({ geo: g, name: m.name })
     else if (door) door.body.push(g)
@@ -488,9 +548,14 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   const neutral = map ? neutralTexel(map) : { uv: [0, 0] as [number, number], color: [1, 1, 1] as [number, number, number] }
   const neutralUv = neutral.uv
   if (map) {
+    // Untextured parts sample the neutral texel: point their UVs at it and divide its tint out of their colours,
+    // so each shows its own colour (rubber stays black, chrome stays chrome).
+    const [nr, ng, nb] = neutral.color.map((c) => 1 / Math.max(0.1, c))
     for (const g of flat) {
       const uv = g.getAttribute('uv') as THREE.BufferAttribute
       for (let i = 0; i < uv.count; i++) uv.setXY(i, neutralUv[0], neutralUv[1])
+      const c = g.getAttribute('color') as THREE.BufferAttribute
+      for (let i = 0; i < c.count; i++) c.setXYZ(i, c.getX(i) * nr, c.getY(i) * ng, c.getZ(i) * nb)
     }
   }
   let body = mergeGeometries(bodies, false)!
@@ -579,6 +644,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   for (const l of lampParts) l.geo.applyMatrix4(norm)
   for (const w of wheels) (w.c.applyMatrix4(norm), (w.r *= k), w.geo.applyMatrix4(norm))
   for (const d of doorGeo) (d.body.applyMatrix4(norm), d.glass?.applyMatrix4(norm), d.hinge.applyMatrix4(norm))
+  const brakeGeo = new Map([...brakeParts.entries()].map(([k, parts]) => [k, mergeGeometries(parts, false)!.applyMatrix4(norm)]))
   // Ground = wheel bottoms; origin = wheelbase centre.
   const groundY = Math.min(...wheels.map((w) => w.c.y - w.r))
   const cx = wheels.reduce((a, w) => a + w.c.x, 0) / 4, cz = wheels.reduce((a, w) => a + w.c.z, 0) / 4
@@ -587,6 +653,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   glass.applyMatrix4(shift)
   for (const l of lampParts) l.geo.applyMatrix4(shift)
   for (const w of wheels) (w.c.applyMatrix4(shift), w.geo.applyMatrix4(shift))
+  for (const g of brakeGeo.values()) g.applyMatrix4(shift)
   if (steeringWheel) pivot.applyMatrix4(shift)
   // Doors: into door space (hinge at the origin). Closed-door bounds still count for the body box below.
   const outline = new THREE.Box3()
@@ -609,6 +676,30 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   const wheel = fl.geo.clone().translate(-fl.c.x, -fl.c.y, -fl.c.z)
   const pick = (sx: number, sz: number) => wheels.reduce((a, b) => (b.c.x * sx + b.c.z * sz > a.c.x * sx + a.c.z * sz ? b : a))
   const wheelPos = [pick(-1, -1), pick(1, -1), pick(-1, 1), pick(1, 1)].map((w) => [w.c.x, w.c.y, w.c.z] as [number, number, number])
+  // Brakes into the left hubs' space; their vertex colours divided by the neutral texel they sample (textured
+  // models), so the part shows its own colour.
+  const hubBrake = (key: string, hub: [number, number, number]): THREE.BufferGeometry | null => {
+    const g = brakeGeo.get(key)
+    if (!g) return null
+    g.translate(-hub[0], -hub[1], -hub[2])
+    g.computeBoundingSphere()
+    return g
+  }
+  const brakes = { front: hubBrake('FL', wheelPos[0]), rear: hubBrake('RL', wheelPos[2]) }
+  for (const [k, g] of brakeGeo) if (k !== 'FL' && k !== 'RL') g.dispose()
+  // TYRE WEIGHT per vertex (the deformation shader flattens and bulges only the rubber): 0 inside the rim, rising
+  // over the bead to 1 on the sidewall and tread. Every other geometry on the car program gets 0 (§6: a program's
+  // attributes must exist on all of its geometries).
+  {
+    const p = wheel.getAttribute('position'), tw = new Float32Array(p.count)
+    const rimR = rim * fl.r, top = rimR + 0.35 * (fl.r - rimR)
+    for (let i = 0; i < p.count; i++) {
+      const t = Math.min(1, Math.max(0, (Math.hypot(p.getY(i), p.getZ(i)) - rimR * 1.04) / Math.max(1e-4, top - rimR * 1.04)))
+      tw[i] = t * t * (3 - 2 * t)
+    }
+    wheel.setAttribute('tyreW', new THREE.BufferAttribute(tw, 1))
+  }
+  for (const g of [body, steeringWheel, brakes.front, brakes.rear, ...doors.map((d) => d.body)]) if (g) zeroTyre(g)
   for (const g of [body, wheel, glass, steeringWheel]) if (g) (g.computeBoundingBox(), g.computeBoundingSphere())
   const bb = body.boundingBox!.clone()
   if (doors.length) bb.union(outline)
@@ -623,6 +714,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   lampParts.forEach((l) => l.geo.dispose())
   meshes.forEach((m) => m.geo.dispose())
   all.dispose()
+  if (map && def.grade) gradeTexture(map, def.grade.sat, def.grade.gain)
   return {
     id: def.id,
     body, glass, wheel, wheelPos,
@@ -639,6 +731,8 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
     steeringRadius,
     neutralUv,
     neutralColor: neutral.color,
+    brakes,
+    rim,
   }
 }
 

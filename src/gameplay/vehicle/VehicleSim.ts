@@ -1,5 +1,8 @@
 import type RAPIER from '@dimforge/rapier3d-compat'
 import { group, Groups, type PhysicsWorld } from '../../physics/PhysicsWorld'
+import { Drivetrain, type ChassisIn, type WheelIn } from './drivetrain/Drivetrain'
+import type { Resolved } from './drivetrain/spec'
+import { TYRE_KINDS, gripFor, roughness, surfaceMix, type SurfaceMix } from './drivetrain/tyre'
 
 /**
  * VEHICLE SIMULATION (no rendering — tested in Node, tests/vehicle.test.ts). Both vehicles are real Rapier
@@ -19,6 +22,10 @@ import { group, Groups, type PhysicsWorld } from '../../physics/PhysicsWorld'
  */
 const GRAVITY = 20 // world gravity (PhysicsWorld): 2× real for snappy jumps — forces below are tuned for it
 const RAY_GROUPS = group(0xffff, Groups.Terrain | Groups.Static)
+/** Real gravity: the realistic drivetrain runs the car at 9.81 (body gravity scale) so real numbers work unchanged. */
+const G_REAL = 9.81
+/** The steepest slope the climb assist lets the tyres feel (rad, ≈ 26°). */
+const SLOPE_EFF = 0.45
 
 export interface Controls {
   /** Nobody at the controls (parked): the brakes are locked and it never creeps or rolls away. */
@@ -77,7 +84,11 @@ abstract class VehicleBase {
   readonly preVel = { x: 0, y: 0, z: 0 }
   protected steerAngle = 0
   protected readonly R: typeof RAPIER
-  private readonly sag: number
+  /** Per wheel: suspension rest length (without the air-suspension ride) and static sag — the rendered `lift`. */
+  protected readonly restW: number[]
+  protected readonly sagW: number[]
+  /** Per wheel: the ground-roughness bump under it this step (m, + = the ground is higher) — the wheel rides it. */
+  protected readonly bumpW = [0, 0, 0, 0, 0, 0, 0, 0]
 
   constructor(
     protected readonly physics: PhysicsWorld,
@@ -100,9 +111,11 @@ abstract class VehicleBase {
     const s = spec.suspension
     // Static sag: all wheels share the weight → k·x·m·n = m·g ⇒ x = g / (n·k). Mount the ray so the wheel sits
     // at its design hub height when the truck rests on flat ground.
-    this.sag = GRAVITY / (spec.wheels.length * s.stiffness)
+    const sag = GRAVITY / (spec.wheels.length * s.stiffness)
+    this.restW = spec.wheels.map(() => s.rest)
+    this.sagW = spec.wheels.map(() => sag)
     spec.wheels.forEach((w, i) => {
-      vc.addWheel({ x: w.hub[0], y: w.hub[1] + s.rest - this.sag, z: w.hub[2] }, { x: 0, y: -1, z: 0 }, { x: 1, y: 0, z: 0 }, s.rest, w.radius)
+      vc.addWheel({ x: w.hub[0], y: w.hub[1] + s.rest - sag, z: w.hub[2] }, { x: 0, y: -1, z: 0 }, { x: 1, y: 0, z: 0 }, s.rest, w.radius)
       vc.setWheelSuspensionStiffness(i, s.stiffness)
       vc.setWheelSuspensionCompression(i, s.compression)
       vc.setWheelSuspensionRelaxation(i, s.relaxation)
@@ -189,8 +202,8 @@ abstract class VehicleBase {
     let rim = 0
     for (let i = 0; i < this.wheels.length; i++) {
       const w = this.wheels[i]
-      const len = this.vc.wheelSuspensionLength(i) ?? this.spec.suspension.rest
-      w.lift = this.spec.suspension.rest - this.sag - len
+      const len = this.vc.wheelSuspensionLength(i) ?? this.restW[i]
+      w.lift = this.restW[i] - this.sagW[i] - len + this.bumpW[i]
       const spin = this.vc.wheelRotation(i) ?? 0
       rim += ((spin - w.spin) / dt) * this.spec.wheels[i].radius
       w.spin = spin
@@ -264,6 +277,7 @@ export class TruckSim extends VehicleBase {
   private readonly colliders: RAPIER.Collider[] = []
   private readonly massShare = [0.85, 0.1, 0.05]
   private readonly baseRadius: number
+  private readonly dims: TruckDims
   /** Drift state. `lateral`: sideways speed of the chassis (m/s, + = sliding to the right); `drift`: smoothed
    *  0..1 slide amount (camera / audio / HUD); `wheelSlip[i]`: 0..1 tyre slip per wheel (tyre smoke, dust). */
   lateral = 0
@@ -272,8 +286,8 @@ export class TruckSim extends VehicleBase {
   readonly wheelSlip = [0, 0, 0, 0]
   private driftHold = 0
   /**
-   * ARCADE handling (Asphalt-style; the game's default, Settings → Handling): Rapier still does suspension,
-   * contacts and crashes, but the feel is scripted — punchy acceleration to a high top speed, the car goes where
+   * ARCADE handling (Asphalt-style option, Settings → Handling; the default is the realistic model): Rapier
+   * still does suspension, contacts and crashes, but the feel is scripted — punchy acceleration to a high top speed, the car goes where
    * it points (no understeer), DRIFT by tapping the brake (or the handbrake) while steering at speed: the slide
    * holds a 20–45° angle, keeps its speed and fills the NITRO bar; nitro (Shift / BOOST) burns it for a big kick;
    * in the air the car levels itself and lands on its wheels; it practically never rolls. Off = the realistic
@@ -312,6 +326,8 @@ export class TruckSim extends VehicleBase {
     })
     this.tune = t
     this.baseRadius = d.wheelRadius
+    this.dims = d
+    this.mode = 'legacy'
     // Keep the colliders for live retuning (mass).
     for (let i = 0; i < this.body.numColliders(); i++) this.colliders.push(this.body.collider(i))
   }
@@ -401,6 +417,7 @@ export class TruckSim extends VehicleBase {
    * toward upright and the stick yaws it a little.
    */
   protected afterWheels(dt: number, v: number): void {
+    if (this.mode === 'drivetrain') return this.afterReal(dt)
     if (!this.arcade || this.boat >= 0.5) return
     const { f, u, r } = this.axes()
     const lv = this.body.linvel(), w = this.body.angvel()
@@ -449,21 +466,395 @@ export class TruckSim extends VehicleBase {
     void v
   }
 
-  /** Change the setup live (garage sliders): mass, springs, grip and tyre size go straight to Rapier. */
+  /** Change the setup live (garage sliders): mass, springs, grip and tyre size go straight to Rapier (or, with
+   *  the drivetrain active, into its spec-derived setup). */
   retune(t: Partial<TruckTune>): void {
     Object.assign(this.tune, t)
+    if (this.mode === 'drivetrain') return this.configure('drivetrain')
+    if (this.mode !== 'legacy') return
     if (t.mass !== undefined) this.colliders.forEach((c, i) => c.setMass(this.tune.mass * (this.massShare[i] ?? 0)))
     for (let i = 0; i < 4; i++) {
       if (t.suspension !== undefined) this.vc.setWheelSuspensionStiffness(i, this.tune.suspension)
       if (t.grip !== undefined) this.vc.setWheelFrictionSlip(i, this.tune.grip)
-      if (t.tyre !== undefined) {
+      if (t.tyre !== undefined || t.suspension !== undefined) {
         const r = this.baseRadius * this.tune.tyre
         this.vc.setWheelRadius(i, r)
         const hub = this.spec.wheels[i].hub
-        const sag = GRAVITY / (4 * this.tune.suspension)
+        const sag = (this.sagW[i] = GRAVITY / (4 * this.tune.suspension))
         this.vc.setWheelChassisConnectionPointCs(i, { x: hub[0], y: hub[1] + (r - this.baseRadius) + this.spec.suspension.rest - sag, z: hub[2] })
       }
     }
+  }
+
+  // ======================= REALISTIC DRIVETRAIN (skills/realistic-vehicle-system) =======================
+
+  /**
+   * The car's spec-driven drivetrain (`setDrivetrain`), or null = the legacy realistic model. It runs whenever the
+   * car is on its wheels in Simulation handling: not arcade, not flying, hull folded away (boat = 0) — the boat
+   * and hover handling keep their own model and Rapier setup, and hand back here when they end.
+   */
+  drivetrain: Drivetrain | null = null
+  /** The car's stock setup: the garage sliders scale the spec relative to it (power, mass, grip, springs). */
+  private ref: TruckTune = { ...STOCK_TRUCK }
+  private mode: 'legacy' | 'drivetrain' | 'none' = 'none'
+  /** Surface under a world point (x, z) → weights + wetness. Set by Car; tests leave it on asphalt. */
+  surface: (x: number, z: number, out: SurfaceMix) => void = () => {}
+  private readonly mixes: SurfaceMix[] = []
+  private surfI = 0
+  private readonly wIn: WheelIn[] = []
+  private readonly chIn: ChassisIn = { speed: 0, yawRate: 0, latAccel: 0, pitch: 0, g: G_REAL, rearVy: 0 }
+  private readonly arb: number[] = []
+  private readonly travelW: number[] = []
+  private readonly kBump: number[] = []
+  private readonly fc = [0, 0, 0]
+  private readonly lc = [0, 0, 0]
+
+  /** Install (or remove, null) the spec-driven drivetrain; `stock` = the catalogue's stock tuning. */
+  setDrivetrain(R: Resolved | null, stock?: TruckTune): void {
+    this.drivetrain = R ? new Drivetrain(R) : null
+    if (stock) this.ref = { ...stock }
+    this.mixes.length = this.wIn.length = 0
+    for (let i = 0; i < 4; i++) {
+      this.mixes.push(surfaceMix())
+      this.wIn.push({ contact: false, Fz: 0, vx: 0, vy: 0, gx: 0, gy: 0, sx: 0, sy: 0, hx: 0, hy: 0 })
+    }
+    this.mode = 'none'
+  }
+
+  /** The drivetrain while it is the model driving the car (Simulation handling, on the wheels), else null —
+   *  what the HUD, audio and effects read (the SIM owns every number). */
+  get real(): Drivetrain | null {
+    return this.mode === 'drivetrain' ? this.drivetrain : null
+  }
+
+  /** Tyre noise from the drivetrain (Simulation handling, null otherwise): the worst slide angle and wheelspin /
+   *  lock of the wheels on the ground, and what they stand on (hard / gravel / soft shares). Reused object. */
+  tyreNoise(): { slide: number; spin: number; hard: number; gravel: number; soft: number } | null {
+    const D = this.real
+    if (!D) return null
+    const t = this.noiseOut
+    t.slide = t.spin = t.hard = t.gravel = t.soft = 0
+    let n = 0
+    for (let i = 0; i < 4; i++) {
+      if (!this.wIn[i].contact) continue
+      n++
+      t.slide = Math.max(t.slide, Math.min(1, Math.abs(D.alpha[i]) / 0.5))
+      t.spin = Math.max(t.spin, Math.min(1, Math.abs(D.kappa[i]) / 0.6))
+      const w = this.mixes[i].w
+      t.hard += w[0] + w[5]
+      t.gravel += w[1]
+      t.soft += w[2] + w[3] + w[4]
+    }
+    if (n) (t.hard /= n), (t.gravel /= n), (t.soft /= n)
+    else t.hard = 1
+    return t
+  }
+  private readonly noiseOut = { slide: 0, spin: 0, hard: 1, gravel: 0, soft: 0 }
+
+  /**
+   * OFF-ROAD ASSIST (gameplay, Settings; off = the real machine, as the tests drive it): engine torque × 1.6, and on
+   * steep ground (slope > 20°, from the contact normals) a CLIMB ASSIST — torque up to × 2.2, 4H engaged, 1st held
+   * at a crawl, and the slope limiter (afterReal): the tyres never feel more than ~26°.
+   */
+  offroadAssist = false
+
+  /** Which model drives the car this step. */
+  private wantMode(): 'legacy' | 'drivetrain' {
+    return this.drivetrain && !this.arcade && !this.hover && this.boat === 0 ? 'drivetrain' : 'legacy'
+  }
+
+  /**
+   * Set Rapier up for a model: DRIVETRAIN = real gravity (9.81 via the gravity scale), the spec's mass, COM and
+   * inertia, per-axle springs from the ride frequency and damping ratio (Rapier multiplies them by the chassis
+   * mass: k = s_w(2πf)², c = 2ζ√(k·s_w), sag = g/(2πf)²), and NO tyre friction (the drivetrain's tyre forces
+   * replace it). LEGACY = the original setup (world gravity, collider masses, Rapier friction).
+   */
+  private configure(mode: 'legacy' | 'drivetrain'): void {
+    const vc = this.vc, body = this.body
+    const prev = this.mode
+    this.mode = mode
+    if (mode === 'legacy') {
+      this.bumpW.fill(0)
+      body.setGravityScale(1, true)
+      body.setLinearDamping(0.02)
+      body.setAngularDamping(0.4)
+      body.setAdditionalMassProperties(0, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0, w: 1 }, true)
+      this.colliders.forEach((c, i) => c.setMass(this.tune.mass * (this.massShare[i] ?? 0)))
+      const s = this.spec.suspension
+      const r = this.baseRadius * this.tune.tyre
+      for (let i = 0; i < 4; i++) {
+        const hub = this.spec.wheels[i].hub
+        const sag = (this.sagW[i] = GRAVITY / (4 * this.tune.suspension))
+        this.restW[i] = s.rest
+        vc.setWheelRadius(i, r)
+        vc.setWheelSuspensionRestLength(i, s.rest + this.ride)
+        vc.setWheelMaxSuspensionTravel(i, s.travel)
+        vc.setWheelSuspensionStiffness(i, this.tune.suspension)
+        vc.setWheelSuspensionCompression(i, s.compression)
+        vc.setWheelSuspensionRelaxation(i, s.relaxation)
+        vc.setWheelMaxSuspensionForce(i, this.tune.mass * GRAVITY * 3)
+        vc.setWheelFrictionSlip(i, this.tune.grip)
+        vc.setWheelSideFrictionStiffness(i, 0.55)
+        vc.setWheelChassisConnectionPointCs(i, { x: hub[0], y: hub[1] - this.baseRadius + r + s.rest - sag, z: hub[2] })
+      }
+      return
+    }
+    const D = this.drivetrain!, R = D.R, M = R.mass * (this.tune.mass / this.ref.mass)
+    body.setGravityScale(G_REAL / GRAVITY, true)
+    // No numerical damping beyond a trace: drag and rolling resistance are simulated.
+    body.setLinearDamping(0)
+    body.setAngularDamping(0.05)
+    // Mass, COM (spec height and front share) and inertia of the body box (mass concentrated toward the middle).
+    for (const c of this.colliders) c.setMass(1e-3)
+    const h = this.dims.half
+    const L = 2 * h.z * 0.85, W = 2 * h.x * 0.85, H = 2 * h.y * 0.6
+    body.setAdditionalMassProperties(
+      M,
+      { x: 0, y: R.comHeight, z: R.comZ },
+      { x: (M / 12) * (H * H + L * L), y: (M / 12) * (W * W + L * L), z: (M / 12) * (W * W + H * H) },
+      { x: 0, y: 0, z: 0, w: 1 },
+      true,
+    )
+    const fScale = Math.sqrt(Math.max(0.3, this.tune.suspension / this.ref.suspension))
+    D.gripScale = this.tune.grip / this.ref.grip
+    D.powerScale = this.tune.power / this.ref.power
+    D.boostFactor = 1 + (this.tune.boost - 1) * 0.5
+    D.retuneBrakes(M)
+    const r = this.baseRadius * this.tune.tyre
+    for (let i = 0; i < 4; i++) {
+      const ax = R.axles[i >> 1]
+      ax.radius = r
+      const sw = ax.share / 2
+      const w = 2 * Math.PI * ax.freq * fScale
+      const k = sw * w * w
+      const sag = G_REAL / (w * w)
+      const travel = sag + 0.55 * ax.travel
+      const rest = travel + 0.1
+      this.sagW[i] = sag
+      this.restW[i] = rest
+      this.travelW[i] = travel
+      this.arb[i] = ax.arb * fScale * fScale
+      this.kBump[i] = (64 * sw * M * G_REAL) / (ax.travel * ax.travel)
+      const hub = this.spec.wheels[i].hub
+      vc.setWheelRadius(i, r)
+      vc.setWheelSuspensionRestLength(i, rest + this.ride)
+      vc.setWheelMaxSuspensionTravel(i, travel)
+      vc.setWheelSuspensionStiffness(i, k)
+      vc.setWheelSuspensionCompression(i, (this.dampB[i] = 2 * ax.zeta[0] * Math.sqrt(k * sw)))
+      vc.setWheelSuspensionRelaxation(i, 2 * ax.zeta[1] * Math.sqrt(k * sw))
+      vc.setWheelMaxSuspensionForce(i, M * G_REAL * 8)
+      vc.setWheelFrictionSlip(i, 0)
+      vc.setWheelSideFrictionStiffness(i, 0)
+      vc.setWheelEngineForce(i, 0)
+      vc.setWheelBrake(i, 0)
+      vc.setWheelChassisConnectionPointCs(i, { x: hub[0], y: hub[1] - this.baseRadius + r + rest - sag, z: hub[2] })
+    }
+    if (prev !== 'drivetrain') {
+      // Taking over (start, after the boat or the flight): wheels roll with the ground, the box in gear.
+      for (let i = 0; i < 4; i++) D.omega[i] = this.speed / r
+      D.reset()
+    }
+  }
+
+  /** Drivetrain mode, before the raycast update: the wheels' steering (for their axles); Rapier drives nothing. */
+  private driveReal(dt: number): void {
+    const D = this.drivetrain!, vc = this.vc
+    for (let i = 0; i < 4; i++) {
+      vc.setWheelSteering(i, -D.steer[i])
+      // GROUND ROUGHNESS (drivetrain/tyre.ts): the terrain mesh is smooth at wheel scale, so each wheel rides the
+      // bumps, ruts and stones of its surface here — the rest length grows by the bump height (the spring sees
+      // the ground raised exactly as a taller ray hit would), the rendered wheel lifts by it, and its rate goes
+      // to the damper in afterReal.
+      const p = vc.wheelHardPoint(i)
+      const h = p && vc.wheelIsInContact(i) ? roughness(p.x, p.z, this.mixes[i]) : this.bumpW[i] * 0.8
+      this.bumpRate[i] = dt > 0 ? (h - this.bumpW[i]) / dt : 0
+      this.bumpW[i] = h
+      vc.setWheelSuspensionRestLength(i, this.restW[i] + this.ride + h)
+    }
+    this.steerAngle = (D.steer[0] + D.steer[1]) / 2
+  }
+  private readonly bumpRate = [0, 0, 0, 0]
+  /** Damper rate per wheel (per kg of chassis, Rapier's units) in bump — for the bump-rate force. */
+  private readonly dampB: number[] = []
+
+  /**
+   * Drivetrain mode, after the raycast update (fresh contacts and spring forces): per wheel the load (spring +
+   * anti-roll bar + bump stop), contact frame, patch velocity and surface → Drivetrain.step → its tyre forces at
+   * the contact points; aero drag at the COM.
+   */
+  private afterReal(dt: number): void {
+    const D = this.drivetrain!, vc = this.vc, body = this.body, R = D.R
+    const { f, u, r: rt } = this.axes()
+    const lv = body.linvel(), w = body.angvel()
+    const com = body.worldCom()
+    const t = body.translation(), q = body.rotation()
+    // Surfaces: one wheel per step (deterministic), its grip re-blended.
+    const si = this.surfI = (this.surfI + 1) % 4
+    {
+      const p = vc.wheelHardPoint(si) ?? t
+      this.surface(p.x, p.z, this.mixes[si])
+      gripFor(TYRE_KINDS[R.axles[si >> 1].tyreKind], this.mixes[si], D.gripScale, D.grips[si])
+    }
+    // Suspension compression → anti-roll bars + bump stops.
+    const x = _x
+    for (let i = 0; i < 4; i++) x[i] = this.restW[i] + this.ride + this.bumpW[i] - (vc.wheelSuspensionLength(i) ?? this.restW[i] + this.ride)
+    let contacts = 0
+    for (let i = 0; i < 4; i++) {
+      const wi = this.wIn[i]
+      wi.contact = vc.wheelIsInContact(i)
+      if (!wi.contact) {
+        wi.Fz = wi.vx = wi.vy = wi.gx = wi.gy = wi.sx = wi.sy = wi.hx = wi.hy = 0
+        continue
+      }
+      contacts++
+      const pair = i ^ 1
+      const arbF = this.arb[i] * (x[i] - x[pair])
+      const bz = x[i] - (this.sagW[i] + 0.75 * (this.travelW[i] - this.sagW[i]))
+      const bump = bz > 0 ? this.kBump[i] * bz * bz : 0
+      // The damper also feels the bump's own rate (Rapier's only sees its ray): a sharp stone kicks.
+      const M = this.body.mass()
+      const kick = Math.max(-M * G_REAL, Math.min(M * G_REAL * 2, (this.dampB[i] ?? 0) * M * this.bumpRate[i]))
+      const hp = vc.wheelHardPoint(i)
+      if (hp && (arbF !== 0 || bump > 0 || kick !== 0)) {
+        const F = arbF + bump + kick
+        _fv.x = u[0] * F; _fv.y = u[1] * F; _fv.z = u[2] * F
+        body.addForceAtPoint(_fv, hp, true)
+      }
+      wi.Fz = Math.max(0, (vc.wheelSuspensionForce(i) ?? 0) + arbF + bump + kick)
+      // Contact frame: the wheel's heading (steered) in the ground plane, and its right.
+      const n = vc.wheelContactNormal(i) ?? { x: u[0], y: u[1], z: u[2] }
+      const d = D.steer[i], cd = Math.cos(d), sd = Math.sin(d)
+      const fx = f[0] * cd + rt[0] * sd, fy = f[1] * cd + rt[1] * sd, fz = f[2] * cd + rt[2] * sd
+      const dn = fx * n.x + fy * n.y + fz * n.z
+      const fc = this.fc, lc = this.lc
+      fc[0] = fx - n.x * dn; fc[1] = fy - n.y * dn; fc[2] = fz - n.z * dn
+      const fl = Math.hypot(fc[0], fc[1], fc[2]) || 1
+      fc[0] /= fl; fc[1] /= fl; fc[2] /= fl
+      lc[0] = fc[1] * n.z - fc[2] * n.y; lc[1] = fc[2] * n.x - fc[0] * n.z; lc[2] = fc[0] * n.y - fc[1] * n.x
+      const p = vc.wheelContactPoint(i) ?? t
+      const rx = p.x - com.x, ry = p.y - com.y, rz = p.z - com.z
+      const vx = lv.x + w.y * rz - w.z * ry, vy = lv.y + w.z * rx - w.x * rz, vz = lv.z + w.x * ry - w.y * rx
+      wi.vx = vx * fc[0] + vy * fc[1] + vz * fc[2]
+      wi.vy = vx * lc[0] + vy * lc[1] + vz * lc[2]
+      // Travel + yaw only (ω about the ground normal), for the static hold.
+      const wn = w.x * n.x + w.y * n.y + w.z * n.z
+      const hx = lv.x + wn * (n.y * rz - n.z * ry), hy = lv.y + wn * (n.z * rx - n.x * rz), hz = lv.z + wn * (n.x * ry - n.y * rx)
+      wi.hx = hx * fc[0] + hy * fc[1] + hz * fc[2]
+      wi.hy = hx * lc[0] + hy * lc[1] + hz * lc[2]
+      wi.gx = -G_REAL * fc[1]
+      wi.gy = -G_REAL * lc[1]
+      // Our anti-roll-bar and bump-stop forces push along the body's up axis (Rapier's springs act along the
+      // contact normal): their in-plane part, for the static hold to cancel.
+      const Fb = arbF + bump + kick
+      wi.sx = Fb * (u[0] * fc[0] + u[1] * fc[1] + u[2] * fc[2])
+      wi.sy = Fb * (u[0] * lc[0] + u[1] * lc[1] + u[2] * lc[2])
+      _cf[i * 6] = fc[0]; _cf[i * 6 + 1] = fc[1]; _cf[i * 6 + 2] = fc[2]
+      _cf[i * 6 + 3] = lc[0]; _cf[i * 6 + 4] = lc[1]; _cf[i * 6 + 5] = lc[2]
+      _cp[i * 3] = p.x; _cp[i * 3 + 1] = p.y; _cp[i * 3 + 2] = p.z
+    }
+    // CLIMB ASSIST — a slope limiter (off-road assist): on ground steeper than SLOPE_EFF the steeper part of the
+    // slope is cancelled at the COM — an uphill force for the extra pull, a press into the ground for the missing
+    // normal load — so the tyres, diffs and gearbox meet at most a ~26° hill: any car crawls up (or down) an 80°
+    // wall in 1st, holds still on it, and nothing acts below the COM to flip it.
+    let steep = 0
+    if (this.offroadAssist && contacts >= 2) {
+      let nx = 0, ny = 0, nz = 0, nn = 0
+      for (let i = 0; i < 4; i++) {
+        if (!this.wIn[i].contact) continue
+        const cn = vc.wheelContactNormal(i)
+        if (cn) (nx += cn.x), (ny += cn.y), (nz += cn.z), nn++
+      }
+      if (nn) (nx /= nn), (ny /= nn), (nz /= nn)
+      const slope = Math.acos(Math.max(-1, Math.min(1, ny || 1)))
+      steep = Math.max(0, Math.min(1, (slope - 0.35) / 0.2))
+      // The slope the tyres may feel: ≤ 26°, and no more than the DRIVEN tyres can hold here (70 % of their grip on
+      // their share of the load) — a rear-drive van on road tyres on wet grass gets a gentler wall than a 4×4.
+      let mu = 0, ds = 0
+      for (let i = 0; i < 4; i++) if (this.wIn[i].contact) mu += D.grips[i].mu / Math.max(1, nn)
+      for (let a = 0; a < R.axles.length; a++) if (D.isDrivenAxle(a)) ds += R.axles[a].share
+      const eff = Math.min(SLOPE_EFF, Math.atan(0.7 * mu * Math.min(1, ds)))
+      if (slope > eff) {
+        const M = body.mass(), g = G_REAL
+        const sinT = Math.sin(slope), cosT = Math.cos(slope)
+        const sinE = Math.sin(eff), cosE = Math.cos(eff)
+        const tl = Math.hypot(nx, nz) || 1
+        // uphill unit vector in the slope plane
+        const ux = (-nx / tl) * cosT, uy = sinT, uz = (-nz / tl) * cosT
+        const lift = M * g * (sinT - sinE), press = M * g * (cosE - cosT)
+        body.addForce({ x: lift * ux - press * nx, y: lift * uy - press * ny, z: lift * uz - press * nz }, true)
+        // The tyres' static hold must only cancel what is left of the slope's pull.
+        const k = sinE / sinT
+        for (let i = 0; i < 4; i++) if (this.wIn[i].contact) (this.wIn[i].gx *= k), (this.wIn[i].gy *= k)
+      }
+    }
+    D.torqueBoost = this.offroadAssist ? 1.6 + 0.6 * steep : 1
+    D.steepClimb = steep > 0.3
+    // 4WD for the climb: a part-time 4×4 into 4H, a permanent one locks its centre (what its driver would do).
+    if (D.steepClimb && R.drive.lockers.includes('centre')) D.locks.add('centre')
+    // Chassis state for steering, shift logic and aids.
+    const ch = this.chIn
+    ch.speed = lv.x * f[0] + lv.y * f[1] + lv.z * f[2]
+    ch.yawRate = -(w.x * u[0] + w.y * u[1] + w.z * u[2])
+    ch.latAccel = ch.speed * ch.yawRate
+    ch.pitch = Math.asin(Math.max(-1, Math.min(1, f[1])))
+    // Rear axle centre's sideways velocity (counter-steer help).
+    rotate(q, 0, 0, R.axles[R.axles.length - 1].z, _rv)
+    const ax = t.x + _rv[0] - com.x, ay = t.y + _rv[1] - com.y, az = t.z + _rv[2] - com.z
+    ch.rearVy = (lv.x + w.y * az - w.z * ay) * rt[0] + (lv.y + w.z * ax - w.x * az) * rt[1] + (lv.z + w.x * ay - w.y * ax) * rt[2]
+    const c = this.controls
+    D.nitro = c.boost
+    D.step(dt, { throttle: c.throttle, steer: c.steer, handbrake: c.handbrake, boost: c.boost, parked: !!c.parked }, ch, this.wIn)
+    // Tyre forces at the contact points.
+    for (let i = 0; i < 4; i++) {
+      if (!this.wIn[i].contact) continue
+      const Fx = D.Fx[i], Fy = D.Fy[i]
+      _fv.x = _cf[i * 6] * Fx + _cf[i * 6 + 3] * Fy
+      _fv.y = _cf[i * 6 + 1] * Fx + _cf[i * 6 + 4] * Fy
+      _fv.z = _cf[i * 6 + 2] * Fx + _cf[i * 6 + 5] * Fy
+      _pv.x = _cp[i * 3]; _pv.y = _cp[i * 3 + 1]; _pv.z = _cp[i * 3 + 2]
+      body.addForceAtPoint(_fv, _pv, true)
+    }
+    // Aero drag ½ρ·C_dA·v² at the COM.
+    const sp = Math.hypot(lv.x, lv.y, lv.z)
+    if (sp > 0.1) {
+      const drag = 0.5 * 1.2 * R.cdA * sp
+      body.addForce({ x: -lv.x * drag, y: -lv.y * drag, z: -lv.z * drag }, true)
+    }
+    // Effects / camera / audio read these.
+    this.lateral = lv.x * rt[0] + lv.y * rt[1] + lv.z * rt[2]
+    const av = Math.abs(ch.speed)
+    const slipAngle = Math.atan2(Math.abs(this.lateral), Math.max(av, 0.5))
+    this.drifting = av > 5 && slipAngle > 0.3 && contacts >= 2
+    this.drift += ((this.drifting ? Math.min(1, slipAngle / 0.6) : 0) - this.drift) * Math.min(1, dt * 8)
+    for (let i = 0; i < 4; i++) this.wheelSlip[i] = D.slip[i]
+    // Auto-righting (game rule, as in the legacy model).
+    this.upsideDown = u[1] < 0.35 && av < 2 && this.wheels.filter((x) => x.contact).length < 2 ? this.upsideDown + dt : 0 // (on its wheels on a steep wall is not "upside down")
+    if (this.upsideDown > 2) {
+      this.place(t.x, t.y + 1.2, t.z, this.heading)
+      this.upsideDown = 0
+      D.reset()
+    }
+  }
+
+  place(x: number, y: number, z: number, heading: number, pitch = 0): void {
+    super.place(x, y, z, heading, pitch)
+    this.drivetrain?.reset()
+  }
+
+  /** Wheel k's tyre load (N) — the drivetrain's (spring + bar + bump stop + kick), else Rapier's spring force —
+   *  and its static share (N), for the tyre-deformation shader (Car). */
+  wheelLoad(k: number): number {
+    if (this.mode === 'drivetrain') return this.wIn[k]?.Fz ?? 0
+    return this.vc.wheelIsInContact(k) ? Math.max(0, this.vc.wheelSuspensionForce(k) ?? 0) * (G_REAL / GRAVITY) : 0
+  }
+  wheelLoadStatic(k: number): number {
+    const D = this.drivetrain
+    if (this.mode === 'drivetrain' && D) return (D.mass * G_REAL * D.R.axles[k >> 1].share) / 2
+    return (this.tune.mass * G_REAL) / 4
+  }
+  /** Sideways tyre force of wheel k (N, + right) — the tyre shear on HIGH. 0 outside the drivetrain. */
+  wheelSide(k: number): number {
+    return this.mode === 'drivetrain' && this.drivetrain ? this.drivetrain.Fy[k] : 0
   }
 
   /** Current tyre radius (m). */
@@ -485,7 +876,7 @@ export class TruckSim extends VehicleBase {
     const d = this.rideTarget - this.ride
     if (Math.abs(d) < 1e-4) return
     this.ride += Math.sign(d) * Math.min(Math.abs(d), dt * 0.5)
-    for (let i = 0; i < 4; i++) this.vc.setWheelSuspensionRestLength(i, this.spec.suspension.rest + this.ride)
+    for (let i = 0; i < 4; i++) this.vc.setWheelSuspensionRestLength(i, this.restW[i] + this.ride)
     this.body.wakeUp()
   }
 
@@ -634,7 +1025,7 @@ export class TruckSim extends VehicleBase {
     }
     const { f, u, r } = this.axes()
     // Capsized (on its side / roof at a crawl for 2 s): set back upright (game rule, as on land).
-    this.upsideDown = u[1] < 0.35 && av < 2 ? this.upsideDown + dt : 0
+    this.upsideDown = u[1] < 0.35 && av < 2 && this.wheels.filter((x) => x.contact).length < 2 ? this.upsideDown + dt : 0 // (on its wheels on a steep wall is not "upside down")
     if (this.upsideDown > 2) {
       const t = this.body.translation()
       this.place(t.x, t.y + 1.2, t.z, this.heading)
@@ -672,14 +1063,31 @@ export class TruckSim extends VehicleBase {
     }, true)
   }
 
-  /** Afloat the wheels stand still — the engine note follows the jet (throttle and speed) instead. */
+  /** Afloat the wheels stand still — the engine note follows the jet (throttle and speed) instead. With the
+   *  drivetrain the wheels show its simulated spin (∫ω), not Rapier's ground-speed rotation. */
   step(dt: number): void {
+    const want = this.wantMode()
+    if (want !== this.mode) this.configure(want)
     super.step(dt)
     if (this.afloat) this.wheelSpeed = Math.sign(this.speed || 1) * Math.max(Math.abs(this.speed), Math.max(0, this.controls.throttle) * 9)
+    const D = this.drivetrain
+    if (this.mode === 'drivetrain' && D && this.enabled) {
+      let rim = 0
+      for (let i = 0; i < 4; i++) {
+        this.wheels[i].spin = D.spin[i]
+        rim += D.omega[i] * D.R.axles[i >> 1].radius
+      }
+      this.wheelSpeed = rim / 4
+    }
   }
 
   protected drive(dt: number, v: number): void {
     this.updateRide(dt)
+    if (this.mode === 'drivetrain') {
+      this.wet = 0
+      this.afloat = false
+      return this.driveReal(dt)
+    }
     if (this.boat > 0) this.buoyancy(dt)
     else (this.wet = 0), (this.afloat = false)
     if (this.boat >= 0.5) return this.driveBoat(dt, v)
@@ -789,7 +1197,7 @@ export class TruckSim extends VehicleBase {
       this.body.addTorque({ x: r[0] * tq, y: r[1] * tq, z: r[2] * tq }, true)
     }
     // Auto-righting: on its side / roof for 2 s at a crawl → set back on the wheels (game rule, not physics).
-    this.upsideDown = u[1] < 0.35 && av < 2 ? this.upsideDown + dt : 0
+    this.upsideDown = u[1] < 0.35 && av < 2 && this.wheels.filter((x) => x.contact).length < 2 ? this.upsideDown + dt : 0 // (on its wheels on a steep wall is not "upside down")
     if (this.upsideDown > 2) {
       const t = this.body.translation()
       this.place(t.x, t.y + 1.2, t.z, this.heading)
@@ -806,6 +1214,10 @@ function rotate(q: { x: number; y: number; z: number; w: number }, x: number, y:
   out[2] = iz * q.w + iw * -q.z + ix * -q.y - iy * -q.x
 }
 const _rv = [0, 0, 0]
+const _x = [0, 0, 0, 0]
+/** Per wheel: contact frame (forward xyz, right xyz) and contact point, reused every step (no allocations). */
+const _cf = new Float64Array(24)
+const _cp = new Float64Array(12)
 const _fv = { x: 0, y: 0, z: 0 }
 const _pv = { x: 0, y: 0, z: 0 }
 
