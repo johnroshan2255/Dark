@@ -27,9 +27,9 @@ export const TYRE_KINDS: Record<TyreKind, TyreKindDef> = {
   winter: { mu: 0.95, peakAlpha: 7 * deg, offroad: 1, snow: 1.5, ice: 1.2 },
 }
 
-/** Surface ids (index into SURFACES). */
-export const Surf = { Asphalt: 0, Dirt: 1, Grass: 2, Sand: 3, Snow: 4, Ice: 5 } as const
-export const SURFACE_COUNT = 6
+/** Surface ids (index into SURFACES). New surfaces go at the END (tyre marks / dust index by id). */
+export const Surf = { Asphalt: 0, Dirt: 1, Grass: 2, Sand: 3, Snow: 4, Ice: 5, Mud: 6 } as const
+export const SURFACE_COUNT = 7
 
 export interface SurfaceDef {
   name: string
@@ -52,6 +52,9 @@ export const SURFACES: SurfaceDef[] = [
   { name: 'sand', mu: 0.55, stiff: 0.6, crr: 0.12, wet: 0, offroad: true, rough: 0.03, stones: 0 },
   { name: 'snow', mu: 0.35, stiff: 0.6, crr: 0.05, wet: 0, offroad: true, rough: 0.025, stones: 0.2 },
   { name: 'ice', mu: 0.12, stiff: 0.5, crr: 0.01, wet: 0, offroad: false, rough: 0.004, stones: 0 },
+  // MUD (the off-road tracks' wet stretches, rut bottoms, potholes, ditch bottoms — world/Road/RoadDetail): slippery
+  // (μ ≈ 0.45 → ~0.37 in the rain), soft (peaks at a big slip angle) and draggy (Crr 0.08: tyres sink in), few stones.
+  { name: 'mud', mu: 0.45, stiff: 0.5, crr: 0.08, wet: 0.2, offroad: true, rough: 0.022, stones: 0.1 },
 ]
 
 /** A blended contact surface: weights per SURFACES entry (sum 1) and the ground wetness. */
@@ -61,12 +64,16 @@ export interface SurfaceMix {
   /** Blended roughness amplitude (m) and stoniness; 0 = a perfectly smooth test ground. */
   rough: number
   stones: number
+  /** WASHBOARD (gravel corrugations across the road): amplitude (m) and the road's unit direction (x, z). */
+  wash?: number
+  washX?: number
+  washZ?: number
 }
 
 export function surfaceMix(): SurfaceMix {
   const w = new Float32Array(SURFACE_COUNT)
   w[0] = 1
-  return { w, wet: 0, rough: 0, stones: 0 }
+  return { w, wet: 0, rough: 0, stones: 0, wash: 0, washX: 0, washZ: 1 }
 }
 
 /** Fill a mix's roughness from its weights (the world sampler calls it; tests leave it smooth). */
@@ -91,14 +98,20 @@ const vnoise = (x: number, z: number, k: number): number => {
 }
 
 /**
- * GROUND ROUGHNESS height (m) at a world point: the bumps, ruts and stones the low-poly terrain mesh can't show
- * (heights every 2 m), fed into each wheel's suspension (TruckSim) — the springs and dampers work on every surface,
- * each wheel on its own. Rolling noise (2.6 m + 0.8 m wavelengths, ± amplitude) plus sparse round stones
+ * GROUND ROUGHNESS height (m) at a world point: the bumps and stones the terrain mesh can't show (the gutters, wheel
+ * ruts and potholes ARE geometry — the road ribbon's collider, world/Road/RoadDetail), fed into each wheel's suspension
+ * (TruckSim) — the springs and dampers work on every surface, each wheel on its own. Rolling noise (2.6 m + 0.8 m wavelengths, ± amplitude) plus sparse round stones
  * (0.2–0.35 m across, up to 2.4 × the amplitude) on stony ground. Deterministic from world position.
  */
 export function roughness(x: number, z: number, s: SurfaceMix): number {
   if (s.rough <= 0) return 0
   let h = ((vnoise(x / 2.6, z / 2.6, 11) - 0.5) * 1.4 + (vnoise(x / 0.8, z / 0.8, 12) - 0.5) * 0.6) * s.rough
+  // Washboard: corrugations ~0.7 m apart across a gravel road (the ruts' packed surface), a smooth periodic
+  // polynomial of the distance along the road (no sin: identical on every engine).
+  if (s.wash) {
+    const t = (x * (s.washX ?? 0) + z * (s.washZ ?? 1)) / 0.7, f = t - Math.floor(t)
+    h += s.wash * (16 * f * f * (1 - f) * (1 - f) - 0.533)
+  }
   if (s.stones > 0) {
     const cx = Math.floor(x / 1.6), cz = Math.floor(z / 1.6)
     if (hash2(cx, cz, 13) < 0.22 * s.stones) {

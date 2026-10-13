@@ -56,7 +56,9 @@ export interface SoundFrame {
     /** Simulation handling: the tyres' own noise — slide 0..1 (sideways slip angle), spin 0..1 (wheelspin / a
      *  locked wheel), the share of the contact on HARD ground (asphalt, ice), GRAVEL (dirt roads) and SOFT ground
      *  (grass, sand, snow). Present ⇒ squeal only on hard ground, a scrub on loose ground. */
-    tyres?: { slide: number; spin: number; hard: number; gravel: number; soft: number } }
+    tyres?: { slide: number; spin: number; hard: number; gravel: number; soft: number
+      /** 0..1 a tyre on FIRE (Drivetrain TYRE): the crackle of burning rubber. */
+      fire?: number } }
   bike: { riding: boolean; distance: number; pan: number; speed: number; throttle: number }
 }
 
@@ -80,6 +82,8 @@ export class AudioSystem {
   private noise: AudioBuffer | null = null
   /** TYRE SCRUB on loose ground (synthesized: looping noise → band-pass): gravel crunch high, grass / sand low. */
   private scrub: { gain: GainNode; filter: BiquadFilterNode; pan: StereoPannerNode } | null = null
+  /** BURNING TYRE (synthesized, no asset): a low roar with sparse crackling pops, looped, high-passed. */
+  private crackle: { gain: GainNode; pan: StereoPannerNode } | null = null
   private readonly buffers = new Map<SoundName, AudioBuffer>()
   private readonly loops = new Map<SoundName, Loop>()
   private loading = false
@@ -143,6 +147,28 @@ export class AudioSystem {
       ws.connect(filter).connect(sg).connect(sp).connect(this.sfx)
       ws.start()
       this.scrub = { gain: sg, filter, pan: sp }
+      // Fire crackle: 3 s of a soft roar + ~35 random pops/s (sharp attack, 2–12 ms decays), looped.
+      const cbuf = ctx.createBuffer(1, ctx.sampleRate * 3, ctx.sampleRate)
+      const cd = cbuf.getChannelData(0)
+      let roar = 0, pop = 0, popK = 0
+      for (let i = 0; i < cd.length; i++) {
+        roar = (roar + 0.03 * (Math.random() * 2 - 1)) / 1.03
+        if (Math.random() < 35 / ctx.sampleRate) (pop = 0.5 + Math.random() * 0.8), (popK = Math.exp(-1 / (ctx.sampleRate * (0.002 + Math.random() * 0.01))))
+        pop *= popK
+        cd[i] = roar * 2.2 + pop * (Math.random() * 2 - 1)
+      }
+      const cs = ctx.createBufferSource()
+      cs.buffer = cbuf
+      cs.loop = true
+      const hp = ctx.createBiquadFilter()
+      hp.type = 'highpass'
+      hp.frequency.value = 260
+      const cg = ctx.createGain()
+      cg.gain.value = 0
+      const cp = ctx.createStereoPanner()
+      cs.connect(hp).connect(cg).connect(cp).connect(this.sfx)
+      cs.start()
+      this.crackle = { gain: cg, pan: cp }
       this.ctx = ctx
       void this.load()
     } catch {
@@ -340,6 +366,11 @@ export class AudioSystem {
       this.scrub.filter.frequency.setTargetAtTime((380 + 1500 * gravel) * (0.8 + 0.5 * clamp01(v / 20)), now, 0.1)
       this.scrub.filter.Q.setTargetAtTime(0.6 + 0.6 * gravel, now, 0.2)
       this.scrub.pan.pan.setTargetAtTime(Math.max(-1, Math.min(1, c.pan)), now, 0.1)
+    }
+    if (this.crackle && this.ctx) {
+      const now = this.ctx.currentTime
+      this.crackle.gain.gain.setTargetAtTime((t.fire ?? 0) * 0.7 * a, now, 0.15)
+      this.crackle.pan.pan.setTargetAtTime(Math.max(-1, Math.min(1, c.pan)), now, 0.1)
     }
     void dt
   }

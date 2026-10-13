@@ -3,6 +3,7 @@ import { hashFloat, Layer } from '../noise/rng'
 import { sampleHeight } from '../Terrain/generateTerrain'
 import { PROP_STRIDE, TREE_STRIDE, TreeSpecies } from '../types'
 import { WorldFields } from '../WorldFields'
+import { detailInfo } from '../Road/RoadDetail'
 import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Biomes'
 import { BIOMES, pickRegion, pickWeighted, regionRoll } from '../biomes/BiomeDefs'
 import { CRAG_SLOPE0, gridSlope } from '../Formations/crags'
@@ -71,6 +72,8 @@ function scatter(
       // Keep every road clear — a boulder's footprint grows with its scale (unit rock radius ≈ 1.4 m), so big
       // ones stand well back from the edge instead of overhanging the track.
       if (edge < (layer === Layer.Trees ? 3.5 : layer === Layer.Rocks ? 1.0 + scale * 1.5 : 0.4)) continue
+      // No bushes in a road's ditch / ruts (Road/RoadDetail) — they'd float over the hollow.
+      if (layer === Layer.Plants && edge < 2.5 && fields.roadDetail.query(wx, wz, _di) < -0.03) continue
       out[n] = lx
       out[n + 1] = h
       out[n + 2] = lz
@@ -135,6 +138,7 @@ function pickBaseSpecies(fields: WorldFields, wx: number, wz: number, r: number,
   return r < 0.45 ? TreeSpecies.Spruce : r < 0.7 ? TreeSpecies.Fir : r < 0.85 ? TreeSpecies.Birch : TreeSpecies.Pine
 }
 
+const _di = detailInfo()
 export function scatterForest(fields: WorldFields, cx: number, cz: number, heights: Float32Array, treesOnly = false) {
   const ctx: ScatterCtx = { fields, cx, cz, heights }
   // Open road corridor (refer/roads hero): grassy verges, trees set back, a long view down the road.

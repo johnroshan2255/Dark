@@ -6,8 +6,23 @@ export interface ChunkData {
   cx: number
   cz: number
   seed: number
-  /** CHUNK_VERTS² heights, index = iz * CHUNK_VERTS + ix. */
+  /** CHUNK_VERTS² heights, index = iz * CHUNK_VERTS + ix — the ground WITHOUT the road detail (placement, LOD1/2). */
   heights: Float32Array
+  /** CHUNK_VERTS² LOD0 mesh / heightfield-collider heights: `heights` with the grid vertices under a road ribbon sunk
+   *  by Road/RoadDetail.SINK (the ribbon below is the surface there). minY0 = their minimum. */
+  heights0: Float32Array
+  minY0: number
+  /** ROAD RIBBON (Terrain/roadSurface.ts): the gutters / ruts / potholes mesh over the sunk grid — chunk-local
+   *  positions, normals, linear colours, attributes (stride RD_ATTR: roadLat, netEdge, netType, biome ×2, wet), Δ per
+   *  vertex (m) and triangles; drawn at LOD0 and collided (trimesh). Empty arrays when no road crosses the chunk. */
+  rdPos: Float32Array
+  rdNor: Float32Array
+  rdCol: Float32Array
+  rdAttr: Float32Array
+  rdDelta: Float32Array
+  rdIdx: Uint32Array
+  rdMinY: number
+  rdMaxY: number
   /** CHUNK_VERTS² × 3, computed from a padded height grid so borders are seamless. */
   normals: Float32Array
   /** CHUNK_VERTS² × 3 linear RGB albedo. */
@@ -70,8 +85,9 @@ export const WATER_LEVEL = -6
  * the ice surface at the water level — physics, feet and the camera stand on it.
  */
 export const ICE_SNOW = 0.32
-/** Vertex `i` of a chunk: its ground height, raised to the ice surface where the water is frozen. */
+/** Vertex `i` of a chunk's COLLIDER grid: its LOD0 height (sunk under a road ribbon), raised to the ice surface where
+ *  the water is frozen. */
 export function solidHeight(d: ChunkData, i: number): number {
-  const h = d.heights[i]
+  const h = d.heights0[i]
   return h < WATER_LEVEL && d.biome[i * 2 + 1] > ICE_SNOW ? WATER_LEVEL : h
 }

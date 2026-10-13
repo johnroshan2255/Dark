@@ -54,7 +54,7 @@ function car(p: PhysicsWorld, id: keyof typeof SPECS, opts: { grip?: number; aid
 }
 
 function run(p: PhysicsWorld, t: TruckSim, seconds: number, ctl: Partial<Controls>, each?: (s: number) => void): void {
-  Object.assign(t.controls, { throttle: 0, steer: 0, handbrake: false, boost: false, lift: 0, parked: false, ...ctl })
+  Object.assign(t.controls, { throttle: 0, steer: 0, handbrake: false, boost: false, lift: 0, parked: false, footBrake: 0, ...ctl })
   for (let i = 0; i < Math.round(seconds * 60); i++) {
     t.step(1 / 60)
     p.world.step()
@@ -62,6 +62,10 @@ function run(p: PhysicsWorld, t: TruckSim, seconds: number, ctl: Partial<Control
   }
 }
 const deg = (r: number) => (r * 180) / Math.PI
+/** Hottest tread surface of the car (°C, Drivetrain TYRE). */
+const hottest = (s: TruckSim) => Math.max(...s.drivetrain!.treadT)
+/** The foot brake the game applies with both pedals (Car BURN_BRAKE: W + S / the touch brake-stand). */
+const BURN_BRAKE = 0.75
 function turned(s: TruckSim): { step: () => void; total: () => number } {
   let prev = s.heading, sum = 0
   return { step: () => { let d = s.heading - prev; d = Math.atan2(Math.sin(d), Math.cos(d)); sum += d; prev = s.heading }, total: () => sum }
@@ -114,8 +118,9 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     const D = t.drivetrain!
     let t100 = NaN, maxRpm = 0, prevGear = D.gear
     const upShifts: number[] = []
-    let rpmPrev = 0
+    let rpmPrev = 0, hot100 = 0
     run(p, t, 80, { throttle: 1 }, (s) => {
+      if (Number.isNaN(t100)) hot100 = Math.max(hot100, hottest(t))
       if (Number.isNaN(t100) && t.speed > 100 / 3.6) t100 = s
       maxRpm = Math.max(maxRpm, D.rpm)
       if (D.gear > prevGear && prevGear >= 1) upShifts.push(rpmPrev)
@@ -127,6 +132,7 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     if (pub.zeroTo100) check(`${id}: 0–100 km/h within 15 % of the published ${pub.zeroTo100} s`, Math.abs(t100 / pub.zeroTo100 - 1) < 0.15, `${t100.toFixed(1)} s`)
     if (pub.topSpeed) check(`${id}: top speed within 10 % of the published ${pub.topSpeed} km/h`, Math.abs(top / pub.topSpeed - 1) < 0.1, `${top.toFixed(0)} km/h in ${D.gearLabel} at ${D.rpm.toFixed(0)} rpm`)
     check(`${id}: never past the redline (${red.toFixed(0)} rpm)`, maxRpm < red * 1.03, `max ${maxRpm.toFixed(0)} rpm`)
+    check(`${id}: a full-throttle 0–100 only warms the tyres (< 110 °C, no fire)`, hot100 < 110 && !t.drivetrain!.burning, `${hot100.toFixed(0)} °C`)
     if (upShifts.length) {
       const want = 0.93 * red * (spec.power.kind === 'diesel' ? 0.85 : 1)
       const ok = upShifts.every((r) => Math.abs(r / want - 1) < 0.06)
@@ -249,6 +255,25 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     p.dispose()
   }
   {
+    // TYRE HEAT at the limit: 30 s (~3 laps) of a steady circle at the car's cornering limit (half lock, 50 km/h
+    // held, full aids so no car spins off its line) — the tyres warm to working temperature, never smoke or burn.
+    const p = world()
+    const t = car(p, id, { aids: 'full' })
+    run(p, t, 1, {})
+    while (t.speed < 14) run(p, t, 0.1, { throttle: 0.6 })
+    const lat: number[] = []
+    let hot = 0
+    for (let k = 0; k < 60 * 30; k++) {
+      run(p, t, 1 / 60, { throttle: Math.max(0, Math.min(0.6, 0.3 + 0.3 * (14 - t.speed))), steer: 0.5 * Math.min(1, k / 120) })
+      if (k > 300) lat.push(Math.abs(t.speed * t.body.angvel().y))
+      hot = Math.max(hot, hottest(t))
+    }
+    lat.sort((a, b) => a - b)
+    const g50 = lat[lat.length >> 1] / 9.81
+    check(`${id}: 30 s cornering at its limit (${g50.toFixed(2)} g) only warms the tyres (< 110 °C, no fire)`, g50 > 0.6 && hot < 110 && !t.drivetrain!.burning, `${hot.toFixed(0)} °C`)
+    p.dispose()
+  }
+  {
     // Handbrake at speed while steering: the rear slides (|slip| > 15°), the car stays on its wheels.
     const p = world()
     const t = car(p, id, { aids: 'off' })
@@ -287,6 +312,51 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
       const h = flick(1.1)
       check(`${id}: a drift can be HELD on throttle + counter-steer (15–57° ≥ 1 s, LSD rear)`, h.held >= 1 && h.up > 0.9, `held ${h.held.toFixed(1)} s, max ${deg(h.maxS).toFixed(0)}°`)
     }
+  }
+  // ---------------- burnout + tyre heat ----------------
+  // BRAKE-STAND (W + S): the brakes (front-biased) hold the fronts, the engine spins the driven rears against their
+  // brakes. A car driving its rear axle only (rear-drive, part-time 4WD in 2H) does it; a permanent 4×4 can't hold
+  // its driven fronts (it creeps off), like the real thing. Aids off (a 1989 pickup / 1972 van: the real car's).
+  const rearDrive = RS.drive.layout === 'part-time-4WD' /* (2H) */ || (!RS.axles[0].driven && RS.drive.layout !== 'AWD-permanent' && RS.drive.layout !== 'AWD-on-demand')
+  if (rearDrive) {
+    const p = world()
+    const t = car(p, id, { aids: 'off' })
+    const D = t.drivetrain!, r = RS.axles[RS.axles.length - 1].radius, last = (RS.axles.length - 1) * 2
+    run(p, t, 1, {})
+    const z0 = t.body.translation().z
+    let rim5 = 0, v5 = 0, hot5 = 0, fireAt = NaN, maxMove = 0, notD = 0
+    run(p, t, 30, { throttle: 1, footBrake: BURN_BRAKE }, (s) => {
+      maxMove = Math.max(maxMove, Math.abs(t.body.translation().z - z0))
+      if (D.selector !== 'D' || D.gear < 1) notD++
+      if (s <= 5) hot5 = Math.max(hot5, hottest(t))
+      if (Math.abs(s - 5) < 1 / 120) (rim5 = Math.max(Math.abs(D.omega[last]), Math.abs(D.omega[last + 1])) * r), (v5 = Math.abs(t.speed))
+      if (Number.isNaN(fireAt) && D.burning) fireAt = s
+    })
+    check(`${id}: brake-stand burnout — the rears spin (rim ≫ ground), the car stays put (< 1 m), never selects R`, rim5 > 4 && rim5 > 10 * v5 && maxMove < 1 && notD === 0, `rim ${rim5.toFixed(1)} m/s vs ground ${v5.toFixed(2)} m/s, moved ${maxMove.toFixed(2)} m`)
+    check(`${id}: burnout heats the tread past 150 °C within 5 s (heavy smoke)`, hot5 > 150, `${hot5.toFixed(0)} °C at 5 s`)
+    check(`${id}: a burnout held long enough sets a tyre ALIGHT (< 30 s)`, fireAt < 30, `${Number.isNaN(fireAt) ? 'no fire' : `fire at ${fireAt.toFixed(1)} s`}, ${hottest(t).toFixed(0)} °C`)
+    // Released and driven off at ~50 km/h: the air puts the fire out and the tyres cool.
+    run(p, t, 3, { throttle: 0 })
+    const burntHot = hottest(t)
+    let outAt = NaN
+    for (let k = 0; k < 60 * 15; k++) {
+      run(p, t, 1 / 60, { throttle: Math.max(0, Math.min(0.5, 0.3 + 0.2 * (14 - t.speed))) })
+      if (Number.isNaN(outAt) && !D.burning) outAt = k / 60
+    }
+    check(`${id}: driving off puts the tyre fire out and cools the tread`, outAt < 10 && !D.burning && hottest(t) < burntHot - 150, `out after ${Number.isNaN(outAt) ? '—' : outAt.toFixed(1)} s, ${burntHot.toFixed(0)} → ${hottest(t).toFixed(0)} °C`)
+    p.dispose()
+  }
+  if (rearDrive) {
+    // A short burnout (4 s, no fire), then released at a standstill: the tread cools (it keeps no heat source).
+    const p = world()
+    const t = car(p, id, { aids: 'off' })
+    run(p, t, 1, {})
+    run(p, t, 4, { throttle: 1, footBrake: BURN_BRAKE })
+    const h0 = hottest(t)
+    run(p, t, 20, {})
+    const h1 = hottest(t)
+    check(`${id}: after a short burnout the tyres cool at rest`, !t.drivetrain!.burning && h1 < h0 - 0.4 * (h0 - 20), `${h0.toFixed(0)} → ${h1.toFixed(0)} °C in 20 s`)
+    p.dispose()
   }
   // ---------------- brakes ----------------
   {

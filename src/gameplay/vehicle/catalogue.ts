@@ -82,6 +82,12 @@ export interface VehicleDef {
   /** Engine voice (AudioSystem): pitch × the recorded loops (V8 low, small 4-cylinder high) and the automatic
    *  gearbox's shift speeds (m/s) — spaced to the car's own top speed so it never sits on the limiter. */
   engine: { pitch: number; gears: number[] }
+  /** Exhaust tailpipe tip(s) in CAR space (m, as baked: −Z forward, +X right, ground y = 0, origin at the
+   *  wheelbase centre) with each tip's HORIZONTAL outflow direction (normalised at load; the smoke rises by
+   *  itself) — measured on the model where it has a pipe. The smoke puffs take turns between the tips (same total
+   *  rate, so the same particle budget) and leave along `dir`. Undefined = one tip at the rear left under the
+   *  bumper, blowing straight back. */
+  exhaust?: { at: [number, number, number]; dir: [number, number, number] }[]
   stock: VehicleTuning
   /** The real machine (skills/realistic-vehicle-system §8.4): its public spec sheet, resolved at load against the
    *  model's measured wheelbase / track into the Simulation-handling drivetrain. The garage sliders scale it
@@ -108,6 +114,9 @@ export const VEHICLES: VehicleDef[] = [
     grade: { sat: 0.5, gain: 0.88 }, // toy-bright olive → faded, sun-worn paint
     cabin: { hip: 0.84, roof: 1.66, behind: 0.51 },
     engine: { pitch: 1, gears: [0, 5.5, 11, 17.5, 25, 34, 60] },
+    // No pipe on the model (its underside is one flat floor plate): the real 1980s Hilux tailpipe ends under the
+    // bed just behind the rear tyre on the left, turned out — placed there, clear of the bed (y 0.66).
+    exhaust: [{ at: [-0.68, 0.45, 2.15], dir: [-0.5, 0, 0.84] }],
     stock: { power: 120, force: 12, boost: 2.2, grip: 2.4, suspension: 36, tyre: 1, mass: 1750, paint: '#ffffff' },
     spec: SPECS.pickup,
   },
@@ -121,6 +130,12 @@ export const VEHICLES: VehicleDef[] = [
     cabin: { hip: 1.35, roof: 2.2, behind: 0.49 },
     lamps: { head: [0.66, 1.08, -2.44], tail: [0.72, 1.22, 2.43] },
     engine: { pitch: 0.8, gears: [0, 7, 14, 22, 31, 42, 70] },
+    // Side exits, as on the real 4×4²: twin tips each side under the sill just ahead of the rear wheels, angled
+    // out and back (the model's own pipes; tip mouths measured, sides alternating).
+    exhaust: [
+      { at: [-0.84, 0.55, 0.58], dir: [-0.88, 0, 0.47] }, { at: [0.84, 0.55, 0.58], dir: [0.88, 0, 0.47] },
+      { at: [-0.84, 0.56, 0.7], dir: [-0.88, 0, 0.47] }, { at: [0.84, 0.56, 0.7], dir: [0.88, 0, 0.47] },
+    ],
     stock: { power: 310, force: 18, boost: 2.0, grip: 2.8, suspension: 44, tyre: 1, mass: 3000, paint: '#55604a' },
     spec: SPECS.gwagen,
   },
@@ -134,6 +149,9 @@ export const VEHICLES: VehicleDef[] = [
     grade: { sat: 0.55, gain: 0.9 }, // candy cyan → the faded blue of a working 1970s van
     cabin: { hip: 0.98, roof: 1.8, behind: 0.42 },
     engine: { pitch: 1.22, gears: [0, 4, 8.5, 14, 20, 27, 45] },
+    // The model's own tailpipe: from the silencer across the rear frame to the rear RIGHT, ending under the body
+    // ~0.2 m short of the step, blowing straight back.
+    exhaust: [{ at: [0.6, 0.36, 2.3], dir: [0, 0, 1] }],
     stock: { power: 55, force: 8, boost: 2.4, grip: 2.0, suspension: 28, tyre: 1, mass: 1400, paint: '#ffffff' },
     spec: SPECS.zuk,
   },

@@ -78,6 +78,7 @@ const _q = new THREE.Quaternion()
 const _p = new THREE.Vector3()
 const _s = new THREE.Vector3()
 const _up = new THREE.Vector3(0, 1, 0)
+const _rb = [0, 0]
 const ZERO = new THREE.Matrix4().makeScale(0, 0, 0)
 const _bw: BiomeWeights = [0, 0]
 const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
@@ -298,7 +299,17 @@ export class GrassField {
       const d = chunk.data
       const lx = wx - d.cx * CHUNK_SIZE
       const lz = wz - d.cz * CHUNK_SIZE
-      const gh = sampleHeight(d.heights, lx, lz)
+      let gh = sampleHeight(d.heights, lx, lz)
+      // ROAD RIBBON (gutters, ruts — Road/RoadDetail): bare soil in the hollows, blades stand on the ribbon elsewhere.
+      const rib = chunk.ribbon
+      if (rib && rib.sample(lx, lz, _rb)) {
+        if (_rb[1] < -0.01) {
+          ZERO.toArray(mats, (base + i) * 16)
+          dens[base + i] = 0
+          continue
+        }
+        gh = _rb[0]
+      }
       const ni = Math.min(CHUNK_VERTS - 1, Math.round(lz / CELL_SIZE)) * CHUNK_VERTS + Math.min(CHUNK_VERTS - 1, Math.round(lx / CELL_SIZE))
       // GREEN ROCK TOPS: the flat tops of crags and formations (pillar crowns, cave hills, ledges) carry the ground
       // cover in their colour — grow the grass ON them (ChunkData.fmTop), not under them at the terrain height.

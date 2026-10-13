@@ -200,5 +200,5 @@ const _cl: [number, number, number] = [0, 0, 0]
 
 /** Buffers to transfer (zero-copy) when posting ChunkData from a worker. */
 export function chunkTransferables(d: ChunkData): ArrayBuffer[] {
-  return [d.heights, d.normals, d.colors, d.roadLat, d.netEdge, d.netType, d.biome, d.trees, d.rocks, d.plants, d.props, d.fmPos, d.fmNor, d.fmCol, d.fmIdx, d.fmBounds, d.fmTop].map((a) => a.buffer as ArrayBuffer)
+  return [d.heights, d.heights0, d.rdPos, d.rdNor, d.rdCol, d.rdAttr, d.rdDelta, d.rdIdx, d.normals, d.colors, d.roadLat, d.netEdge, d.netType, d.biome, d.trees, d.rocks, d.plants, d.props, d.fmPos, d.fmNor, d.fmCol, d.fmIdx, d.fmBounds, d.fmTop].map((a) => a.buffer as ArrayBuffer)
 }

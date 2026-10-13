@@ -111,6 +111,9 @@ export interface QualitySettings {
   monsters: { stalkers: number; striders: number }
   /** Particle caps: vehicle exhaust + tyre smoke/dust sprites alive at once (one draw; ~0.03 ms CPU at 320); rain = share of the 1600-drop pool. */
   particles: { vehicle: number; rain: number }
+  /** Tyre marks (rendering/particles/TyreMarks.ts, one draw): ring size in quads (208 B each), seconds before a mark
+   *  has faded, camera distance (m) where marks are gone (kept inside the LOD0 terrain ring). */
+  tyreMarks: { segments: number; life: number; range: number }
   /** Planar water reflections (trees/mountains/sky in lakes and on ice): render-target scale per axis, 0 = off
    *  (the water then mirrors the sky colour only). Rendered only on frames where water is visible. */
   reflections: number
@@ -228,7 +231,7 @@ export const PRESETS: Record<TierName, Preset> = {
   low: {
     base: {
       maxDpr: 1, renderScale: { min: 0.5, max: 0.85, start: 0.75 }, aa: 'fxaa', sharpen: 0.35, paint: { stride: 0, bloom: 0.45 },
-      buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, particles: { vehicle: 110, rain: 0.35 }, pixelBudget: 0.6e6, skyScale: 0.25,
+      buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, particles: { vehicle: 110, rain: 0.35 }, tyreMarks: { segments: 1024, life: 40, range: 50 }, pixelBudget: 0.6e6, skyScale: 0.25,
     },
     features: { shadows: 'low', reflections: 'off', ao: 'off', volumetrics: 'low', grass: 'low', effects: 'low', vegetation: 'low', view: 'low' },
   },
@@ -236,7 +239,7 @@ export const PRESETS: Record<TierName, Preset> = {
   medium: {
     base: {
       maxDpr: 1.25, renderScale: { min: 0.6, max: 1, start: 0.85 }, aa: 'fxaa', sharpen: 0.25, paint: { stride: 1.4, bloom: 0.4 },
-      buildPerFrame: 2, monsters: { stalkers: 2, striders: 1 }, particles: { vehicle: 220, rain: 0.7 }, pixelBudget: 1.4e6, skyScale: 0.33,
+      buildPerFrame: 2, monsters: { stalkers: 2, striders: 1 }, particles: { vehicle: 220, rain: 0.7 }, tyreMarks: { segments: 2048, life: 75, range: 70 }, pixelBudget: 1.4e6, skyScale: 0.33,
     },
     features: { shadows: 'medium', reflections: 'off', ao: 'off', volumetrics: 'medium', grass: 'medium', effects: 'medium', vegetation: 'medium', view: 'medium' },
   },
@@ -244,7 +247,7 @@ export const PRESETS: Record<TierName, Preset> = {
   high: {
     base: {
       maxDpr: 1.5, renderScale: { min: 0.7, max: 1, start: 1 }, aa: 'fxaa', sharpen: 0.25, paint: { stride: 1.8, bloom: 0.45 },
-      buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 320, rain: 1 }, pixelBudget: 2.4e6, skyScale: 0.5,
+      buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 320, rain: 1 }, tyreMarks: { segments: 4096, life: 120, range: 90 }, pixelBudget: 2.4e6, skyScale: 0.5,
     },
     features: { shadows: 'high', reflections: 'high', ao: 'medium', volumetrics: 'high', grass: 'high', effects: 'high', vegetation: 'high', view: 'high' },
   },
@@ -252,7 +255,7 @@ export const PRESETS: Record<TierName, Preset> = {
   ultra: {
     base: {
       maxDpr: 2, renderScale: { min: 0.8, max: 1, start: 1 }, aa: 'fxaa', sharpen: 0.22, paint: { stride: 1.8, bloom: 0.45 },
-      buildPerFrame: 3, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 420, rain: 1 }, pixelBudget: 4.2e6, skyScale: 1,
+      buildPerFrame: 3, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 420, rain: 1 }, tyreMarks: { segments: 6144, life: 180, range: 110 }, pixelBudget: 4.2e6, skyScale: 1,
     },
     features: { shadows: 'ultra', reflections: 'ultra', ao: 'ultra', volumetrics: 'ultra', grass: 'ultra', effects: 'high', vegetation: 'high', view: 'ultra' },
   },

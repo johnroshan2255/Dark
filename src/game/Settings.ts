@@ -69,7 +69,7 @@ export const DEFAULT_SETTINGS: Settings = {
   handling: 'sim',
   gearbox: 'auto',
   aids: 'auto',
-  offroadAssist: true,
+  offroadAssist: false,
   autoAccelerate: false,
   dayLength: 24,
   showFps: true,
@@ -84,19 +84,22 @@ export const DEFAULT_SETTINGS: Settings = {
   garage: { vehicle: DEFAULT_VEHICLE, tuning: {} },
 }
 
-const KEY = 'dark.settings.v6'
-/** v5 → v6: the default handling became the realistic simulation; a v5 save keeps everything else (and arcade only
- *  if it wasn't simply the old default). v4 saves are no longer migrated (they get the defaults). */
-const OLD_KEY = 'dark.settings.v5'
+const KEY = 'dark.settings.v7'
+/** v6 → v7: OFF-ROAD ASSIST became off by default (the real machine); a v6 save keeps everything else.
+ *  v5 → v7: also the default handling became the realistic simulation (v5's handling is dropped too).
+ *  v4 saves are no longer migrated (they get the defaults). */
+const V6_KEY = 'dark.settings.v6'
+const V5_KEY = 'dark.settings.v5'
 
 export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(KEY)
     if (raw) return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) }
-    const old = localStorage.getItem(OLD_KEY)
-    if (old) {
-      const { handling: _oldDefault, ...rest } = JSON.parse(old) as Partial<Settings>
-      const s = { ...DEFAULT_SETTINGS, ...rest }
+    const v6 = localStorage.getItem(V6_KEY)
+    const v5 = v6 ? null : localStorage.getItem(V5_KEY)
+    if (v6 || v5) {
+      const { handling, offroadAssist: _oldDefault, ...rest } = JSON.parse((v6 ?? v5)!) as Partial<Settings>
+      const s = { ...DEFAULT_SETTINGS, ...rest, ...(v6 && handling ? { handling } : {}) }
       saveSettings(s)
       return s
     }

@@ -29,7 +29,63 @@ export interface DriverInput {
   handbrake: boolean
   boost: boolean
   parked: boolean
+  /** 0..1 FOOT BRAKE held TOGETHER with the gas (W + S; touch: DRIFT + stick forward at a standstill) — the
+   *  throttle axis is then the gas pedal only and never selects reverse. Both pedals = left-foot braking, or at a
+   *  standstill a BRAKE-STAND BURNOUT: the brakes (front-biased) hold the fronts, the engine overpowers the rear
+   *  brakes and spins the driven rears. */
+  brake?: number
 }
+
+/**
+ * TYRE TEMPERATURE (per wheel, two lumps): the tread SURFACE (the skin in the contact patch, incl. its flash heat —
+ * what smokes, loses grip and burns) on the tread BULK under it. Heat in = the tyre's share of the SLIDING power
+ * at the contact, |Fx·(ω·r − vx)| + |Fy·vy| (W); out = convection to the air (rising with the air speed over the
+ * tyre: the car's speed and the tread's own rim speed) and conduction into the bulk / rim / road. Sizes scale with
+ * the tyre (∝ r²). Anchors (tuned in tests/drivetrain.test.ts): a brake-stand burnout of the 85 kW pickup smokes
+ * hard within ~2–4 s (surface ≈ 180–200 °C) and ignites after ~15–25 s (≈ 360 °C, rubber's ignition range
+ * 350–400 °C); a 1 g skidpad / a 0–100 run stays under ~110 °C; a drift gets hot and smoky, not alight.
+ */
+export const TYRE = {
+  /** Share of the sliding power that goes into the tyre (the rest heats the road), at most — the heat partition of
+   *  a sliding contact favours the surface that moves THROUGH it (fresh, cold material): × (√u_tyre + 0.2) /
+   *  (√u_tyre + √u_road + 0.4), u = the tread's rim speed and the ground speed. A burnout (road spot still, tread
+   *  streaming through) heats the tyre; a locked wheel (the same patch dragged over fresh road) mostly the road. */
+  eta: 0.72,
+  /** Heat capacity at r = 0.39 m (J/K): the surface skin (~60 g of rubber — the contact patch's flash layer), the
+   *  outer tread under it (~0.35 kg: the few mm a burnout cooks in tens of seconds). */
+  cS: 120,
+  cB: 700,
+  /** Conductance surface → bulk (W/K), and to the air: base + per √(m/s) of air speed (surface; bulk). */
+  gSB: 40,
+  gSA: 6,
+  gSAv: 9,
+  gBA: 3,
+  gBAv: 3,
+  /** Share of the rim speed the tread feels as air speed (a spinning tyre fans itself a little). */
+  fan: 0.1,
+  /** Wet ground: surface → air × (1 + wetCool · wetness) — water quenches a hot tyre. */
+  wetCool: 3,
+  /** Grip: full to `gripFrom` °C, then down to (1 − gripLoss) at `gripTo` (overheated, greasy rubber). */
+  gripFrom: 120,
+  gripTo: 300,
+  gripLoss: 0.3,
+  /** Smoke from the tread surface: starts at `smokeFrom` °C, thick at `smokeFull` (VehicleFx reads `smoke`). */
+  smokeFrom: 140,
+  smokeFull: 230,
+  /** FIRE: ignites at `ignite` °C (rubber: 350–400 °C); burns while ≥ `out` °C. The flame feeds `fireW` W back into
+   *  the surface (less as it nears `pyro`, where the rubber gasifies instead of getting hotter) while there is tread
+   *  left (`fuel` s of full flame), so a stopped car's tyre keeps burning, and driving off (air) puts it out. */
+  ignite: 360,
+  /** …with the tread under it ≥ this hot: a thin flash-heated skin (a spin, a short wheelspin) can't feed a flame
+   *  — sustained heating that cooks the tread does (the ignition criterion of a thermally thick solid). */
+  igniteCore: 170,
+  out: 230,
+  fireW: 8000,
+  pyro: 500,
+  fuel: 45,
+  /** Air speed (m/s) that halves the flame's heat feedback (blown off the rubber). */
+  blowOff: 6,
+} as const
 
 export interface WheelIn {
   contact: boolean
@@ -76,6 +132,25 @@ export class Drivetrain {
   /** 0..1 visible slip per wheel (smoke, dust, squeal). */
   readonly slip: Float64Array
   readonly grips: Grip[] = []
+  // ---- tyre temperature (TYRE above) ----
+  /** Tread surface temperature (°C) per wheel — what smokes, grips and burns. */
+  readonly treadT: Float64Array
+  /** Tread bulk temperature (°C) per wheel. */
+  readonly coreT: Float64Array
+  /** Ambient air (°C) and ground wetness (0..1) per wheel (TruckSim sets them from the surface under it). */
+  readonly airT: Float64Array
+  readonly wetT: Float64Array
+  /** Seconds this tyre has been burning (0 = not on fire), and its tread left to burn (s of full flame). */
+  readonly fire: Float64Array
+  private readonly fuel: Float64Array
+  /** Sliding power into each tyre this step (W, averaged over the substeps) — and the grip factor from its heat. */
+  readonly slideP: Float64Array
+  private readonly heatGrip: Float64Array
+  private readonly accP: Float64Array
+  /** Driven wheels turning against their applied foot brake this step (a burnout): not held by the static hold. */
+  private readonly free: Uint8Array
+  /** Burnout launch (manual / DCT): the driver's clutch stays in while the engine revs, then is dumped. */
+  private burnClutch = 0
   // ---- powertrain state / outputs ----
   /** Engine (motor) speed (rad/s). */
   we: number
@@ -143,7 +218,12 @@ export class Drivetrain {
     this.omega = f(); this.spin = f(); this.kappa = f(); this.alpha = f(); this.steer = f()
     this.Fx = f(); this.Fy = f(); this.slip = f(); this.I = f(); this.Ieff = f(); this.a = f()
     this.brakeMax = f(); this.FzStatic = f(); this.escBrake = f(); this.accFx = f(); this.accFy = f()
+    this.treadT = f(); this.coreT = f(); this.airT = f(); this.wetT = f(); this.fire = f(); this.fuel = f()
+    this.slideP = f(); this.heatGrip = f(); this.accP = f()
+    this.airT.fill(20)
+    this.coolDown()
     this.absRel = new Uint8Array(n)
+    this.free = new Uint8Array(n)
     this.aids = R.aids
     this.mass = R.mass
     this.we = R.power.wIdle
@@ -180,6 +260,30 @@ export class Drivetrain {
     this.gear = this.selector === 'R' ? -1 : 1
     this.shifting = false
     this.gas = this.brake = 0
+    this.coolDown()
+  }
+
+  /** Tyres at the air temperature, no fire, a full tread (a new placement). */
+  coolDown(): void {
+    for (let i = 0; i < this.n; i++) {
+      this.treadT[i] = this.coreT[i] = this.airT[i]
+      this.fire[i] = 0
+      this.fuel[i] = TYRE.fuel
+      this.heatGrip[i] = 1
+      this.slideP[i] = 0
+    }
+  }
+
+  /** 0..1 tyre smoke from the tread's heat (thick white smoke when hot, even while it only smoulders). */
+  smoke(i: number): number {
+    const t = (this.treadT[i] - TYRE.smokeFrom) / (TYRE.smokeFull - TYRE.smokeFrom)
+    return t <= 0 ? 0 : t >= 1 ? 1 : t
+  }
+
+  /** Any tyre on fire. */
+  get burning(): boolean {
+    for (let i = 0; i < this.n; i++) if (this.fire[i] > 0) return true
+    return false
   }
 
   // ---------------- player controls ----------------
@@ -268,7 +372,7 @@ export class Drivetrain {
       const spool = Math.max(0, Math.min(1, (this.we - 0.5 * P.turbo.from) / (0.5 * P.turbo.from)))
       this.boost += (Math.min(1, this.gas * 1.5) * spool - this.boost) * Math.min(1, dt / P.turbo.lag)
     }
-    this.accFx.fill(0); this.accFy.fill(0)
+    this.accFx.fill(0); this.accFy.fill(0); this.accP.fill(0)
     let absActive = false
     const eff = gb.efficiency
     let sumFz = 0
@@ -278,6 +382,7 @@ export class Drivetrain {
       sumFz += Math.max(0, w[i].Fz)
       if (this.a[i] > 0) this.gripTorque += this.grips[i].mu * Math.max(0, w[i].Fz) * R.axles[i >> 1].radius
     }
+    this.spin0.set(this.spin)
     for (let s = 0; s < SUBSTEPS; s++) {
       // ---- power unit ----
       let Te = this.engineTorque(coupled, speed, h)
@@ -293,7 +398,7 @@ export class Drivetrain {
           const ass = Math.atan2(wi.vy, vden)
           this.alpha[i] += (ass - this.alpha[i]) * Math.min(1, ((Math.hypot(wi.vx, wi.vy) + 0.5) / SIGMA) * h)
           this.kappa[i] = k
-          const mu = gp.mu * Math.max(0.6, 1 - 0.1 * (wi.Fz / this.FzStatic[i] - 1))
+          const mu = gp.mu * this.heatGrip[i] * Math.max(0.6, 1 - 0.1 * (wi.Fz / this.FzStatic[i] - 1))
           combinedSlip(k, this.alpha[i], gp, this.tmp)
           Fx = this.tmp[0] * mu * wi.Fz
           Fy = this.tmp[1] * mu * wi.Fz
@@ -306,6 +411,8 @@ export class Drivetrain {
           const mShare = sumFz > 0 ? (this.mass * wi.Fz) / sumFz : this.mass / n
           const capY = (mShare * Math.abs(wi.vy)) / dt
           if (Math.abs(Fy) > capY) Fy = Math.sign(Fy) * capY
+          // Sliding power at the contact (heats the tread): force × slip velocity, along and across.
+          this.accP[i] += Math.abs(Fx * sl) + Math.abs(Fy * wi.vy)
         } else this.alpha[i] *= 1 - Math.min(1, 8 * h)
         this.accFx[i] += Fx
         this.accFy[i] += Fy
@@ -361,13 +468,34 @@ export class Drivetrain {
       }
     }
     // ---- outputs: averaged forces, low-speed static friction (hill hold) ----
-    const hold = this.selector === 'P' || this.brake > 0.05 || input.handbrake || (this.gas < 0.05 && this.selector !== 'N')
+    // IDLE CREEP: an automatic (torque converter / CVT) in gear with no pedals pulls at idle — it creeps at walking
+    // pace, as a real one does — so nothing holds it on level ground; on a slope (> ~4°) the hold stays (the car's
+    // auto-hold: it doesn't roll back off its creep).
+    const creep = (gb.kind === 'auto' || gb.kind === 'cvt') && (this.selector === 'D' || this.selector === 'R') && Math.abs(ch.pitch) < 0.07
+    const hold = this.selector === 'P' || this.brake > 0.05 || input.handbrake || (this.gas < 0.05 && this.selector !== 'N' && !creep)
     // Hill-start assist: pulling away (≤ 1.5 s after the hold, still slow) the tyres won't let the car roll BACK —
     // the static force only ever pushes the way it's driving, until the drive takes over.
     if (hold) this.hillStart = 0
     else this.hillStart += dt
     const assist = !hold && this.hillStart < 1.5 && Math.abs(speed) < 1.5 && this.selector !== 'N'
     const dir = this.selector === 'R' ? -1 : 1
+    // BOTH PEDALS (a brake-stand): a driven wheel the engine turns against its brake is FREE — its sliding tyre
+    // pushes the car (Fx from the slip) and is no part of the static hold. The braked wheels that do hold react
+    // that push too (static friction: whatever keeps the car still), each up to what its BRAKE can hold
+    // (pedal × its brake torque / r) and its grip — past that the car creeps on.
+    const burn = hold && this.gas > 0.05 && this.brake > 0.05 && this.selector !== 'P' && !input.handbrake
+    let pushF = 0, pushR = 0, mHeld = 0
+    for (let i = 0; i < n; i++) {
+      const wi = w[i]
+      this.free[i] = burn && wi.contact && wi.Fz > 0 && this.isDriven(i) && Math.abs(this.omega[i]) > 0.05 ? 1 : 0
+      if (!wi.contact || wi.Fz <= 0) continue
+      if (this.free[i]) {
+        // its force in the car frame (forward, right)
+        const fx = this.accFx[i] / SUBSTEPS, fy = this.accFy[i] / SUBSTEPS, c = Math.cos(this.steer[i]), s = Math.sin(this.steer[i])
+        pushF += fx * c - fy * s
+        pushR += fx * s + fy * c
+      } else mHeld += sumFz > 0 ? (this.mass * wi.Fz) / sumFz : this.mass / n
+    }
     for (let i = 0; i < n; i++) {
       const wi = w[i]
       let Fx = this.accFx[i] / SUBSTEPS, Fy = this.accFy[i] / SUBSTEPS
@@ -376,7 +504,7 @@ export class Drivetrain {
         const sx = Math.max(-this.grips[i].mu * wi.Fz, Math.min(this.grips[i].mu * wi.Fz, -mShare * (wi.hx / dt + wi.gx) - wi.sx))
         if (sx * dir > Fx * dir) Fx = sx
       }
-      if (wi.contact && wi.Fz > 0 && hold) {
+      if (wi.contact && wi.Fz > 0 && hold && !this.free[i]) {
         const v = Math.hypot(wi.vx, wi.vy)
         const k = Math.min(1, Math.max(0, 1.25 - v / 0.64)) // full hold below 0.16 m/s, none above 0.8
         if (k > 0) {
@@ -384,11 +512,25 @@ export class Drivetrain {
           // All of the slope's pull and of the body's own travel (Rapier's spring impulse already acted this step).
           let sx = -mShare * (wi.hx / dt + wi.gx) - wi.sx, sy = -mShare * (wi.hy / dt + wi.gy) - wi.sy
           const cap = this.grips[i].mu * wi.Fz
+          if (burn && mHeld > 0) {
+            // + this wheel's share of the free wheels' push (into its own frame), held by its brake
+            const share = mShare / mHeld, c = Math.cos(this.steer[i]), s = Math.sin(this.steer[i])
+            sx -= share * (pushF * c + pushR * s)
+            sy -= share * (-pushF * s + pushR * c)
+            let Tb = this.brake * this.brakeMax[i]
+            if (i >= 2) Tb *= Math.max(0.35, Math.min(1, wi.Fz / this.FzStatic[i]))
+            const capB = Tb / R.axles[i >> 1].radius
+            if (Math.abs(sx) > capB) sx = Math.sign(sx) * capB
+          }
           const m = Math.hypot(sx, sy)
           if (m > cap) (sx *= cap / m), (sy *= cap / m)
           Fx += (sx - Fx) * k
           Fy += (sy - Fy) * k
-          if (k > 0.5) this.omega[i] = this.selector === 'P' || this.brake > 0.05 ? 0 : wi.vx / R.axles[i >> 1].radius
+          if (k > 0.5) {
+            this.omega[i] = this.selector === 'P' || this.brake > 0.05 ? 0 : wi.vx / R.axles[i >> 1].radius
+            // The held wheel turns with the ground only (the substeps' idle creep never happened).
+            this.spin[i] = this.spin0[i] + this.omega[i] * dt
+          }
         }
       }
       this.Fx[i] = Fx
@@ -397,6 +539,7 @@ export class Drivetrain {
       this.slip[i] += (Math.min(1, Math.max(0, vis - 0.25)) - this.slip[i]) * Math.min(1, dt * 10)
     }
     this.traction(dt, speed, w)
+    this.thermal(dt, w)
     this.absOn = absActive
     const Tmax = curveTorque(P, Math.max(1, this.we), this.boost) * this.powerScale
     this.load = Tmax > 0 ? Math.max(-1, Math.min(1, this.lastTe / Tmax)) : 0
@@ -427,6 +570,8 @@ export class Drivetrain {
   /** Σ over the driven wheels of μ·Fz·r: the most torque the tyres can take (launch control). */
   private gripTorque = 0
   private readonly wTyre = new Float64Array(8)
+  /** Spin angles at the start of the step (a held wheel's are re-integrated from the ground speed). */
+  private readonly spin0 = new Float64Array(8)
 
   /**
    * TCS (§8.7, aids std / full), two parts like a real system:
@@ -477,6 +622,46 @@ export class Drivetrain {
   private hillStart = 9
   private gasIn = 0
 
+  /**
+   * TYRE TEMPERATURE, GRIP AND FIRE (TYRE), once per step: the sliding power heats the tread surface, which
+   * conducts into the bulk; both lose heat to the air faster the faster the air moves over the tyre (wet ground ×
+   * more). Past `ignite` the tyre catches FIRE: the burning rubber adds its own heat while there is tread left, so
+   * at a standstill it keeps burning (smoulders); driving fast cools it below `out` and it dies.
+   */
+  private thermal(dt: number, w: WheelIn[]): void {
+    for (let i = 0; i < this.n; i++) {
+      const wi = w[i], r = this.R.axles[i >> 1].radius
+      const sz = (r / 0.39) * (r / 0.39)
+      const P = this.accP[i] / SUBSTEPS
+      this.slideP[i] = P
+      const Ta = this.airT[i]
+      // Air speed over the tread: the car's travel plus a share of its own rim speed (a spinning tyre fans itself).
+      const sq = Math.sqrt(Math.hypot(wi.vx, wi.vy) + TYRE.fan * Math.abs(this.omega[i] * r))
+      const wet = wi.contact ? 1 + TYRE.wetCool * this.wetT[i] : 1
+      const gSA = (TYRE.gSA + TYRE.gSAv * sq) * sz * wet, gBA = (TYRE.gBA + TYRE.gBAv * sq) * sz, gSB = TYRE.gSB * sz
+      let Ts = this.treadT[i], Tb = this.coreT[i]
+      const ut = Math.sqrt(Math.abs(this.omega[i] * r)), ur = Math.sqrt(Math.hypot(wi.vx, wi.vy))
+      let q = TYRE.eta * Math.max(0.15, (ut + 0.2) / (ut + ur + 0.4)) * P
+      if (this.fire[i] > 0) {
+        // Burning rubber heats its own tread; the flame dies down as the tread burns away, and the head wind of a
+        // moving car blows it off the rubber (less of its heat comes back).
+        const pyro = (TYRE.pyro - Ts) / 120
+        q += (TYRE.fireW * sz * Math.min(1, this.fuel[i] / (0.25 * TYRE.fuel)) * (pyro <= 0 ? 0 : pyro >= 1 ? 1 : pyro)) / (1 + Math.abs(wi.vx) / TYRE.blowOff)
+        this.fuel[i] = Math.max(0, this.fuel[i] - dt)
+        this.fire[i] = Ts < TYRE.out || this.fuel[i] <= 0 ? 0 : this.fire[i] + dt // (burnt out: it only smokes now)
+      } else if (Ts >= TYRE.ignite && Tb >= TYRE.igniteCore && this.fuel[i] > 0) this.fire[i] = dt
+      // (explicit Euler: the surface time constant, cS / Σg ≥ 0.3 s even wet at speed, is ≫ the 1/60 s step)
+      const flowSB = gSB * (Ts - Tb)
+      Ts += ((q - flowSB - gSA * (Ts - Ta)) / (TYRE.cS * sz)) * dt
+      Tb += ((flowSB - gBA * (Tb - Ta)) / (TYRE.cB * sz)) * dt
+      // (past its pyrolysis range more heat only gasifies the rubber — the smoke — the surface gets no hotter)
+      this.treadT[i] = Math.min(Ts, TYRE.pyro + 60)
+      this.coreT[i] = Tb
+      const hot = (Ts - TYRE.gripFrom) / (TYRE.gripTo - TYRE.gripFrom)
+      this.heatGrip[i] = 1 - TYRE.gripLoss * (hot <= 0 ? 0 : hot >= 1 ? 1 : hot)
+    }
+  }
+
   /** Ramped pedals and the P/R/N/D selector from the one throttle axis (§8.6–8.7). */
   private pedals(dt: number, c: DriverInput, v: number): void {
     let gas = 0, brake = 0
@@ -491,7 +676,14 @@ export class Drivetrain {
       this.gear = Math.max(1, this.gear)
     }
     const t = c.throttle
-    if (this.selector === 'D') {
+    const fb = c.brake && c.brake > 0 ? Math.min(1, c.brake) : 0
+    if (fb > 0) {
+      // BOTH PEDALS: the axis is the gas pedal only (W + S never selects reverse; from R at a standstill → D).
+      this.revHold = 0
+      if (this.selector === 'R' && v > -0.5) (this.selector = 'D'), (this.gear = 1), (this.shifting = false)
+      if (this.selector === 'D') (gas = Math.max(0, t)), (brake = Math.max(fb, -t))
+      else brake = Math.max(fb, Math.abs(t)) // rolling back in R: both pedals = the brake
+    } else if (this.selector === 'D') {
       if (t >= 0) gas = t, (this.revHold = 0)
       else if (v > 0.5) brake = -t, (this.revHold = 0)
       else {
@@ -519,6 +711,14 @@ export class Drivetrain {
     this.gas = gas > this.gas ? Math.min(gas, this.gas + up) : Math.max(gas, this.gas - down)
     this.brake = brake > this.brake ? Math.min(brake, this.brake + b) : Math.max(brake, this.brake - b)
     this.braking = this.brake > 0.05 || (this.R.power.kind === 'electric' && this.regen > 0.3)
+    // BURNOUT LAUNCH (auto-clutch: manual / DCT) — what a driver does to break a modest engine's tyres loose: with
+    // the brake held at a standstill and the gas floored, the clutch stays IN while the engine revs to ~75 % of the
+    // redline, then is DUMPED (the normal bite logic: full capacity above the launch rpm). The flywheel's kick
+    // breaks the driven tyres loose; once sliding they need far less torque to keep spinning.
+    const gb = this.R.gearbox
+    if (this.brake < 0.05 || this.gas < 0.05 || (gb.kind !== 'manual' && gb.kind !== 'dct')) this.burnClutch = 0
+    else if (this.burnClutch === 0 && this.brake > 0.3 && this.gas > 0.3 && Math.abs(v) < 0.5 && Math.abs(this.carrierSpeed()) < 0.5) this.burnClutch = 1
+    if (this.burnClutch === 1 && this.we > 0.75 * this.R.power.wRedline) this.burnClutch = 2
   }
 
   private steering(dt: number, c: DriverInput, ch: ChassisIn): void {
@@ -680,6 +880,8 @@ export class Drivetrain {
       // (and on a steep climb under the off-road assist, whatever the aids)
       if (this.aids !== 'off' || this.steepClimb) cap = Math.min(cap, (0.95 * this.gripTorque) / Math.abs(G))
       this.clutch = e
+      // Burnout launch: the clutch held in while the engine revs (then dumped: pedals()).
+      if (this.burnClutch === 1) (cap = 0), (this.clutch = 0)
     }
     let inv = 1 / P.inertia, cs = 0
     for (let i = 0; i < n; i++) {

@@ -1,8 +1,8 @@
 import type RAPIER from '@dimforge/rapier3d-compat'
 import { group, Groups, type PhysicsWorld } from '../../physics/PhysicsWorld'
-import { Drivetrain, type ChassisIn, type WheelIn } from './drivetrain/Drivetrain'
+import { Drivetrain, type ChassisIn, type DriverInput, type WheelIn } from './drivetrain/Drivetrain'
 import type { Resolved } from './drivetrain/spec'
-import { TYRE_KINDS, gripFor, roughness, surfaceMix, type SurfaceMix } from './drivetrain/tyre'
+import { Surf, TYRE_KINDS, gripFor, roughness, surfaceMix, type SurfaceMix } from './drivetrain/tyre'
 
 /**
  * VEHICLE SIMULATION (no rendering — tested in Node, tests/vehicle.test.ts). Both vehicles are real Rapier
@@ -39,6 +39,9 @@ export interface Controls {
   /** The brake (S / stick back) is pressed, even while the throttle is held too — arcade: a tap while steering
    *  at speed starts a drift (Asphalt). */
   brake?: boolean
+  /** 0..1 foot brake held TOGETHER with the gas (W + S, touch DRIFT + stick forward at a standstill) — Simulation
+   *  handling: left-foot braking / a brake-stand burnout (Drivetrain `DriverInput.brake`). */
+  footBrake?: number
   /** −1 … 1 (↓ / ↑, touch ▼ ▲): on the ground raises / lowers the body (air suspension); flying = climb / sink. */
   lift?: number
 }
@@ -204,7 +207,7 @@ abstract class VehicleBase {
       const w = this.wheels[i]
       const len = this.vc.wheelSuspensionLength(i) ?? this.restW[i]
       w.lift = this.restW[i] - this.sagW[i] - len + this.bumpW[i]
-      const spin = this.vc.wheelRotation(i) ?? 0
+      const spin = this.drawnSpin(i) ?? this.vc.wheelRotation(i) ?? 0
       rim += ((spin - w.spin) / dt) * this.spec.wheels[i].radius
       w.spin = spin
       w.steer = -(this.vc.wheelSteering(i) ?? 0)
@@ -212,6 +215,12 @@ abstract class VehicleBase {
     }
     const ws = rim / Math.max(1, this.wheels.length)
     this.wheelSpeed = Number.isFinite(ws) ? ws : this.speed
+  }
+
+  /** The wheel's own spin angle (rad) when a model simulates it (the drivetrain: wheelspin, locked brakes, a wheel
+   *  spinning in the air); null = Rapier's, which only rolls the wheel with the ground under it. */
+  protected drawnSpin(_i: number): number | null {
+    return null
   }
 
   private holding = false
@@ -503,6 +512,7 @@ export class TruckSim extends VehicleBase {
   private surfI = 0
   private readonly wIn: WheelIn[] = []
   private readonly chIn: ChassisIn = { speed: 0, yawRate: 0, latAccel: 0, pitch: 0, g: G_REAL, rearVy: 0 }
+  private readonly din: DriverInput = { throttle: 0, steer: 0, handbrake: false, boost: false, parked: false, brake: 0 }
   private readonly arb: number[] = []
   private readonly travelW: number[] = []
   private readonly kBump: number[] = []
@@ -528,12 +538,14 @@ export class TruckSim extends VehicleBase {
   }
 
   /** Tyre noise from the drivetrain (Simulation handling, null otherwise): the worst slide angle and wheelspin /
-   *  lock of the wheels on the ground, and what they stand on (hard / gravel / soft shares). Reused object. */
-  tyreNoise(): { slide: number; spin: number; hard: number; gravel: number; soft: number } | null {
+   *  lock of the wheels on the ground, what they stand on (hard / gravel / soft shares), and a tyre on fire
+   *  (1: the crackle). Reused object. */
+  tyreNoise(): { slide: number; spin: number; hard: number; gravel: number; soft: number; fire: number } | null {
     const D = this.real
     if (!D) return null
     const t = this.noiseOut
     t.slide = t.spin = t.hard = t.gravel = t.soft = 0
+    t.fire = D.burning ? 1 : 0
     let n = 0
     for (let i = 0; i < 4; i++) {
       if (!this.wIn[i].contact) continue
@@ -549,7 +561,7 @@ export class TruckSim extends VehicleBase {
     else t.hard = 1
     return t
   }
-  private readonly noiseOut = { slide: 0, spin: 0, hard: 1, gravel: 0, soft: 0 }
+  private readonly noiseOut = { slide: 0, spin: 0, hard: 1, gravel: 0, soft: 0, fire: 0 }
 
   /**
    * OFF-ROAD ASSIST (gameplay, Settings; off = the real machine, as the tests drive it): engine torque × 1.6, and on
@@ -557,6 +569,12 @@ export class TruckSim extends VehicleBase {
    * at a crawl, and the slope limiter (afterReal): the tyres never feel more than ~26°.
    */
   offroadAssist = false
+
+  /** The drivetrain's wheel spin (Simulation handling): a locked wheel stops, a spinning one spins — Rapier's
+   *  rotation only follows the ground speed, so a handbrake slide or a burnout drew rolling wheels. */
+  protected drawnSpin(i: number): number | null {
+    return this.mode === 'drivetrain' && this.drivetrain ? this.drivetrain.spin[i] : null
+  }
 
   /** Which model drives the car this step. */
   private wantMode(): 'legacy' | 'drivetrain' {
@@ -640,8 +658,12 @@ export class TruckSim extends VehicleBase {
       vc.setWheelSuspensionRestLength(i, rest + this.ride)
       vc.setWheelMaxSuspensionTravel(i, travel)
       vc.setWheelSuspensionStiffness(i, k)
-      vc.setWheelSuspensionCompression(i, (this.dampB[i] = 2 * ax.zeta[0] * Math.sqrt(k * sw)))
-      vc.setWheelSuspensionRelaxation(i, 2 * ax.zeta[1] * Math.sqrt(k * sw))
+      // Damping is ours (afterReal: on the real compression rate, digressive); per kg of chassis, like Rapier's.
+      this.dampB[i] = 2 * ax.zeta[0] * Math.sqrt(k * sw)
+      this.dampR[i] = 2 * ax.zeta[1] * Math.sqrt(k * sw)
+      vc.setWheelSuspensionCompression(i, 0)
+      vc.setWheelSuspensionRelaxation(i, 0)
+      this.xPrev[i] = this.sagW[i]
       vc.setWheelMaxSuspensionForce(i, M * G_REAL * 8)
       vc.setWheelFrictionSlip(i, 0)
       vc.setWheelSideFrictionStiffness(i, 0)
@@ -651,31 +673,71 @@ export class TruckSim extends VehicleBase {
     }
     if (prev !== 'drivetrain') {
       // Taking over (start, after the boat or the flight): wheels roll with the ground, the box in gear.
-      for (let i = 0; i < 4; i++) D.omega[i] = this.speed / r
       D.reset()
+      for (let i = 0; i < 4; i++) D.omega[i] = this.speed / r
+      // The drawn wheels carry on from Rapier's angle (no jump in the picture or the rim-speed audio).
+      for (let i = 0; i < 4; i++) D.spin[i] = vc.wheelRotation(i) ?? D.spin[i]
     }
   }
 
   /** Drivetrain mode, before the raycast update: the wheels' steering (for their axles); Rapier drives nothing. */
-  private driveReal(dt: number): void {
+  private driveReal(_dt: number): void {
     const D = this.drivetrain!, vc = this.vc
+    const { f, u, r: rt } = this.axes()
     for (let i = 0; i < 4; i++) {
       vc.setWheelSteering(i, -D.steer[i])
       // GROUND ROUGHNESS (drivetrain/tyre.ts): the terrain mesh is smooth at wheel scale, so each wheel rides the
       // bumps, ruts and stones of its surface here — the rest length grows by the bump height (the spring sees
       // the ground raised exactly as a taller ray hit would), the rendered wheel lifts by it, and its rate goes
-      // to the damper in afterReal.
+      // to the damper in afterReal. The TYRE ENVELOPES it (tyreEnvelope): a round tyre rolls up a stone, a kerb
+      // or a log before its hub is over it, instead of the single ray dropping onto it in one step.
       const p = vc.wheelHardPoint(i)
-      const h = p && vc.wheelIsInContact(i) ? roughness(p.x, p.z, this.mixes[i]) : this.bumpW[i] * 0.8
-      this.bumpRate[i] = dt > 0 ? (h - this.bumpW[i]) / dt : 0
+      const d = D.steer[i], cd = Math.cos(d), sd = Math.sin(d)
+      _hd[0] = f[0] * cd + rt[0] * sd; _hd[1] = f[1] * cd + rt[1] * sd; _hd[2] = f[2] * cd + rt[2] * sd
+      const h = p ? this.tyreEnvelope(i, p, _hd, u) : this.bumpW[i] * 0.8
       this.bumpW[i] = h
       vc.setWheelSuspensionRestLength(i, this.restW[i] + this.ride + h)
     }
     this.steerAngle = (D.steer[0] + D.steer[1]) / 2
   }
-  private readonly bumpRate = [0, 0, 0, 0]
-  /** Damper rate per wheel (per kg of chassis, Rapier's units) in bump — for the bump-rate force. */
+  /**
+   * TYRE ENVELOPE (m): how much higher than under its hub the ground effectively is for wheel i. A rigid circle of
+   * the tyre's radius rests on the highest point of the ground along its footprint arc: sampled at 0, ± 0.35 r and
+   * ± 0.7 r along the wheel's heading, each sample counts its height (terrain and obstacle colliders by ray, plus
+   * the surface roughness) minus the circle's drop there, r − √(r² − d²). Before: the one ray met a 30 cm stone in
+   * a single 60 Hz step at speed — 4–10 × load spikes and wheel hop; a real tyre swallows it over its footprint.
+   * Cost: 5 rays per wheel per fixed step (20 per step, ≈ 20–40 µs on a phone), same on every tier.
+   */
+  private tyreEnvelope(i: number, hp: { x: number; y: number; z: number }, hd: number[], u: number[]): number {
+    const vc = this.vc
+    const r = vc.wheelRadius(i) ?? this.baseRadius * this.tune.tyre
+    const L = this.restW[i] + this.ride + r * 1.6
+    const mix = this.mixes[i]
+    const ray = (this.envRay ??= new this.R.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }))
+    ray.dir.x = -u[0]; ray.dir.y = -u[1]; ray.dir.z = -u[2]
+    let g0 = 0, best = -Infinity
+    for (let k = 0; k < 5; k++) {
+      const s = ENV_D[k] * r
+      const ox = hp.x + hd[0] * s, oy = hp.y + hd[1] * s, oz = hp.z + hd[2] * s
+      ray.origin.x = ox; ray.origin.y = oy; ray.origin.z = oz
+      const hit = this.physics.world.castRay(ray, L, true, undefined, RAY_GROUPS, undefined, this.body)
+      // Ground height above the ray's end, along the body's up axis (no hit = at the end: nothing to climb).
+      const g = hit ? L - hit.timeOfImpact : 0
+      const gx = ox - u[0] * (L - g), gz = oz - u[2] * (L - g)
+      const hk = g + roughness(gx, gz, mix)
+      if (k === 0) g0 = g
+      const lift = hk - (r - Math.sqrt(r * r - s * s))
+      if (lift > best) best = lift
+    }
+    // (negative = a dip the tyre sinks into: the roughness's troughs, never more than they are deep)
+    return Math.min(0.8 * r, best - g0)
+  }
+  private envRay: RAPIER.Ray | null = null
+  /** Damper rates per wheel at low shaft speed, bump and rebound (N·s/m per kg of chassis, Rapier's units). */
   private readonly dampB: number[] = []
+  private readonly dampR: number[] = []
+  /** Last step's suspension compression per wheel (m) — the damper's shaft speed. */
+  private readonly xPrev = [0, 0, 0, 0]
 
   /**
    * Drivetrain mode, after the raycast update (fresh contacts and spring forces): per wheel the load (spring +
@@ -694,6 +756,10 @@ export class TruckSim extends VehicleBase {
       const p = vc.wheelHardPoint(si) ?? t
       this.surface(p.x, p.z, this.mixes[si])
       gripFor(TYRE_KINDS[R.axles[si >> 1].tyreKind], this.mixes[si], D.gripScale, D.grips[si])
+      // The air the tyre cools in, from the ground it stands on (desert sand hot, snow / ice cold), and the wet.
+      const mw = this.mixes[si].w
+      D.airT[si] = 20 + 15 * mw[Surf.Sand] - 24 * mw[Surf.Snow] - 28 * mw[Surf.Ice]
+      D.wetT[si] = this.mixes[si].wet
     }
     // Suspension compression → anti-roll bars + bump stops.
     const x = _x
@@ -704,6 +770,7 @@ export class TruckSim extends VehicleBase {
       wi.contact = vc.wheelIsInContact(i)
       if (!wi.contact) {
         wi.Fz = wi.vx = wi.vy = wi.gx = wi.gy = wi.sx = wi.sy = wi.hx = wi.hy = 0
+        this.xPrev[i] = 0 // full droop: a landing compresses from there
         continue
       }
       contacts++
@@ -711,16 +778,34 @@ export class TruckSim extends VehicleBase {
       const arbF = this.arb[i] * (x[i] - x[pair])
       const bz = x[i] - (this.sagW[i] + 0.75 * (this.travelW[i] - this.sagW[i]))
       const bump = bz > 0 ? this.kBump[i] * bz * bz : 0
-      // The damper also feels the bump's own rate (Rapier's only sees its ray): a sharp stone kicks.
+      // DAMPER (ours — Rapier's is off in this mode, it only saw the body's motion, never the wheel's): on the real
+      // compression rate, body AND ground (a stone, a kerb, a rut under the tyre), bump / rebound rates from the
+      // spec, DIGRESSIVE like a valved damper — linear to 0.25 m/s of shaft speed, then 0.35 × the slope (the
+      // blow-off). A linear damper at a pothole's 2 m/s hit the body with 2–3 × the corner's weight.
       const M = this.body.mass()
-      const kick = Math.max(-M * G_REAL, Math.min(M * G_REAL * 2, (this.dampB[i] ?? 0) * M * this.bumpRate[i]))
+      const spring = vc.wheelSuspensionForce(i) ?? 0
       const hp = vc.wheelHardPoint(i)
-      if (hp && (arbF !== 0 || bump > 0 || kick !== 0)) {
-        const F = arbF + bump + kick
+      // (touching down — or the first step: the shaft moves at the body's approach speed at that corner, not by the
+      // jump from full droop in one step)
+      let sv: number
+      if (this.xPrev[i] > 0 || !hp) sv = dt > 0 ? (x[i] - this.xPrev[i]) / dt : 0
+      else {
+        const rx = hp.x - com.x, ry = hp.y - com.y, rz = hp.z - com.z
+        sv = -((lv.x + w.y * rz - w.z * ry) * u[0] + (lv.y + w.z * rx - w.x * rz) * u[1] + (lv.z + w.x * ry - w.y * rx) * u[2])
+      }
+      this.xPrev[i] = Math.max(1e-6, x[i])
+      const av = Math.abs(sv)
+      let damp = Math.sign(sv) * ((sv > 0 ? this.dampB[i] : this.dampR[i]) ?? 0) * M * (av < DAMP_KNEE ? av : DAMP_KNEE + DAMP_HIGH * (av - DAMP_KNEE))
+      // A tyre only pushes: rebound damping can't pull the wheel down onto the ground.
+      // (only ever a limit on the damper's pull — never a push: when the anti-roll bar already out-pulls the spring
+      // on an unloading inside wheel, the damper adds nothing)
+      if (damp < 0) damp = Math.min(0, Math.max(damp, -(spring + arbF + bump)))
+      if (hp && (arbF !== 0 || bump > 0 || damp !== 0)) {
+        const F = arbF + bump + damp
         _fv.x = u[0] * F; _fv.y = u[1] * F; _fv.z = u[2] * F
         body.addForceAtPoint(_fv, hp, true)
       }
-      wi.Fz = Math.max(0, (vc.wheelSuspensionForce(i) ?? 0) + arbF + bump + kick)
+      wi.Fz = Math.max(0, spring + arbF + bump + damp)
       // Contact frame: the wheel's heading (steered) in the ground plane, and its right.
       const n = vc.wheelContactNormal(i) ?? { x: u[0], y: u[1], z: u[2] }
       const d = D.steer[i], cd = Math.cos(d), sd = Math.sin(d)
@@ -745,7 +830,7 @@ export class TruckSim extends VehicleBase {
       wi.gy = -G_REAL * lc[1]
       // Our anti-roll-bar and bump-stop forces push along the body's up axis (Rapier's springs act along the
       // contact normal): their in-plane part, for the static hold to cancel.
-      const Fb = arbF + bump + kick
+      const Fb = arbF + bump + damp
       wi.sx = Fb * (u[0] * fc[0] + u[1] * fc[1] + u[2] * fc[2])
       wi.sy = Fb * (u[0] * lc[0] + u[1] * lc[1] + u[2] * lc[2])
       _cf[i * 6] = fc[0]; _cf[i * 6 + 1] = fc[1]; _cf[i * 6 + 2] = fc[2]
@@ -803,7 +888,10 @@ export class TruckSim extends VehicleBase {
     ch.rearVy = (lv.x + w.y * az - w.z * ay) * rt[0] + (lv.y + w.z * ax - w.x * az) * rt[1] + (lv.z + w.x * ay - w.y * ax) * rt[2]
     const c = this.controls
     D.nitro = c.boost
-    D.step(dt, { throttle: c.throttle, steer: c.steer, handbrake: c.handbrake, boost: c.boost, parked: !!c.parked }, ch, this.wIn)
+    const din = this.din
+    din.throttle = c.throttle; din.steer = c.steer; din.handbrake = c.handbrake; din.boost = c.boost; din.parked = !!c.parked
+    din.brake = c.footBrake ?? 0
+    D.step(dt, din, ch, this.wIn)
     // Tyre forces at the contact points.
     for (let i = 0; i < 4; i++) {
       if (!this.wIn[i].contact) continue
@@ -841,6 +929,19 @@ export class TruckSim extends VehicleBase {
     this.drivetrain?.reset()
   }
 
+  /** TYRE HEAT (Simulation handling; Drivetrain TYRE): wheel k's tread surface temperature (°C; 20 outside the
+   *  drivetrain), its smoke 0..1 from the heat (thick white smoke when hot), and how long it has been on fire (s, 0 =
+   *  not burning). Effects, HUD and audio read these. */
+  tyreTemp(k: number): number {
+    return this.mode === 'drivetrain' && this.drivetrain ? this.drivetrain.treadT[k] : 20
+  }
+  tyreSmoke(k: number): number {
+    return this.mode === 'drivetrain' && this.drivetrain ? this.drivetrain.smoke(k) : 0
+  }
+  tyreFire(k: number): number {
+    return this.mode === 'drivetrain' && this.drivetrain ? this.drivetrain.fire[k] : 0
+  }
+
   /** Wheel k's tyre load (N) — the drivetrain's (spring + bar + bump stop + kick), else Rapier's spring force —
    *  and its static share (N), for the tyre-deformation shader (Car). */
   wheelLoad(k: number): number {
@@ -855,6 +956,11 @@ export class TruckSim extends VehicleBase {
   /** Sideways tyre force of wheel k (N, + right) — the tyre shear on HIGH. 0 outside the drivetrain. */
   wheelSide(k: number): number {
     return this.mode === 'drivetrain' && this.drivetrain ? this.drivetrain.Fy[k] : 0
+  }
+  /** Surface under wheel k (weights over SURFACES, the sim's own sample — tyre marks); null outside the drivetrain
+   *  (not sampled then). Reused object: read it, don't keep it. */
+  wheelSurface(k: number): SurfaceMix | null {
+    return this.mode === 'drivetrain' ? (this.mixes[k] ?? null) : null
   }
 
   /** Current tyre radius (m). */
@@ -1214,6 +1320,12 @@ function rotate(q: { x: number; y: number; z: number; w: number }, x: number, y:
   out[2] = iz * q.w + iw * -q.z + ix * -q.y - iy * -q.x
 }
 const _rv = [0, 0, 0]
+/** Damper knee (m/s of shaft speed) and the slope past it (× the low-speed rate): a digressive valve. */
+const DAMP_KNEE = 0.25
+const DAMP_HIGH = 0.35
+/** Tyre-envelope sample offsets along the wheel's heading (× the tyre radius); the hub first. */
+const ENV_D = [0, 0.35, -0.35, 0.7, -0.7]
+const _hd = [0, 0, 0]
 const _x = [0, 0, 0, 0]
 /** Per wheel: contact frame (forward xyz, right xyz) and contact point, reused every step (no allocations). */
 const _cf = new Float64Array(24)

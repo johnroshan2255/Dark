@@ -15,6 +15,7 @@ import { WorldFields } from './WorldFields'
 import type { BiomeWeights } from './Biomes'
 import { groundPalette } from '../rendering/artStyle'
 import { sampleHeight } from './Terrain/generateTerrain'
+import { groundOf } from './Terrain/ribbonIndex'
 import { FarForest } from './Forest/FarForest'
 import type { SpeciesDef } from './Forest/treeFactory'
 
@@ -104,14 +105,16 @@ export class WorldManager {
 
   private frame = 0
 
-  /** Terrain height from the loaded chunk data (null where no chunk is loaded) — the rendered surface, and far
-   *  cheaper than `fields.height` (no noise / road-network queries): per-frame consumers should use this. */
+  /** Terrain height from the loaded chunk data (null where no chunk is loaded) — the rendered (LOD0) surface incl. the
+   *  road ribbon's gutters and ruts (= the colliders), and far cheaper than `fields.height` (no noise / road-network
+   *  queries): per-frame consumers should use this. */
   groundAt(x: number, z: number): number | null {
     const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE)
     const c = this.chunks.get(chunkKey(cx, cz))
     if (!c) return null
     const lx = x - cx * CHUNK_SIZE, lz = z - cz * CHUNK_SIZE
-    const h = sampleHeight(c.data.heights, lx, lz)
+    // The LOD0 / collider surface: the road ribbon (gutters, ruts) where there is one, else the grid.
+    const h = Math.max(groundOf(c.data, c.ribbon, lx, lz), sampleHeight(c.data.heights0, lx, lz))
     if (h >= WorldFields.WATER) return h
     // Frozen water in the snow: the surface is the ice (same rule as the physics heightfield).
     const vi = Math.min(CHUNK_RES, Math.round(lz / CELL_SIZE)) * (CHUNK_RES + 1) + Math.min(CHUNK_RES, Math.round(lx / CELL_SIZE))

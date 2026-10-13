@@ -266,7 +266,16 @@ margin of 0.35 chunk (LOD), so standing on a border does not thrash.
   Measured seed 7, RTX 4050 laptop: no fps change (144 capped), GPU within noise (4.6–6.3 ms HIGH, 2.8 ms LOW).
   DRIFT + KIT: handbrake slides can be caught and held (no shifts mid-slide, handbrake declutches, full lock into
   a slide, pickup rear LSD, each car's real aids by default — the 1989 pickup and the Żuk have no TCS / ESC);
-  tests/drivetrain.test.ts checks catch (all) and hold (pickup). Every car carries real kit built in Blender
+  tests/drivetrain.test.ts checks catch (all) and hold (pickup).
+  BURNOUT + TYRE HEAT: W + S (touch: DRIFT + stick forward at a standstill) = gas + foot brake 0.75 → a brake-stand:
+  the front-biased brakes hold the fronts, the engine spins the driven rears (manual: clutch held to ~75 % of the
+  redline, then dumped). Per tyre a two-lump tread temperature (`Drivetrain` `TYRE`) from the sliding power: grip
+  falls past 120 °C, smoke from 140 °C, FIRE at 360 °C (bulk ≥ 170 °C) — pickup: smoke 2.7 s, fire ~21 s, 0.0 m
+  of creep; Żuk (open diff: a one-wheel peel) 3.1 s / ~15 s, 0.3 m; limit cornering 30 s and 0–100 stay < 110 °C.
+  VehicleFx: heat smoke, additive flames + soot + a glow sprite in the SAME draw (premultiplied blending; no real
+  light — no point-light pool exists); HUD lamp `TYRES n°C` / `TYRE FIRE`, toast on ignition, synthesized crackle.
+  Cost: thermal ≈ 0.2 µs per physics step, +320 B; GPU (M4, 1280×720, seed 7, 6.5 m chase) burnout HIGH ≈ +0.4 ms,
+  LOW within noise (the 110-sprite cap), fire HIGH / LOW within noise; +0 draws, +0 programs. Every car carries real kit built in Blender
   (`scripts/blender/vehicle_details.py`: racks, spares, jerrycans, lights, snorkel, sliders, flaps; 560–1270 tris).
 - **Arcade handling** (`VehicleSim.TruckSim.arcade`, Settings → Controls → Driving): Asphalt-style —
   Rapier keeps suspension, contacts and crashes; `driveArcade` adds a scripted longitudinal force (0→100 km/h ≈ 3.7 s,

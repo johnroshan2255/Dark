@@ -291,7 +291,15 @@ default rates and travel. Unsprung mass, camber thrust and roll centres are out 
 (all-terrain, × 1.15 off-road), `mt` (mud-terrain: μ 0.9 on asphalt, × 1.3 off-road, peak 10°), `winter` (× 1.5 on
 snow, × 1.2 on ice).
 
-Out of scope on purpose: tyre temperature and wear, brake fade, fuel, clutch pedal, hybrids, camber thrust,
+**Tyre temperature** (implemented, `Drivetrain.ts` `TYRE`): two lumps per tyre (tread surface on tread bulk) heated
+by the tyre's share of the sliding power |Fx·(ωr − vx)| + |Fy·vy| (share by which surface moves through the contact:
+a burnout heats the tyre, a locked skid the road), cooled by air speed; grip −30 % from 120 → 300 °C; smoke from
+140 °C; FIRE at a 360 °C surface over a ≥ 170 °C bulk, kept alight by its own flame at rest, blown out by driving.
+Both pedals (W + S; touch DRIFT + stick forward at a standstill) = foot brake 0.75 with the gas → a brake-stand
+burnout (the driven wheels the engine turns against their brakes are free of the static hold; the braked ones
+react their push up to pedal × brake torque / r; a manual's clutch is held in to ~75 % of the redline and dumped).
+
+Out of scope on purpose: tyre wear, brake fade, fuel, clutch pedal, hybrids, camber thrust,
 gyroscopic effects. Add one only with a gameplay reason and a test.
 
 ### 8.4 From spec sheet to `VehicleSpec`

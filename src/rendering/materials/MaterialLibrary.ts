@@ -132,6 +132,13 @@ export class MaterialLibrary {
   readonly atlas = createFoliageAtlas(isStorybook(), isGenshin())
   /** Hand-painted surface detail for solids and ground (shaders/paint.ts) — 0.35 MB, shared. */
   readonly brush = (globalUniforms.uBrush.value = createBrushTexture())
+  /**
+   * ROAD RIBBONS (gutters, ruts, potholes — world/Terrain/roadSurface.ts): the terrain's material and program (same
+   * options → same cache key; uniforms are global), plus a polygon offset toward the camera so the ribbon wins where
+   * it lies on the unsunk grid at its edges. Created BEFORE `terrain`: the opaque sort orders by material id, so the
+   * ribbon draws first and the sunk grid under it fails the depth test (early-z) instead of being shaded twice.
+   */
+  readonly roadDetail = stylize(new THREE.MeshLambertMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 }), { key: 'terrain', rim: 0.25, terrain: true, toon: 0.45 })
   readonly terrain = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'terrain', rim: 0.25, terrain: true, toon: 0.45 })
   readonly vegetation = stylize(billboardable(
     new THREE.MeshLambertMaterial({ vertexColors: true, map: this.atlas, alphaTest: 0.42, side: THREE.DoubleSide }),
@@ -242,7 +249,7 @@ export class MaterialLibrary {
   }
 
   all(): THREE.Material[] {
-    return [this.terrain, this.vegetation, this.landmark, this.rock, ...(this.cliffRock === this.rock ? [] : [this.cliffRock]), this.grass, this.grassFar, this.character, this.lampGlow]
+    return [this.roadDetail, this.terrain, this.vegetation, this.landmark, this.rock, ...(this.cliffRock === this.rock ? [] : [this.cliffRock]), this.grass, this.grassFar, this.character, this.lampGlow]
   }
 
   dispose(): void {

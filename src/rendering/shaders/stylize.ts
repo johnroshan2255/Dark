@@ -235,8 +235,8 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
     }
     if (o.terrain) {
       vs = vs
-        .replace('#include <common>', '#include <common>\nattribute float roadLat;\nattribute vec2 roadNet;\nattribute vec2 biome;\nvarying float vRoadLat;\nvarying vec2 vRoadNet;\nvarying vec2 vBiome;\nvarying vec3 vWorldPos;\nvarying float vUpN;\nvarying vec2 vNxz;')
-        .replace('#include <project_vertex>', '#include <project_vertex>\nvRoadLat = roadLat;\nvRoadNet = roadNet;\nvBiome = biome;\nvWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvUpN = normal.y; // terrain normals are world-space (the mesh is only translated)\nvNxz = normal.xz;')
+        .replace('#include <common>', '#include <common>\nattribute float roadLat;\nattribute vec2 roadNet;\nattribute vec2 biome;\nattribute float mud;\nvarying float vRoadLat;\nvarying vec2 vRoadNet;\nvarying vec2 vBiome;\nvarying float vMud;\nvarying vec3 vWorldPos;\nvarying float vUpN;\nvarying vec2 vNxz;')
+        .replace('#include <project_vertex>', '#include <project_vertex>\nvRoadLat = roadLat;\nvRoadNet = roadNet;\nvBiome = biome;\nvMud = mud;\nvWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvUpN = normal.y; // terrain normals are world-space (the mesh is only translated)\nvNxz = normal.xz;')
     }
     if (o.surface !== undefined) {
       const surf = o.surface === 'atlas' ? ATLAS_SURF : o.surface.toFixed(1)
@@ -261,7 +261,7 @@ varying vec3 vFogSky; varying vec3 vWPos;
 ${fs.includes('uSkyMist') ? '' : MIST_GLSL}
 ${o.terrain || o.surface !== undefined ? 'uniform sampler2D uBrush;\n' : ''}${o.surface !== undefined ? paintFragPars(o.cliffStone ? STONE_CLIFF_UV : undefined).replace('uniform sampler2D uBrush;', '') : ''}${o.surface === 'atlas' ? '\nvarying float vGlow;' : ''}
 ${o.biomeCover ? 'varying vec2 vBiomeW; varying float vSnowUp;\n' + (o.terrain ? '' : NOISE) : ''}
-${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying vec3 vWorldPos; varying float vUpN; varying vec2 vNxz;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\nfloat cliffW = 0.0; vec3 cliffTilt = vec3(0.0); // cliff weight + per-block normal tilt: set in the colour block, read in the normal block\n' + NOISE + GUST_GLSL + TRAIL_GLSL : ''}
+${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying float vMud; varying vec3 vWorldPos; varying float vUpN; varying vec2 vNxz;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\nfloat cliffW = 0.0; vec3 cliffTilt = vec3(0.0); // cliff weight + per-block normal tilt: set in the colour block, read in the normal block\n' + NOISE + GUST_GLSL + TRAIL_GLSL : ''}
 ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
     )
     // Genshin CEL SHADING: N·L through a narrow ramp → lit / shadow sides with a crisp soft-edged terminator
@@ -479,23 +479,48 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     road = mix(road, diffuseColor.rgb, vBiome.x * 0.4 * smoothstep(0.35, 0.75, st_noise(wp * 0.45 + 3.0)));
     diffuseColor.rgb = mix(diffuseColor.rgb, road, 1.0 - smoothstep(HALF + 0.9, HALF + 1.6, lat));
   }
-  // Secondary roads: GRAVEL (type 0: grey-brown stones, two darker wheel ruts) / TRAIL (type 1: packed dirt,
-  // grass strip down the middle). vRoadNet.x = distance from the road EDGE (<0 on it).
-  if (vRoadNet.y > -0.5 && vRoadNet.x < 1.2) {
+  // OFF-ROAD TRACKS (network roads: GRAVEL type 0, TRAIL type 1 — the "mud roads"). Road/RoadDetail carves their
+  // geometry on the LOD0 ribbon (two wheel ruts, the centre hump left standing, potholes, ditches); this paints it:
+  // packed, darker, smoother earth in the RUTS, loose stony / crumbly ground between and outside them, a patchy
+  // GRASSY HUMP down the middle, ragged grass-eaten EDGES, loose stones on gravel; mud + water come from vMud below.
+  // vRoadNet.x = distance from the road EDGE (<0 on it). ~35 ALU (LOW skips the fine noise).
+  if (vRoadNet.y > -0.5 && vRoadNet.x < 0.8) {
     float e = vRoadNet.x;
-    float s1 = st_noise(wp * 8.0), s2 = st_hash(floor(wp * 5.0)), s3 = st_noise(wp * 0.7);
-    vec3 surf;
-    if (vRoadNet.y < 0.5) {
-      surf = vec3(0.3, 0.27, 0.22) * (0.75 + 0.3 * s1 + 0.12 * s2);
-      float rut = (1.0 - smoothstep(0.25, 0.5, abs(-e - 0.9))) ;               // ~0.9 m in from each edge
-      surf *= 1.0 - rut * 0.25;
-    } else {
-      surf = vec3(0.28, 0.21, 0.14) * (0.78 + 0.25 * s1 + 0.1 * s3);
-      float mid = 1.0 - smoothstep(0.0, 0.35, abs(-e - 1.35));                 // centre of a 2.7 m track
-      surf = mix(surf, diffuseColor.rgb * 1.1, mid * 0.75 * step(0.35, s3));   // grass strip
+    bool gravelT = vRoadNet.y < 0.5;
+    float lat = max(0.0, e + (gravelT ? 2.3 : 1.35)); // from the centreline
+    float s1 = st_noise(wp * 8.0), s3 = st_noise(wp * 0.7);
+    float rut = 1.0 - smoothstep(0.12, 0.36, abs(lat - (gravelT ? 0.8 : 0.74)));
+    vec3 soil = gravelT ? vec3(0.36, 0.31, 0.25) : vec3(0.31, 0.225, 0.15);
+    vec3 loose = soil * (0.8 + 0.3 * s1 + (fine ? 0.12 * st_noise(wp * 3.1) - 0.06 : 0.0));
+    if (gravelT) {
+      // Loose round pebbles (one hashed pebble per 0.2 m cell, ~40 % of cells), lit on top.
+      vec2 pc = wp * 5.0, pi = floor(pc);
+      float ph = st_hash(pi);
+      vec2 pd = fract(pc) - (0.3 + 0.4 * vec2(ph, fract(ph * 7.31)));
+      float pr = 0.12 + 0.16 * fract(ph * 3.17);
+      float peb = (1.0 - smoothstep(pr - 0.06, pr, length(pd))) * step(0.6, fract(ph * 11.3)) * (1.0 - rut * 0.7);
+      loose = mix(loose, vec3(0.5, 0.48, 0.45) * (0.8 + 0.35 * fract(ph * 5.1) - pd.y * 0.6), peb * 0.8);
     }
-    surf = mix(surf, vec3(0.7, 0.75, 0.84) * (0.88 + 0.15 * s1), vBiome.y * 0.8);
-    diffuseColor.rgb = mix(diffuseColor.rgb, surf, 1.0 - smoothstep(-0.2, 1.2 + 0.5 * s1, e));
+    vec3 surf = mix(loose, soil * (0.6 + 0.12 * s3), rut);
+    float hump = (1.0 - smoothstep(0.2, 0.46, lat + (s1 - 0.5) * 0.14)) * smoothstep(0.3, 0.62, s3 + (gravelT ? -0.12 : 0.18));
+    surf = mix(surf, diffuseColor.rgb * (0.88 + 0.16 * s1), hump * 0.85);
+    // Ragged edges: grass eats into the track here, bare earth spills past the edge there (±0.5 m).
+    float edgeN = st_noise(wp * 0.3 + 4.0) * 0.65 + st_noise(wp * 1.7) * 0.35;
+    float bare = 1.0 - smoothstep(-0.65 + edgeN * 0.95, -0.25 + edgeN * 0.95, e);
+    // Snow: packed snow, icy blue-grey ruts. Sand: drifted over the track.
+    surf = mix(surf, vec3(0.7, 0.75, 0.84) * (0.88 + 0.15 * s1) * (1.0 - rut * 0.2), vBiome.y * 0.8);
+    surf = mix(surf, diffuseColor.rgb, vBiome.x * 0.5 * smoothstep(0.3, 0.7, s3));
+    diffuseColor.rgb = mix(diffuseColor.rgb, surf, bare);
+  }
+  // MUD + STANDING WATER (vMud: the road ribbon's damp weight, 0 elsewhere): dark wet earth in the rut bottoms,
+  // potholes and ditch bottoms; the deepest hollows of muddy stretches always hold water, and every hollow collects
+  // it when it rains (the puddle mirror after lighting). Slushy grey in the snow, nothing in the desert.
+  if (vMud > 0.01) {
+    float m = clamp(vMud * 1.3, 0.0, 1.0) * (1.0 - vBiome.x);
+    vec3 mudC = mix(vec3(0.12, 0.085, 0.055), vec3(0.4, 0.43, 0.5), vBiome.y) * (0.85 + 0.3 * n1);
+    diffuseColor.rgb = mix(diffuseColor.rgb, mudC, m * 0.8);
+    float water = smoothstep(0.6, 0.78, vMud + 0.3 * uWet) * (1.0 - vBiome.x) * (1.0 - smoothstep(0.25, 0.4, vBiome.y)) * smoothstep(0.75, 0.9, vUpN);
+    wetPuddle = max(wetPuddle, water);
   }
 }`,
       )
@@ -563,8 +588,9 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
       outgoingLight += uKeyColor * glint * 3.0;
     }
   }
-  if (uWet > 0.01) {
-    // Sheen: a broad specular lobe toward the key light on wet ground; puddles mirror the sky (Fresnel-ish).
+  if (uWet > 0.01 || wetPuddle > 0.001) {
+    // Sheen: a broad specular lobe toward the key light on wet ground; puddles mirror the sky (Fresnel-ish) — rain
+    // puddles, and the standing water in the road ribbon's ruts / potholes / ditches (vMud) even when it's dry.
     vec3 H = normalize(V + uKeyDirView);
     float sheen = pow(clamp(dot(normal, H), 0.0, 1.0), 24.0) * uWet * 0.5;
     outgoingLight += uKeyColor * sheen;

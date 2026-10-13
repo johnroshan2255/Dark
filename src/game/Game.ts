@@ -19,6 +19,7 @@ import { Health } from '../gameplay/survival/Health'
 import { Lightning } from '../gameplay/weather/Lightning'
 import { AshParticles } from '../rendering/particles/AshParticles'
 import { VehicleFx } from '../rendering/particles/VehicleFx'
+import { TyreMarks } from '../rendering/particles/TyreMarks'
 import { RainParticles } from '../rendering/particles/RainParticles'
 import { Weather } from '../rendering/weather/Weather'
 import { CameraController, type CameraMode } from '../gameplay/player/CameraController'
@@ -174,6 +175,8 @@ export class Game {
   private lampOnAt: number | null = null
   /** Exhaust puffs + tyre smoke/dust (one draw, tier-capped pool). */
   readonly vehicleFx = new VehicleFx()
+  /** Skid marks on the road, tyre tracks in the ground (one draw, tier budget `tyreMarks`). */
+  readonly tyreMarks = new TyreMarks()
   /** Dynamic weather (clouds / rain / wind) and its rain streaks. */
   readonly weather: Weather
   readonly rain = new RainParticles()
@@ -323,7 +326,8 @@ export class Game {
     this.envRoot.name = 'environment'
     this.envRoot.add(this.caves.group, this.destruction.mesh, this.drift.points, this.sky.mesh, this.bike.root, this.car.root, this.vehicleFx.points, this.rain.points, this.horizon.mesh, this.landmarks.group, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
     // Not in the water's mirror: the water itself, near-field grass, particles, the torch beam, debug helpers.
-    this.reflection.hide.push(this.water.mesh, this.world.grass.root, this.drift.points, this.vehicleFx.points, this.rain.points, this.ash.points, this.beam.mesh, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
+    this.envRoot.add(this.tyreMarks.mesh)
+    this.reflection.hide.push(this.tyreMarks.mesh, this.water.mesh, this.world.grass.root, this.drift.points, this.vehicleFx.points, this.rain.points, this.ash.points, this.beam.mesh, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
 
     this.bindKeys()
     this.buildLoop()
@@ -559,6 +563,7 @@ export class Game {
     this.post.setPaint(q.paint.stride, q.paint.bloom * q.fx.bloom)
     globalUniforms.uSurfaceDetail.value = q.fx.surface ? 1 : 0
     this.vehicleFx.budget = q.particles.vehicle
+    this.tyreMarks.setBudget(q.tyreMarks)
     this.rainBudget = q.particles.rain
     this.caves.fxShare = q.particles.rain
     this.reflection.scale = q.reflections
@@ -808,6 +813,8 @@ export class Game {
           // Landing page: slow orbit around the parked car (the garage turntable); no look input.
           this.cameraCtl.garage = this.store.get().landing ? this.car.pos : null
           this.cameraCtl.ignoreBody = this.car.occupied ? this.car.sim.body : null
+          // Simulation handling: the chassis-attached first person / weighted chase view (arcade keeps its chase below).
+          this.cameraCtl.car = this.car.driving && !this.car.sim.arcade ? this.car : null
           this.cameraCtl.update(dt, this.camera, p, this.lighting.flashlightOn)
           // BOOST feedback: the field of view widens (speed rush) while the boost is pushing the truck.
           const cam = this.camera
@@ -849,6 +856,7 @@ export class Game {
             this.fxLight.g += L.sun.color.g * sk
             this.fxLight.b += L.sun.color.b * sk
             this.vehicleFx.update(dt, this.car, this.world.fields, this.camera.position, globalUniforms.uWind.value, this.fxLight, this.post.targetHeight)
+            this.tyreMarks.update(dt, this.car, this.world, this.camera.position)
           }
         },
       })
@@ -1302,6 +1310,7 @@ export class Game {
     this.bike.dispose()
     this.car.dispose()
     this.vehicleFx.dispose()
+    this.tyreMarks.dispose()
     this.destruction.dispose()
     this.trails.dispose()
     this.drift.dispose()

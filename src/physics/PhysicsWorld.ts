@@ -135,6 +135,18 @@ export class PhysicsWorld {
         .setFriction(0.9),
       body,
     )
+    // ROAD RIBBON (world/Terrain/roadSurface.ts): gutters, wheel ruts and potholes — the exact rendered triangles as a
+    // TERRAIN trimesh over the heightfield, whose vertices under it are sunk (heights0 via solidHeight): a wheel
+    // drops into the ditch and tracks in the ruts. ~1–5 k triangles on a road chunk, built in ~0.1–0.3 ms.
+    if (d.rdIdx.length) {
+      const v = new Float32Array(d.rdPos.length)
+      for (let i = 0; i < v.length; i += 3) {
+        v[i] = d.rdPos[i] - half
+        v[i + 1] = d.rdPos[i + 1]
+        v[i + 2] = d.rdPos[i + 2] - half
+      }
+      this.world.createCollider(R.ColliderDesc.trimesh(v, d.rdIdx).setCollisionGroups(group(Groups.Terrain, 0xffff)).setFriction(0.9), body)
+    }
     // Rock formations (arches, caves, pillars, outcrops): an exact trimesh of their voxel mesh — you can drive
     // through the cave and under the arch.
     if (d.fmIdx.length) {

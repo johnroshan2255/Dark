@@ -6,7 +6,8 @@ import { CELL_SIZE, CHUNK_RES, CHUNK_SIZE, LOD_COUNT } from './constants'
 import type { PropGeometries } from './Forest/propGeometries'
 import type { SpeciesDef } from './Forest/treeFactory'
 import { impostorQuad } from '../rendering/impostors/Impostors'
-import { buildTerrainGeometry } from './Terrain/TerrainGeometry'
+import { buildRoadDetailGeometry, buildTerrainGeometry } from './Terrain/TerrainGeometry'
+import { RibbonIndex } from './Terrain/ribbonIndex'
 import { PROP_STRIDE, TREE_STRIDE, TreeSpecies, isBroadleaf, type ChunkData } from './types'
 import { buildWires } from './Road/propMeshes'
 import { RoadProp } from './Road/roadProps'
@@ -247,6 +248,9 @@ export class WorldChunk implements Cullable {
   instanceCount = 0
 
   private terrain: (THREE.Mesh | null)[] = new Array(LOD_COUNT).fill(null)
+  /** The road ribbon (gutters, ruts, potholes; Terrain/roadSurface.ts) — drawn with the LOD0 terrain only. */
+  private roadDetail: THREE.Mesh | null = null
+  private ribbonIdx: RibbonIndex | null | undefined = undefined
   /** The chunk's ground crosses the water level (a lake or river shore): terrain stays at LOD0 (see setLod). */
   readonly shore: boolean
   /** Submerged sample points (chunk-local x, z pairs) or null — WorldManager.waterInView. */
@@ -310,7 +314,7 @@ export class WorldChunk implements Cullable {
     this.group.position.set(data.cx * CHUNK_SIZE, 0, data.cz * CHUNK_SIZE)
     this.group.updateMatrix()
     this.group.matrixAutoUpdate = false
-    this.bounds.min.set(data.cx * CHUNK_SIZE, data.minY - 8, data.cz * CHUNK_SIZE)
+    this.bounds.min.set(data.cx * CHUNK_SIZE, Math.min(data.minY, data.minY0) - 8, data.cz * CHUNK_SIZE)
     this.bounds.max.set((data.cx + 1) * CHUNK_SIZE, data.maxY + 12, (data.cz + 1) * CHUNK_SIZE)
     // Rock formations: their own mesh (stone material); the chunk's culling box grows to hold them.
     if (data.fmIdx.length) {
@@ -513,6 +517,19 @@ export class WorldChunk implements Cullable {
       this.terrain[tl] = this.add(mesh)
     }
     this.terrain.forEach((m, i) => m && (m.visible = i === tl))
+    // Road ribbon: with the LOD0 grid only (that grid is the one sunk under it; LOD1/2 use the plain ground).
+    if (tl === 0 && !this.roadDetail && this.data.rdIdx.length) {
+      const g = buildRoadDetailGeometry(this.data)
+      if (g) {
+        this.roadDetail = this.add(new THREE.Mesh(g, this.mats.roadDetail))
+        this.roadDetail.name = 'roadDetail'
+        this.roadDetail.receiveShadow = true
+      }
+    }
+    if (this.roadDetail) {
+      this.roadDetail.visible = tl === 0
+      this.roadDetail.castShadow = tl === 0 && !(detail.lean && lod === 2)
+    }
     // Terrain casts at EVERY LOD: with only LOD0 casting, low sun/moon hill shadows end in straight lines at
     // chunk borders. Cheap now that shadow passes cull to the light frustum.
     this.terrain[tl]!.castShadow = !(detail.lean && lod === 2)
@@ -583,6 +600,12 @@ export class WorldChunk implements Cullable {
     if (this.impostors) this.impostors.visible = !!b && b.imp
   }
 
+  /** Point lookup on the road ribbon (built on first use; null when the chunk has none) — WorldManager.groundAt. */
+  get ribbon(): RibbonIndex | null {
+    if (this.ribbonIdx === undefined) this.ribbonIdx = this.data.rdIdx.length ? new RibbonIndex(this.data) : null
+    return this.ribbonIdx
+  }
+
   setVisible(v: boolean): void {
     if (v === this.isVisible) return
     this.isVisible = v
@@ -602,6 +625,7 @@ export class WorldChunk implements Cullable {
   dispose(): void {
     this.group.removeFromParent()
     for (const m of this.terrain) m?.geometry.dispose()
+    this.roadDetail?.geometry.dispose()
     // Shared geometries/materials belong to the libraries; only per-chunk buffers are freed.
     for (const { m } of this.species) m.levels.forEach((x) => x.dispose())
     for (const f of this.far) (f.lod1.dispose(), f.lod2.dispose())

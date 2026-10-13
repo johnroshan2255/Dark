@@ -33,6 +33,10 @@ export interface NetRoad {
   xs: Float32Array
   zs: Float32Array
   hs: Float32Array
+  /** Ground under each sample BEFORE grading (cut / fill = hs − gs) — Road/RoadDetail gates its ditches by it. */
+  gs: Float32Array
+  /** Arclength (m) from the first sample to each sample. */
+  cum: Float32Array
   minX: number
   minZ: number
   maxX: number
@@ -44,6 +48,16 @@ export interface RoadHit {
   height: number
   type: number
   halfWidth: number
+}
+
+/** `nearestRoad` result: the road itself, the distance to its centreline, the arclength of the nearest point and
+ *  the SIGNED lateral offset (+ = left of the direction of travel, first sample → last). */
+export interface RoadRef {
+  road: NetRoad | null
+  dist: number
+  s: number
+  side: number
+  height: number
 }
 
 export interface NetworkHost {
@@ -191,7 +205,7 @@ export class RoadNetwork {
         }
       }
     } else {
-      const probe: NetRoad = { key, type, halfWidth: 0, n: SAMPLES, xs, zs, hs, minX: Math.min(...xs), minZ: Math.min(...zs), maxX: Math.max(...xs), maxZ: Math.max(...zs) }
+      const probe: NetRoad = { key, type, halfWidth: 0, n: SAMPLES, xs, zs, hs, gs: raw, cum: raw, minX: Math.min(...xs), minZ: Math.min(...zs), maxX: Math.max(...xs), maxZ: Math.max(...zs) }
       const ci = Math.floor(a[0] / REGION), cj = Math.floor(a[1] / REGION)
       const others = kind === 1 ? this.gridLinks(ci, cj) : [...this.gridLinks(ci, cj), ...this.mainLinks(ci, cj)]
       if (kind === 2 && this.host.pois) {
@@ -247,7 +261,9 @@ export class RoadNetwork {
     for (let i = 0; i < SAMPLES; i++) {
       minX = Math.min(minX, xs[i]); maxX = Math.max(maxX, xs[i]); minZ = Math.min(minZ, zs[i]); maxZ = Math.max(maxZ, zs[i])
     }
-    r = { key, type, halfWidth: type === RoadType.Gravel ? 2.3 : 1.35, n: SAMPLES, xs, zs, hs, minX, minZ, maxX, maxZ }
+    const cum = new Float32Array(SAMPLES)
+    for (let i = 1; i < SAMPLES; i++) cum[i] = cum[i - 1] + Math.hypot(xs[i] - xs[i - 1], zs[i] - zs[i - 1])
+    r = { key, type, halfWidth: type === RoadType.Gravel ? 2.3 : 1.35, n: SAMPLES, xs, zs, hs, gs: raw, cum, minX, minZ, maxX, maxZ }
     if (this.built.size > 4000) this.built.clear()
     this.built.set(key, r)
     return r
@@ -299,12 +315,15 @@ export class RoadNetwork {
     return list
   }
 
-  /** Distance to each road's nearest point within `maxDist` (m): calls `fn` once per road in range. */
-  private forEachRoad(x: number, z: number, maxDist: number, fn: (dist: number, height: number, type: number, halfWidth: number) => void): void {
+  /**
+   * Each road's nearest point within `maxDist` (m): calls `fn` once per road in range with the distance, the graded
+   * height there, the segment index and its parameter t.
+   */
+  private scan(x: number, z: number, maxDist: number, fn: (r: NetRoad, dist: number, height: number, seg: number, t: number) => void): void {
     const roads = this.roadsForCell(Math.floor(x / REGION), Math.floor(z / REGION))
     for (const r of roads) {
       if (x < r.minX - maxDist || x > r.maxX + maxDist || z < r.minZ - maxDist || z > r.maxZ + maxDist) continue
-      let bestD = maxDist, bestH = 0
+      let bestD = maxDist, bestH = 0, bestI = -1, bestT = 0
       for (let i = 0; i < r.n - 1; i++) {
         const ax = r.xs[i], az = r.zs[i], bx = r.xs[i + 1], bz = r.zs[i + 1]
         // Segment AABB early-out (most segments of a long road are far from the point).
@@ -318,10 +337,40 @@ export class RoadNetwork {
         if (d < bestD) {
           bestD = d
           bestH = r.hs[i] + (r.hs[i + 1] - r.hs[i]) * t
+          bestI = i
+          bestT = t
         }
       }
-      if (bestD < maxDist) fn(bestD, bestH, r.type, r.halfWidth)
+      if (bestI >= 0) fn(r, bestD, bestH, bestI, bestT)
     }
+  }
+
+  /** Distance to each road's nearest point within `maxDist` (m): calls `fn` once per road in range. */
+  private forEachRoad(x: number, z: number, maxDist: number, fn: (dist: number, height: number, type: number, halfWidth: number) => void): void {
+    this.scan(x, z, maxDist, (r, d, h) => fn(d, h, r.type, r.halfWidth))
+  }
+
+  /**
+   * The nearest road (optionally other than `exclude`) within `maxDist` with its arclength and signed lateral offset
+   * at the nearest point — what Road/RoadDetail evaluates its ruts, potholes and ditches in. Same choice as
+   * `nearest` (strictly smallest distance, first road on a tie).
+   */
+  nearestRoad(x: number, z: number, maxDist: number, out: RoadRef, exclude: NetRoad | null = null): RoadRef | null {
+    let best: NetRoad | null = null, bestD = maxDist, bestH = 0, bestI = 0, bestT = 0
+    this.scan(x, z, maxDist, (r, d, h, i, t) => {
+      if (r !== exclude && d < bestD) (best = r), (bestD = d), (bestH = h), (bestI = i), (bestT = t)
+    })
+    out.road = best
+    if (!best) return null
+    const r: NetRoad = best
+    const vx = r.xs[bestI + 1] - r.xs[bestI], vz = r.zs[bestI + 1] - r.zs[bestI]
+    const l = Math.sqrt(vx * vx + vz * vz)
+    out.dist = bestD
+    out.height = bestH
+    out.s = r.cum[bestI] + l * bestT
+    // + = left of travel: cross((v), (p − a)) > 0.
+    out.side = (vx * (z - r.zs[bestI]) - vz * (x - r.xs[bestI])) >= 0 ? bestD : -bestD
+    return out
   }
 
   /** Nearest network road to (x, z) within `maxDist` (m), or null. */

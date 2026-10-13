@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { CELL_SIZE, CHUNK_RES, CHUNK_VERTS, LOD_TERRAIN_STRIDE } from '../constants'
 import type { ChunkData } from '../types'
+import { RD_ATTR } from './roadSurface'
 
 /**
  * Terrain mesh for one chunk at one LOD. Vertex stride 1/2/4 of the LOD0 grid.
@@ -22,6 +23,11 @@ export function buildTerrainGeometry(d: ChunkData, lod: number): THREE.BufferGeo
   const lat = new Float32Array(vCount)
   const net = new Float32Array(vCount * 2)
   const bio = new Float32Array(vCount * 2)
+  // Damp / standing-water weight (the road ribbon's `mud`): 0 on the grid — same attribute set as the ribbon, one program.
+  const mud = new Float32Array(vCount)
+  // LOD0 is drawn with the road ribbon: its grid vertices under the ribbon are sunk (Road/RoadDetail). LOD1/2 keep the
+  // plain ground (no ribbon there).
+  const hs = lod === 0 ? d.heights0 : d.heights
 
   const copy = (dst: number, src: number, y: number) => {
     const ix = (src % CHUNK_VERTS)
@@ -43,7 +49,7 @@ export function buildTerrainGeometry(d: ChunkData, lod: number): THREE.BufferGeo
   for (let j = 0; j < m; j++) {
     for (let i = 0; i < m; i++) {
       const src = j * s * CHUNK_VERTS + i * s
-      copy(j * m + i, src, d.heights[src])
+      copy(j * m + i, src, hs[src])
     }
   }
 
@@ -100,10 +106,34 @@ export function buildTerrainGeometry(d: ChunkData, lod: number): THREE.BufferGeo
   g.setAttribute('roadLat', new THREE.BufferAttribute(lat, 1))
   g.setAttribute('roadNet', new THREE.BufferAttribute(net, 2))
   g.setAttribute('biome', new THREE.BufferAttribute(bio, 2))
+  g.setAttribute('mud', new THREE.BufferAttribute(mud, 1))
   g.setIndex(new THREE.BufferAttribute(idx, 1))
   const size = CHUNK_RES * CELL_SIZE
-  g.boundingBox = new THREE.Box3(new THREE.Vector3(0, d.minY - skirtDepth, 0), new THREE.Vector3(size, d.maxY, size))
+  g.boundingBox = new THREE.Box3(new THREE.Vector3(0, (lod === 0 ? d.minY0 : d.minY) - skirtDepth, 0), new THREE.Vector3(size, d.maxY, size))
   g.boundingSphere = g.boundingBox.getBoundingSphere(new THREE.Sphere())
   g.name = `terrain.${d.cx},${d.cz}.lod${lod}`
+  return g
+}
+
+/**
+ * The chunk's ROAD RIBBON mesh (gutters, ruts, potholes — Terrain/roadSurface.ts) with the terrain's vertex format
+ * (position, normal, colour, roadLat, roadNet, biome, mud), so it draws with the terrain program. null when the
+ * chunk has no road. The attributes share one interleaved buffer.
+ */
+export function buildRoadDetailGeometry(d: ChunkData): THREE.BufferGeometry | null {
+  if (!d.rdIdx.length) return null
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.BufferAttribute(d.rdPos, 3))
+  g.setAttribute('normal', new THREE.BufferAttribute(d.rdNor, 3))
+  g.setAttribute('color', new THREE.BufferAttribute(d.rdCol, 3))
+  const ib = new THREE.InterleavedBuffer(d.rdAttr, RD_ATTR)
+  g.setAttribute('roadLat', new THREE.InterleavedBufferAttribute(ib, 1, 0))
+  g.setAttribute('roadNet', new THREE.InterleavedBufferAttribute(ib, 2, 1))
+  g.setAttribute('biome', new THREE.InterleavedBufferAttribute(ib, 2, 3))
+  g.setAttribute('mud', new THREE.InterleavedBufferAttribute(ib, 1, 5))
+  g.setIndex(new THREE.BufferAttribute(d.rdIdx, 1))
+  g.computeBoundingBox()
+  g.boundingSphere = g.boundingBox!.getBoundingSphere(new THREE.Sphere())
+  g.name = `roadDetail.${d.cx},${d.cz}`
   return g
 }

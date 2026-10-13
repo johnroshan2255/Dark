@@ -64,6 +64,10 @@ export type CarEvent = 'doorOpen' | 'doorSlam' | 'drive' | 'out' | 'fly' | 'boat
 
 /** Boat transformation time (s, each way) and the points where a hull part locks home (a clunk). */
 const BOAT_TIME = 2.2
+/** Foot brake with both pedals (W + S, touch brake-stand): the driver holding the car for a burnout — enough
+ *  front-biased pressure to hold the fronts against the spinning rears' push, not so much that a modest engine can't
+ *  turn the rear brakes (pickup and Żuk: rears spin, < 1 m of creep; tests/drivetrain.test.ts). */
+const BURN_BRAKE = 0.75
 const CLUNKS = [0.3, 0.5, 0.72, 0.85, 0.96]
 
 export class Car {
@@ -74,6 +78,8 @@ export class Car {
   private readonly wheelPos: [number, number, number][]
   private readonly track: number
   private readonly half: { x: number; y: number; z: number }
+  /** Exhaust tailpipe tips in car space and their outflow directions (catalogue `exhaust`; default rear left). */
+  private readonly exhaustTips: { at: THREE.Vector3; dir: THREE.Vector3 }[]
   private readonly wheelRadius: number
   private readonly bodyMat: THREE.MeshLambertMaterial
   private readonly glassMesh: THREE.Mesh
@@ -148,6 +154,21 @@ export class Car {
   /** Forward acceleration (m/s², smoothed) — swings an open door. */
   private accel = 0
   private lastSpeed = 0
+  private readonly renderQ = new THREE.Quaternion()
+
+  /** The rendered (interpolated) chassis pose at the physics `alpha` — exactly what update() draws this frame, readable
+   *  BEFORE it runs (the camera system runs first). Simulation driving camera: CameraController. */
+  renderPose(alpha: number, pos: THREE.Vector3, quat: THREE.Quaternion): void {
+    const t = this.sim.body.translation(), r = this.sim.body.rotation()
+    pos.set(t.x, t.y, t.z)
+    pos.lerpVectors(this.prevP, pos, alpha) // component-wise: safe with pos as the second operand
+    quat.slerpQuaternions(this.prevQ, this.renderQ.set(r.x, r.y, r.z, r.w), alpha)
+  }
+
+  /** Driver's eye in car space (read-only). */
+  get eyeLocal(): Readonly<THREE.Vector3> {
+    return this.eye
+  }
 
   constructor(
     glassMaterial: THREE.Material,
@@ -299,6 +320,9 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
       this.doors.push({ side: d.side, length: d.length, pivot, glass, angle: 0, vel: 0, latched: true })
     }
     const def = vehicleDef(truck.id)
+    this.exhaustTips = def.exhaust?.length
+      ? def.exhaust.map((e) => ({ at: new THREE.Vector3(...e.at), dir: new THREE.Vector3(...e.dir).normalize() }))
+      : [{ at: new THREE.Vector3(-0.42, 0.3, truck.half.z * 0.96), dir: new THREE.Vector3(0, 0, 1) }]
     // Driver's seat: behind the steering wheel at the cab's measured hip height (catalogue `cabin`).
     const cab = def.cabin
     const seat = truck.steeringWheel
@@ -489,9 +513,19 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     return out.set(v.x, v.y, v.z)
   }
 
-  /** Exhaust tip (world): rear left, under the bumper — through the rendered (interpolated) pose. */
-  exhaustWorld(out: THREE.Vector3): THREE.Vector3 {
-    return out.set(-0.42, 0.3, this.half.z * 0.96).applyMatrix4(this.root.matrixWorld)
+  /** How many exhaust tips the car has (catalogue `exhaust`; 1 by default). */
+  get exhaustCount(): number {
+    return this.exhaustTips.length
+  }
+
+  /** Exhaust tip k (world) — through the rendered (interpolated) pose. Default: rear left, under the bumper. */
+  exhaustWorld(out: THREE.Vector3, k = 0): THREE.Vector3 {
+    return out.copy(this.exhaustTips[k % this.exhaustTips.length].at).applyMatrix4(this.root.matrixWorld)
+  }
+
+  /** Outflow direction of exhaust tip k (world, unit): straight back by default, sideways for side exits. */
+  exhaustDir(out: THREE.Vector3, k = 0): THREE.Vector3 {
+    return out.copy(this.exhaustTips[k % this.exhaustTips.length].dir).transformDirection(this.root.matrixWorld)
   }
 
   /** Ground contact point under wheel k (world, rendered pose). */
@@ -725,17 +759,58 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.say(D.locks.size === 0 ? (pt ? '2H — rear-wheel drive' : 'Differentials open') : pt && D.locks.size === 1 ? (D.lowRange ? '4L' : '4H — four-wheel drive') : `Locked: ${[...D.locks].join(' + ')}`)
   }
 
+  /** Keyboard pedal (−1 brake / reverse … 1 gas) and steering after the hands-and-feet ramps (Simulation). */
+  private keyPedal = 0
+  private keySteer = 0
+  /**
+   * KEYS AS A FOOT AND HANDS (Simulation handling; arcade keeps the raw keys, the touch stick is already analog):
+   * a key is all-or-nothing, a pedal and a wheel are not. Holding W squeezes the gas on over 0.6 s (a tap = a
+   * part throttle — the only way to drive an aids-off rear-drive truck on dirt without spinning it round), S
+   * presses the brake over 0.3 s, and A / D wind the wheel on over 0.45 s (eased: a tap is a small correction,
+   * holding is a full turn); letting go of a key releases at once, a steering key centres in 0.15 s.
+   */
+  private keyPedals(dt: number, w: number, ad: number): void {
+    if (this.sim.arcade) {
+      this.keyPedal = w
+      this.keySteer = ad
+      return
+    }
+    const p = this.keyPedal
+    if (w === 0 || Math.sign(w) !== Math.sign(p)) this.keyPedal = 0
+    this.keyPedal = w > 0 ? Math.min(1, this.keyPedal + dt / 0.6) : w < 0 ? Math.max(-1, this.keyPedal - dt / 0.3) : 0
+    // Steering: the wheel's travel 0 → 1 over 0.45 s (eased in), back to centre or across in 0.15 s.
+    const st = this.keySteer
+    if (ad === 0 || (st !== 0 && Math.sign(ad) !== Math.sign(st))) {
+      const d = dt / 0.15
+      this.keySteer = Math.abs(st) <= d ? 0 : st - Math.sign(st) * d
+      this.keyHold = 0
+    } else {
+      this.keyHold = Math.min(1, this.keyHold + dt / 0.45)
+      this.keySteer = ad * Math.max(Math.abs(st), this.keyHold * this.keyHold * (3 - 2 * this.keyHold))
+    }
+  }
+  private keyHold = 0
+
   /** Fixed step (60 Hz), called inside physics.advance before world.step(). */
   fixedUpdate(dt: number): void {
     const i = this.input
     const drive = this.driving && !this.player.dead
     const c = this.sim.controls
-    c.throttle = drive ? Math.max(-1, Math.min(1, (i.down('KeyW') ? 1 : 0) - (i.down('KeyS') ? 1 : 0) + i.touchMove.y)) : 0
+    // BOTH PEDALS (Simulation): W + S = the gas AND the foot brake — left-foot braking, or at a standstill a
+    // brake-stand BURNOUT (Drivetrain: the front-biased brakes hold the fronts, the engine spins the driven rears).
+    // Touch: hold DRIFT and push the stick forward from a standstill (latched while both stay held).
+    const sim = !this.sim.arcade
+    const both = drive && sim && i.down('KeyW') && i.down('KeyS')
+    this.touchBurn = drive && sim && i.touch && i.down('Space') && i.touchMove.y > 0.5 && (this.touchBurn || Math.abs(this.sim.speed) < 1.5)
+    const w = both ? 1 : (i.down('KeyW') ? 1 : 0) - (i.down('KeyS') ? 1 : 0), ad = (i.down('KeyD') ? 1 : 0) - (i.down('KeyA') ? 1 : 0)
+    this.keyPedals(dt, drive ? w : 0, drive ? ad : 0)
+    c.footBrake = both || this.touchBurn ? BURN_BRAKE : 0
+    c.throttle = drive ? Math.max(-1, Math.min(1, this.keyPedal + i.touchMove.y)) : 0
     // Arcade on a touch screen (Asphalt): the car accelerates by itself; pulling the stick back brakes (a pull
     // while steering at speed = drift).
     if (drive && this.autoAccel && this.sim.arcade && i.touch && i.touchMove.y > -0.35) c.throttle = 1
-    c.steer = drive ? Math.max(-1, Math.min(1, (i.down('KeyD') ? 1 : 0) - (i.down('KeyA') ? 1 : 0) + i.touchMove.x)) : 0
-    c.handbrake = drive && i.down('Space')
+    c.steer = drive ? Math.max(-1, Math.min(1, this.keySteer + i.touchMove.x)) : 0
+    c.handbrake = drive && i.down('Space') && !this.touchBurn
     c.brake = drive && (i.down('KeyS') || i.touchMove.y < -0.35)
     c.boost = drive && (i.down('ShiftLeft') || i.down('ShiftRight'))
     // ↑ / ↓ (touch ▲ ▼): the air suspension on the ground, climb / sink in the air.
@@ -755,7 +830,14 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.sim.step(dt)
     this.sim.keepAbove(this.fields.surface(t.x, t.z))
     if (this.driving) this.player.carryTo(this.seatWorld()) // streaming, grass, monsters follow the truck
+    // A tyre catching fire (Drivetrain TYRE): one notice as it lights.
+    const burning = !!this.sim.real?.burning
+    if (burning && !this.wasBurning && this.driving) this.say('🔥 TYRE FIRE — drive on to put it out')
+    this.wasBurning = burning
   }
+  /** Touch brake-stand held (DRIFT + stick forward from a standstill), a tyre on fire last step. */
+  private touchBurn = false
+  private wasBurning = false
 
   /** Flying (or transforming / landing): the wheels are not (all) wheels. */
   get flying(): boolean {
@@ -963,7 +1045,9 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.glassMesh.visible = !hideGlass
     for (const d of this.doors) if (d.glass) d.glass.visible = !hideGlass
     if (this.driving) {
-      if (p.lookIdle > 0.6) {
+      // Arcade: back to the heading when not looking around (+ Game's arcade chase). Simulation: CameraController
+      // recentres (chase yaw in third person, the look carried with the chassis in first).
+      if (this.sim.arcade && p.lookIdle > 0.6) {
         let d = this.heading - p.yaw
         d = Math.atan2(Math.sin(d), Math.cos(d))
         p.yaw += d * Math.min(1, dt * 3)

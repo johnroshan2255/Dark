@@ -100,7 +100,12 @@ export function GameHud({ game }: { game: Game }) {
           }
           const gear = D ? D.gearLabel : ''
           if (gearEl.current && gearEl.current.textContent !== gear) gearEl.current.textContent = gear
-          const lamps = D ? [D.absOn && 'ABS', D.tcsOn && 'TCS', D.escOn && 'ESC', D.lowRange && 'LOW', D.locks.size > 0 && (D.R.drive.layout === 'part-time-4WD' && D.locks.size === 1 ? '4WD' : 'LOCK')].filter(Boolean).join(' · ') : ''
+          // Tyre heat (Drivetrain TYRE): the hottest tread past 110 °C in 10 °C steps (overheating: less grip, smoke),
+          // or a fire.
+          let hot = 0
+          if (D) for (let k = 0; k < D.n; k++) hot = Math.max(hot, D.treadT[k])
+          const tyres = !D ? '' : D.burning ? '🔥 TYRE FIRE' : hot > 110 ? `TYRES ${Math.round(hot / 10) * 10}°C` : ''
+          const lamps = D ? [tyres, D.absOn && 'ABS', D.tcsOn && 'TCS', D.escOn && 'ESC', D.lowRange && 'LOW', D.locks.size > 0 && (D.R.drive.layout === 'part-time-4WD' && D.locks.size === 1 ? '4WD' : 'LOCK')].filter(Boolean).join(' · ') : ''
           if (aidsEl.current && aidsEl.current.textContent !== lamps) aidsEl.current.textContent = lamps
         }
       }

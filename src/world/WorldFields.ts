@@ -1,6 +1,7 @@
 import { hash4 } from './noise/rng'
 import { createNoise2D, fbm, ridged, type Noise2D } from './noise/simplex'
 import { RoadNetwork, type RoadHit } from './Road/RoadNetwork'
+import { RoadDetail } from './Road/RoadDetail'
 import { PoiField } from './POI/pois'
 import { Biome, BIOME_COUNT, BiomeField, type BiomeWeights, type RegionWeights } from './Biomes'
 import { BIOMES } from './biomes/BiomeDefs'
@@ -46,6 +47,8 @@ export class WorldFields {
   static readonly RIVER_BANK = 26
   /** Secondary roads (gravel roads + dirt trails to hills, lakes, viewpoints). */
   readonly network: RoadNetwork
+  /** Gutters beside every road + the off-road ruts / potholes / mud of the network tracks (Road/RoadDetail.ts). */
+  readonly roadDetail: RoadDetail
   /** Procedural places (farms, cabins, ruins, camps). */
   readonly pois: PoiField
   /** Biome regions (forest / desert / snow) + the snow line. */
@@ -127,6 +130,7 @@ export class WorldFields {
       mainRoadHeight: (z) => this.roadHeight(z),
       water: WorldFields.WATER,
     })
+    this.roadDetail = new RoadDetail(this)
   }
 
   /** Main road: runs roughly along +Z, meandering in X. */
