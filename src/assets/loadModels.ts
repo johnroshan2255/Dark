@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import humanUrl from './models/characters/human.lod0.glb?url'
+import heroUrl from './models/characters/hero.lod0.glb?url'
 import hullUrl from './models/vehicles/boat_hull.lod0.glb?url'
 import { vehicleDef, type VehicleDef } from '../gameplay/vehicle/catalogue'
 import { loadTreeModels } from './treeModels'
@@ -10,8 +10,8 @@ import { loadTreeModels } from './treeModels'
  * Loads the GLB models once at startup (parallel with Rapier init) and bakes them into plain geometry for the
  * game's own materials — no GLTF materials, scene graphs or PBR programs survive (skills/asset-optimization).
  *
- *   human   our stylized human (scripts/blender/human.py): one static T-pose mesh with vertex colours, no rig → rigged
- *           and animated procedurally by CharacterModel. Returned in its baked source frame (metres, facing +Z).
+ *   hero    the player (scripts/blender/hero/): one skinned mesh (15 k tris, 65-bone Mixamo skeleton incl. fingers),
+ *           its 1024² albedo and 13 Mixamo clips — kept as a scene graph (CharacterModel animates it).
  *   vehicles the garage catalogue (gameplay/vehicle/catalogue.ts): pickup (Sketchfab, 00amza), Mercedes G500 4×4²,
  *           Żuk A06 — each baked by `bakeVehicle` (materials → vertex colours, paint mask, wheels split out or
  *           found by name, glass split off) and normalised: metres, facing −Z, origin on the ground at the
@@ -230,8 +230,15 @@ function findLamps(body: THREE.BufferGeometry, tex: THREE.Texture, front: number
 
 export type VehicleModel = TruckModel
 
+/** The player character: glTF scene (rig + skinned mesh), its animation clips and albedo texture. */
+export interface HeroAsset {
+  scene: THREE.Group
+  clips: THREE.AnimationClip[]
+  map: THREE.Texture | null
+}
+
 export interface GameModels {
-  human: THREE.BufferGeometry
+  hero: HeroAsset
   truck: TruckModel
 }
 
@@ -276,11 +283,16 @@ export async function loadModels(onProgress?: (f: number) => void, vehicleId = '
   const got = [0, 0]
   const report = () => onProgress?.(Math.min(1, (got[0] + got[1]) / 2))
   const [h, t] = await Promise.all([
-    loader.loadAsync(humanUrl, (e) => ((got[0] = e.lengthComputable ? e.loaded / e.total : 0.5), report())),
+    loader.loadAsync(heroUrl, (e) => ((got[0] = e.lengthComputable ? e.loaded / e.total : 0.5), report())),
     loadVehicle(vehicleId, (f) => ((got[1] = f), report())),
     loadTreeModels(), // Blender trees: registered before the world builds its tree library (treeModels.ts)
   ])
-  return { human: bakeFirstMesh(h.scene), truck: t }
+  let map: THREE.Texture | null = null
+  h.scene.traverse((o) => {
+    const m = o as THREE.SkinnedMesh
+    if (m.isSkinnedMesh && !map) map = (m.material as THREE.MeshStandardMaterial).map
+  })
+  return { hero: { scene: h.scene, clips: h.animations, map }, truck: t }
 }
 
 /** Every mesh in world space. `name` includes the parent's (a multi-material node is a Group of primitives);
@@ -317,12 +329,6 @@ function neutralTexel(tex: THREE.Texture): { uv: [number, number]; color: [numbe
   }
   const lin = (c: number) => new THREE.Color().setRGB(c / 255, 0, 0, THREE.SRGBColorSpace).r
   return { uv: [bu, tex.flipY ? 1 - bv : bv], color: [lin(data[bo]), lin(data[bo + 1]), lin(data[bo + 2])] }
-}
-
-function bakeFirstMesh(scene: THREE.Object3D): THREE.BufferGeometry {
-  const [first] = bakedMeshes(scene)
-  first.geo.deleteAttribute('uv')
-  return first.geo
 }
 
 /** Connected components (vertices welded by position) → per-triangle component id + component bounds. */

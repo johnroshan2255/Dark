@@ -1,61 +1,42 @@
 import * as THREE from 'three'
+import type { HeroAsset } from '../../assets/loadModels'
 
 /**
- * Player character: the stylized human built in Blender (scripts/blender/human.py → human.lod0.glb: one smooth
- * skin-modifier body + head, hair, face, clothes by vertex colour, T-pose, joints exactly at the SRC landmarks),
- * RIGGED IN CODE — 15 bones from those landmarks, every vertex skinned by body region (smooth 2-bone blends at the
- * joints) — and animated procedurally:
- *   idle (breathing), walk ↔ jog ↔ sprint with PLANTED FEET (each foot stays put on the ground during its
- *   stance, two-bone leg IK, hips drop to let the short legs reach, flight phase when running, feet follow the
- *   terrain; footsteps fire on each touchdown — `steps`), arm swing against the legs, lean and twist,
- *   jump (take-off tuck, airborne pose, fall), landing squash, flashlight aim (right arm follows the view),
- *   knockdown (stagger → fall onto the back → lie → sit up on the hands → squat → stand, solved against the
- *   ground so the body never floats or sinks), cycling (two-bone IK: feet on the pedals, hands on the bars).
- * One SkinnedMesh = 1 draw call (the old box character was 5) on the shared vertex-colour material; skinning
- * 1.6k vertices × 16 bones is negligible on any GPU. Faces −Z in local space (camera convention).
+ * Player character: the hero (hero.lod0.glb — scripts/blender/hero/: the AI-generated body with a rebuilt face and
+ * modelled hands, auto-rigged in Mixamo: 65 bones incl. fingers, 15 k tris, one 1024² albedo) animated two ways:
+ *
+ *  CLIPS (Mixamo, in the GLB): idle; walk → jog → run → sprint blended by speed on ONE shared foot phase (each clip's
+ *   own left-foot touchdown aligned, stride lengths measured from the clips → no foot sliding at any speed); walk
+ *   backwards / strafe left / right blended in by the direction of travel relative to the facing (flashlight aiming
+ *   while moving); jump → fall; a landing clip after long falls (a squash after short hops); knockdown → get up
+ *   (driven by the `knock` value). Layered on top: feet on the terrain (two-bone leg IK, hips drop to let the low
+ *   foot reach), the flashlight arm (right arm follows the view), footsteps from the shared phase.
+ *  PROCEDURAL (the 15-bone driver rig below, unchanged from the stylized human): seated + steering + door IK in
+ *   cars (`carPose`), pedalling on the BMX (`ride`), the bail tumble — RETARGETED onto the Mixamo bones every frame
+ *   (per-bone rest-direction corrections, spine spread over three bones).
+ * Switching between the two blends the pose over ~0.2 s. One SkinnedMesh = 1 draw call; 65 bones (bone texture).
+ * Faces −Z in local space (camera convention).
  */
 
-/** Source landmarks (metres, facing +Z, +X = the character's left) — = scripts/blender/human.py `L`. */
-const SRC = {
-  sole: 0, ankle: 0.085, knee: 0.5, hip: 0.9, pelvis: 0.96, chest: 1.26, neck: 1.5, shoulderY: 1.44,
-  shoulderX: 0.19, elbowX: 0.465, wristX: 0.705, handX: 0.79, legX: 0.092, zc: 0, height: 1.78,
+/** Joint landmarks (metres; final space: facing −Z, +X = the character's right, soles at y = 0), measured from the
+ *  Mixamo skeleton in hero.lod0.glb at rest. The driver rig uses them in a T-pose. */
+const J = {
+  pelvis: new THREE.Vector3(0, 0.9807, -0.045),
+  hipX: 0.107, hipY: 0.9287, hipZ: -0.046,
+  chest: new THREE.Vector3(0, 1.3085, 0.005),
+  neck: new THREE.Vector3(0, 1.449, 0.027),
+  top: 1.774,
+  shoulderX: 0.23, shoulderY: 1.49, shoulderZ: 0.027,
+  upperArm: 0.2316, foreArm: 0.199,
+  thigh: 0.4023, shin: 0.409,
+  /** Ankle joint above the sole (the mesh's). */
+  ankle: 0.124,
 }
-/** Skinning blend widths were tuned in the old model's units (96.67 per body height): scale them to this one. */
-const SU = SRC.height / 96.67
-/**
- * PROPORTIONS. The source stickman has a head a third of its height and very short legs — next to real-size cars
- * (catalogue: wheelbases match the real vehicles) it read as a 2.5 m giant. The mesh is reshaped at load
- * (`remapY` / head width): legs × LEG_K below the hip joint, the head × HEAD_K above the neck (height and width),
- * torso unchanged — then scaled to HEIGHT: a 1.78 m adult (hip joint ≈ 0.8 m, head ≈ 0.3 m), the same height as
- * the capsule and the 1.62 m first-person eye, so the world's scale is unchanged.
- */
-const LEG_K = 1 // (the Blender human is modelled at real proportions — no reshaping)
-const HEAD_K = 1
-/** Standing height (m). */
-const HEIGHT = 1.78
-const remapY = (y: number) => (y < SRC.hip ? SRC.hip - (SRC.hip - y) * LEG_K : y > SRC.neck ? SRC.neck + (y - SRC.neck) * HEAD_K : y)
-/** Head width factor: 1 below the neck, HEAD_K over the head (a smooth band at the neck). */
-const headW = (y: number) => {
-  const t = Math.min(1, Math.max(0, (y - (SRC.neck - 1)) / 5))
-  return 1 + (HEAD_K - 1) * t * t * (3 - 2 * t)
-}
-const TOP = SRC.sole + SRC.height
-const U = HEIGHT / (remapY(TOP) - remapY(SRC.sole))
-/** Source point → final space (m, facing −Z, soles at y = 0), reshaped. */
-const toFinal = (x: number, y: number, z: number) => {
-  const w = headW(y)
-  return new THREE.Vector3(-x * w * U, (remapY(y) - remapY(SRC.sole)) * U, -(z - SRC.zc) * w * U)
-}
-/** Height of a source landmark above the soles (m, final). */
-const Y = (y: number) => (remapY(y) - remapY(SRC.sole)) * U
-const BODY_COLOUR = 0xeeeae2
-/** Hip joint height (m) standing, ankle above the sole (m), hip→ankle leg length (m), half the hip spacing. */
-const HIP_Y = Y(SRC.hip)
-const ANKLE_Y = Y(SRC.ankle)
-const LEG = HIP_Y - ANKLE_Y
-const FOOT_X = SRC.legX * U
-/** Head: neck → top (m); its centre above the neck bone and its radius (ground contact probes, eye). */
-const HEAD_LEN = Y(TOP) - Y(SRC.neck)
+/** Ankle above the sole (m), hip→ankle leg length (m). */
+const ANKLE_Y = J.ankle
+const LEG = J.thigh + J.shin
+/** Head: neck → top (m); its centre above the neck bone and its radius (ground contact probes). */
+const HEAD_LEN = J.top - J.neck.y
 const HEAD_C = HEAD_LEN * 0.5
 const HEAD_R = HEAD_LEN * 0.45
 
@@ -78,10 +59,10 @@ export interface RideRig {
 }
 
 /** Hips-bone height standing (m above the soles) and the ankle above the sole — car-seat posing (CarEntry). */
-export const STAND_HIPS = Y(SRC.pelvis)
+export const STAND_HIPS = J.pelvis.y
 export const ANKLE_HEIGHT = ANKLE_Y
 /** Hips → top of the head (m): how much headroom a seated body needs at scale 1. */
-export const SEATED_HEIGHT = Y(TOP) - Y(SRC.pelvis)
+export const SEATED_HEIGHT = J.top - J.pelvis.y
 /** Hip joint → ankle (m): seated feet are placed within reach. */
 export const LEG_LENGTH = LEG
 
@@ -95,7 +76,7 @@ export interface CarPose {
   sit: number
   /** Chest pitch (+ = leaning back). */
   lean: number
-  /** Body scale (a seated cartoon fits a cramped cab) and the head's own scale. */
+  /** Body scale (a seated body fits a cramped cab) and the head's own scale. */
   scale: number
   head: number
   /** Head turn (rad, + = left). */
@@ -112,18 +93,89 @@ const smooth = (a: number, b: number, x: number) => {
   return t * t * (3 - 2 * t)
 }
 
+/**
+ * The Mixamo clips: loop cycle length (s; the jog clip holds 3 cycles), left-foot touchdown as a fraction of the
+ * cycle, and the ground speed (m/s) its feet move at — measured from the foot bones in Blender (scripts/blender/hero).
+ */
+const LOCO = {
+  walk: { cycles: 1, td: 0.237, speed: 0.98 },
+  jog: { cycles: 3, td: 0.231, speed: 1.5 },
+  run: { cycles: 1, td: 0.318, speed: 3.6 },
+  sprint: { cycles: 1, td: 0.294, speed: 5.4 },
+  walk_back: { cycles: 1, td: 0.304, speed: 0.45 },
+  strafe_left: { cycles: 1, td: 0.3125, speed: 1.7 },
+  strafe_right: { cycles: 1, td: 0.219, speed: 1.7 },
+} as const
+type Loco = keyof typeof LOCO
+const FORWARD: Loco[] = ['walk', 'jog', 'run', 'sprint']
+const CLIPS = ['idle', 'walk', 'jog', 'run', 'sprint', 'walk_back', 'strafe_left', 'strafe_right', 'jump', 'fall', 'land', 'knockdown', 'get_up'] as const
+type Clip = (typeof CLIPS)[number]
+/** Jumping Up: take-off (the crouch before it is skipped — the capsule leaves at once). Falling To Landing: the
+ *  feet touch down here. Hips height held while airborne in the jump clip (its own rises 0.5 m with the body). */
+const JUMP_T0 = 0.43
+const LAND_T0 = 0.3
+const AIR_HIPS = 0.96
+/** Retarget map: Mixamo bone ← driver bone (or a blend of driver bones for the extra spine / neck / clavicles). */
+type Src = BoneId | 'spine0' | 'spine1' | 'neck' | 'clavicle'
+const MAP: [string, Src][] = [
+  ['Hips', B.hips], ['Spine', 'spine0'], ['Spine1', 'spine1'], ['Spine2', B.chest], ['Neck', 'neck'], ['Head', B.head],
+  ['LeftShoulder', 'clavicle'], ['RightShoulder', 'clavicle'],
+  ['LeftArm', B.armL], ['LeftForeArm', B.foreL], ['LeftHand', B.handL],
+  ['RightArm', B.armR], ['RightForeArm', B.foreR], ['RightHand', B.handR],
+  ['LeftUpLeg', B.thighL], ['LeftLeg', B.shinL], ['LeftFoot', B.footL],
+  ['RightUpLeg', B.thighR], ['RightLeg', B.shinR], ['RightFoot', B.footR],
+]
+/** Limb bone → its child, for rest-direction corrections (hands and feet keep their parent's / their own rest). */
+const CHILD: Record<string, string> = {
+  LeftArm: 'LeftForeArm', LeftForeArm: 'LeftHand', RightArm: 'RightForeArm', RightForeArm: 'RightHand',
+  LeftUpLeg: 'LeftLeg', LeftLeg: 'LeftFoot', RightUpLeg: 'RightLeg', RightLeg: 'RightFoot',
+}
+
 export class CharacterModel {
   readonly root = new THREE.Group()
   private readonly mesh: THREE.SkinnedMesh
+  private readonly mixer: THREE.AnimationMixer
+  private readonly actions = new Map<Clip, THREE.AnimationAction>()
+  private readonly weights = new Map<Clip, number>()
+  /** Mixamo bones by short name ('Hips', 'LeftHand', …) and in hierarchy order. */
+  private readonly mx = new Map<string, THREE.Bone>()
+  private readonly mxOrder: THREE.Bone[] = []
+  /** Driver rig (procedural poses) — never rendered. */
   private readonly bones: THREE.Bone[] = []
   private readonly rest: THREE.Vector3[] = []
   private readonly target: THREE.Quaternion[] = []
+  /** Retarget data per Mixamo bone: rest world rotation (root at identity), rest-direction correction, rest local. */
+  private readonly rm0 = new Map<THREE.Bone, THREE.Quaternion>()
+  private readonly corr = new Map<THREE.Bone, THREE.Quaternion>()
+  private readonly restLocal = new Map<THREE.Bone, THREE.Quaternion>()
+  private readonly hipsOffset = new THREE.Vector3()
+  private readonly hipsRestPos = new THREE.Vector3()
+  /** Eye point in the Head bone's space (FPP eye while getting in / out). */
+  private readonly eyeLocal = new THREE.Vector3()
+  /** Get-up clip: its hips end this far (root space, xz) from the rest — subtracted so the body stands up on the spot. */
+  private readonly getUpEnd = new THREE.Vector3()
+  /** Pose blend across mode switches (clips ⇄ procedural). */
+  private mode: 'clip' | 'proc' = 'clip'
+  private blendT = 0
+  private readonly snapQ = new Map<THREE.Bone, THREE.Quaternion>()
+  private readonly snapHips = new THREE.Vector3()
+
   private time = 0
   private air = 0
+  private airTime = 0
+  /** Fastest downward speed (m/s, negative) since leaving the ground. */
+  private fallVy = 0
   private land = 0
+  private landT = -1
+  private jumpT = -1
+  private fallT = 0
   private wasGrounded = true
-  private runK = 0
   private moveK = 0
+  private aimK = 0
+  /** Shared locomotion phase (0 = left foot touchdown, 0.5 = right). */
+  private phase = 0
+  private readonly lastPos = new THREE.Vector3(Number.NaN, 0, 0)
+  private readonly vel = new THREE.Vector2()
   /** Body yaw (smoothed toward movement / aim). */
   yaw = 0
   /** Terrain height (world) for foot placement on slopes; null = flat ground at the player's feet. */
@@ -132,40 +184,57 @@ export class CharacterModel {
   steps = 0
   /** Each foot plant: where (world x, z) and facing (forward x, z) — footprints in snow and sand (TrailMap). */
   onStep: ((x: number, z: number, fx: number, fz: number) => void) | null = null
-  /** Gait cycle (0..1) and the smoothed hip height (m) of the foot-planting locomotion. */
-  private cycle = 0
-  private hipH = HIP_Y
-  /** Knockdown: 'fall' while going down, 'up' while getting up (the pose sequences differ). */
+  /** Knockdown: 'fall' while going down, 'up' while getting up. */
   private knockMode: 'none' | 'fall' | 'up' = 'none'
   private lastKnock = 0
 
-  constructor(material: THREE.Material, source: THREE.BufferGeometry) {
+  constructor(material: THREE.Material, asset: HeroAsset) {
     this.root.name = 'player-character'
-    this.root.rotation.order = 'YXZ' // knockdown tips relative to facing
-    const geo = this.skinGeometry(source)
-    // Skeleton (rest = T-pose, identity rotations; bone offsets from the landmarks).
-    const S = SRC
+    this.root.rotation.order = 'YXZ' // the tumble pitches relative to facing
+    // --- the Mixamo model: faces +Z in glTF → turned to face −Z --------------------------------------------------
+    const model = asset.scene
+    model.rotation.y = Math.PI
+    let mesh: THREE.SkinnedMesh | null = null
+    model.traverse((o) => {
+      const sm = o as THREE.SkinnedMesh
+      if (sm.isSkinnedMesh && !mesh) mesh = sm
+      const b = o as THREE.Bone
+      if (b.isBone) {
+        const short = b.name.replace(/^mixamorig:?/, '')
+        this.mx.set(short, b)
+      }
+    })
+    if (!mesh) throw new Error('hero.lod0.glb: no skinned mesh')
+    this.mesh = mesh
+    this.mesh.material = material
+    this.mesh.name = 'character'
+    this.mesh.frustumCulled = false // poses leave the bind-pose bounds; the player is always near the camera
+    this.mesh.castShadow = false
+    this.mxOrder.push(...this.mesh.skeleton.bones)
+    const depth = (o: THREE.Object3D) => { let d = 0; for (let p = o.parent; p; p = p.parent) d++; return d }
+    this.mxOrder.sort((a, b) => depth(a) - depth(b))
+    this.root.add(model)
+    // --- driver rig (T-pose, identity rotations), measured landmarks ------------------------------------------
     const at: [BoneId, BoneId | -1, THREE.Vector3][] = [
-      [B.hips, -1, toFinal(0, S.pelvis, 0)],
-      [B.chest, B.hips, toFinal(0, S.chest, 0)],
-      [B.head, B.chest, toFinal(0, S.neck, 0)],
-      [B.armL, B.chest, toFinal(S.shoulderX, S.shoulderY, 0)],
-      [B.foreL, B.armL, toFinal(S.elbowX, S.shoulderY, 0)],
-      [B.handL, B.foreL, toFinal(S.wristX, S.shoulderY, 0)],
-      [B.armR, B.chest, toFinal(-S.shoulderX, S.shoulderY, 0)],
-      [B.foreR, B.armR, toFinal(-S.elbowX, S.shoulderY, 0)],
-      [B.handR, B.foreR, toFinal(-S.wristX, S.shoulderY, 0)],
-      [B.thighL, B.hips, toFinal(S.legX, S.hip, 0)],
-      [B.shinL, B.thighL, toFinal(S.legX, S.knee, 0)],
-      [B.footL, B.shinL, toFinal(S.legX, S.ankle, 0)],
-      [B.thighR, B.hips, toFinal(-S.legX, S.hip, 0)],
-      [B.shinR, B.thighR, toFinal(-S.legX, S.knee, 0)],
-      [B.footR, B.shinR, toFinal(-S.legX, S.ankle, 0)],
+      [B.hips, -1, J.pelvis.clone()],
+      [B.chest, B.hips, J.chest.clone()],
+      [B.head, B.chest, J.neck.clone()],
     ]
+    for (const side of [-1, 1] as const) {
+      const s = new THREE.Vector3(side * J.shoulderX, J.shoulderY, J.shoulderZ)
+      const e = s.clone().add(new THREE.Vector3(side * J.upperArm, 0, 0))
+      const w = e.clone().add(new THREE.Vector3(side * J.foreArm, 0, 0))
+      const h = new THREE.Vector3(side * J.hipX, J.hipY, J.hipZ)
+      const k = h.clone().add(new THREE.Vector3(0, -J.thigh, 0))
+      const a = k.clone().add(new THREE.Vector3(0, -J.shin, 0))
+      const L = side < 0
+      at.push([L ? B.armL : B.armR, B.chest, s], [L ? B.foreL : B.foreR, L ? B.armL : B.armR, e], [L ? B.handL : B.handR, L ? B.foreL : B.foreR, w])
+      at.push([L ? B.thighL : B.thighR, B.hips, h], [L ? B.shinL : B.shinR, L ? B.thighL : B.thighR, k], [L ? B.footL : B.footR, L ? B.shinL : B.shinR, a])
+    }
     const world: THREE.Vector3[] = []
     for (const [id, parent, p] of at) {
       const b = new THREE.Bone()
-      b.name = Object.keys(B)[id]
+      b.name = 'drv-' + Object.keys(B)[id]
       world[id] = p
       b.position.copy(parent < 0 ? p : p.clone().sub(world[parent]))
       this.bones[id] = b
@@ -173,79 +242,438 @@ export class CharacterModel {
       this.target[id] = new THREE.Quaternion()
       if (parent >= 0) this.bones[parent].add(b)
     }
-    this.mesh = new THREE.SkinnedMesh(geo, material)
-    this.mesh.name = 'character'
-    this.mesh.frustumCulled = false // poses leave the bind-pose bounds; the player is always near the camera
-    this.mesh.add(this.bones[B.hips])
-    this.mesh.updateMatrixWorld(true)
-    this.mesh.bind(new THREE.Skeleton(this.bones))
-    this.root.add(this.mesh)
-  }
-
-  /**
-   * Baked source (units, facing +Z) → final space (m, facing −Z, feet at 0) + skin indices/weights by region.
-   * Each vertex gets ≤ 2 bones; blends across ~3–5 units around every joint so bends are smooth.
-   */
-  private skinGeometry(src: THREE.BufferGeometry): THREE.BufferGeometry {
-    const g = src.clone() // keep it indexed: shared vertices keep the model's own smooth normals
-    const pos = g.getAttribute('position')
-    const nor = g.getAttribute('normal')
-    const n = pos.count
-    const si = new Uint16Array(n * 4)
-    const sw = new Float32Array(n * 4)
-    const col = new Float32Array(n * 3)
-    const c = new THREE.Color().setHex(BODY_COLOUR, THREE.SRGBColorSpace)
-    const srcCol = g.getAttribute('color') // the Blender model's clothes / skin / hair (linear, RGB or RGBA)
-    const S = SRC
-    for (let i = 0; i < n; i++) {
-      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i)
-      const ax = Math.abs(x)
-      const left = x > 0 // source faces +Z → +x is the character's LEFT
-      let a: number, b2: number, t: number
-      if (y > S.neck + 1.5 * SU) (a = B.head), (b2 = B.head), (t = 0)
-      else if (y > S.neck - 1.5 * SU && ax < S.shoulderX) (a = B.chest), (b2 = B.head), (t = (y - (S.neck - 1.5 * SU)) / (3 * SU))
-      else if (ax > S.shoulderX + 0.5 * SU && y > S.shoulderY - 7 * SU) {
-        const up = left ? B.armL : B.armR, fo = left ? B.foreL : B.foreR, ha = left ? B.handL : B.handR
-        if (ax < S.shoulderX + 3.5 * SU) (a = B.chest), (b2 = up), (t = (ax - S.shoulderX - 0.5 * SU) / (3 * SU))
-        else if (ax < S.elbowX - 2.5 * SU) (a = up), (b2 = up), (t = 0)
-        else if (ax < S.elbowX + 2.5 * SU) (a = up), (b2 = fo), (t = (ax - (S.elbowX - 2.5 * SU)) / (5 * SU))
-        else if (ax < S.wristX) (a = fo), (b2 = fo), (t = 0)
-        else (a = fo), (b2 = ha), (t = Math.min(1, (ax - S.wristX) / (2 * SU)))
-      } else if (y < S.hip + 0.5 * SU) {
-        const th = left ? B.thighL : B.thighR, sh = left ? B.shinL : B.shinR, fo = left ? B.footL : B.footR
-        if (y > S.hip - 2.5 * SU) (a = B.hips), (b2 = th), (t = (S.hip + 0.5 * SU - y) / (3 * SU))
-        else if (y > S.knee + 2 * SU) (a = th), (b2 = th), (t = 0)
-        else if (y > S.knee - 2 * SU) (a = th), (b2 = sh), (t = (S.knee + 2 * SU - y) / (4 * SU))
-        else if (y > S.ankle + 1 * SU) (a = sh), (b2 = sh), (t = 0)
-        else (a = sh), (b2 = fo), (t = Math.min(1, (S.ankle + 1 * SU - y) / (2 * SU)))
-      } else if (y < S.pelvis + 6 * SU) (a = B.hips), (b2 = B.hips), (t = 0)
-      else if (y > S.chest - 2 * SU) (a = B.chest), (b2 = B.chest), (t = 0)
-      else (a = B.hips), (b2 = B.chest), (t = (y - (S.pelvis + 6 * SU)) / (S.chest - 2 * SU - (S.pelvis + 6 * SU)))
-      t = smooth(0, 1, t)
-      si[i * 4] = a
-      si[i * 4 + 1] = b2
-      sw[i * 4] = 1 - t
-      sw[i * 4 + 1] = t
-      const f = toFinal(x, y, z)
-      pos.setXYZ(i, f.x, f.y, f.z)
-      if (nor) nor.setXYZ(i, -nor.getX(i), nor.getY(i), -nor.getZ(i)) // same 180° turn as the positions
-      if (srcCol) (col[i * 3] = srcCol.getX(i)), (col[i * 3 + 1] = srcCol.getY(i)), (col[i * 3 + 2] = srcCol.getZ(i))
-      else c.toArray(col, i * 3)
+    const drv = new THREE.Group()
+    drv.name = 'driver-rig'
+    drv.add(this.bones[B.hips])
+    this.root.add(drv)
+    this.root.updateMatrixWorld(true)
+    // --- retarget data (root at identity, model in its bind pose) ---------------------------------------------
+    const m = (n: string) => this.mx.get(n)!
+    for (const b of this.mxOrder) {
+      this.rm0.set(b, b.getWorldQuaternion(new THREE.Quaternion()))
+      this.restLocal.set(b, b.quaternion.clone())
+      this.snapQ.set(b, new THREE.Quaternion())
     }
-    g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4))
-    g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4))
-    g.setAttribute('color', new THREE.BufferAttribute(col, 3))
-    if (!nor) g.computeVertexNormals()
-    g.computeBoundingSphere()
-    g.name = 'character'
-    return g
+    const drvDir = (id: BoneId, child: BoneId) => world[child].clone().sub(world[id]).normalize()
+    const limb: [string, BoneId, BoneId][] = [
+      ['LeftArm', B.armL, B.foreL], ['LeftForeArm', B.foreL, B.handL], ['RightArm', B.armR, B.foreR], ['RightForeArm', B.foreR, B.handR],
+      ['LeftUpLeg', B.thighL, B.shinL], ['LeftLeg', B.shinL, B.footL], ['RightUpLeg', B.thighR, B.shinR], ['RightLeg', B.shinR, B.footR],
+    ]
+    for (const [name, id, child] of limb) {
+      const bn = m(name), c = m(CHILD[name])
+      const dm = c.getWorldPosition(new THREE.Vector3()).sub(bn.getWorldPosition(new THREE.Vector3())).normalize()
+      this.corr.set(bn, new THREE.Quaternion().setFromUnitVectors(dm, drvDir(id, child)))
+    }
+    this.corr.set(m('LeftHand'), this.corr.get(m('LeftForeArm'))!.clone())
+    this.corr.set(m('RightHand'), this.corr.get(m('RightForeArm'))!.clone())
+    m('Hips').getWorldPosition(this.hipsRestPos)
+    this.hipsOffset.copy(this.hipsRestPos).sub(J.pelvis)
+    m('Head').worldToLocal(this.eyeLocal.set(0, 1.62, -0.1))
+    // --- clips: rotations only (+ the hips position); scale and other translations are constant -----------------
+    this.mixer = new THREE.AnimationMixer(model)
+    const hipsTrack = m('Hips').name + '.position'
+    for (const c of asset.clips) {
+      const name = c.name as Clip
+      if (!(CLIPS as readonly string[]).includes(name)) continue
+      c.tracks = c.tracks.filter((t) => t.name.endsWith('.quaternion') || t.name === hipsTrack)
+      const a = this.mixer.clipAction(c)
+      a.setLoop(name === 'jump' || name === 'land' || name === 'knockdown' || name === 'get_up' ? THREE.LoopOnce : THREE.LoopRepeat, Infinity)
+      a.clampWhenFinished = true
+      a.timeScale = 0 // times are set explicitly every frame (shared phase, knock-driven clips)
+      a.play()
+      a.setEffectiveWeight(0)
+      this.actions.set(name, a)
+      this.weights.set(name, 0)
+    }
+    for (const c of CLIPS) if (!this.actions.has(c)) throw new Error(`hero.lod0.glb: missing clip "${c}"`)
+    this.weights.set('idle', 1)
+    // Where the get-up clip leaves the hips (so it can be anchored to the spot).
+    const gu = this.actions.get('get_up')!
+    this.setWeightsOnly('get_up')
+    gu.time = gu.getClip().duration
+    this.mixer.update(0)
+    this.root.updateMatrixWorld(true)
+    m('Hips').getWorldPosition(this.getUpEnd).sub(this.hipsRestPos)
+    this.getUpEnd.y = 0
+    this.setWeightsOnly('idle')
+    this.mixer.update(0)
   }
 
   set castShadow(v: boolean) {
     this.mesh.castShadow = v
   }
 
-  // ---- pose helpers -------------------------------------------------------------------------------------
+  // ---- clip playback ------------------------------------------------------------------------------------------
+  private setWeightsOnly(c: Clip): void {
+    for (const k of CLIPS) {
+      this.weights.set(k, k === c ? 1 : 0)
+      this.actions.get(k)!.setEffectiveWeight(k === c ? 1 : 0)
+    }
+  }
+  /** Ease every clip weight toward its target (cross-fades) and normalise to 1 (no bind-pose bleed). */
+  private applyWeights(tw: Partial<Record<Clip, number>>, dt: number, rate: number): void {
+    const k = 1 - Math.exp(-rate * dt)
+    let sum = 0
+    for (const c of CLIPS) {
+      const w = this.weights.get(c)! + ((tw[c] ?? 0) - this.weights.get(c)!) * k
+      this.weights.set(c, w)
+      sum += w
+    }
+    for (const c of CLIPS) {
+      const w = sum > 1e-6 ? this.weights.get(c)! / sum : c === 'idle' ? 1 : 0
+      const a = this.actions.get(c)!
+      a.enabled = w > 1e-3
+      a.setEffectiveWeight(w)
+    }
+  }
+  private loopTime(c: Clip, phase: number): number {
+    const L = LOCO[c as Loco]
+    const cyc = this.actions.get(c)!.getClip().duration / L.cycles
+    return (((phase + L.td) % 1) + 1) % 1 * cyc
+  }
+
+  /**
+   * @param speed horizontal m/s   @param grounded   @param aimPitch camera pitch (arm follows when aiming)
+   * @param aiming flashlight on → right arm raised forward   @param vy vertical velocity (jump/fall pose)
+   */
+  animate(dt: number, pos: THREE.Vector3, targetYaw: number, speed: number, grounded: boolean, aiming: boolean, aimPitch: number, vy = 0, knock = 0, tumble: { angle: number; yaw: number } | null = null): void {
+    this.unscale()
+    let d = targetYaw - this.yaw
+    d = Math.atan2(Math.sin(d), Math.cos(d))
+    this.yaw += d * (1 - Math.exp(-12 * dt))
+    this.time += dt
+    // Travel direction (from the body's motion: the caller gives the speed and facing only).
+    if (Number.isNaN(this.lastPos.x) || dt <= 0) this.lastPos.copy(pos)
+    else {
+      const k = 1 - Math.exp(-10 * dt)
+      this.vel.x += ((pos.x - this.lastPos.x) / dt - this.vel.x) * k
+      this.vel.y += ((pos.z - this.lastPos.z) / dt - this.vel.y) * k
+      this.lastPos.copy(pos)
+    }
+    // Air / landing timers.
+    const tookOff = !grounded && this.wasGrounded
+    if (tookOff) this.jumpT = vy > 1.5 ? JUMP_T0 : -1
+    this.air = grounded ? 0 : this.air + dt
+    if (!grounded) this.fallVy = Math.min(this.fallVy, vy)
+    if (grounded && !this.wasGrounded && this.airTime > 0.25) {
+      this.land = 0.22
+      // the landing clip (a deep crouch) only after a real drop — not a hop, a step off a kerb or the spawn settle
+      this.landT = this.fallVy < -7 && speed < 1.5 ? LAND_T0 : -1
+    }
+    if (grounded) this.fallVy = 0
+    this.airTime = grounded ? 0 : this.airTime + dt
+    this.wasGrounded = grounded
+    this.land = Math.max(0, this.land - dt)
+
+    // BAIL TUMBLE: procedural (driver rig), retargeted.
+    if (tumble) {
+      this.yaw = tumble.yaw
+      this.knockMode = 'fall'
+      this.lastKnock = 1
+      this.enter('proc')
+      this.tumblePose(tumble.angle, pos)
+      this.retarget()
+      this.finishBlend(dt)
+      return
+    }
+    this.enter('clip')
+    this.root.position.copy(pos)
+    this.root.rotation.set(0, this.yaw, 0)
+    const tw: Partial<Record<Clip, number>> = {}
+    let rate = 10
+    let groundIK = false
+    let airborne = false
+    let stepsOn = false
+    if (knock > 0.001) {
+      // KNOCKDOWN / GET UP: the clips scrubbed by the knock value (fall 0 → 1, get up 1 → 0).
+      // (the impact overshoot above 1 settling back is still the fall, not the get-up)
+      const kc = Math.min(1, knock)
+      if (kc > this.lastKnock + 1e-4 && this.knockMode !== 'up') this.knockMode = 'fall'
+      else if (kc < this.lastKnock - 1e-4) this.knockMode = 'up'
+      this.lastKnock = kc
+      const kd = this.actions.get('knockdown')!, gu = this.actions.get('get_up')!
+      if (this.knockMode === 'up') {
+        tw.get_up = 1
+        gu.time = (1 - Math.min(1, knock)) * gu.getClip().duration
+      } else {
+        tw.knockdown = 1
+        kd.time = Math.min(1, knock) * kd.getClip().duration * 0.98
+      }
+      rate = 14
+      if (this.ground) this.root.position.y = this.ground(pos.x, pos.z)
+    } else {
+      this.knockMode = 'none'
+      this.lastKnock = 0
+      if (!grounded && this.air > 0.06) {
+        airborne = true
+        const jump = this.actions.get('jump')!
+        if (this.jumpT >= 0 && this.jumpT < jump.getClip().duration) {
+          tw.jump = 1
+          jump.time = this.jumpT
+          this.jumpT += dt
+        } else {
+          tw.fall = 1
+          this.fallT += dt
+          const fall = this.actions.get('fall')!
+          fall.time = this.fallT % fall.getClip().duration
+        }
+        rate = 12
+      } else {
+        groundIK = true
+        // GROUND: idle ⇄ locomotion; forward walk → jog → run → sprint by speed, backwards / sideways by the travel
+        // direction relative to the facing; one shared phase advanced by speed / stride (the active clips' blend).
+        this.moveK += (smooth(0.15, 0.6, speed) - this.moveK) * Math.min(1, dt * 8)
+        const m = this.moveK
+        const fx = -Math.sin(this.yaw), fz = -Math.cos(this.yaw)
+        const vlen = this.vel.length()
+        let cf = 1, cr = 0
+        if (vlen > 0.3) {
+          cf = (this.vel.x * fx + this.vel.y * fz) / vlen
+          cr = (this.vel.x * -fz + this.vel.y * fx) / vlen // + = moving to the right
+        }
+        let wF = Math.max(0, cf), wB = Math.max(0, -cf) * 0.999, wS = Math.abs(cr)
+        const ws = wF + wB + wS || 1
+        wF /= ws; wB /= ws; wS /= ws
+        // forward speed blend
+        const fw: Partial<Record<Loco, number>> = {}
+        const pts = FORWARD.map((c) => LOCO[c].speed)
+        if (speed <= pts[0]) fw.walk = 1
+        else if (speed >= pts[pts.length - 1]) fw.sprint = 1
+        else for (let i = 0; i < pts.length - 1; i++) {
+          if (speed >= pts[i] && speed < pts[i + 1]) {
+            const t = (speed - pts[i]) / (pts[i + 1] - pts[i])
+            fw[FORWARD[i]] = 1 - t
+            fw[FORWARD[i + 1]] = t
+          }
+        }
+        const side: Loco = cr < 0 ? 'strafe_left' : 'strafe_right'
+        let stride = 0, wsum = 0
+        const loco: [Loco, number][] = [...FORWARD.map((c) => [c, (fw[c] ?? 0) * wF] as [Loco, number]), ['walk_back', wB], [side, wS]]
+        for (const [c, w] of loco) {
+          if (w <= 0) continue
+          const L = LOCO[c]
+          stride += w * L.speed * (this.actions.get(c)!.getClip().duration / L.cycles)
+          wsum += w
+        }
+        stride = wsum > 0 ? stride / wsum : 1.2
+        const prev = this.phase
+        if (m > 0.02) this.phase = (this.phase + (Math.max(speed, 0.5) * dt) / stride) % 1
+        for (const [c, w] of loco) {
+          tw[c] = w * m
+          if (w > 0 || (this.weights.get(c) ?? 0) > 1e-3) this.actions.get(c)!.time = this.loopTime(c, this.phase)
+        }
+        tw.idle = 1 - m
+        const idle = this.actions.get('idle')!
+        idle.time = this.time % idle.getClip().duration
+        // Landing after a long fall: the clip from touchdown (standing still only), else a squash.
+        if (this.landT >= 0) {
+          const land = this.actions.get('land')!
+          if (this.landT < land.getClip().duration * 0.92 && speed < 1.5) {
+            const k = 1 - smooth(land.getClip().duration * 0.7, land.getClip().duration * 0.92, this.landT)
+            for (const c of CLIPS) if (tw[c]) tw[c]! *= 1 - k
+            tw.land = k
+            land.time = this.landT
+            this.landT += dt
+          } else this.landT = -1
+        }
+        // Footsteps: the shared phase crossing each foot's touchdown.
+        stepsOn = m > 0.35 && speed > 0.4
+        if (stepsOn) {
+          const crossed = (p: number) => (prev <= p && this.phase > p) || (prev > this.phase && (p >= prev || p < this.phase))
+          if (crossed(0)) this.footstep('LeftFoot')
+          if (crossed(0.5)) this.footstep('RightFoot')
+        }
+      }
+    }
+    this.applyWeights(tw, dt, rate)
+    this.mixer.update(dt)
+    this.root.updateMatrixWorld(true)
+    // Hips corrections (root space): the air clips held in place horizontally (they drift; the ground clips are
+    // Mixamo 'in place' already and their hip sway over the planted feet must stay — pinning it slid the feet);
+    // the jump's own rise held (the capsule rises instead); the get-up anchored to the spot.
+    const hips = this.mx.get('Hips')!
+    const hp = this.root.worldToLocal(hips.getWorldPosition(_v))
+    const wj = this.weights.get('jump')!, wg = this.weights.get('get_up')!
+    const inPlace = Math.min(1, wj + this.weights.get('fall')! + this.weights.get('land')!)
+    hp.x += (this.hipsRestPos.x - hp.x) * inPlace
+    hp.z += (this.hipsRestPos.z - hp.z) * inPlace
+    hp.addScaledVector(this.getUpEnd, -wg)
+    if (airborne) hp.y += (AIR_HIPS - hp.y) * wj
+    if (this.land > 0 && this.landT < 0) hp.y -= 0.12 * Math.sin((this.land / 0.22) * Math.PI) // short-hop squash
+    this.setHips(hp)
+    if (groundIK && this.ground) this.feetOnGround(pos)
+    // Flashlight: the right arm points along the view.
+    this.aimK += ((aiming ? 1 : 0) - this.aimK) * (1 - Math.exp(-10 * dt))
+    if (this.aimK > 0.01 && knock <= 0.001) this.aimArm(aimPitch)
+    this.finishBlend(dt)
+  }
+
+  /** Hips to a root-space position. */
+  private setHips(p: THREE.Vector3): void {
+    const hips = this.mx.get('Hips')!
+    this.root.localToWorld(_t.copy(p))
+    hips.position.copy(hips.parent!.worldToLocal(_t))
+    hips.updateMatrixWorld(true)
+  }
+
+  private footstep(foot: 'LeftFoot' | 'RightFoot'): void {
+    this.steps++
+    if (!this.onStep) return
+    this.mx.get(foot)!.getWorldPosition(_v)
+    this.onStep(_v.x, _v.z, -Math.sin(this.yaw), -Math.cos(this.yaw))
+  }
+
+  /**
+   * FEET ON THE TERRAIN: the clips walk on a flat floor at the player's feet; each foot is moved by the terrain
+   * height under it (two-bone leg IK, knee kept in the clip's bend plane, foot keeps its clip orientation) and the
+   * hips drop just enough for the lower foot to reach.
+   */
+  private feetOnGround(pos: THREE.Vector3): void {
+    const g = this.ground!
+    const L = this.mx.get('LeftFoot')!, R = this.mx.get('RightFoot')!
+    L.getWorldPosition(_a)
+    R.getWorldPosition(_b)
+    const dL = Math.max(-0.35, Math.min(0.35, g(_a.x, _a.z) - pos.y))
+    const dR = Math.max(-0.35, Math.min(0.35, g(_b.x, _b.z) - pos.y))
+    if (Math.abs(dL) < 0.005 && Math.abs(dR) < 0.005) return
+    const drop = Math.max(0, -Math.min(dL, dR))
+    const hips = this.mx.get('Hips')!
+    const hp = this.root.worldToLocal(hips.getWorldPosition(_v))
+    hp.y -= drop
+    _a.y += dL
+    _b.y += dR
+    const ta = _ta.copy(_a), tb = _tb.copy(_b)
+    this.setHips(hp)
+    this.legIK('LeftUpLeg', 'LeftLeg', 'LeftFoot', ta)
+    this.legIK('RightUpLeg', 'RightLeg', 'RightFoot', tb)
+  }
+
+  /** Two-bone IK on Mixamo bones: `end` reaches `target` (world), bending in the current bend plane. */
+  private legIK(upN: string, loN: string, endN: string, target: THREE.Vector3): void {
+    const up = this.mx.get(upN)!, lo = this.mx.get(loN)!, end = this.mx.get(endN)!
+    end.getWorldQuaternion(_qe)
+    up.getWorldPosition(_a2)
+    lo.getWorldPosition(_b2)
+    end.getWorldPosition(_c2)
+    const l1 = _a2.distanceTo(_b2), l2 = _b2.distanceTo(_c2)
+    // bend direction: the knee's offset from the hip→ankle line
+    _dir.subVectors(_c2, _a2).normalize()
+    _p.subVectors(_b2, _a2)
+    _p.addScaledVector(_dir, -_p.dot(_dir))
+    if (_p.lengthSq() < 1e-8) _p.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw))
+    _d.subVectors(target, _a2)
+    const dist = Math.min(Math.max(_d.length(), 1e-3), (l1 + l2) * 0.999)
+    _d.normalize()
+    const cosA = (l1 * l1 + dist * dist - l2 * l2) / (2 * l1 * dist)
+    const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA))
+    _n.crossVectors(_d, _p)
+    if (_n.lengthSq() < 1e-8) _n.set(1, 0, 0)
+    _bb.crossVectors(_n.normalize(), _d).normalize()
+    _e2.copy(_a2).addScaledVector(_d, l1 * cosA).addScaledVector(_bb, l1 * sinA)
+    this.turnBone(up, _r.subVectors(_b2, _a2), _r2.subVectors(_e2, _a2), 1)
+    lo.getWorldPosition(_b2)
+    end.getWorldPosition(_c2)
+    _t2.copy(_a2).addScaledVector(_d, dist)
+    this.turnBone(lo, _r.subVectors(_c2, _b2), _r2.subVectors(_t2, _b2), 1)
+    // the foot keeps its clip orientation
+    end.parent!.getWorldQuaternion(_q).invert()
+    end.quaternion.copy(_q.multiply(_qe))
+    end.updateMatrixWorld(true)
+  }
+
+  /** Rotate a bone (world) by the rotation taking `from` onto `to`, scaled by k. */
+  private turnBone(b: THREE.Bone, from: THREE.Vector3, to: THREE.Vector3, k: number): void {
+    _q2.setFromUnitVectors(from.normalize(), to.normalize())
+    if (k < 1) _q2.slerp(_qI, 1 - k)
+    b.getWorldQuaternion(_q3)
+    _q3.premultiply(_q2)
+    b.parent!.getWorldQuaternion(_q).invert()
+    b.quaternion.copy(_q.multiply(_q3))
+    b.updateMatrixWorld(true)
+  }
+
+  /** Flashlight: right upper arm + forearm straightened along the view direction (pitch-scaled), blended by aimK. */
+  private aimArm(pitch: number): void {
+    const p = Math.PI / 2 - 0.1 + pitch * 0.8 - Math.PI / 2 // the old pose: arm swung forward to the horizon + pitch
+    _dir.set(-Math.sin(this.yaw) * Math.cos(p), Math.sin(p), -Math.cos(this.yaw) * Math.cos(p)).normalize()
+    const arm = this.mx.get('RightArm')!, fore = this.mx.get('RightForeArm')!, hand = this.mx.get('RightHand')!
+    arm.getWorldPosition(_a)
+    fore.getWorldPosition(_b)
+    this.turnBone(arm, _r.subVectors(_b, _a), _r2.copy(_dir), this.aimK)
+    fore.getWorldPosition(_b)
+    hand.getWorldPosition(_c)
+    this.turnBone(fore, _r.subVectors(_c, _b), _r2.copy(_dir), this.aimK)
+  }
+
+  // ---- procedural poses (driver rig) → Mixamo -------------------------------------------------------------------
+  /** Switching between clips and procedural poses: remember the current pose and blend from it (~0.2 s). */
+  private enter(mode: 'clip' | 'proc'): void {
+    if (this.mode === mode) return
+    this.mode = mode
+    for (const b of this.mxOrder) this.snapQ.get(b)!.copy(b.quaternion)
+    this.snapHips.copy(this.mx.get('Hips')!.position)
+    this.blendT = 0.22
+  }
+  private finishBlend(dt: number): void {
+    if (this.blendT <= 0) return
+    const k = smooth(0, 1, 1 - this.blendT / 0.22)
+    for (const b of this.mxOrder) b.quaternion.slerpQuaternions(this.snapQ.get(b)!, b.quaternion, k)
+    const h = this.mx.get('Hips')!
+    h.position.lerpVectors(this.snapHips, h.position, k)
+    this.blendT -= dt
+    this.root.updateMatrixWorld(true)
+  }
+
+  /** Copy the driver rig's pose onto the Mixamo bones (rest-direction corrected; spine / neck / clavicles spread). */
+  private retarget(): void {
+    this.root.updateMatrixWorld(true)
+    const dq: THREE.Quaternion[] = []
+    for (let i = 0; i < this.bones.length; i++) dq[i] = this.bones[i].getWorldQuaternion(new THREE.Quaternion())
+    const tgt = _tgt
+    tgt.clear()
+    for (const [name, src] of MAP) {
+      const b = this.mx.get(name)
+      if (!b) continue
+      let q: THREE.Quaternion
+      if (src === 'spine0') q = _qa.slerpQuaternions(dq[B.hips], dq[B.chest], 1 / 3)
+      else if (src === 'spine1') q = _qa.slerpQuaternions(dq[B.hips], dq[B.chest], 2 / 3)
+      else if (src === 'neck') q = _qa.slerpQuaternions(dq[B.chest], dq[B.head], 0.5)
+      else if (src === 'clavicle') q = _qa.copy(dq[B.chest])
+      else q = _qa.copy(dq[src])
+      const c = this.corr.get(b)
+      const out = new THREE.Quaternion().copy(q)
+      if (c) out.multiply(c)
+      out.multiply(this.rm0.get(b)!)
+      tgt.set(b, out)
+    }
+    // locals, parents first
+    const wq = _wq
+    wq.clear()
+    for (const b of this.mxOrder) {
+      const p = b.parent!
+      const pw = wq.get(p as THREE.Bone) ?? p.getWorldQuaternion(new THREE.Quaternion())
+      const t = tgt.get(b)
+      if (t) {
+        b.quaternion.copy(pw).invert().multiply(t)
+        wq.set(b, t)
+      } else {
+        b.quaternion.copy(this.restLocal.get(b)!)
+        wq.set(b, pw.clone().multiply(b.quaternion))
+      }
+    }
+    // hips position, the head's scale (a cramped cab)
+    this.bones[B.hips].getWorldPosition(_v)
+    this.root.worldToLocal(_v).add(this.hipsOffset)
+    this.setHips(_v)
+    this.mx.get('Head')!.scale.setScalar(this.bones[B.head].scale.x)
+    this.root.updateMatrixWorld(true)
+    // The spine spread over three bones puts the shoulders a few cm off the driver's single chest pivot: the hands
+    // are pulled back onto the driver's (grips, steering wheel, door handle) by two-bone IK.
+    this.legIK('LeftArm', 'LeftForeArm', 'LeftHand', this.bones[B.handL].getWorldPosition(_ta))
+    this.legIK('RightArm', 'RightForeArm', 'RightHand', this.bones[B.handR].getWorldPosition(_tb))
+  }
+
+  // ---- driver-rig pose helpers ------------------------------------------------------------------------------------
   private readonly _e = new THREE.Euler()
   private pose(id: BoneId, x: number, y = 0, z = 0): void {
     this.target[id].setFromEuler(this._e.set(x, y, z, 'XYZ'))
@@ -268,185 +696,12 @@ export class CharacterModel {
   }
 
   /**
-   * @param speed horizontal m/s   @param grounded   @param aimPitch camera pitch (arm follows when aiming)
-   * @param aiming flashlight on → right arm raised forward   @param vy vertical velocity (jump/fall pose)
-   */
-  animate(dt: number, pos: THREE.Vector3, targetYaw: number, speed: number, grounded: boolean, aiming: boolean, aimPitch: number, vy = 0, knock = 0, tumble: { angle: number; yaw: number } | null = null): void {
-    this.unscale()
-    let d = targetYaw - this.yaw
-    d = Math.atan2(Math.sin(d), Math.cos(d))
-    this.yaw += d * (1 - Math.exp(-12 * dt))
-    this.time += dt
-    // Walk ↔ run blend (the cadence itself comes from the planted feet: plantFeet).
-    this.runK += (smooth(3.9, 6.0, speed) - this.runK) * Math.min(1, dt * 6)
-    this.moveK += (smooth(0.15, 1.2, speed) - this.moveK) * Math.min(1, dt * 8)
-    // Air / landing timers.
-    this.air = grounded ? 0 : this.air + dt
-    if (grounded && !this.wasGrounded && this.airTime > 0.25) this.land = 0.22
-    this.airTime = grounded ? 0 : this.airTime + dt
-    this.wasGrounded = grounded
-    this.land = Math.max(0, this.land - dt)
-
-    const r = this.runK, m = this.moveK
-    let hipsY = 0
-    if (!grounded && this.air > 0.06) {
-      // AIRBORNE (Genshin / GTA jump): rising = the lead knee DRIVEN UP, the other leg trailing back, arms swung out
-      // to the sides and a little back, chest up; falling = both legs reaching down for the landing (lead knee
-      // still bent), arms rising out for balance.
-      const fall = smooth(1, -4, vy)
-      this.leg(-1, 1.25 - fall * 0.7, 1.7 - fall * 0.95, 0.05, -0.25)
-      this.leg(1, -0.25 + fall * 0.35, 0.95 - fall * 0.55, 0.05, 0.35 - fall * 0.2)
-      this.arm(1, 0.95 - fall * 0.3, -0.25 + fall * 0.15, 0.55, 0.25)
-      this.arm(-1, 0.95 - fall * 0.3, 0.15 + fall * 0.05, 0.55, 0.25)
-      this.pose(B.chest, 0.08 - fall * 0.14, 0.12 * (1 - fall))
-      this.pose(B.hips, -0.08, -0.08 * (1 - fall))
-      this.pose(B.head, 0.12 - fall * 0.2)
-    } else {
-      // Upper body (legs are placed by foot IK below). WALK / RUN: the pelvis twists with the forward leg and rolls
-      // over the stance leg, the chest counter-rotates, the head stays on the horizon (cancels the twist), arms
-      // swing against the legs (relaxed in the walk, bent ~90° and driving in the run), forward lean when running.
-      // IDLE: weight shifting from leg to leg, breathing in the chest and shoulders, relaxed slightly bent arms.
-      const idle = 1 - m
-      const breath = Math.sin(this.time * 2.0) * 0.025 * idle
-      const shift = Math.sin(this.time * 0.7) // idle weight shift (also moves the hips sideways in plantFeet)
-      const ph = this.cycle * Math.PI * 2
-      const sw = Math.sin(ph)
-      const armSwing = (0.55 + 0.4 * r) * m
-      const elbow = (0.28 + 0.05 * shift) * idle + (0.35 + 1.15 * r) * m
-      const fwd = 0.06 * idle + 0.12 * r * m // arms carried a little forward (more when running)
-      this.arm(1, 1.3 - 0.12 * r + 0.03 * breath * 10, fwd + armSwing * sw, elbow, 0.04 + 0.03 * idle)
-      this.arm(-1, 1.3 - 0.12 * r + 0.03 * breath * 10, fwd - armSwing * sw, elbow, 0.04 + 0.03 * idle)
-      const hipYaw = -(0.13 + 0.07 * r) * sw * m
-      const chestYaw = (0.2 + 0.1 * r) * sw * m
-      const roll = 0.045 * sw * m * (1 - 0.5 * r) + 0.035 * shift * idle
-      this.pose(B.hips, -0.05 * m - 0.07 * r * m, hipYaw, roll)
-      this.pose(B.chest, -0.04 * m - 0.22 * r * m - breath, chestYaw, -roll * 0.8)
-      this.pose(B.head, 0.04 * m + 0.16 * r * m + breath * 0.5, -(hipYaw + chestYaw) * 0.8, roll * 0.4 - 0.02 * shift * idle)
-      this.leg(-1, 0, 0.08)
-      this.leg(1, 0, 0.08)
-    }
-    if (this.land > 0) {
-      // Landing squash: knees give, hips drop, arms swing down.
-      const k = Math.sin((this.land / 0.22) * Math.PI)
-      this.leg(-1, 0.55 * k, 1.1 * k)
-      this.leg(1, 0.55 * k, 1.1 * k)
-      this.pose(B.chest, -0.3 * k)
-      hipsY -= 0.14 * k
-    }
-    if (aiming) this.arm(1, Math.PI / 2, Math.PI / 2 - 0.1 + aimPitch * 0.8, 0.05) // flashlight: lowered, then swung straight forward
-    // BAIL TUMBLE: tucked body rolling forward along the slide (PlayerController.bail).
-    if (tumble) {
-      this.yaw = tumble.yaw
-      this.knockMode = 'fall'
-      this.lastKnock = 1
-      this.tumblePose(tumble.angle, pos)
-      return
-    }
-    // KNOCKDOWN / GET UP: authored human sequences (knockPose), solved against the ground (see `groundPose`).
-    if (knock > 0.001) {
-      if (knock > this.lastKnock + 1e-4 && this.knockMode !== 'up') this.knockMode = 'fall'
-      else if (knock < this.lastKnock - 1e-4) this.knockMode = 'up'
-      this.lastKnock = knock
-      this.knockPose(knock)
-      this.commit(1)
-      this.groundPose(pos)
-      return
-    }
-    this.knockMode = 'none'
-    this.lastKnock = 0
-    this.commit(1 - Math.exp(-16 * dt))
-    this.root.position.copy(pos)
-    this.root.rotation.set(0, this.yaw, 0)
-    if (!grounded && this.air > 0.06) {
-      this.bones[B.hips].position.set(this.rest[B.hips].x, this.rest[B.hips].y + hipsY, this.rest[B.hips].z)
-      return
-    }
-    this.plantFeet(dt, pos, speed, hipsY)
-  }
-
-  /**
-   * FOOT-PLANTING LOCOMOTION. Each foot is PLANTED on the ground during its stance (it moves backward under the
-   * body at exactly the body's speed — no skating) and swings forward in an arc in between; two-bone IK bends
-   * the leg to reach it and the hips drop just enough for the legs to reach (they are short: 0.41 m), so the
-   * walk bobs and the run bounces with a flight phase. Gait from the speed: walk (stance 62 % of the cycle,
-   * 0.38 m step) → jog (40 %, 0.5 m) → sprint (30 %, 0.56 m). On slopes the feet follow the terrain (`ground`).
-   */
-  private plantFeet(dt: number, pos: THREE.Vector3, speed: number, extraHipY: number): void {
-    const m = this.moveK
-    const v = Math.max(speed, 0.6 * m)
-    const beta = v < 1.5 ? 0.62 : v < 3.6 ? 0.62 - (v - 1.5) / 2.1 * 0.22 : Math.max(0.3, 0.4 - (v - 3.6) / 2.9 * 0.1)
-    const S = Math.min(0.95, 0.34 + v * 0.1) * m // step: how far a planted foot travels under the body (0.8 m legs: long run strides)
-    const strideLen = Math.max(0.2, S / beta)
-    const prevCycle = this.cycle
-    this.cycle = (this.cycle + (v * dt) / strideLen) % 1
-    const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw)
-    const fwdX = -sy, fwdZ = -cy, rightX = cy, rightZ = -sy
-    let hip = HIP_Y
-    const targets: [number, number, number, number][] = [] // world x, y, z, swing (0 = planted)
-    for (const side of [-1, 1] as const) {
-      const off = side < 0 ? 0 : 0.5
-      const c = (this.cycle + off) % 1
-      const cPrev = (prevCycle + off) % 1
-      const touchdown = c < cPrev && m > 0.35 && speed > 0.4 // a new stance begins
-      let fz: number, lift = 0
-      // FOOT ROLL (+ = toes down): heel strike (toes up) → flat → heel off / toe push at the end of the stance; in
-      // the swing the toes trail down, then come up again to meet the ground heel first.
-      let roll = 0
-      if (c < beta) {
-        const k = c / beta
-        fz = S / 2 - S * k
-        roll = (-0.32 * (1 - smooth(0, 0.22, k)) + 0.5 * smooth(0.62, 1, k)) * m
-      } else {
-        const t = (c - beta) / (1 - beta)
-        fz = -S / 2 + S * (0.5 - 0.5 * Math.cos(Math.PI * t))
-        // Swing height: a low walk step, a high run (knee drive + heel kicked up behind, early in the swing).
-        lift = (0.06 * Math.sin(Math.PI * t) + 0.26 * this.runK * Math.sin(Math.PI * Math.pow(t, 0.75))) * m
-
-        roll = (0.5 * (1 - smooth(0, 0.55, t)) - 0.32 * smooth(0.7, 1, t)) * m
-      }
-      // Heel up at the push-off: the foot pivots on its ball, so the ankle rises (no toes through the ground).
-      lift += 0.11 * Math.sin(Math.max(0, roll)) * (c < beta ? 1 : 1 - smooth(0, 0.4, (c - beta) / (1 - beta)))
-      const lx = side * FOOT_X * 0.9
-      const wx = pos.x + rightX * lx + fwdX * fz, wz = pos.z + rightZ * lx + fwdZ * fz
-      if (touchdown) {
-        this.steps++
-        this.onStep?.(wx, wz, fwdX, fwdZ)
-      }
-      const gy = (this.ground ? this.ground(wx, wz) : pos.y) - pos.y // terrain under the foot (root-local)
-      const fy = gy + ANKLE_Y + lift
-      // Highest hip that still lets this leg reach its foot (with 3 % slack so the knee keeps a little bend).
-      const reach = LEG * 0.97
-      hip = Math.min(hip, fy + Math.sqrt(Math.max(0, reach * reach - fz * fz)))
-      targets.push([wx, pos.y + fy, wz, roll])
-    }
-    // Hips: never above standing; smoothed (the landing / stance compression reads as a soft bob).
-    this.hipH += (hip - this.hipH) * (1 - Math.exp(-dt * 30))
-    const hipsY = this.hipH - HIP_Y + extraHipY
-    // Idle: the weight shifts from leg to leg (hips sway sideways over the planted feet; the IK bends the knee).
-    const sway = 0.022 * Math.sin(this.time * 0.7) * (1 - m)
-    this.bones[B.hips].position.set(this.rest[B.hips].x + sway, this.rest[B.hips].y + hipsY, this.rest[B.hips].z)
-    this.root.updateMatrixWorld(true)
-    _p.set(fwdX, 0.15, fwdZ) // knees bend forward
-    for (let i = 0; i < 2; i++) {
-      const side = i === 0 ? -1 : 1
-      const [x, y, z, roll] = targets[i]
-      const th = side > 0 ? B.thighR : B.thighL, sh = side > 0 ? B.shinR : B.shinL, ft = side > 0 ? B.footR : B.footL
-      this.ik(th, sh, ft, _t.set(x, y, z), _p)
-      // Foot flat on the ground (cancel the leg's rotation), toes dipping a little as it swings through.
-      this.bones[sh].getWorldQuaternion(_q).invert()
-      this.root.getWorldQuaternion(_q2)
-      this.bones[ft].quaternion.copy(_q).multiply(_q2).multiply(_q3.setFromAxisAngle(_xAxis, roll))
-      for (const id of [th, sh, ft]) this.target[id].copy(this.bones[id].quaternion)
-    }
-  }
-
-  /**
    * Forward roll: arms wrapped in, knees tucked to the chest, chin down; the whole body pitched forward by `angle`
    * about its right axis (yaw = slide direction). Centred on the hips over `pos`, lowest point on the ground.
    * In the last quarter-turn before lying on the back the limbs open out toward the supine pose.
    */
   private tumblePose(angle: number, pos: THREE.Vector3): void {
-    const S = CharacterModel.KP.supine
+    const S = CharacterModel.SUPINE
     const a = ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)
     const open = angle > Math.PI * 2 ? smooth(Math.PI * 2 - 2.6, Math.PI * 2 - 1.5, a) : 0 // unfold onto the back
     const mix = (tuck: number, sup: number) => tuck + (sup - tuck) * open
@@ -481,82 +736,8 @@ export class CharacterModel {
     R.updateMatrixWorld(true)
   }
 
-  /** Pose keyframes of the fall and the get-up (blended by `knockPose`). */
-  private static readonly KP = {
-    stand: { tilt: 0, chest: 0, head: 0, hips: 0, thL: 0, knL: 0.06, thR: 0, knR: 0.06, spread: 0.03, aDown: 1.35, aFwd: 0, aBend: 0.2, aOut: 0.05 },
-    // Hit: the knees buckle, the body folds forward over the blow, arms fly up.
-    stagger: { tilt: 0.3, chest: -0.45, head: -0.25, hips: -0.2, thL: 0.5, knL: 0.9, thR: 0.25, knR: 0.6, spread: 0.08, aDown: 0.55, aFwd: 1.0, aBend: 0.5, aOut: 0.3 },
-    // On the back: knees raised with the feet on the ground, arms lying alongside, head resting.
-    // (Angles are body-relative: a body tilted back by t points its thighs t further forward/up in the world.)
-    supine: { tilt: 1.5, chest: 0.05, head: 0.15, hips: 0, thL: 0.75, knL: 1.2, thR: 0.35, knR: 0.5, spread: 0.12, aDown: 1.3, aFwd: 0.1, aOut: 0.45, aBend: 0.25 },
-    // Sit up: torso raised ~35° off the ground, hands planted on the ground behind, knees drawn up, feet flat.
-    sit: { tilt: 0.95, chest: -0.35, head: 0.25, hips: -0.1, thL: 1.15, knL: 1.8, thR: 1.0, knR: 1.6, spread: 0.1, aDown: 1.2, aFwd: -1.5, aBend: 0.05, aOut: 0.2 },
-    // Rock forward onto the feet: a deep squat (knees ahead of the feet), arms reaching forward for balance.
-    squat: { tilt: -0.3, chest: -0.35, head: 0.35, hips: -0.15, thL: 1.95, knL: 2.1, thR: 1.95, knR: 2.1, spread: 0.1, aDown: 1.1, aFwd: 0.8, aBend: 0.45, aOut: 0.1 },
-    // Push up through the legs, torso still forward.
-    rise: { tilt: -0.18, chest: -0.2, head: 0.2, hips: -0.05, thL: 0.9, knL: 1.15, thR: 0.9, knR: 1.15, spread: 0.06, aDown: 1.25, aFwd: 0.3, aBend: 0.3, aOut: 0.08 },
-  }
-
-  /** Current knockdown pose: fall = stand → stagger → supine (knock 0 → 1, the impact overshoot > 1 is a thump);
-   *  get up = supine → sit up → squat → rise → stand (knock 1 → 0). */
-  private knockPose(knock: number): void {
-    const K = CharacterModel.KP
-    type P = typeof K.stand
-    const seq: [number, P][] = this.knockMode === 'up'
-      ? [[0, K.supine], [0.3, K.sit], [0.58, K.squat], [0.82, K.rise], [1, K.stand]]
-      : [[0, K.stand], [0.3, K.stagger], [1, K.supine]]
-    const x = this.knockMode === 'up' ? 1 - Math.min(1, knock) : Math.min(1, knock)
-    let i = 0
-    while (i < seq.length - 2 && x > seq[i + 1][0]) i++
-    const [x0, a] = seq[i], [x1, b] = seq[i + 1]
-    const t = smooth(0, 1, (x - x0) / (x1 - x0))
-    const L = (k: keyof P) => a[k] + (b[k] - a[k]) * t
-    const thump = Math.max(0, knock - 1) // impact overshoot: chest and head bounce
-    this.root.rotation.set(L('tilt'), this.yaw, 0) // + = tipped BACKWARD (head toward +Z, behind the facing direction)
-    this.pose(B.chest, L('chest') - thump * 0.6)
-    this.pose(B.head, L('head') - thump * 0.8)
-    this.pose(B.hips, L('hips'))
-    this.leg(-1, L('thL'), L('knL'), L('spread'), -0.3 * L('knL') * 0.3)
-    this.leg(1, L('thR'), L('knR'), L('spread'), -0.3 * L('knR') * 0.3)
-    this.arm(1, L('aDown'), L('aFwd'), L('aBend'), L('aOut'))
-    this.arm(-1, L('aDown') + 0.08, L('aFwd') * 0.9, L('aBend'), L('aOut') * 1.1)
-    this.bones[B.hips].position.copy(this.rest[B.hips])
-  }
-
-  /**
-   * Put the posed body ON the ground: the lowest body part (feet, hands, pelvis, back, the big head — each with
-   * its thickness) rests on the terrain, and the feet stay where the player stands (a body falling back lands
-   * behind its feet; getting up, the hips come forward over them) — no floating, no sinking, no sliding.
-   */
-  private groundPose(pos: THREE.Vector3): void {
-    const R = this.root
-    R.position.copy(pos)
-    R.updateMatrixWorld(true)
-    const b = this.bones
-    // Feet anchor: midpoint of the ankles → the player's position (horizontal).
-    b[B.footL].getWorldPosition(_a)
-    b[B.footR].getWorldPosition(_d)
-    R.position.x += pos.x - (_a.x + _d.x) / 2
-    R.position.z += pos.z - (_a.z + _d.z) / 2
-    R.updateMatrixWorld(true)
-    let low = Infinity
-    const probe = (id: BoneId, r: number, up = 0) => {
-      if (up) b[id].localToWorld(_t.set(0, up, 0))
-      else b[id].getWorldPosition(_t)
-      low = Math.min(low, _t.y - r)
-    }
-    probe(B.footL, ANKLE_Y)
-    probe(B.footR, ANKLE_Y)
-    probe(B.handL, 0.05)
-    probe(B.handR, 0.05)
-    probe(B.hips, 0.13)
-    probe(B.chest, 0.15)
-    probe(B.head, HEAD_R, HEAD_C)
-    const g = this.ground ? this.ground(pos.x, pos.z) : pos.y
-    R.position.y += g - low
-    R.updateMatrixWorld(true)
-  }
-  private airTime = 0
+  /** On the back: knees raised with the feet on the ground, arms lying alongside, head resting (end of the tumble). */
+  private static readonly SUPINE = { chest: 0.05, head: 0.15, hips: 0, thL: 0.75, knL: 1.2, thR: 0.35, knR: 0.5, spread: 0.12, aDown: 1.3, aFwd: 0.1, aOut: 0.45, aBend: 0.25 }
 
   /**
    * Riding pose on the BMX: seated, feet ON the turning pedals and hands ON the steering bars (two-bone IK),
@@ -564,6 +745,7 @@ export class CharacterModel {
    */
   ride(pos: THREE.Vector3, heading: number, pedal: number, lean: number, rig?: RideRig, steer = 0, bikeQ?: THREE.Quaternion): void {
     this.unscale()
+    this.enter('proc')
     this.yaw = heading
     this.root.position.copy(pos)
     // The rider sits in the bike's frame: its full simulated orientation (lean, pitch on slopes) when given.
@@ -576,24 +758,27 @@ export class CharacterModel {
     bones[B.chest].quaternion.setFromEuler(this._e.set(-0.42, 0, 0))
     bones[B.head].quaternion.setFromEuler(this._e.set(0.45, 0, 0))
     this.root.updateMatrixWorld(true)
-    if (!rig) return
-    for (const side of [1, -1] as const) {
-      const a = pedal + (side > 0 ? 0 : Math.PI)
-      // Pedal on the crank circle (forward pedalling = top of the stroke moves forward, −Z).
-      _t.set(side * rig.pedalX, rig.crank.y + rig.crankR * Math.sin(a), rig.crank.z - rig.crankR * Math.cos(a))
-      _t.y += 0.085 // ankle above the pedal (toes pointed down)
-      this.root.localToWorld(_t)
-      _p.set(0, 0.6, -1).transformDirection(this.root.matrixWorld) // knees bend forward/up
-      this.ik(side > 0 ? B.thighR : B.thighL, side > 0 ? B.shinR : B.shinL, side > 0 ? B.footR : B.footL, _t, _p)
-      bones[side > 0 ? B.footR : B.footL].quaternion.setFromEuler(this._e.set(0.35, 0, 0))
-      // Grip on the (steered) handlebar.
-      _t.copy(rig.grip).setX(side * Math.abs(rig.grip.x)).applyAxisAngle(_up, steer).add(rig.fork)
-      this.root.localToWorld(_t)
-      _p.set(side * 0.6, -1, 0.3).transformDirection(this.root.matrixWorld) // elbows out and down
-      this.ik(side > 0 ? B.armR : B.armL, side > 0 ? B.foreR : B.foreL, side > 0 ? B.handR : B.handL, _t, _p)
+    if (rig) {
+      for (const side of [1, -1] as const) {
+        const a = pedal + (side > 0 ? 0 : Math.PI)
+        // Pedal on the crank circle (forward pedalling = top of the stroke moves forward, −Z).
+        _t.set(side * rig.pedalX, rig.crank.y + rig.crankR * Math.sin(a), rig.crank.z - rig.crankR * Math.cos(a))
+        _t.y += 0.085 // ankle above the pedal (toes pointed down)
+        this.root.localToWorld(_t)
+        _p.set(0, 0.6, -1).transformDirection(this.root.matrixWorld) // knees bend forward/up
+        this.ik(side > 0 ? B.thighR : B.thighL, side > 0 ? B.shinR : B.shinL, side > 0 ? B.footR : B.footL, _t, _p)
+        bones[side > 0 ? B.footR : B.footL].quaternion.setFromEuler(this._e.set(0.35, 0, 0))
+        // Grip on the (steered) handlebar.
+        _t.copy(rig.grip).setX(side * Math.abs(rig.grip.x)).applyAxisAngle(_up, steer).add(rig.fork)
+        this.root.localToWorld(_t)
+        _p.set(side * 0.6, -1, 0.3).transformDirection(this.root.matrixWorld) // elbows out and down
+        this.ik(side > 0 ? B.armR : B.armL, side > 0 ? B.foreR : B.foreL, side > 0 ? B.handR : B.handL, _t, _p)
+      }
     }
     // Keep the next ground animation blending from here.
     for (let i = 0; i < bones.length; i++) this.target[i].copy(bones[i].quaternion)
+    this.retarget()
+    this.finishBlend(1 / 60)
   }
 
   /**
@@ -602,6 +787,7 @@ export class CharacterModel {
    * `sit`/`lean`, and hands / feet reach their car-space targets by two-bone IK (else a default arm / seated leg).
    */
   carPose(carM: THREE.Matrix4, o: CarPose): void {
+    this.enter('proc')
     const R = this.root, b = this.bones, s = o.scale
     carM.decompose(R.position, R.quaternion, _v)
     R.scale.setScalar(s)
@@ -638,21 +824,24 @@ export class CharacterModel {
     // The next on-foot frame blends from here.
     for (let i = 0; i < b.length; i++) this.target[i].copy(b[i].quaternion)
     this.yaw = Math.atan2(-_v.set(-sy, 0, -cy).applyQuaternion(R.quaternion).x, -_v.z)
+    this.retarget()
+    this.finishBlend(1 / 60)
   }
 
-  /** World position of the head (FPP eye while getting in / out). */
+  /** World position of the eyes (FPP eye while getting in / out). */
   headPosition(out: THREE.Vector3): THREE.Vector3 {
     this.root.updateMatrixWorld(true)
-    return this.bones[B.head].localToWorld(out.set(0, HEAD_C * 0.9, -HEAD_R * 0.5))
+    return this.mx.get('Head')!.localToWorld(out.copy(this.eyeLocal))
   }
 
   /** Back to normal size (after a car seat). */
   private unscale(): void {
     if (this.root.scale.x !== 1) this.root.scale.setScalar(1)
     this.bones[B.head].scale.setScalar(1)
+    this.mx.get('Head')!.scale.setScalar(1)
   }
 
-  /** Two-bone IK: rotate `upper`/`lower` so the `end` joint reaches `target` (world), bending toward `pole`. */
+  /** Two-bone IK on the driver rig: rotate `upper`/`lower` so the `end` joint reaches `target`, bending toward `pole`. */
   private ik(upper: BoneId, lower: BoneId, end: BoneId, target: THREE.Vector3, pole: THREE.Vector3): void {
     const U1 = this.bones[upper], L1 = this.bones[lower]
     const l1 = this.rest[lower].length(), l2 = this.rest[end].length()
@@ -664,8 +853,8 @@ export class CharacterModel {
     const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA))
     _n.crossVectors(_d, pole)
     if (_n.lengthSq() < 1e-8) _n.set(1, 0, 0)
-    _b.crossVectors(_n.normalize(), _d).normalize() // in the bend plane, toward the pole
-    _e2.copy(_a).addScaledVector(_d, l1 * cosA).addScaledVector(_b, l1 * sinA) // elbow / knee
+    _bb.crossVectors(_n.normalize(), _d).normalize() // in the bend plane, toward the pole
+    _e2.copy(_a).addScaledVector(_d, l1 * cosA).addScaledVector(_bb, l1 * sinA) // elbow / knee
     const endPos = _t2.copy(_a).addScaledVector(_d, dist)
     this.aim(U1, _dir.subVectors(_e2, _a).normalize(), this.rest[lower])
     U1.updateMatrixWorld(true)
@@ -681,21 +870,26 @@ export class CharacterModel {
   /** World position of the right hand (flashlight origin in TPP). */
   handPosition(out: THREE.Vector3): THREE.Vector3 {
     this.root.updateMatrixWorld(true)
-    return this.bones[B.handR].getWorldPosition(out)
+    return (this.mx.get('RightHandMiddle1') ?? this.mx.get('RightHand')!).getWorldPosition(out)
   }
 
   dispose(): void {
+    this.mixer.stopAllAction()
+    this.mixer.uncacheRoot(this.mixer.getRoot())
     this.mesh.geometry.dispose()
     this.mesh.skeleton.dispose()
   }
 }
 
 const _v = new THREE.Vector3(), _t = new THREE.Vector3(), _t2 = new THREE.Vector3(), _p = new THREE.Vector3()
-const _a = new THREE.Vector3(), _d = new THREE.Vector3(), _n = new THREE.Vector3(), _b = new THREE.Vector3()
-const _e2 = new THREE.Vector3(), _dir = new THREE.Vector3(), _r = new THREE.Vector3()
-const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _q3 = new THREE.Quaternion()
+const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3(), _d = new THREE.Vector3(), _n = new THREE.Vector3()
+const _bb = new THREE.Vector3(), _e2 = new THREE.Vector3(), _dir = new THREE.Vector3(), _r = new THREE.Vector3(), _r2 = new THREE.Vector3()
+const _a2 = new THREE.Vector3(), _b2 = new THREE.Vector3(), _c2 = new THREE.Vector3(), _ta = new THREE.Vector3(), _tb = new THREE.Vector3()
+const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _q3 = new THREE.Quaternion(), _qa = new THREE.Quaternion()
+const _qe = new THREE.Quaternion(), _qI = new THREE.Quaternion()
 const _up = new THREE.Vector3(0, 1, 0)
-const _xAxis = new THREE.Vector3(1, 0, 0)
+const _tgt = new Map<THREE.Bone, THREE.Quaternion>()
+const _wq = new Map<THREE.Bone, THREE.Quaternion>()
 
 /** Soft round blob shadow (grounds the character on tiers without real dynamic shadows). */
 export function createBlobShadow(): THREE.Mesh {

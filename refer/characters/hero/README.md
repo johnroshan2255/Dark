@@ -14,7 +14,13 @@
 - `face_closeup.png` — the texture on the head, unlit. `ingame_*.png` — swapped into the running game (bright, ultra).
 - Rejected: v2 flat palette colours ("no details, don't make it like our old char"); v3a front-only face (a hard mask).
 
-NOT wired in yet: (1) the character material is vertex-colour only — it needs the texture as `map`;
-(2) the arms hang down, the rig in code is built for a T-pose.
+## v5 — the game player (2026-10-14)
+
+`hero_v4_static_source.glb` (the 15 k file above, kept as the pipeline input) → `scripts/blender/hero/` → the game
+file `src/assets/models/characters/hero.lod0.glb`: face shape restored from the 332 k source and re-textured from
+the sheet's CLOSE UP portrait (`ingame_v5_face.png`), modelled hands (fingerless gloves, five fingers), arms cut free
+of the jacket, A-posed (`apose_v5.png`) and auto-rigged in Mixamo (65 bones) with 13 clips (`mixamo/`), 15 k tris,
+`hero_albedo_v5_1024.png`. Wired in: `CharacterModel` plays the clips and retargets its procedural poses (car, BMX,
+tumble) onto the Mixamo skeleton; material `MaterialLibrary.hero` (stylized Lambert + map).
 
 Tooling (outside the repo, `~/Hunyuan3D`): `run_mv.py` → `carve.py` → `bake.py shape.glb out --views views`.

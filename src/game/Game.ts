@@ -259,7 +259,9 @@ export class Game {
     this.player.yaw = Math.atan2(-(this.world.fields.roadCenterX(z + 1) - x), -1)
     this.player.pitch = -0.08
 
-    this.character = new CharacterModel(this.materials.character, models.human)
+    this.materials.hero.map = models.hero.map
+    this.materials.hero.needsUpdate = true
+    this.character = new CharacterModel(this.materials.hero, models.hero)
     // Feet on the slope, the fallen body on the ground: the loaded chunk heights (cheap, = the rendered mesh).
     // The ground under the feet as the colliders see it: the terrain, or a cave's rock floor (the height field is
     // carved 2+ m below it there — feet IK on that pulled the body into the cave floor). Cast from just above the

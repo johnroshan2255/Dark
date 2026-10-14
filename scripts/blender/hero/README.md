@@ -1,0 +1,30 @@
+# Hero pipeline — `src/assets/models/characters/hero.lod0.glb`
+
+Rebuilds the player character from the AI-generated source (`refer/characters/hero/`): face rebuilt, real hands,
+arms freed from the jacket, re-textured, rigged in Mixamo (65 bones incl. fingers) with 13 clips, 15 k tris.
+
+Run the steps in Blender 5.2 with the Blender MCP add-on listening on `localhost:9876`:
+
+```
+node bl.cjs <step>.py        # sends the file to Blender; set HERO_WORK (scratch dir) and HERO_SCRIPTS (this dir)
+```
+
+| step | does |
+|---|---|
+| `build1.py` | `hero_v4_static_source.glb` (old game mesh) → welded, smooth-shaded; fists cut at the glove cuff (planar cut, cuff tapered), new procedural hands (`hands.py`: palm, 3-segment fingers, opposable thumb, voxel-unioned, 1.5 k tris each, fingerless-glove edge as a signed distance) |
+| `build2.py` | face shape back from the 332 k-face source: the face region subdivided and snapped to a de-noised copy (nose, brow, lips, chin) |
+| `build3a.py` | new UV layout: head islands × 1.8 before packing (face 2.3× the texels); wrist-cap UVs collapsed |
+| `build3b.py` | bake: old atlas + the concept sheet's CLOSE UP portrait front-projected onto the face (landmark fit: x = (px − 123)·0.001346, z = 0.9768 − py·0.001346), soft elliptical mask narrowed at the jaw |
+| `build3c.py` | colour: old head/neck skin → the portrait's hue (luminance mostly kept), neck/under-jaw repainted clean, skin-coloured blotches in the hair pulled back to hair colour, glove cuff band, hand patch (charcoal glove / skin, straight edge); the sides of the face (cheek / temple / jaw in front of the ears) repainted in the portrait's skin tone so the front projection has no seam; a jacket-olive block for build4a's caps |
+| `build4a.py` | the generator fused each arm to the jacket side between forearm and armpit: creases found per slice (convex-hull pockets), faces classified (angular test around the arm centre + forearm flood), split, both openings capped, seams smoothed |
+| `build4.py` | A-pose (arms 40° out about the shoulder joints) with exact geometric weights — Mixamo's auto-rigger needs arms off the body. Above the armpit only the sleeve side of the crease (|x| > ~0.21) follows the arm (else the jacket side panel is dragged out: 'wings') |
+| `build5.py` | head + neck tilted back 8° about the base of the neck (the generator's forward head carriage; the hood stays), metres, soles at 0, one UV map + material → `export/hero_apose.fbx` (= `refer/characters/hero/mixamo/hero_apose_upload.fbx`) |
+| — Mixamo | upload the FBX, markers: chin, wrists (glove top), elbows, knees, groin; Standard skeleton (65). Download: the character with skin (`character.fbx`) and the clips WITHOUT skin, FBX, 30 fps, In Place where offered — idle = Breathing Idle, walk = Walking (Male Standard Walk), jog = Jogging, run = Running (Running Forward Quickly), sprint = Fast Run, walk_back = Walking Backwards (Male Walk Backwards), strafe_left / strafe_right = Left / Right Strafe Walking, jump = Jumping Up, fall = Falling Idle, land = Falling To Landing, knockdown = Falling Back Death, get_up = Getting Up (From Back) → `refer/characters/hero/mixamo/<name>.fbx` |
+| `build6.py` (reshape) | the rigged mesh is moved to the CURRENT build5 shape while keeping Mixamo's skeleton + weights: Mixamo's mesh = `mixamo/hero_apose_upload.fbx` vertex for vertex (the shape that was rigged), which = the build5 mesh by index. Moved armpit vertices take the weights of their nearest unmoved neighbour; upper sleeves slimmed 15 % toward the arm bone. (So shape fixes in build4/5 don't need a Mixamo re-rig — on 2026-10-14 Mixamo's rigger failed every job with "Unknown error while generating motion".) |
+| `build6.py` (arm weights) | Mixamo rigged the whole padded upper sleeve as TORSO (the arm then swung out from under the shoulder, the band between stretched thin): every vertex keeps Mixamo's split among Arm / ForeArm / Hand / finger bones, but its arm-vs-torso share comes from build4's geometric weights (arm piece separated below the armpit, smooth shoulder-cap blend). Forearm filled out +12 % below the elbow, Arm ⇄ ForeArm blend widened. Shoulder joints RAISED 8 cm to (±0.26, 1.41 m) — Mixamo set them low in the padded shoulder (further inboard swung the arms into the torso, higher gave coat-hanger shoulders; `SHOULDER`). Then the WHOLE ARM is raised 8 cm (`ARM_LIFT`): arm-weighted mesh + Arm/ForeArm/Hand/finger bones, the shoulder top and the jacket side under the arm blended up with it — the generator had hung the arm low off a sloping panel. Then the arms move IN 3 cm per side (`ARM_IN`; joints 52 → 43 cm apart; 5 cm was too narrow, the shoulder top squeezed in to meet them) and the collarbones are not animated (the clips spread them 2–3 cm wider in motion). Armpit: the jacket side under the arm pulled in toward the body by 35 % of its width past 13 cm (`ARMPIT_K`) |
+| `build6.py` (clips) | before each bake the clip rig's COLLARBONE rest is set to ours (else the world-rotation copy aims our collarbone at the clip skeleton's lower shoulder and every clip drops the raised arms ~20 cm); the clip FBXs carry a T-pose rest, the character an A-pose rest: each clip is RETARGETED (world-space copy rotation + hips location, baked) onto the character's rig → one NLA track per clip |
+| `build7.py` | decimate to 15 k tris (head + hands protected), our albedo (JPEG q90), export the game GLB (one animation per clip) |
+
+`CharacterModel.ts` depends on the clip names above and on numbers measured from this GLB (joint landmarks `J`,
+clip speeds / cycles / left-foot touchdown phases `LOCO`, `JUMP_T0`, `LAND_T0`) — re-measure them if the rig or the
+clips change.

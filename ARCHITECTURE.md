@@ -354,11 +354,16 @@ Measured (RTX 4050, 1080p): GPU time within noise on every tier, LOW +8 draws (�
   `Car.retune` → `TruckSim.retune` changes power / force / boost / grip / springs / tyre size / mass in Rapier in
   place; paint tints the masked panels in the car shader. Saved per vehicle in Settings (`garage`).
 - **Scale**: real-world. Each car's `length` is set so its WHEELBASE matches the real vehicle (Hilux Xtra Cab 3.095 m,
-  G500 4×4² 2.85 m, Żuk 2.70 m); the player is a 1.78 m adult — a stylized human modelled in Blender at real proportions
-  (`scripts/blender/human.py`: skin-modifier body, head, hair, face, clothes by vertex colour, ~5 k tris, 124 KB; joints
-  at `CharacterModel` SRC), rigged and animated in code: idle weight shift + breathing; walk / run with planted feet,
-  heel strike → toe-off foot roll, pelvis twist + roll, counter-rotating chest, steady head, run lean, bent run arms;
-  jump with the lead knee driven up and the rear leg trailing, legs reaching down when falling. Same capsule and 1.62 m eye.
+  G500 4×4² 2.85 m, Żuk 2.70 m); the player is a 1.78 m adult — the hero (`hero.lod0.glb`, built by
+  `scripts/blender/hero/`: AI-generated body, rebuilt face + modelled hands, Mixamo rig of 65 bones incl. fingers,
+  15 k tris, 1024² albedo on `MaterialLibrary.hero`, 2.3 MB) animated by `CharacterModel`: 13 Mixamo clips — idle,
+  walk → jog → run → sprint blended by speed on one shared foot phase (stride lengths measured from the clips: no
+  sliding), walk-back / strafes by travel direction vs facing (flashlight aiming), jump → fall, landing, knockdown →
+  get-up scrubbed by `knock` — plus leg IK onto the terrain, the flashlight arm, footsteps from the phase; car seat /
+  BMX / bail-tumble poses stay procedural (the 15-bone driver rig) and are retargeted onto the Mixamo bones (hands
+  re-solved onto grips / wheel by IK). Clip ⇄ procedural switches blend over 0.22 s; the ground clips keep their own hip sway (pinning the hips slid the planted feet), the upper sleeves follow the arm (Mixamo had skinned them to the spine; arm-vs-torso shares re-derived in scripts/blender/hero/build6.py). Cost: ~0.08 ms CPU / frame
+  (desktop), 1 draw, +5.3 MB texture VRAM. Same capsule and 1.62 m eye. (The old `scripts/blender/human.py` model is
+  no longer loaded.)
 - **Doors, cabin, axles** (models prepared in Blender: `scripts/blender/vehicle_doors.py` + `vehicle_finish.py`):
   the front doors are separate parts (`door_FL*`/`door_FR*` with a `hinge` glTF extra, dark jamb in the opening),
   the steering wheel is a named part on every car, the Żuk has a ~150-tri cabin, and only the base-colour texture is
