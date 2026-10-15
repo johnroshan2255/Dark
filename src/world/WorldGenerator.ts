@@ -10,6 +10,7 @@ import { WorldFields } from './WorldFields'
 import { buildFormation, FORMATION_BED } from './Formations/formations'
 import { buildCrags } from './Formations/crags'
 import { buildBridges } from './Road/bridges'
+import { buildCamps } from './Road/camps'
 
 /**
  * Deterministic chunk generator: (seed, cx, cz) → ChunkData.
@@ -118,6 +119,7 @@ export class WorldGenerator {
     const crag = { pos: [] as number[], nor: [] as number[], col: [] as number[] }
     buildCrags(this.fields, cx, cz, heights, crag)
     buildBridges(this.fields, cx, cz, crag) // bright: rope bridges over the river (same mesh + collider)
+    buildCamps(this.fields, cx, cz, crag) // bright: oasis camps (white tents, campfire)
     for (let i = 0; i < crag.pos.length; i += 3) {
       const x = crag.pos[i], y = crag.pos[i + 1], z = crag.pos[i + 2]
       idx.push(pos.length / 3)

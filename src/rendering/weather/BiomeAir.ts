@@ -23,7 +23,8 @@ const SNOW_TINT_OTH = new THREE.Color(0.94, 0.98, 1.04)
 const SNOW_SHADE_OTH = new THREE.Color(0.5, 0.72, 1.0)
 const OTH_SAND_FILL = new THREE.Color(1.0, 0.8, 0.7)
 const OTH_SAND_ZENITH = new THREE.Color(0.58, 0.86, 1.0)
-const OTH_SAND_HAZE = new THREE.Color(1.0, 0.93, 0.88)
+const OTH_SAND_HAZE = new THREE.Color(1.0, 0.9, 0.86)
+const OTH_SAND_LAND = new THREE.Color(1.0, 0.8, 0.74) // far mesas fade to pink-peach layers
 
 // AUTUMN: warm golden air — honey haze, a warmer lower-feeling sun, an amber bounce from the leaf-strewn ground.
 const AUT_FOG = new THREE.Color(1.0, 0.86, 0.66)
@@ -112,10 +113,11 @@ export function applyBiomeAir(p: LightingParams, sand: number, snow: number, aut
     // zenith's low luminance, which turned the pale target into a grey lid.
     _c.copy(OTH_SAND_ZENITH).multiplyScalar(lum(p.fogColor) / lum(OTH_SAND_HAZE))
     p.skyZenith.lerp(_c, 0.85 * sand)
-    hueToward(p.landHaze, OTH_SAND_HAZE, 0.8 * sand)
+    hueToward(p.landHaze, OTH_SAND_LAND, 0.85 * sand, 1 + 0.1 * sand)
     p.clouds *= 1 - 0.75 * sand
     p.hemiIntensity *= 1 + 0.3 * sand // lighter, warm shade (theirs ≈ 178,134,98)
-    p.haze = Math.min(1, p.haze + 0.12 * sand)
+    p.haze = Math.min(1, p.haze + 0.24 * sand)
+    p.fogMax = Math.min(0.92, p.fogMax + 0.1 * sand)
     p.split *= 1 - 0.8 * sand // no cool split-toned shadows
   }
 }

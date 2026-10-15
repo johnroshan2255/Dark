@@ -4,9 +4,14 @@ import { useStore } from '../game/GameState'
 import { POI_ICONS, poiName } from '../world/POI/pois'
 import { LANDMARK_ICONS, landmarkName } from '../world/Landmarks/landmarks'
 import { BIOME_NAMES } from '../world/Biomes'
+import { isBright } from '../rendering/artStyle'
 
 const MAP_RANGE = 600 // m shown inside the compass ring; farther places sit on the rim
 const MAX_PLACES = 8
+/** Bright (over the hill): a COMPASS STRIP across the top centre instead of the ring — ±100° of view across its width. */
+const STRIP_HALF = (100 * Math.PI) / 180
+const STRIP_DIRS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const
+const wrapPi = (a: number) => a - Math.PI * 2 * Math.floor((a + Math.PI) / (Math.PI * 2))
 /** A compass entry: a place (farm, camp…) or a landmark (giant tree, ruins, tower…). */
 interface Mark { x: number; z: number; radius: number; icon: string; name: string }
 
@@ -30,6 +35,9 @@ export function GameHud({ game }: { game: Game }) {
   const nitroBar = useRef<HTMLDivElement>(null)
   const gearEl = useRef<HTMLSpanElement>(null)
   const aidsEl = useRef<HTMLDivElement>(null)
+  const strip = isBright() // fixed per session (art style)
+  const touch = useStore(game.store, (st) => st.touch)
+  const stripW = touch ? 300 : 520
   const dead = useStore(game.store, (st) => st.dead)
   const fpsCap = useStore(game.store, (st) => st.fpsCap)
   useEffect(() => {
@@ -43,6 +51,15 @@ export function GameHud({ game }: { game: Game }) {
       if (!el) return
       const d = Math.hypot(dx, dz)
       const a = game.player.yaw + Math.atan2(dx, -dz)
+      if (strip) {
+        // Strip: bearing → x across the bar; behind you = hidden.
+        const r = wrapPi(a)
+        el.style.display = Math.abs(r) < STRIP_HALF ? 'block' : 'none'
+        el.style.opacity = d > MAP_RANGE * 2 ? '0.55' : '1'
+        el.style.transform = `translate(${(r / STRIP_HALF) * (stripW / 2)}px, 0px)`
+        if (icon !== undefined && el.textContent !== icon) el.textContent = icon
+        return
+      }
       const r = 12 + 44 * Math.min(1, d / MAP_RANGE)
       el.style.display = 'block'
       el.style.opacity = d > MAP_RANGE ? '0.55' : '1'
@@ -123,6 +140,12 @@ export function GameHud({ game }: { game: Game }) {
       // yaw 0 faces -Z (north). Letters move around the ring; they stay upright.
       letters.current.forEach((el, i) => {
         if (!el) return
+        if (strip) {
+          const r = wrapPi(game.player.yaw + (i * Math.PI) / 4)
+          el.style.display = Math.abs(r) < STRIP_HALF ? 'block' : 'none'
+          el.style.transform = `translate(${(r / STRIP_HALF) * (stripW / 2)}px, 0px)`
+          return
+        }
         // Heading-up: the letter you face is at the top; east is to the right when facing north.
         const a = game.player.yaw + (i * Math.PI) / 2
         el.style.transform = `translate(${Math.sin(a) * 52}px, ${-Math.cos(a) * 52}px)`
@@ -160,7 +183,7 @@ export function GameHud({ game }: { game: Game }) {
     }
     id = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(id)
-  }, [game])
+  }, [game, strip, stripW])
   const party = [{ name: 'You', color: '#3aa6e8', hp: 1 }]
   return (
     <>
@@ -188,6 +211,21 @@ export function GameHud({ game }: { game: Game }) {
         <span style={keyCap}>E</span>
         <span>Mount bike</span>
       </div>
+      {strip ? (
+        <div style={{ ...stripBox, width: stripW }}>
+          <div style={stripLine} />
+          <div style={stripTick} />
+          {STRIP_DIRS.map((d, i) => (
+            <span key={d} ref={(el) => void (letters.current[i] = el)} style={d.length === 1 ? stripLetter : stripLetterSmall}>{d}</span>
+          ))}
+          {Array.from({ length: MAX_PLACES + 2 }, (_, i) => (
+            <span key={`m${i}`} ref={(el) => void (marks.current[i] = el)} style={stripMark}>
+              {i === MAX_PLACES ? '🚗' : i === MAX_PLACES + 1 ? '🚲' : ''}
+            </span>
+          ))}
+          <div ref={nearest} style={stripNearest} />
+        </div>
+      ) : (
       <div style={compass}>
         <div style={ringStyle}>
           {(['N', 'E', 'S', 'W'] as const).map((d, i) => (
@@ -202,6 +240,7 @@ export function GameHud({ game }: { game: Game }) {
         <div style={arrow}>▲</div>
         <div ref={nearest} style={nearestStyle} />
       </div>
+      )}
       <div ref={banner} style={bannerStyle} />
       <div ref={speedo} style={speedoStyle}>
         <div><span ref={gearEl} style={gearStyle} /><span ref={speedNum} style={speedNumStyle}>0</span><span style={speedUnit}>km/h</span></div>
@@ -239,3 +278,11 @@ const nearestStyle: CSSProperties = { position: 'absolute', top: '100%', right: 
 const capStyle: CSSProperties = { position: 'fixed', bottom: 64, left: '50%', transform: 'translateX(-50%)', maxWidth: '90vw', padding: '8px 14px', borderRadius: 8, background: 'rgba(20,12,4,0.78)', border: '1px solid rgba(255,190,110,0.5)', color: '#ffe2b8', font: '600 13px system-ui, sans-serif', textAlign: 'center', pointerEvents: 'none', zIndex: 9 }
 const bannerStyle: CSSProperties = { position: 'fixed', top: '16%', left: 0, right: 0, textAlign: 'center', font: '700 30px Georgia, serif', letterSpacing: 3, color: '#fff8e6', textShadow: '0 2px 10px rgba(0,0,0,0.6)', opacity: 0, transition: 'opacity 600ms', pointerEvents: 'none', zIndex: 9 }
 const arrow: CSSProperties = { position: 'absolute', left: 0, right: 0, top: '42%', textAlign: 'center', color: '#fff', fontSize: 14 }
+// Compass strip (bright): a thin line with sliding direction letters and place markers, the facing tick in the middle.
+const stripBox: CSSProperties = { position: 'fixed', top: 14, left: '50%', transform: 'translateX(-50%)', height: 30, zIndex: 9, pointerEvents: 'none' }
+const stripLine: CSSProperties = { position: 'absolute', left: 0, right: 0, top: 14, height: 1.5, background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.85) 12%, rgba(255,255,255,0.85) 88%, transparent)' }
+const stripTick: CSSProperties = { position: 'absolute', left: '50%', top: 8, width: 6, height: 6, marginLeft: -3, borderRadius: 3, background: '#fff', boxShadow: '0 0 4px rgba(0,0,0,0.6)' }
+const stripLetter: CSSProperties = { position: 'absolute', left: '50%', top: 0, width: 24, marginLeft: -12, textAlign: 'center', font: '800 13px system-ui, sans-serif', color: '#fff', textShadow: '0 1px 3px rgba(0,0,0,0.8)', background: 'rgba(0,0,0,0)', lineHeight: '30px' }
+const stripLetterSmall: CSSProperties = { ...stripLetter, font: '700 10px system-ui, sans-serif', opacity: 0.85 }
+const stripMark: CSSProperties = { position: 'absolute', left: '50%', top: 3, width: 22, height: 22, marginLeft: -11, lineHeight: '22px', textAlign: 'center', fontSize: 13, display: 'none', filter: 'drop-shadow(0 1px 1px #000)' }
+const stripNearest: CSSProperties = { position: 'absolute', top: '100%', left: '50%', transform: 'translateX(-50%)', marginTop: 4, whiteSpace: 'nowrap', font: '600 12px system-ui, sans-serif', color: '#fff', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }

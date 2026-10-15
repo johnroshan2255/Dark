@@ -131,6 +131,13 @@ function canyonWalls(fields: WorldFields, cx: number, cz: number, out: CragMesh)
       addSlabs(fields, out, x - x0, z - z0, x, z, h0, side, 0, (top - rh) / 12, ws, wd, seed, k, side, L + 10, false,
         [rh - 1.5, top + 0.5 + 2 * hashFloat(seed, k, side, L + 4)])
       n++
+      // STEPPED SHELF at the wall's foot on every other step (their canyon floors: low layered ledges), 1–2 slabs.
+      if (k % 2 === 0 && hashFloat(seed, k, side, L + 5) < 0.5) {
+        const xs = rx + side * (dOut - 5.2), sw = 3 + 2.5 * hashFloat(seed, k, side, L + 6), sd = 2 + 1.2 * hashFloat(seed, k, side, L + 7)
+        if (xs >= x0 && xs < x0 + CHUNK_SIZE && Math.abs(xs - rx) > WorldFields.ROAD_HALF_WIDTH + 3 + sd)
+          addSlabs(fields, out, xs - x0, z - z0, xs, z, fields.height(xs, z), side, 0, 0.5, sw, sd, seed, k, side, L + 60, true,
+            [rh - 1, rh + 1.2 + 1.8 * hashFloat(seed, k, side, L + 8)])
+      }
     }
   }
   return n
@@ -264,12 +271,12 @@ function addCrag(
  * BRIGHT (palette 0) — "over the hill" canyon rock (their canyon / boulder close-ups): each crag is a STACK of 2–6
  * thick SLABS, each its own size, rotation and offset (piled blocks, overhanging lips, dark undersides). A slab is
  * REAL ROCK, not a pillow: an irregular 7–11-sided outline (12-gon directions, some dropped, strong radius jitter),
- * near-vertical sides with a small chamfer at the foot and the top rim, a FLAT top; FLAT-SHADED planes (face
+ * near-vertical sides with a small chamfer at the top rim, a FLAT top; FLAT-SHADED planes (face
  * normals), each plane its own tone (±7 %), lit flat tops, darker foot. Arithmetic + sqrt only (no trig).
- * Cost: ≈ 9 sides × (3 bands × 2 + 1 cap) ≈ 63 tris per slab (+9 under an overhang); ~250 tris per crag.
+ * Cost: ≈ 9 sides × (2 bands × 2 + 1 cap) ≈ 45 tris per slab (+9 under an overhang); ~180 tris per crag.
  */
 /** Ring layout: height fraction, radius scale — foot chamfer, body, top chamfer, top rim. */
-const SLAB_RINGS = [[0, 0.9], [0.12, 1], [0.86, 0.98], [1, 0.9]] as const
+const SLAB_RINGS = [[0, 1], [0.86, 0.98], [1, 0.9]] as const // (no foot chamfer: it sat under the slab below / the sand)
 // 12-gon directions (exact constants).
 const C30 = 0.8660254, S30 = 0.5
 const DIR12 = [1, 0, C30, S30, S30, C30, 0, 1, -S30, C30, -C30, S30, -1, 0, -C30, -S30, -S30, -C30, 0, -1, S30, -C30, C30, -S30]
@@ -341,7 +348,7 @@ function addSlabs(
       const y = y0 + (y1 - y0) * fy
       for (let k = 0; k < N2; k++) {
         // sides lean a little in or out per ring (slightly slanted planes, not a perfect prism)
-        const lj = r === 1 || r === 2 ? 0.96 + 0.08 * hs(50 + r * 12 + k) : 1
+        const lj = r <= 1 ? 0.96 + 0.08 * hs(50 + r * 12 + k) : 1
         const a = ca[k] * wd * sc * rs2 * rad[k] * lj, b = cb[k] * ws * sc * rs2 * rad[k] * lj
         R.push([cxs + dx * a + sx * b, y, czs + dz * a + sz * b])
       }
@@ -354,7 +361,7 @@ function addSlabs(
     const plane = () => { const t = 0.93 + 0.14 * hashFloat(seed, gx, gz, L + 900 + face++); return [base[0] * t, base[1] * t, base[2] * t] }
     const V = (r: number, k: number) => R[r * N2 + (k % N2)]
     for (let r = 0; r < SLAB_RINGS.length - 1; r++) {
-      const dk = r === 0 ? 0.72 : r === 2 ? 1.04 : 1 // foot chamfer in shade, top chamfer catching light
+      const dk = r === 1 ? 1.04 : 0.94 // body a touch darker, the top chamfer catching light
       for (let k = 0; k < N2; k++) {
         const c = plane()
         const cc = [c[0] * dk, c[1] * dk, c[2] * dk]

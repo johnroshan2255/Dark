@@ -8,6 +8,7 @@ import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Bi
 import { BIOMES, pickRegion, pickWeighted, regionRoll } from '../biomes/BiomeDefs'
 import { CRAG_SLOPE0, gridSlope } from '../Formations/crags'
 import { nearBridge } from '../Road/bridges'
+import { nearCamp } from '../Road/camps'
 
 const _bw: BiomeWeights = [0, 0]
 const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
@@ -135,7 +136,12 @@ function pickBaseSpecies(fields: WorldFields, wx: number, wz: number, r: number,
   const wn = fields.region(wx, wz, _wn, h)
   if (wn[Biome.Autumn] + wn[Biome.Mystic] > 0.002) {
     const region = pickRegion(wn, regionRoll(fields.seed, wx, wz, 4711))
-    if (region === Biome.Autumn || region === Biome.Mystic) return pickWeighted(BIOMES[region].trees, r)
+    if (region === Biome.Autumn || region === Biome.Mystic) {
+      const sp = pickWeighted(BIOMES[region].trees, r)
+      // Bright: the autumn valleys' birches are WHITE birches (their autumn groves), and more of them.
+      if (fields.palette === 0 && region === Biome.Autumn && (sp === TreeSpecies.Birch || (sp === TreeSpecies.Maple && regionRoll(fields.seed, wx, wz, 4712) < 0.3))) return TreeSpecies.WhiteBirch
+      return sp
+    }
   }
   const w = fields.biome(wx, wz, _bw, h)
   // Desert: saguaros, Joshua trees and the odd dead snag; the desert's rim keeps a few hardy pines.
@@ -167,7 +173,7 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     (wx, wz, r, h) => {
       const d = fields.roadDistance(wx, wz)
       if (d < clearRoad) return 0
-      if (nearBridge(fields, wx, wz, 4)) return 0 // rope bridges: a clear way across
+      if (nearBridge(fields, wx, wz, 4) || nearCamp(fields, wx, wz, 3)) return 0 // rope bridges / camps: clear
       // Forest thickens with distance from the road (verge → treeline), instead of a wall at the kerb.
       // Desert (Sumeru): mostly BARE sand and rock — cacti and Joshua trees only in scattered clumps (~1/4 of
       // the ground), a lone one now and then between them (forestDensity is ~0 on sand).
@@ -189,20 +195,23 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
   // Far forest (FarForest): trees only — the impostor ring needs nothing else.
   if (treesOnly) return { trees, rocks: new Float32Array(0), plants: new Float32Array(0) }
   const rocks = scatter(ctx, ROCK_CELL, Layer.Rocks, PROP_STRIDE, (wx, wz, r, h) => {
-    if (nearBridge(fields, wx, wz)) return 0
+    if (nearBridge(fields, wx, wz) || nearCamp(fields, wx, wz)) return 0
     if (fields.palette === 0 && h < WorldFields.WATER + 0.3) return 0 // bright: no boulders in the (oasis) water
     const w = fields.biome(wx, wz, _bw, h)
-    const p = 0.14 * (1 + w[0] * 1.2 + w[1] * 0.5) // sparse (≈ 9 per chunk in the forest); deserts and snowfields stonier
+    // Bright desert (their canyon floors): twice the stones — RUBBLE everywhere — and the biggest ones truck-sized
+    // (up to ~7 m), so you drive between boulders.
+    const oth = fields.palette === 0 ? w[0] : 0
+    const p = 0.14 * (1 + w[0] * 1.2 + w[1] * 0.5) * (1 + 1.2 * oth) // sparse (≈ 9 per chunk in the forest); deserts and snowfields stonier
     if (r >= p) return 0
     const t = r / p
-    const scale = 0.4 + t * t * t * 2.2 // mostly small stones, a rare 2.6 m boulder (was 0.5–5.4 at 2.5× the count)
+    const scale = 0.4 + t * t * t * (2.2 + 4.6 * oth) // mostly small stones, a rare 2.6 m boulder (bright desert: up to ~7 m)
     // The main road and its shoulders stay clear; big boulders further out (footprint ≈ 1.4 m × scale).
     if (fields.roadDistance(wx, wz) < WorldFields.ROAD_HALF_WIDTH + 1.5 + scale * 1.5) return 0
     return scale
   })
 
   const plants = scatter(ctx, PLANT_CELL, Layer.Plants, PROP_STRIDE, (wx, wz, r, h) => {
-    if (fields.roadDistance(wx, wz) < WorldFields.ROAD_HALF_WIDTH + 0.3 || nearBridge(fields, wx, wz, 1)) return 0
+    if (fields.roadDistance(wx, wz) < WorldFields.ROAD_HALF_WIDTH + 0.3 || nearBridge(fields, wx, wz, 1) || nearCamp(fields, wx, wz)) return 0
     // Undergrowth: dense on the verges (refer/roads: ferns lining the road), sparse under canopy; none on snow.
     const rd = fields.roadDistance(wx, wz) - WorldFields.ROAD_HALF_WIDTH
     const verge = rd > 1.5 && rd < 12 ? 0.45 * (1 - Math.abs(rd - 5) / 7) : 0

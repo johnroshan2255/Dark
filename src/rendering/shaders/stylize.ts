@@ -541,11 +541,8 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
         '#include <alphamap_fragment>',
         /* glsl */ `{
   float bn = st_noise(vWPos.xz * 1.4 + vec2(vWPos.y * 0.9));
-  ${o.biomeCover === 'rock' && bright ? `// BRIGHT desert: flat warm sandstone, keeping the vertex tone (slab shading) — no strata.
-  if (vBiomeW.x > 0.02) {
-    float lum = dot(diffuseColor.rgb, vec3(0.3, 0.55, 0.15));
-    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.62, 0.32, 0.2) * clamp(lum / 0.3, 0.6, 1.4), vBiomeW.x * 0.8);
-  }` : o.biomeCover === 'rock' ? `// Desert sandstone: wavy horizontal strata in warm reds and creams.
+  ${o.biomeCover === 'rock' && bright ? `// BRIGHT: no desert re-tint — slab rock, formations and boulders are already sandstone in their vertex /
+  // instance colours, and the same mesh carries the bridges' planks and the camps' white tents.` : o.biomeCover === 'rock' ? `// Desert sandstone: wavy horizontal strata in warm reds and creams.
   if (vBiomeW.x > 0.02) {
     float band = sin(vWPos.y * 3.3 + bn * 2.4) * 0.5 + 0.5;
     vec3 strata = mix(vec3(0.62, 0.3, 0.16), vec3(0.86, 0.62, 0.4), band) * (0.8 + 0.3 * bn);

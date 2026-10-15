@@ -118,10 +118,10 @@ export function buildBridges(fields: WorldFields, cx: number, cz: number, out: C
   return n
 }
 
-type V3 = [number, number, number]
+export type V3 = [number, number, number]
 
 /** Oriented box: centre c, unit axes u (length), v (up-ish), w (across); half sizes. Flat-shaded, 12 tris. */
-function obox(out: CragMesh, c: V3, u: V3, v: V3, w: V3, hu: number, hv: number, hw: number, col: V3): void {
+export function obox(out: CragMesh, c: V3, u: V3, v: V3, w: V3, hu: number, hv: number, hw: number, col: V3): void {
   const P = (su: number, sv: number, sw: number): V3 => [
     c[0] + u[0] * hu * su + v[0] * hv * sv + w[0] * hw * sw,
     c[1] + u[1] * hu * su + v[1] * hv * sv + w[1] * hw * sw,
@@ -144,14 +144,14 @@ function obox(out: CragMesh, c: V3, u: V3, v: V3, w: V3, hu: number, hv: number,
   quad(P(-1, -1, -1), P(-1, 1, -1), P(1, 1, -1), P(1, -1, -1), neg(w), 0.8)
 }
 
-const srgbLin = (h: number): V3 => {
+export const srgbLin = (h: number): V3 => {
   const f = (c: number) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
   return [f(((h >> 16) & 255) / 255), f(((h >> 8) & 255) / 255), f((h & 255) / 255)]
 }
 const SUB = srgbLin(0x3a2a1c), PLANK = srgbLin(0x9a7650), PLANK2 = srgbLin(0x7e5c3c), BEAM = srgbLin(0x5c4128), ROPE = srgbLin(0x6a5236), POST = srgbLin(0x6e5032)
 
 /** Segment from p to q as a thin square beam of half-size r (ropes, hangers, posts). */
-function beam(out: CragMesh, p: V3, q: V3, r: number, col: V3): void {
+export function beam(out: CragMesh, p: V3, q: V3, r: number, col: V3): void {
   const d: V3 = [q[0] - p[0], q[1] - p[1], q[2] - p[2]]
   const L = Math.hypot(d[0], d[1], d[2]) || 1
   const u: V3 = [d[0] / L, d[1] / L, d[2] / L]

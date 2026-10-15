@@ -379,8 +379,18 @@ export class WorldFields {
     return r ? Math.min(main, r.dist - r.halfWidth) : main
   }
 
-  /** Carve the river channel (bed below water) with sloping banks. */
+  /** Carve the river channel (bed below water) with sloping banks; bright desert rivers get SANDBARS (oasis islands). */
   private riverShape(x: number, z: number, h: number): number {
+    const r = this.riverChannel(x, z, h)
+    if (this.palette !== 0 || r >= WorldFields.WATER + 0.6 || this.riverDistance(x, z) > WorldFields.RIVER_HALF_WIDTH + 6) return r
+    const sand = this.biomes.weights(x, z, this.cbw)[0]
+    if (sand < 0.4) return r
+    // Low sand islands breaking the water (their oasis river): noise blobs in the channel rising 0.5 m over it.
+    const bar = sstep(0.6, 0.74, this.detail(x * 0.028 + 5.1, z * 0.028 - 2.3) * 0.5 + 0.5) * sstep(0.4, 0.7, sand)
+    return bar > 0 ? r + (WorldFields.WATER + 0.55 - r) * bar : r
+  }
+
+  private riverChannel(x: number, z: number, h: number): number {
     const d = this.riverDistance(x, z)
     const W = WorldFields.RIVER_HALF_WIDTH
     const B = WorldFields.RIVER_BANK
@@ -428,6 +438,16 @@ export class WorldFields {
     d = Math.min(1, d * (1 + wn[Biome.Autumn] * (BIOMES[Biome.Autumn].treeDensity - 1) + wn[Biome.Mystic] * (BIOMES[Biome.Mystic].treeDensity - 1)))
     if (h !== undefined && h > 95) d *= 1 - Math.min(1, (h - 95) / 30)
     return d
+  }
+
+  /**
+   * Bright AUTUMN SNOW PATCHES (their autumn barn: snow lying in patches between the golden grass): 0..1 at (x, z)
+   * for a given autumn weight — ~15–30 m patches on ~15 % of the autumn ground. Shared by the ground colour and the
+   * grass (no blades on the snow).
+   */
+  autumnSnow(x: number, z: number, autumn: number): number {
+    if (this.palette !== 0 || autumn < 0.05) return 0
+    return autumn * sstep(0.64, 0.72, this.colorN(x * 0.045 + 3.3, z * 0.045 - 9.1) * 0.5 + 0.5)
   }
 
   /** Low-frequency albedo variation 0..1. */

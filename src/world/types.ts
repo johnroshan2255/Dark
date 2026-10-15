@@ -69,12 +69,12 @@ export const PROP_STRIDE = 5
  *  (world/biomes/BiomeDefs.ts). Region species REPLACE the forest ones there, so a chunk's draw count stays flat. */
 /** Oak (Windrise), Slender (Mondstadt), Golden (Liyue) and Curvy are the broadleaf STAND types that share the Birch
  *  slot's places (Forest/scatter.ts `broadleafStand`: one type per ~56 m stand, so a chunk adds ≤ 1–2 draws). */
-export const TreeSpecies = { Spruce: 0, Dead: 1, Fir: 2, Pine: 3, Birch: 4, Cactus: 5, Joshua: 6, Maple: 7, Ancient: 8, Shroom: 9, Oak: 10, Slender: 11, Golden: 12, Curvy: 13, Palm: 14 } as const
-export const TREE_SPECIES_COUNT = 15
+export const TreeSpecies = { Spruce: 0, Dead: 1, Fir: 2, Pine: 3, Birch: 4, Cactus: 5, Joshua: 6, Maple: 7, Ancient: 8, Shroom: 9, Oak: 10, Slender: 11, Golden: 12, Curvy: 13, Palm: 14, WhiteBirch: 15 } as const
+export const TREE_SPECIES_COUNT = 16
 /** The broadleaf species of the green lands (Birch + its stand types) — they share tints, hues and the autumn turn. */
 export const isBroadleaf = (sp: number): boolean => sp === TreeSpecies.Birch || (sp >= TreeSpecies.Oak && sp <= TreeSpecies.Curvy)
 /** Trunk collider radius at scale 1, indexed by species id (see Forest/treeFactory.ts). */
-export const TRUNK_RADIUS = [0.24, 0.22, 0.28, 0.32, 0.3, 0.34, 0.3, 0.3, 0.6, 0.26, 0.62, 0.3, 0.32, 0.34, 0.22] as const
+export const TRUNK_RADIUS = [0.24, 0.22, 0.28, 0.32, 0.3, 0.34, 0.3, 0.3, 0.6, 0.26, 0.62, 0.3, 0.32, 0.34, 0.22, 0.22] as const
 
 export const chunkKey = (cx: number, cz: number): string => `${cx},${cz}`
 

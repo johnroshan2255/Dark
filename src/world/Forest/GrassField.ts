@@ -13,7 +13,7 @@ import { FM_TOP } from '../types'
 const EDGE_PROBE = [[0.9, 0.9], [-0.9, 0.9], [0.9, -0.9], [-0.9, -0.9]] as const
 import { isGenshin, isOverland } from '../../rendering/artStyle'
 import { farmFieldAt } from '../POI/pois'
-import { BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Biomes'
+import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Biomes'
 import { blendBy } from '../biomes/BiomeDefs'
 
 /**
@@ -117,6 +117,8 @@ interface Layer {
  * interpolated between the 8 m tile corners and fed per instance (`iDensity`), and each blade picks its own
  * thresholds in the shader → no squares, no rows, no rings; blades grow in and out with distance (Genshin).
  */
+const sstepG = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t) }
+
 export class GrassField {
   readonly root = new THREE.Group()
   private readonly near: Layer
@@ -233,9 +235,22 @@ export class GrassField {
     // Genshin: a full carpet even near trees (its meadows never show bare soil between the blades).
     const floor = isGenshin() ? 0.72 : 0.45
     v = (floor + (1 - floor) * (1 - this.fields.forestDensity(x, z, h))) * bare
-    if (this.corners.size > 20000) this.corners.clear()
+    // Bright autumn: no grass on the snow patches; remember the autumn weight for the tussock clumping.
+    const au = _wn[Biome.Autumn]
+    v *= 1 - this.fields.autumnSnow(x, z, au)
+    if (this.corners.size > 20000) (this.corners.clear(), this.autumn.clear())
     this.corners.set(key, v)
+    this.autumn.set(key, au)
     return v
+  }
+  private readonly autumn = new Map<number, number>()
+  /** Autumn weight (bilinear on the corner grid; corners are filled by `meadowAt` first). */
+  private autumnAt(x: number, z: number): number {
+    const fx = x / CORNER, fz = z / CORNER
+    const ix = Math.floor(fx), iz = Math.floor(fz)
+    const u = fx - ix, v = fz - iz
+    const k = (i: number, j: number) => this.autumn.get((i + 32768) * 65536 + (j + 32768)) ?? 0
+    return k(ix, iz) * (1 - u) * (1 - v) + k(ix + 1, iz) * u * (1 - v) + k(ix, iz + 1) * (1 - u) * v + k(ix + 1, iz + 1) * u * v
   }
 
   /** Meadow density at any point: bilinear between the corner-grid values (continuous — no tile edges). */
@@ -291,7 +306,16 @@ export class GrassField {
       // Density: the corners' meadow factor interpolated across the tile (continuous — no tile edges), the
       // verge pushes it up; the shader shows that fraction of each patch's blades.
       const meadow = this.meadowAt(wx, wz)
-      const density = Math.min(1, Math.max(meadow, verge * bare))
+      let density = Math.min(1, Math.max(meadow, verge * bare))
+      // GOLDEN TUSSOCKS (bright autumn, their straw clumps): the blades gather into ~2 m clumps with soil between —
+      // still separate blades, just fewer between the clumps (cheaper, not dearer).
+      if (this.fields.palette === 0) {
+        const au = this.autumnAt(wx, wz)
+        if (au > 0.05) {
+          density *= 1 - au * 0.85 * (1 - sstepG(0.42, 0.6, this.fields.colorVariation(wx * 24 + 7, wz * 24 - 3)))
+          density *= 1 - Math.min(1, this.fields.autumnSnow(wx, wz, au) * 1.6) // per blade: none on the snow patches
+        }
+      }
       if (!chunk || road < 0.3 || density < 0.03 || nearBridge(this.fields, wx, wz, 0.3)) { // (no grass through a bridge deck)
         ZERO.toArray(mats, (base + i) * 16)
         dens[base + i] = 0

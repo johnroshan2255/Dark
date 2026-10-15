@@ -29,6 +29,8 @@ const FROST_TREE = [0.55, 0.72, 0.85] as const
 const DRY_TREE = [1.2, 1.0, 0.62] as const
 const SNOW_ROCK = [1.6, 1.65, 1.85] as const
 const SAND_ROCK = [1.45, 1.2, 0.85] as const
+/** Bright: red sandstone boulders (the shader's desert re-tint is off in bright; the tint does it here). */
+const SAND_ROCK_OTH = [2.0, 1.05, 0.62] as const
 const NO_TINT = [1, 1, 1] as const
 function biomeTint(fields: WorldFields, origin: readonly [number, number], data: Float32Array, o: number, snowT: readonly number[], sandT: readonly number[], out: [number, number, number]): void {
   const w = fields.biome(origin[0] + data[o], origin[1] + data[o + 2], _bw, data[o + 1])
@@ -104,6 +106,7 @@ const ANCIENT_HUES: [number, number, number][] = [[1, 1, 1], [0.75, 0.95, 1.2], 
 const SHROOM_HUES: [number, number, number][] = [[1, 1, 1], [0.7, 0.9, 1.25], [1.15, 0.85, 0.9]]
 for (const set of [OVER_HUES, GENSHIN_HUES, GEN_HUES]) {
   set[TreeSpecies.Palm] = [[1, 1, 1], [1.06, 1.02, 0.9], [0.94, 0.98, 1.02]] // modelled olive fronds, gentle variation
+  set[TreeSpecies.WhiteBirch] = [[1, 1, 1], [1.1, 1.25, 0.8], [0.85, 0.7, 0.75], [1.05, 1.4, 0.7]] // red → orange → gold crowns
   set[TreeSpecies.Maple] = MAPLE_HUES
   set[TreeSpecies.Ancient] = ANCIENT_HUES
   set[TreeSpecies.Shroom] = SHROOM_HUES
@@ -338,7 +341,7 @@ export class WorldChunk implements Cullable {
       biomeTint(fields, this.origin, data.trees, o, FROST_TREE, sp >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
       if (isBroadleaf(sp) || sp === TreeSpecies.Pine) regionLeafTint(fields, this.origin[0] + data.trees[o], this.origin[1] + data.trees[o + 2], data.trees[o + 1], out)
     }
-    const rockTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.rocks, o, SNOW_ROCK, SAND_ROCK, out)
+    const rockTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.rocks, o, SNOW_ROCK, fields.palette === 0 ? SAND_ROCK_OTH : SAND_ROCK, out)
     const perSpecies = speciesTreeAttrs(data.trees, this.origin, fields, geos.trees)
     for (const { sp, attrs } of perSpecies) {
       // Near meshes: full detail, or level 1 tagged as the NEAR LOD band (LOW's near trees).
@@ -358,7 +361,7 @@ export class WorldChunk implements Cullable {
     const byId = (id: number) => geos.trees.find((x) => x.id === id)!
     // Desert species keep their own far meshes (a saguaro and a Joshua tree read differently on the skyline); a
     // desert chunk has no conifers or birches, so its far draws stay at ≤ 2 like a forest chunk's.
-    const farSets = [[conifer, spruce], [only(TreeSpecies.Birch), birch], [only(TreeSpecies.Cactus), byId(TreeSpecies.Cactus)], [only(TreeSpecies.Joshua), byId(TreeSpecies.Joshua)], [only(TreeSpecies.Palm), byId(TreeSpecies.Palm)],
+    const farSets = [[conifer, spruce], [only(TreeSpecies.Birch), birch], [only(TreeSpecies.Cactus), byId(TreeSpecies.Cactus)], [only(TreeSpecies.Joshua), byId(TreeSpecies.Joshua)], [only(TreeSpecies.Palm), byId(TreeSpecies.Palm)], [only(TreeSpecies.WhiteBirch), byId(TreeSpecies.WhiteBirch)],
       [only(TreeSpecies.Maple), byId(TreeSpecies.Maple)], [only(TreeSpecies.Ancient), byId(TreeSpecies.Ancient)], [only(TreeSpecies.Shroom), byId(TreeSpecies.Shroom)],
       ...[TreeSpecies.Oak, TreeSpecies.Slender, TreeSpecies.Golden, TreeSpecies.Curvy].map((id) => [only(id), byId(id)] as const)] as const
     for (const [filter, sp] of farSets) {

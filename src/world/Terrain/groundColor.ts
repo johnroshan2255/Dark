@@ -54,6 +54,7 @@ const DUNE_D_OTH = hex(0xdc9466)
 const DUNE_RED_OTH = hex(0xc8704a)
 const PLAYA = hex(0xdcc9a2)
 const OASIS_WET = hex(0x9a7a56)
+const OASIS_SCRUB = hex(0x56702e)
 // Snowfields (Dragonspine): bright blue-white snow, cooler shaded drifts, grey-blue rock where it's steep, ice at the water.
 const SNOW = hex(0xf4f7fc)
 const SNOW_SHADE = hex(0xcbd8ea)
@@ -116,6 +117,8 @@ export function groundColor(fields: WorldFields, x: number, z: number, h: number
     if (slope > 0.2) lerp(a, AUT_EARTH, Math.min(1, (slope - 0.2) * 3) * 0.5)
     if (slope > 0.5) lerp(a, AUT_ROCK, Math.min(1, (slope - 0.5) * 4))
     if (wl < 2.2) lerp(a, wl < 0 ? P.silt : P.sand, Math.min(1, (2.2 - wl) / 1.6))
+    const sp = fields.autumnSnow(x, z, 1) // bright: snow lying in patches (no grass on them: GrassField)
+    if (sp > 0 && slope < 0.5) lerp(a, SNOW, sp * 0.92)
     lerp(out, a, wn[Biome.Autumn])
   }
   if (wn[Biome.Mystic] > 0.002) {
@@ -142,6 +145,8 @@ export function groundColor(fields: WorldFields, x: number, z: number, h: number
     if (oth) {
       // OASIS (bright): water in the desert's river / basins → a band of green ground along it (patchy, fading out
       // ~7 m above the water) and darker wet sand at the waterline, instead of a dry clay pan.
+      // Dark-green SCRUB carpets in patches across the oasis floor (their oasis: green mats spread over the sand).
+      if (wl < 14) lerp(d, OASIS_SCRUB, Math.min(1, (14 - wl) / 5) * sstep(0.55, 0.68, fields.colorVariation(x * 4 + 11, z * 4 - 7)) * 0.9)
       if (wl < 7) lerp(d, P.olive, Math.min(1, (7 - wl) / 4) * sstep(0.25, 0.6, m * 0.6 + fine * 0.4 + (7 - wl) / 14) * 0.85)
       if (wl < 0.8) lerp(d, OASIS_WET, Math.min(1, (0.8 - wl) / 0.8) * 0.7)
     } else if (wl < 1.5) lerp(d, PLAYA, Math.min(1, (1.5 - wl) / 1.5) * 0.85)
