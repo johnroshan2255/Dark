@@ -1,5 +1,7 @@
 import { hash4 } from './noise/rng'
 import { createNoise2D, fbm, ridged, type Noise2D } from './noise/simplex'
+import { bridgeOf } from './Road/bridges'
+import { campsIn } from './Road/camps'
 import { RoadNetwork, type RoadHit } from './Road/RoadNetwork'
 import { RoadDetail } from './Road/RoadDetail'
 import { PoiField } from './POI/pois'
@@ -129,6 +131,9 @@ export class WorldFields {
       roadCenterX: (z) => this.roadCenterX(z),
       mainRoadHeight: (z) => this.roadHeight(z),
       water: WorldFields.WATER,
+      bridge: (k) => bridgeOf(this, k),
+      destination: (x, z) => this.pois.near(x, z, 30) !== null,
+      camps: (a, b) => campsIn(this, a, b),
     })
     this.roadDetail = new RoadDetail(this)
   }
@@ -241,6 +246,14 @@ export class WorldFields {
    *  the floor there — Formations/caves.ts). */
   height(x: number, z: number): number {
     return this.formations.caveCarve(x, z, this.heightNoCave(x, z))
+  }
+
+  /** The ground WITHOUT the secondary roads (gorges + places on the valley / river): what the rope bridges are
+   *  measured on (the network builds the bridges' roads, so the bridges can't depend on it). */
+  heightNoNet(x: number, z: number): number {
+    const g = this.gorge(x, z, this.groundBeforePlaces(x, z))
+    const s = this.poiWeight(x, z)
+    return s > 0 ? g + (this.pois.near(x, z)!.baseH - g) * s : g
   }
 
   /** The terrain before the cave carve: the far horizon mesh (a coarse grid sample in a cave would dip it) and the

@@ -19,6 +19,8 @@ import { createPropGeometries } from '../src/world/Forest/propGeometries'
 import { buildInstanceAttributes } from '../src/optimization/instancing/InstanceBuilder'
 import { Biome, BIOME_COUNT } from '../src/world/Biomes'
 import { RoadNetwork, type NetRoad as RoadNetworkRoad } from '../src/world/Road/RoadNetwork'
+import { builtBridge } from '../src/world/Road/bridges'
+import { campsIn } from '../src/world/Road/camps'
 
 let failures = 0
 const check = (name: string, ok: boolean, detail = '') => {
@@ -235,33 +237,61 @@ for (const seed of [7, 1337, 42]) {
   check('grid links stay out of the main road corridor', corridor === 0, `${corridor} in the corridor`)
 }
 
-// Secondary roads are CONNECTED: every road reaches the main road through other roads (no trail chain that starts
-// and ends in the middle of nowhere). Union of road end points; roads gathered over a wider window than checked.
+// ROAD GRAPH (RoadNetwork: spanning tree + loops + leaf closures + pruning; A* connectors for places, camps and
+// bridges): every road reaches the main road; NO road ends in the middle of nowhere (each end is on the main road,
+// on another road = a junction, at a place, a camp or a bridge deck); every place and camp has a road; a bridge is
+// built only when both its ends lead to roads. Junction-aware union–find over 4 seeds (window edges excluded).
 {
-  let cut = 0, checked = 0
+  let cut = 0, dead = 0, checked = 0, noRoad = 0, places = 0, campsNo = 0, bridgesBad = 0, bridges = 0
   for (const seed of [7, 1337, 42, 6]) {
     const f = new WorldGenerator(seed).fields
-    const roads = new Set<RoadNetworkRoad>()
-    for (let cj = -7; cj <= 9; cj++) for (let ci = -6; ci <= 6; ci++) for (const r of f.network.roadsIn(ci, cj)) roads.add(r)
-    const parent = new Map<string, string>()
-    const find = (k: string): string => { let r = k; while (parent.get(r) !== r) r = parent.get(r)!; parent.set(k, r); return r }
-    const add = (k: string) => { if (!parent.has(k)) parent.set(k, k) }
-    const key = (x: number, z: number) => `${Math.round(x)},${Math.round(z)}`
-    const MAIN = 'main'
-    add(MAIN)
-    for (const r of roads) {
-      const a = key(r.xs[0], r.zs[0]), b = Math.abs(r.xs[r.n - 1] - f.roadCenterX(r.zs[r.n - 1])) < 3 ? MAIN : key(r.xs[r.n - 1], r.zs[r.n - 1])
-      add(a); add(b)
-      parent.set(find(a), find(b))
+    const set = new Set<RoadNetworkRoad>()
+    // (Collected over a wider window than checked: a chain may leave the checked window on its way to the main road.)
+    for (let cj = -11; cj <= 13; cj++) for (let ci = -8; ci <= 8; ci++) for (const r of f.network.roadsIn(ci, cj)) set.add(r)
+    const list = [...set]
+    const near = (r: RoadNetworkRoad, x: number, z: number) => {
+      if (x < r.minX - 4 || x > r.maxX + 4 || z < r.minZ - 4 || z > r.maxZ + 4) return false
+      for (let i = 0; i < r.n - 1; i++) {
+        const vx = r.xs[i + 1] - r.xs[i], vz = r.zs[i + 1] - r.zs[i], l2 = vx * vx + vz * vz || 1
+        const t = Math.min(1, Math.max(0, ((x - r.xs[i]) * vx + (z - r.zs[i]) * vz) / l2))
+        if (Math.hypot(r.xs[i] + vx * t - x, r.zs[i] + vz * t - z) < 3) return true
+      }
+      return false
     }
-    for (const r of roads) {
-      const cx = Math.floor(r.xs[0] / 380), cz = Math.floor(r.zs[0] / 380)
-      if (cx < -3 || cx > 3 || cz < -4 || cz > 6) continue
+    const onMain = (x: number, z: number) => Math.abs(x - f.roadCenterX(z)) < 4
+    const parent = new Map<RoadNetworkRoad | 'main', RoadNetworkRoad | 'main'>()
+    const find = (k: RoadNetworkRoad | 'main'): RoadNetworkRoad | 'main' => { let r = k; while (parent.get(r) !== r) r = parent.get(r)!; return r }
+    parent.set('main', 'main')
+    for (const r of list) parent.set(r, r)
+    const join = (a: RoadNetworkRoad | 'main', b: RoadNetworkRoad | 'main') => parent.set(find(a), find(b))
+    const inner = (x: number, z: number) => x > -4 * 380 && x < 5 * 380 && z > -5 * 380 && z < 7 * 380
+    for (const r of list) {
+      if (r.key.startsWith('br') && r.key.endsWith('a')) { const o = list.find((q) => q.key === r.key.slice(0, -1) + 'b'); if (o) join(r, o) } // the deck joins a bridge's two roads
+      for (const e of [0, r.n - 1]) {
+        const x = r.xs[e], z = r.zs[e]
+        let ok = false
+        if (onMain(x, z)) (join(r, 'main'), (ok = true))
+        for (const q of list) if (q !== r && near(q, x, z)) (join(r, q), (ok = true))
+        if (!ok && inner(x, z) && !f.pois.near(x, z, 5) && !(e === 0 && (r.key.startsWith('camp:') || r.key.startsWith('br')))) { dead++; console.log(`  dead end: seed ${seed} ${r.key}`) }
+      }
+    }
+    for (const r of list) {
+      if (!inner(r.xs[0], r.zs[0])) continue
       checked++
-      if (find(key(r.xs[0], r.zs[0])) !== find(MAIN)) { cut++; console.log(`  cut off: seed ${seed} ${r.key}`) }
+      if (find(r) !== find('main')) { cut++; console.log(`  cut off: seed ${seed} ${r.key}`) }
     }
+    for (const p of f.pois.inBox(-1500, -1900, 1900, 2600)) {
+      if (Math.abs(p.x - f.roadCenterX(p.z)) > 2400 || Math.abs(p.x - f.roadCenterX(p.z)) < p.radius + 15) continue
+      places++
+      if (!f.network.nearest(p.x, p.z, p.radius + 25)) { noRoad++; console.log(`  place without a road: seed ${seed} ${p.x | 0},${p.z | 0}`) }
+    }
+    for (const c of campsIn(f, -1900, 2600)) if (!f.network.nearest(c.x, c.z, 10)) campsNo++
+    for (let k = -4; k <= 5; k++) if (builtBridge(f, k)) { bridges++; if (!f.network.bridgeLinks(k)) bridgesBad++ }
   }
-  check(`every secondary road reaches the main road (${checked} roads, 4 seeds)`, checked > 50 && cut === 0, `${cut} cut off`)
+  check(`every secondary road reaches the main road (${checked} roads, 4 seeds)`, checked > 100 && cut === 0, `${cut} cut off`)
+  check('no road ends in the middle of nowhere (junction / main road / place / camp / bridge at every end)', dead === 0, `${dead} dead ends`)
+  check(`every place and camp has a road (${places} places)`, places > 20 && noRoad === 0 && campsNo === 0, `${noRoad} places, ${campsNo} camps without`)
+  check(`every built bridge leads to roads at both ends (${bridges} bridges)`, bridgesBad === 0, `${bridgesBad} bad`)
 }
 
 // Landmarks (giant trees, windmills, ruins, towers…): deterministic, dry, off the road; the home one in view.

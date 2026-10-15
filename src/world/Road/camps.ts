@@ -2,7 +2,7 @@ import { CHUNK_SIZE } from '../constants'
 import { hashFloat } from '../noise/rng'
 import { WorldFields } from '../WorldFields'
 import type { CragMesh } from '../Formations/crags'
-import { beam, nearBridge, obox, srgbLin, type V3 } from './bridges'
+import { beam, bridgeOf, obox, srgbLin, type V3 } from './bridges'
 
 /**
  * OASIS CAMPS (bright — their oasis has white tents): on ~3/4 of the 450 m stretches of the river where it runs
@@ -35,11 +35,11 @@ export function campOf(fields: WorldFields, k: number): Camp | null {
       // (The desert banks climb steeply out of the water, so the camp sits on the first FLAT ground walking up
       // from the oasis — the bank top overlooking it — within 80 m.)
       for (let d = 10; d < 80 && !c; d += 1) {
-        const x = rc + side * d, h = fields.height(x, z), wl = h - WorldFields.WATER
+        const x = rc + side * d, h = fields.heightNoNet(x, z), wl = h - WorldFields.WATER
         if (wl < 1) continue
         if (wl > 40) break
-        const flat = Math.abs(fields.height(x + 4, z) - h) + Math.abs(fields.height(x - 4, z) - h) + Math.abs(fields.height(x, z + 4) - h) + Math.abs(fields.height(x, z - 4) - h)
-        if (flat > 3 || fields.anyRoadEdge(x, z) < 10 || nearBridge(fields, x, z, 10)) continue
+        const flat = Math.abs(fields.heightNoNet(x + 4, z) - h) + Math.abs(fields.heightNoNet(x - 4, z) - h) + Math.abs(fields.heightNoNet(x, z + 4) - h) + Math.abs(fields.heightNoNet(x, z - 4) - h)
+        if (flat > 3 || fields.roadDistance(x, z) < 14 || nearBridgeSite(fields, x, z, 10)) continue
         c = { x, z, h }
       }
     }
@@ -47,6 +47,23 @@ export function campOf(fields: WorldFields, k: number): Camp | null {
   if (cache.size > 4000) cache.clear()
   cache.set(key, c)
   return c
+}
+
+/** Near a bridge SITE (built or not — camps must not depend on the road network, which connects them). */
+function nearBridgeSite(fields: WorldFields, x: number, z: number, m: number): boolean {
+  const k = Math.floor(z / 500)
+  for (let j = k - 1; j <= k + 1; j++) {
+    const b = bridgeOf(fields, j)
+    if (b && Math.abs(z - b.z) < 2 + m && x > b.xa - m - 2 && x < b.xb + m + 2) return true
+  }
+  return false
+}
+
+/** Camps whose centre lies in the box (the road network gives each a track). */
+export function campsIn(fields: WorldFields, minZ: number, maxZ: number): Camp[] {
+  const out: Camp[] = []
+  for (let k = Math.floor(minZ / CELL); k <= Math.floor(maxZ / CELL); k++) { const c = campOf(fields, k); if (c && c.z >= minZ && c.z <= maxZ) out.push(c) }
+  return out
 }
 
 /** True near a camp (keep trees / rocks / plants off it). */

@@ -81,6 +81,18 @@ World (seed)
   (`src/world/Streaming/chunk.worker.ts`). Same seed ⇒ same world on every client. Generation uses only
   arithmetic + `Math.floor` (no `Math.random`, no `sin/cos` in anything gameplay-relevant).
 - **Road** is a global analytic function `roadCenterX(z)` so any chunk can evaluate it without neighbours.
+- **Road graph (2026-10-15, `Road/RoadNetwork.ts`) — no road ends mid-way.** Nodes within `NET_BAND` (2.4 km) of
+  the main road; tree links toward the main road + E/N loops; every structural LEAF (would dead-end on a bare hilltop)
+  tries a CLOSURE to another tree node (8 neighbours) or the main road, conflicts between closures resolved pairwise
+  (non-recursive); `live()` prunes branches that still lead nowhere (degree ≥ 2 or a destination for every node).
+  PLACES, oasis CAMPS and the far end of every rope BRIDGE are joined by an A* ROUTE (`route`/`search`: Dijkstra on a
+  12 m grid — 24 m beyond 1.5 km — with half-cell heights; cost len·(1 + 14·grade² + water); stops at the FIRST road
+  it reaches, ending on it as a junction at that road's height, so it can't cross; road cells it can't join (cut /
+  fill > 3 m) are walls; RDP + Chaikin smoothing with a cliff-safe fallback; stricter slope passes on failure). A
+  bridge is built only if both ends get roads (`bridgeLinks` / `builtBridge`; bridges use `heightNoNet`). Grading
+  (`finishRoad`): fixed heights (ends, place discs) with a band that widens just enough for a ramp; roads that would
+  float over a valley or climb a cliff are rejected. Tests: every road reaches the main road, 0 dead ends, every place
+  / camp has a road, every bridge connected, 0 crossings (4 seeds). Cost: ~25 ms of worker time per 380 m region.
 - **Secondary roads are CONNECTED by construction** (`Road/RoadNetwork.ts`): one hilltop node per 380 m region; each
   node's road goes to a 4-neighbour strictly nearer the main road (same side, itself connected) or onto the main road
   (a spanning tree rooted at the main road, like a drainage network — distances strictly decrease, so no cycles and

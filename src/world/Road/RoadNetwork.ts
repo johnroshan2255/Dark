@@ -72,7 +72,19 @@ export interface NetworkHost {
   roadCenterX(z: number): number
   mainRoadHeight(z: number): number
   water: number
+  /** Rope bridge of z-cell k (bright; Road/bridges.ts) — its two ends get roads (`bridgeLinks`). */
+  bridge?(k: number): { z: number; xa: number; xb: number; ha: number; hb: number } | null
+  /** Is (x, z) a destination a road may end at (a place, a landmark)? */
+  destination?(x: number, z: number): boolean
+  /** Extra destinations needing a road (bright oasis camps), centres in the z range. */
+  camps?(minZ: number, maxZ: number): { x: number; z: number }[]
 }
+
+/** Roads only exist within this distance (m) of the main road — keeps the graph finite (every query terminates). */
+export const NET_BAND = 2400
+/** Bridge z-cells (Road/bridges.ts CELL). */
+const BRIDGE_CELL = 500
+const NB8 = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]] as const
 
 export class RoadNetwork {
   private readonly nodes = new Map<string, [number, number] | null>()
@@ -81,6 +93,9 @@ export class RoadNetwork {
   private readonly parents = new Map<string, NetRoad | null>()
   private readonly loops = new Map<string, NetRoad | null>()
   private readonly drives = new Map<string, NetRoad | null>()
+  private readonly tents = new Map<string, NetRoad | null>()
+  private readonly lives = new Map<string, boolean>()
+  private readonly bridgeRoads = new Map<number, NetRoad[] | null>()
 
   constructor(private readonly host: NetworkHost) {}
 
@@ -97,7 +112,7 @@ export class RoadNetwork {
       const h = this.host.baseHeight(x, z)
       if (h > bestH && h > this.host.water + 3) (bestH = h), (best = [x, z])
     }
-    n = best
+    n = best && Math.abs(best[0] - this.host.roadCenterX(best[1])) <= NET_BAND ? best : null
     if (this.nodes.size > 4000) this.nodes.clear()
     this.nodes.set(key, n)
     return n
@@ -231,40 +246,414 @@ export class RoadNetwork {
     return r
   }
 
-  /** Tree + loop links of the nodes in [i0, i1] × [j0, j1]. */
+  /** Is node m = (mi, mj)'s tree link pointing at (i, j)? (= m is a structural child of (i, j)). */
+  private childOf(mi: number, mj: number, i: number, j: number): boolean {
+    const r = this.parentLink(mi, mj)
+    return !!r && r.key === `${mi},${mj}>p${i - mi},${j - mj}`
+  }
+
+  /** Loops touching node (i, j). */
+  private loopsAt(i: number, j: number): boolean {
+    return !!(this.loopLink(i, j, 'e') || this.loopLink(i, j, 'n') || this.loopLink(i - 1, j, 'e') || this.loopLink(i, j - 1, 'n'))
+  }
+
+  /** A STRUCTURAL LEAF: on the tree, no tree children, no loops, not at a destination → its road would dead-end. */
+  private leaf(i: number, j: number): boolean {
+    const a = this.node(i, j)
+    if (!a || !this.parentLink(i, j) || this.loopsAt(i, j)) return false
+    if (this.host.destination?.(a[0], a[1])) return false
+    for (const [di, dj] of NB8.slice(0, 4)) if (this.childOf(i + di, j + dj, i, j)) return false
+    return true
+  }
+
+  /**
+   * TENTATIVE CLOSURE of a leaf (no dead ends): a second road from the leaf to another tree node among its 8
+   * neighbours (not its parent) or onto the main road, shortest buildable first, crossing no tree link or loop.
+   * Computed independently of other closures (no recursion); `closure` then resolves conflicts pairwise.
+   */
+  private tentClosure(i: number, j: number): NetRoad | null {
+    const key = `${i},${j}`
+    const hit = this.tents.get(key)
+    if (hit !== undefined) return hit
+    let best: NetRoad | null = null
+    if (this.leaf(i, j)) {
+      const a = this.node(i, j)!
+      const par = this.parentLink(i, j)!.key
+      const s = this.host.seed
+      const cands: NetRoad[] = []
+      for (const [di, dj] of NB8) {
+        if (par === `${i},${j}>p${di},${dj}`) continue
+        const b = this.node(i + di, j + dj)
+        if (!b || !this.parentLink(i + di, j + dj) || this.side(i + di, j + dj) !== this.side(i, j)) continue
+        const r = this.shape(`${i},${j}>c${di},${dj}`, a, b, hashFloat(s, i, j, 970 + di * 3 + dj) < 0.4 ? RoadType.Gravel : RoadType.Trail)
+        if (r) cands.push(r)
+      }
+      if (par !== `${i},${j}>m` && this.dist(i, j) < REGION * 1.6) {
+        const r = this.shape(`${i},${j}>cm`, a, null, RoadType.Gravel)
+        if (r) cands.push(r)
+      }
+      cands.sort((x, y) => x.cum[x.n - 1] - y.cum[y.n - 1])
+      for (const r of cands) {
+        let ok = true
+        for (let q = j - 2; q <= j + 2 && ok; q++) {
+          for (let p = i - 2; p <= i + 2 && ok; p++) {
+            const o = this.parentLink(p, q)
+            if (o && RoadNetwork.crosses(r, o)) ok = false
+            for (const d of ['e', 'n'] as const) { const l = ok ? this.loopLink(p, q, d) : null; if (l && RoadNetwork.crosses(r, l)) ok = false }
+          }
+        }
+        if (ok) { best = r; break }
+      }
+    }
+    if (this.tents.size > 6000) this.tents.clear()
+    this.tents.set(key, best)
+    return best
+  }
+
+  /** The closure's target node offset (or null for the main road / none). */
+  private static target(r: NetRoad): [number, number] | null {
+    const m = /c(-?\d+),(-?\d+)$/.exec(r.key)
+    return m ? [Number(m[1]), Number(m[2])] : null
+  }
+
+  /** FINAL closure: the tentative one, unless an EARLIER leaf's (strict j, i order) tentative closure crosses it or
+   *  already joins the same pair (pairwise rule — finite, deterministic). */
+  private closure(i: number, j: number): NetRoad | null {
+    const r = this.tentClosure(i, j)
+    if (!r) return null
+    const t = RoadNetwork.target(r)
+    for (let q = j - 2; q <= j; q++) {
+      for (let p = i - 2; p <= i + 2; p++) {
+        if (q === j && p >= i) continue
+        const o = this.tentClosure(p, q)
+        if (!o) continue
+        if (RoadNetwork.crosses(r, o)) return null
+        const to = RoadNetwork.target(o)
+        if (t && to && p + to[0] === i && q + to[1] === j && i + t[0] === p && j + t[1] === q) return null // the same pair
+      }
+    }
+    return r
+  }
+
+  /** Does a final closure of a neighbour end at (i, j)? */
+  private closedInto(i: number, j: number): boolean {
+    for (const [di, dj] of NB8) {
+      const r = this.closure(i + di, j + dj)
+      const t = r && RoadNetwork.target(r)
+      if (t && di + t[0] === 0 && dj + t[1] === 0) return true
+    }
+    return false
+  }
+
+  /**
+   * LIVE node (its tree road is built): on the tree, and its road LEADS somewhere — a live child, a loop, its own
+   * closure, a closure ending at it, or a destination. Children are strictly farther from the main road and the
+   * network is bounded (NET_BAND) → the recursion is finite. Every live node therefore has degree ≥ 2 or is a
+   * destination: NO dead ends. Dead branches are pruned back to the nearest junction.
+   */
+  private live(i: number, j: number): boolean {
+    const key = `${i},${j}`
+    const hit = this.lives.get(key)
+    if (hit !== undefined) return hit
+    let v = false
+    const a = this.node(i, j)
+    if (a && this.parentLink(i, j)) {
+      v = this.loopsAt(i, j) || !!this.closure(i, j) || this.closedInto(i, j) || !!this.host.destination?.(a[0], a[1])
+      for (const [di, dj] of NB8.slice(0, 4)) if (!v && this.childOf(i + di, j + dj, i, j) && this.live(i + di, j + dj)) v = true
+    }
+    if (this.lives.size > 6000) this.lives.clear()
+    this.lives.set(key, v)
+    return v
+  }
+
+  /** Live tree links, loops and closures of the nodes in [i0, i1] × [j0, j1]. */
   private netLinks(i0: number, j0: number, i1: number, j1: number, out: NetRoad[]): NetRoad[] {
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
-        for (const r of [this.parentLink(i, j), this.loopLink(i, j, 'e'), this.loopLink(i, j, 'n')]) if (r && !out.includes(r)) out.push(r)
+        const list = [this.loopLink(i, j, 'e'), this.loopLink(i, j, 'n'), this.closure(i, j)]
+        if (this.live(i, j)) list.push(this.parentLink(i, j))
+        for (const r of list) if (r && !out.includes(r)) out.push(r)
       }
     }
     return out
   }
 
   /**
-   * Driveway from a place to the main road: the shared geometry + grading (`shape`), rejected if it would cut across
-   * any network road, or the driveway of a place EARLIER in (z, x) order (strict order → the recursion terminates and
-   * every client gets the same result).
+   * A* ROUTE (Dijkstra on an 8-connected 12 m grid within `R` m of `a`): the cheapest path over the terrain from `a`
+   * to the FIRST road it reaches — the main road or any of `goals` (live network roads, earlier driveways). Step cost
+   * = length × (1 + 14·grade² + water, +40 over 31°); grades over 0.93 (43°) are impassable, the main road's corridor only as the
+   * goal. Because it stops at the first road, it can never cut across one: it ENDS on it (a junction, at that road's
+   * graded height). The cell path is simplified (Ramer–Douglas–Peucker 4 m), rounded (Chaikin ×2), resampled every
+   * ~10 m and graded like every road (`finishRoad`). Deterministic (fixed grid, stable tie order). ~2–8 ms, cached.
    */
-  private driveway(p: { x: number; z: number }): NetRoad | null {
+  private route(key: string, a: [number, number], ah: number | undefined, goals: NetRoad[], type: number, R = 900, sideOf = 0): NetRoad | null {
+    const hit = this.built.get(key)
+    if (hit !== undefined) return hit
+    // Stricter and stricter slope limits until the graded road passes (a path along 40° ground can't be graded).
+    let r: NetRoad | null = null
+    for (const maxG of [0.93, 0.5, 0.32]) {
+      this.built.delete(key)
+      r = this.search(key, a, ah, goals, type, R, sideOf, maxG)
+      if (r) break
+    }
+    this.built.set(key, r)
+    return r
+  }
+
+  private search(key: string, a: [number, number], ah: number | undefined, goals: NetRoad[], type: number, R: number, sideOf: number, maxG: number): NetRoad | null {
+    const C = R > 1500 ? 24 : 12, N = Math.ceil(R / C) * 2 + 1, half = (N - 1) / 2
+    const ox = a[0] - half * C, oz = a[1] - half * C
+    // Heights on a HALF-cell grid (cell centres at even indices, step midpoints at odd ones), each sampled once.
+    const M = N * 2 - 1
+    const HH = new Float32Array(M * M).fill(NaN)
+    const hHalf = (hx: number, hz: number) => {
+      const k = hz * M + hx
+      let h = HH[k]
+      if (h !== h) { h = this.host.baseHeight(ox + hx * C * 0.5, oz + hz * C * 0.5); HH[k] = h }
+      return h
+    }
+    const hAt = (i: number) => hHalf((i % N) * 2, Math.floor(i / N) * 2)
+    // Goal cells: on / beside a goal road (rasterised every 4 m) or on the main road.
+    const goal = new Map<number, [NetRoad, number]>() // cell → goal road and the sample index
+    for (const r of goals) {
+      for (let i = 0; i < r.n - 1; i++) {
+        const l = Math.hypot(r.xs[i + 1] - r.xs[i], r.zs[i + 1] - r.zs[i]), n = Math.max(1, Math.ceil(l / 4))
+        for (let k = 0; k <= n; k++) {
+          const x = r.xs[i] + (r.xs[i + 1] - r.xs[i]) * (k / n), z = r.zs[i] + (r.zs[i + 1] - r.zs[i]) * (k / n)
+          const gi = Math.round((x - ox) / C), gj = Math.round((z - oz) / C)
+          if (gi >= 0 && gj >= 0 && gi < N && gj < N && !goal.has(gj * N + gi)) goal.set(gj * N + gi, [r, i + k / n])
+        }
+      }
+    }
+    const main = (i: number) => {
+      const x = ox + (i % N) * C, z = oz + Math.floor(i / N) * C
+      return Math.abs(x - this.host.roadCenterX(z)) < C * 0.75
+    }
+    const inCorr = (i: number) => {
+      const x = ox + (i % N) * C, z = oz + Math.floor(i / N) * C
+      return Math.abs(x - this.host.roadCenterX(z)) < 2.7 + 9
+    }
+    const start = half * N + half
+    const dist = new Float32Array(N * N).fill(Infinity), prev = new Int32Array(N * N).fill(-1)
+    // binary heap of (cost, cell)
+    const hc: number[] = [], hi: number[] = []
+    const push = (c: number, i: number) => {
+      let k = hc.length; hc.push(c); hi.push(i)
+      while (k > 0) { const p = (k - 1) >> 1; if (hc[p] < hc[k] || (hc[p] === hc[k] && hi[p] < hi[k])) break; [hc[p], hc[k]] = [hc[k], hc[p]]; [hi[p], hi[k]] = [hi[k], hi[p]]; k = p }
+    }
+    const pop = (): number => {
+      const top = hi[0], lc = hc.pop()!, li = hi.pop()!
+      if (hc.length) {
+        hc[0] = lc; hi[0] = li
+        let k = 0
+        for (;;) {
+          const l = k * 2 + 1, r = l + 1
+          let m = k
+          if (l < hc.length && (hc[l] < hc[m] || (hc[l] === hc[m] && hi[l] < hi[m]))) m = l
+          if (r < hc.length && (hc[r] < hc[m] || (hc[r] === hc[m] && hi[r] < hi[m]))) m = r
+          if (m === k) break
+          ;[hc[m], hc[k]] = [hc[k], hc[m]]; [hi[m], hi[k]] = [hi[k], hi[m]]; k = m
+        }
+      }
+      return top
+    }
+    dist[start] = 0
+    push(0, start)
+    let end = -1
+    const water = this.host.water
+    while (hc.length) {
+      const i = pop()
+      const d0 = dist[i]
+      // A goal only where the ground is at the road's level (a road at the foot of a cliff is not reached from its top).
+      if (i !== start) {
+        const gg = goal.get(i)
+        if (gg) {
+          const k = Math.min(gg[0].n - 2, Math.floor(gg[1])), t = gg[1] - k
+          if (Math.abs(hAt(i) - (gg[0].hs[k] + (gg[0].hs[k + 1] - gg[0].hs[k]) * t)) < 3) { end = i; break }
+        } else if (!sideOf && main(i)) {
+          const z = oz + Math.floor(i / N) * C
+          if (Math.abs(hAt(i) - this.host.mainRoadHeight(z)) < 3) { end = i; break }
+        }
+      }
+      const ix = i % N, iz = (i / N) | 0
+      const h0 = hAt(i)
+      for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dz) continue
+        const jx = ix + dx, jz = iz + dz
+        if (jx < 0 || jz < 0 || jx >= N || jz >= N) continue
+        const j = jz * N + jx
+        const len = C * (dx && dz ? 1.41421356 : 1)
+        const h1 = hAt(j)
+        // (+ the ground halfway: a cliff edge inside a cell is not crossed unseen)
+        const hm = hHalf(ix + jx, iz + jz)
+        const g = Math.max(Math.abs(hm - h0), Math.abs(h1 - hm)) / (len * 0.5)
+        if (g > maxG) continue // (> 43°: a cliff; 31–43°: a steep ramp, heavily penalised)
+        if (inCorr(j) && !(!sideOf && main(j))) continue // only into the main road's corridor to END on it
+        // Another road's cell where it can't be joined (it runs on a fill / in a cut here): a WALL — never cross it.
+        const gj = goal.get(j)
+        if (gj) {
+          const k = Math.min(gj[0].n - 2, Math.floor(gj[1])), t = gj[1] - k
+          if (Math.abs(h1 - (gj[0].hs[k] + (gj[0].hs[k + 1] - gj[0].hs[k]) * t)) >= 3) continue
+        }
+        if (sideOf && Math.sign(ox + jx * C - this.host.roadCenterX(oz + jz * C)) !== sideOf) continue
+        const wet = h1 < water + 0.6 ? 6 : 0
+        const c = d0 + len * (1 + 14 * g * g + (g > 0.6 ? 40 : 0) + wet)
+        if (c < dist[j]) { dist[j] = c; prev[j] = i; push(c, j) }
+      }
+    }
+    let road: NetRoad | null = null
+    if (end >= 0) {
+      // cells → points (start exact), end snapped onto the goal road / main road centreline
+      const cells: number[] = []
+      for (let i = end; i >= 0; i = prev[i]) cells.push(i)
+      cells.reverse()
+      let pts: [number, number][] = cells.map((i) => [ox + (i % N) * C, oz + Math.floor(i / N) * C])
+      pts[0] = [a[0], a[1]]
+      const g = goal.get(end)
+      let endH: number
+      if (g) {
+        const [r, f] = g, k = Math.min(r.n - 2, Math.floor(f)), t = f - k
+        const px = r.xs[k] + (r.xs[k + 1] - r.xs[k]) * t, pz = r.zs[k] + (r.zs[k + 1] - r.zs[k]) * t
+        pts[pts.length - 1] = [px, pz]
+        endH = r.hs[k] + (r.hs[k + 1] - r.hs[k]) * t
+      } else {
+        const z = pts[pts.length - 1][1]
+        pts[pts.length - 1] = [this.host.roadCenterX(z), z]
+        endH = this.host.mainRoadHeight(z)
+      }
+      // RDP simplify (4 m), then Chaikin ×2 (keeping the end points), resample ~10 m.
+      const rdp = (p: [number, number][], eps: number): [number, number][] => {
+        if (p.length < 3) return p
+        const [ax, az] = p[0], [bx, bz] = p[p.length - 1]
+        const L = Math.hypot(bx - ax, bz - az) || 1
+        let md = 0, mi = 0
+        for (let i = 1; i < p.length - 1; i++) { const d = Math.abs((bx - ax) * (az - p[i][1]) - (ax - p[i][0]) * (bz - az)) / L; if (d > md) (md = d), (mi = i) }
+        return md > eps ? [...rdp(p.slice(0, mi + 1), eps).slice(0, -1), ...rdp(p.slice(mi), eps)] : [p[0], p[p.length - 1]]
+      }
+      const exact = rdp(pts.slice(), 1)
+      pts = rdp(pts, 4)
+      for (let it = 0; it < 2; it++) {
+        const q: [number, number][] = [pts[0]]
+        for (let i = 0; i < pts.length - 1; i++) {
+          const [x0, z0] = pts[i], [x1, z1] = pts[i + 1]
+          if (i > 0) q.push([x0 * 0.75 + x1 * 0.25, z0 * 0.75 + z1 * 0.25])
+          if (i < pts.length - 2) q.push([x0 * 0.25 + x1 * 0.75, z0 * 0.25 + z1 * 0.75])
+        }
+        q.push(pts[pts.length - 1])
+        pts = q
+      }
+      // The rounded curve cuts corners: if it runs over a drop the cell path avoided (> 0.9 rise per metre between
+      // 3 m probes), keep the exact cell path instead.
+      for (let i = 0; i < pts.length - 1 && pts !== exact; i++) {
+        const l = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]), n = Math.max(1, Math.ceil(l / 3))
+        let hp = this.host.baseHeight(pts[i][0], pts[i][1])
+        for (let k = 1; k <= n; k++) {
+          const hq = this.host.baseHeight(pts[i][0] + (pts[i + 1][0] - pts[i][0]) * (k / n), pts[i][1] + (pts[i + 1][1] - pts[i][1]) * (k / n))
+          if (Math.abs(hq - hp) > (l / n) * 0.9) { pts = exact; break }
+          hp = hq
+        }
+      }
+      let total = 0
+      for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
+      const S = Math.max(2, Math.min(160, Math.round(total / 10) + 1))
+      if (total >= 4) {
+        const xs = new Float32Array(S), zs = new Float32Array(S), raw = new Float32Array(S)
+        let seg = 0, acc = 0
+        for (let k = 0; k < S; k++) {
+          const want = (total * k) / (S - 1)
+          while (seg < pts.length - 2 && acc + Math.hypot(pts[seg + 1][0] - pts[seg][0], pts[seg + 1][1] - pts[seg][1]) < want) { acc += Math.hypot(pts[seg + 1][0] - pts[seg][0], pts[seg + 1][1] - pts[seg][1]); seg++ }
+          const l = Math.hypot(pts[seg + 1][0] - pts[seg][0], pts[seg + 1][1] - pts[seg][1]) || 1
+          const t = Math.min(1, Math.max(0, (want - acc) / l))
+          xs[k] = pts[seg][0] + (pts[seg + 1][0] - pts[seg][0]) * t
+          zs[k] = pts[seg][1] + (pts[seg + 1][1] - pts[seg][1]) * t
+          raw[k] = this.host.baseHeight(xs[k], zs[k])
+        }
+        raw[S - 1] = endH
+        if (ah !== undefined) raw[0] = ah
+        this.built.delete(key)
+        // (A routed track already hugs the ground; on the strictest pass it may be a steep 4×4 track: grade 0.45.)
+        road = this.finishRoad(key, type, xs, zs, raw, maxG < 0.4 ? 0.45 : MAX_GRADE)
+      }
+    }
+    return road
+  }
+
+  /** Tentative driveway of a place: a connector to the nearest road (any kind) within 700 m. */
+  private tentDrive(p: { x: number; z: number }): NetRoad | null {
     const key = `poi:${Math.floor(p.x)},${Math.floor(p.z)}`
     const hit = this.drives.get(key)
     if (hit !== undefined) return hit
-    let r = this.shape(key, [p.x, p.z], null, RoadType.Gravel)
-    if (r) {
-      const ci = Math.floor(p.x / REGION), cj = Math.floor(p.z / REGION)
-      const others = this.netLinks(ci - 2, cj - 2, ci + 2, cj + 2, [])
-      for (const q of this.host.pois?.inBox(p.x - 800, p.z - 800, p.x + 800, p.z + 800) ?? []) {
-        if (q.z > p.z || (q.z === p.z && q.x >= p.x)) continue
-        if (Math.abs(q.x - this.host.roadCenterX(q.z)) > REGION * 1.8) continue
-        const o = this.driveway(q)
-        if (o) others.push(o)
-      }
-      for (const o of others) if (RoadNetwork.crosses(r, o)) { r = null; break }
-    }
+    const ci = Math.floor(p.x / REGION), cj = Math.floor(p.z / REGION)
+    // Fine search within 1.3 km; a remote place falls back to a coarse (24 m) search over 2.6 km.
+    const r = this.route(key, [p.x, p.z], undefined, this.netLinks(ci - 5, cj - 5, ci + 5, cj + 5, []), RoadType.Gravel, 1300) ??
+      this.route(key + '~', [p.x, p.z], undefined, this.netLinks(ci - 8, cj - 8, ci + 8, cj + 8, []), RoadType.Gravel, 2600)
     if (this.drives.size > 4000) this.drives.clear()
     this.drives.set(key, r)
     return r
+  }
+
+  /** DRIVEWAY of a place: its tentative connector unless it crosses the tentative one of a place EARLIER in (z, x)
+   *  order within 800 m (pairwise, non-recursive); then the next candidates are not tried (rare). */
+  private driveway(p: { x: number; z: number }): NetRoad | null {
+    const r = this.tentDrive(p)
+    if (!r) return null
+    const earlier: NetRoad[] = []
+    let clash = false
+    const box = Math.max(800, r.maxX - r.minX + 400, r.maxZ - r.minZ + 400)
+    for (const q of this.host.pois?.inBox(p.x - box, p.z - box, p.x + box, p.z + box) ?? []) {
+      if (q.z > p.z || (q.z === p.z && q.x >= p.x)) continue
+      const o = this.tentDrive(q)
+      if (!o) continue
+      earlier.push(o)
+      if (RoadNetwork.crosses(r, o)) clash = true
+    }
+    if (!clash) return r
+    // It would cross an earlier place's drive: route again with those drives as goals too — it then ENDS on the
+    // first one it meets (a junction) instead of crossing it. (Earlier drives are tentative ones: non-recursive.)
+    const ci = Math.floor(p.x / REGION), cj = Math.floor(p.z / REGION)
+    const goals = [...this.netLinks(ci - 8, cj - 8, ci + 8, cj + 8, []), ...earlier]
+    const key = `poi:${Math.floor(p.x)},${Math.floor(p.z)}`
+    const r2 = this.route(key + '+', [p.x, p.z], undefined, goals, RoadType.Gravel, 1300) ?? this.route(key + '+~', [p.x, p.z], undefined, goals, RoadType.Gravel, 2600)
+    return r2 && !earlier.some((o) => RoadNetwork.crosses(r2, o)) ? r2 : null
+  }
+
+  /** Camp track: a connector (trail) to the nearest road within 700 m. */
+  private campRoad(c: { x: number; z: number }): NetRoad | null {
+    const key = `camp:${Math.floor(c.x)},${Math.floor(c.z)}`
+    const hit = this.drives.get(key)
+    if (hit !== undefined) return hit
+    const ci = Math.floor(c.x / REGION), cj = Math.floor(c.z / REGION)
+    const r = this.route(key, [c.x, c.z], undefined, this.netLinks(ci - 3, cj - 3, ci + 3, cj + 3, []), RoadType.Trail)
+    this.drives.set(key, r)
+    return r
+  }
+
+  /**
+   * BRIDGE ROADS (bright rope bridges): the near end (on the main road's side) gets a short track straight onto the
+   * main road, the far end a connector into the network on the far side. A bridge is built ONLY if both exist
+   * (`bridgeOK`) — no bridge to nowhere. The roads end exactly at the deck's height.
+   */
+  bridgeLinks(k: number): NetRoad[] | null {
+    const hit = this.bridgeRoads.get(k)
+    if (hit !== undefined) return hit
+    this.bridgeRoads.set(k, null) // (guards re-entry while building)
+    let out: NetRoad[] | null = null
+    const b = this.host.bridge?.(k)
+    if (b) {
+      const side = Math.sign(b.xb - this.host.roadCenterX(b.z)) || 1
+      const near = this.shape(`br${k}a`, [b.xa - side * 0.5, b.z], null, RoadType.Trail, undefined, b.ha, 6, b.z)
+      const ci = Math.floor(b.xb / REGION), cj = Math.floor(b.z / REGION)
+      const far = this.route(`br${k}b`, [b.xb + side * 0.5, b.z], b.hb, this.netLinks(ci - 3, cj - 3, ci + 3, cj + 3, []), RoadType.Trail, 900, side)
+      if (near && far) out = [near, far]
+    }
+    if (this.bridgeRoads.size > 1000) this.bridgeRoads.clear()
+    this.bridgeRoads.set(k, out)
+    return out
+  }
+
+  /** Is the bridge of z-cell k built (both ends lead to roads)? */
+  bridgeOK(k: number): boolean {
+    return !!this.bridgeLinks(k)
   }
 
   /**
@@ -273,27 +662,27 @@ export class RoadNetwork {
    * road's corridor (nodes on opposite sides connect through it), or when it would climb a cliff. Crossing rules
    * between roads are the callers' (parentLink / loopLink / driveway).
    */
-  private shape(key: string, a: [number, number], b: [number, number] | null, type: number): NetRoad | null {
+  private shape(key: string, a: [number, number], b: [number, number] | null, type: number, endH?: number, startH?: number, minLen = 30, mainZ?: number): NetRoad | null {
     let r = this.built.get(key)
     if (r !== undefined) return r
     const s = this.host.seed
     let bx: number, bz: number
     if (b) [bx, bz] = b
     else {
-      bz = a[1] + (hashFloat(s, Math.floor(a[0]), Math.floor(a[1]), 950) - 0.5) * 120
+      bz = mainZ ?? a[1] + (hashFloat(s, Math.floor(a[0]), Math.floor(a[1]), 950) - 0.5) * 120
       bx = this.host.roadCenterX(bz)
     }
     const dx = bx - a[0], dz = bz - a[1]
     const len = Math.hypot(dx, dz)
-    if (len < 30 || len > REGION * 1.9) {
+    if (len < minLen || len > REGION * 1.9) {
       this.built.set(key, null)
       return null
     }
-    const bend = (hashFloat(s, Math.floor(a[0]), Math.floor(bz), 951) - 0.5) * 0.6 * len
+    const bend = mainZ !== undefined ? 0 : (hashFloat(s, Math.floor(a[0]), Math.floor(bz), 951) - 0.5) * 0.6 * len
     const cx = (a[0] + bx) / 2 - (dz / len) * bend
     const cz = (a[1] + bz) / 2 + (dx / len) * bend
     const SAMPLES = Math.min(MAX_SAMPLES, Math.max(MIN_SAMPLES, Math.round(len / SAMPLE_STEP) + 1))
-    const xs = new Float32Array(SAMPLES), zs = new Float32Array(SAMPLES), raw = new Float32Array(SAMPLES), hs = new Float32Array(SAMPLES)
+    const xs = new Float32Array(SAMPLES), zs = new Float32Array(SAMPLES), raw = new Float32Array(SAMPLES)
     for (let i = 0; i < SAMPLES; i++) {
       const t = i / (SAMPLES - 1)
       const u = 1 - t
@@ -311,32 +700,58 @@ export class RoadNetwork {
         }
       }
     }
+    if (!b) raw[SAMPLES - 1] = this.host.mainRoadHeight(bz)
+    else if (endH !== undefined) raw[SAMPLES - 1] = endH // a junction: the joined road's own height
+    if (startH !== undefined) raw[0] = startH // a bridge deck end
+    return this.finishRoad(key, type, xs, zs, raw)
+  }
+
+  /**
+   * Grade a polyline (raw = the ground under each sample; its first / last entries may already be set to the exact
+   * end heights) and package it as a road; null (cached) if it would climb a cliff.
+   */
+  private finishRoad(key: string, type: number, xs: Float32Array, zs: Float32Array, raw: Float32Array, grade = MAX_GRADE): NetRoad | null {
+    let r: NetRoad | null
+    const SAMPLES = xs.length
+    let len = 0
+    for (let i = 1; i < SAMPLES; i++) len += Math.hypot(xs[i] - xs[i - 1], zs[i] - zs[i - 1])
+    const hs = new Float32Array(SAMPLES)
     // Grade within a band around the ground: the road never sits more than MAX_OFFSET above or below the
     // terrain it crosses (no ramps floating over a valley, no trenches), and inside that band the grade is
     // smoothed to MAX_GRADE where the ground allows. Both ends are exact (the node; the main road bed).
-    const mh = b ? 0 : this.host.mainRoadHeight(bz)
-    if (!b) raw[SAMPLES - 1] = mh
     const segLen = Math.max(1, len / (SAMPLES - 1))
-    const maxRise = segLen * MAX_GRADE
+    const maxRise = segLen * grade
+    // FIXED heights: both ends (exact: the node / a junction's road height / a bridge deck / the main road bed) and
+    // inside a place's flattened disc (the road lies on the place's base — no bump through a farmyard).
+    const fixed = new Uint8Array(SAMPLES)
     hs.set(raw)
-    for (let pass = 0; pass < 4; pass++) {
-      for (let i = 1; i < SAMPLES; i++) hs[i] = Math.min(hs[i - 1] + maxRise, Math.max(hs[i - 1] - maxRise, hs[i]))
-      for (let i = SAMPLES - 2; i >= 0; i--) hs[i] = Math.min(hs[i + 1] + maxRise, Math.max(hs[i + 1] - maxRise, hs[i]))
-      for (let i = 0; i < SAMPLES; i++) hs[i] = Math.min(raw[i] + MAX_OFFSET, Math.max(raw[i] - MAX_OFFSET, hs[i]))
-    }
-    for (let i = 1; i < SAMPLES - 1; i++) hs[i] = Math.min(raw[i] + MAX_OFFSET, Math.max(raw[i] - MAX_OFFSET, (hs[i - 1] + 2 * hs[i] + hs[i + 1]) * 0.25))
-    hs[0] = raw[0]
-    hs[SAMPLES - 1] = raw[SAMPLES - 1]
-    for (let i = 0; i < SAMPLES; i++) hs[i] = Math.max(this.host.water + 1.2, hs[i]) // fords: a causeway just above the water
-    // Inside a place's flattened disc the road lies exactly on the place's base (no bump through a farmyard).
+    fixed[0] = fixed[SAMPLES - 1] = 1
     if (this.host.pois) {
       for (let i = 0; i < SAMPLES; i++) {
         const p = this.host.pois.near(xs[i], zs[i])
-        if (p && Math.hypot(xs[i] - p.x, zs[i] - p.z) < p.radius * 0.6) hs[i] = p.baseH
+        if (p && Math.hypot(xs[i] - p.x, zs[i] - p.z) < p.radius * 0.6) (hs[i] = p.baseH), (fixed[i] = 1)
       }
     }
+    // The BAND the road may sit in around the ground: ±MAX_OFFSET, widened next to a fixed height that is off the
+    // ground (a junction, a farmyard) by exactly what a MAX_GRADE ramp from it needs — so it meets them on a ramp.
+    const band = new Float32Array(SAMPLES).fill(MAX_OFFSET)
+    for (let f = 0; f < SAMPLES; f++) {
+      if (!fixed[f]) continue
+      const off = Math.abs(hs[f] - raw[f])
+      if (off <= MAX_OFFSET) continue
+      for (let i = 0; i < SAMPLES; i++) band[i] = Math.max(band[i], off - maxRise * Math.abs(i - f))
+    }
+    const clampBand = (i: number, v: number) => Math.min(raw[i] + band[i], Math.max(raw[i] - band[i], v))
+    // Grade within the band: rise-limited (MAX_GRADE) both ways where the ground allows, never more than the band off
+    // the ground (no ramps floating over a valley, no trenches).
+    for (let pass = 0; pass < 6; pass++) {
+      for (let i = 1; i < SAMPLES; i++) if (!fixed[i]) hs[i] = clampBand(i, Math.min(hs[i - 1] + maxRise, Math.max(hs[i - 1] - maxRise, hs[i])))
+      for (let i = SAMPLES - 2; i >= 0; i--) if (!fixed[i]) hs[i] = clampBand(i, Math.min(hs[i + 1] + maxRise, Math.max(hs[i + 1] - maxRise, hs[i])))
+    }
+    for (let i = 1; i < SAMPLES - 1; i++) if (!fixed[i] && !fixed[i - 1] && !fixed[i + 1]) hs[i] = clampBand(i, (hs[i - 1] + 2 * hs[i] + hs[i + 1]) * 0.25)
+    for (let i = 0; i < SAMPLES; i++) if (!fixed[i]) hs[i] = Math.max(this.host.water + 1.2, hs[i]) // fords: a causeway just above the water
     // A road can't climb a cliff: links whose graded profile still exceeds ~90 % (42°) anywhere (plateau edges, karst
-    // walls) are not built — the network routes around the uplands instead of painting a track up a rock face.
+    // walls, a valley it would have to bridge) are not built — the tree / router finds another way.
     for (let i = 1; i < SAMPLES; i++) {
       if (Math.abs(hs[i] - hs[i - 1]) > segLen * 0.9) {
         this.built.set(key, null)
@@ -355,6 +770,7 @@ export class RoadNetwork {
     return r
   }
 
+
   /** Roads touching region (ci, cj) — tests / debug. */
   roadsIn(ci: number, cj: number): NetRoad[] {
     return this.roadsForCell(ci, cj)
@@ -370,9 +786,19 @@ export class RoadNetwork {
     list = this.netLinks(ci - 2, cj - 2, ci + 2, cj + 2, []).filter((r) => r.maxX >= x0 && r.minX <= x1 && r.maxZ >= z0 && r.minZ <= z1)
     // Driveways: every place gets a gravel road to the main road (unless it would cut across another road).
     for (const p of this.host.pois?.inBox(x0 - 400, z0 - 400, x1 + 400, z1 + 400) ?? []) {
-      if (Math.abs(p.x - this.host.roadCenterX(p.z)) > REGION * 1.8) continue
       const r = this.driveway(p)
       if (r && r.maxX >= x0 && r.minX <= x1 && r.maxZ >= z0 && r.minZ <= z1 && !list.includes(r)) list.push(r)
+    }
+    // Camps (bright oases): a track to the nearest road, like a place's driveway.
+    for (const c of this.host.camps?.(z0 - 700, z1 + 700) ?? []) {
+      const r = this.campRoad(c)
+      if (r && r.maxX >= x0 && r.minX <= x1 && r.maxZ >= z0 && r.minZ <= z1 && !list.includes(r)) list.push(r)
+    }
+    // Bridge roads (bright): both ends of every built bridge whose cell is near.
+    if (this.host.bridge) {
+      for (let k = Math.floor((z0 - 700) / BRIDGE_CELL); k <= Math.floor((z1 + 700) / BRIDGE_CELL); k++) {
+        for (const r of this.bridgeLinks(k) ?? []) if (r.maxX >= x0 && r.minX <= x1 && r.maxZ >= z0 && r.minZ <= z1 && !list.includes(r)) list.push(r)
+      }
     }
     if (this.cellRoads.size > 2000) this.cellRoads.clear()
     this.cellRoads.set(key, list)

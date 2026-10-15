@@ -374,7 +374,8 @@ export class RoadDetail {
     if (p) g *= sstep(2, 10, Math.hypot(x - p.x, z - p.z) - p.radius)
     if (g <= 0) return 0
     const w = f.biome(x, z, this.bw)
-    return g * (1 - sstep(0.05, 0.45, w[1])) * (1 - 0.75 * w[0])
+    // (Bright: gutters in the desert too — their canyon tracks are lined by them.)
+    return g * (1 - sstep(0.05, 0.45, w[1])) * (1 - (f.palette === 0 ? 0 : 0.75) * w[0])
   }
 
   /** Main-road detail (the ditches) at lateral u (= x − roadCenterX(z)). */
@@ -405,8 +406,8 @@ export class RoadDetail {
     const seed = f.seed
     const au = Math.abs(u)
     const q = Math.abs(au - MAIN_RUT_C) / MAIN_RUT_HW
-    const rutW = q < 1 ? 1 - sstep(0.3, 1, q) : 0
-    const rutD = (0.13 + 0.1 * vnoise1(seed, 31, z / 9)) * rutW
+    const rutW = q < 1 ? 1 - sstep(0.55, 1, q) : 0 // flat-bottomed, steep-walled (hard, like the mud tracks)
+    const rutD = (0.15 + 0.09 * vnoise1(seed, 31, z / 9)) * rutW
     const bq = Math.abs(au - 2.85) / 0.5
     const berm = bq < 1 ? (0.12 + 0.1 * vnoise1(seed, u > 0 ? 33 : 34, z / 3.1)) * (1 - bq * bq) * (1 - bq * bq) : 0
     const clod = (vnoise1(seed, 35, z / 2.1 + u * 1.1) - 0.5) * 0.12 * (1 - sstep(2.9, 3.3, au))

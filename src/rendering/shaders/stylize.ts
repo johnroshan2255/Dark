@@ -504,7 +504,29 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     road = mix(road, packedSnow, vBiome.y * 0.85);
     ${bright ? `// BRIGHT (over the hill): the desert track IS the sand — packed a shade darker with two darker wheel ruts.
     road = mix(road, diffuseColor.rgb * (0.88 - rutS * 0.16) * (0.95 + 0.1 * n2), vBiome.x * 0.92);` : 'road = mix(road, diffuseColor.rgb, vBiome.x * 0.4 * smoothstep(0.35, 0.75, st_noise(wp * 0.45 + 3.0)));'}
-    diffuseColor.rgb = mix(diffuseColor.rgb, road, 1.0 - smoothstep(HALF + 0.9, HALF + 1.6, lat));
+    ${bright ? `// BRIGHT: the main road is painted like the MUD TRACKS (hard, not a soft path) — packed darker earth in the carved
+    // ruts (±1.35 m), loose crumbly soil with pebbles between and outside them, a darker berm line, ragged edges that
+    // spill bare earth into the verge; in the desert the same over the sand's colour.
+    {
+      float s1 = st_noise(wp * 8.0), s3 = st_noise(wp * 0.7);
+      float rutM = 1.0 - smoothstep(0.16, 0.4, abs(lat - 1.35));
+      vec3 soilM = mix(vec3(0.34, 0.27, 0.2), diffuseColor.rgb * 0.82, vBiome.x * 0.85);
+      vec3 looseM = soilM * (0.84 + 0.3 * s1 + (fine ? 0.12 * st_noise(wp * 3.1) - 0.06 : 0.0));
+      if (fine) {
+        vec2 pc = wp * 5.0, pi = floor(pc);
+        float ph = st_hash(pi);
+        vec2 pd = fract(pc) - 0.5 - (vec2(fract(ph * 7.3), fract(ph * 3.9)) - 0.5) * 0.4;
+        float pr = 0.1 + 0.14 * fract(ph * 3.17);
+        float peb = (1.0 - smoothstep(pr - 0.05, pr, length(pd))) * step(0.66, fract(ph * 11.3)) * (1.0 - rutM * 0.8);
+        looseM = mix(looseM, vec3(0.5, 0.47, 0.43) * (0.8 + 0.35 * fract(ph * 5.1) - pd.y * 0.6), peb * 0.75);
+      }
+      vec3 hard = mix(looseM, soilM * (0.62 + 0.12 * s3), rutM);
+      hard *= 1.0 - 0.18 * (1.0 - smoothstep(0.0, 0.35, abs(lat - 2.85))); // the berm's shaded inner face
+      float edgeN = st_noise(wp * 0.3 + 4.0) * 0.65 + st_noise(wp * 1.7) * 0.35;
+      float bareM = 1.0 - smoothstep(HALF + 0.1 + edgeN * 0.9, HALF + 0.6 + edgeN * 0.9, lat);
+      road = mix(road, hard, bareM * (1.0 - vBiome.y * 0.85));
+    }
+    ` : ''}diffuseColor.rgb = mix(diffuseColor.rgb, road, 1.0 - smoothstep(HALF + 0.9, HALF + 1.6, lat));
     roadDirt = (1.0 - smoothstep(HALF + 0.3, HALF + 1.0, lat)) * (1.0 - vBiome.y);
   }
   // OFF-ROAD TRACKS (network roads: GRAVEL type 0, TRAIL type 1 — the "mud roads"). Road/RoadDetail carves their

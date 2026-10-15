@@ -45,8 +45,8 @@ export function bridgeOf(fields: WorldFields, k: number): Bridge | null {
     const top = WorldFields.WATER + 2.2
     const out = (dir: number): number => {
       for (let d = 10; d < 75; d += 1) {
-        const x = rc + dir * d, h = fields.height(x, z)
-        if (h >= top && Math.abs(fields.height(x + dir * 4, z) - h) < 1.2) return x + dir * 2
+        const x = rc + dir * d, h = fields.heightNoNet(x, z)
+        if (h >= top && Math.abs(fields.heightNoNet(x + dir * 4, z) - h) < 1.2) return x + dir * 2
       }
       return NaN
     }
@@ -54,17 +54,17 @@ export function bridgeOf(fields: WorldFields, k: number): Bridge | null {
     // bank rises to meet the deck level (it often keeps climbing into the hills — the bridge lands on the slope),
     // else its own flat top.
     let xa = out(-1)
-    if (Number.isNaN(xa)) for (let d = 10; d < 60 && Number.isNaN(xa); d++) if (fields.height(rc - d, z) >= top + 1) xa = rc - d - 1
-    const hRoad = Number.isNaN(xa) ? NaN : fields.height(xa, z)
+    if (Number.isNaN(xa)) for (let d = 10; d < 60 && Number.isNaN(xa); d++) if (fields.heightNoNet(rc - d, z) >= top + 1) xa = rc - d - 1
+    const hRoad = Number.isNaN(xa) ? NaN : fields.heightNoNet(xa, z)
     let xb = NaN
-    for (let d = 10; d < 75 && Number.isNaN(xb); d++) if (fields.height(rc + d, z) >= hRoad - 0.5) xb = rc + d + 1.5
+    for (let d = 10; d < 75 && Number.isNaN(xb); d++) if (fields.heightNoNet(rc + d, z) >= hRoad - 0.5) xb = rc + d + 1.5
     if (Number.isNaN(xb)) xb = out(1)
     const span = xb - xa
     if (span >= 22 && span <= 95 && xa > fields.roadCenterX(z) + WorldFields.ROAD_HALF_WIDTH + 6) {
       // The deck must clear every bump between its ends and the channel (a bank lip higher than the end left
       // the car's nose against the ground): ha / hb = the highest ground on that half (+0.15 m); if that lifts the
       // end off the ground, the deck runs on back until it meets the ground again (≤ 15 m).
-      const gh = (x: number) => Math.max(fields.height(x, z - BW), fields.height(x, z), fields.height(x, z + BW))
+      const gh = (x: number) => Math.max(fields.heightNoNet(x, z - BW), fields.heightNoNet(x, z), fields.heightNoNet(x, z + BW))
       let ha = gh(xa), hb = gh(xb)
       for (let x = xa; x < rc; x += 1) ha = Math.max(ha, gh(x))
       for (let x = xb; x > rc; x -= 1) hb = Math.max(hb, gh(x))
@@ -85,6 +85,12 @@ export function bridgeOf(fields: WorldFields, k: number): Bridge | null {
   return b
 }
 
+/** A bridge that is actually BUILT: both its ends are joined to roads (RoadNetwork.bridgeLinks) — never to nowhere. */
+export function builtBridge(fields: WorldFields, k: number): Bridge | null {
+  const b = bridgeOf(fields, k)
+  return b && fields.network.bridgeOK(k) ? b : null
+}
+
 /** Deck height at x (between the ends, sagging, never lower than 1.2 m over the water). */
 export function deckY(b: Bridge, x: number): number {
   const t = Math.min(1, Math.max(0, (x - b.xa) / (b.xb - b.xa)))
@@ -96,7 +102,7 @@ export function nearBridge(fields: WorldFields, x: number, z: number, margin = 3
   if (fields.palette !== 0) return false
   const k = Math.floor(z / CELL)
   for (let j = k - 1; j <= k + 1; j++) {
-    const b = bridgeOf(fields, j)
+    const b = builtBridge(fields, j)
     if (b && Math.abs(z - b.z) < BW + margin && x > b.xa - margin - 2 && x < b.xb + margin + 2) return true
   }
   return false
@@ -108,7 +114,7 @@ export function buildBridges(fields: WorldFields, cx: number, cz: number, out: C
   const x0 = cx * CHUNK_SIZE, z0 = cz * CHUNK_SIZE
   let n = 0
   for (let k = Math.floor(z0 / CELL) - 1; k <= Math.floor((z0 + CHUNK_SIZE) / CELL) + 1; k++) {
-    const b = bridgeOf(fields, k)
+    const b = builtBridge(fields, k)
     if (!b) continue
     const mx = (b.xa + b.xb) / 2
     if (mx < x0 || mx >= x0 + CHUNK_SIZE || b.z < z0 || b.z >= z0 + CHUNK_SIZE) continue
@@ -198,7 +204,7 @@ function addBridge(fields: WorldFields, b: Bridge, x0: number, z0: number, out: 
   const postH = 2.7
   const ends = [b.xa - 0.4, b.xb + 0.4]
   for (const ex of ends) {
-    const gy = Math.min(deckY(b, ex), fields.height(ex, b.z)) - 0.4
+    const gy = Math.min(deckY(b, ex), fields.heightNoNet(ex, b.z)) - 0.4
     for (const s of [-1, 1]) beam(out, [X(ex), gy, lz + s * (BW + 0.15)], [X(ex), deckY(b, ex) + postH, lz + s * (BW + 0.15)], 0.13, POST)
     beam(out, [X(ex), deckY(b, ex) + postH - 0.25, lz - BW - 0.3], [X(ex), deckY(b, ex) + postH - 0.25, lz + BW + 0.3], 0.1, POST) // lintel
   }
