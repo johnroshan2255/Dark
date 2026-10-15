@@ -22,10 +22,11 @@ interface Palette {
 }
 type RGB = [number, number, number]
 const PALETTES: Palette[] = [
-  // 0 — Genshin meadow: vivid fresh green → lime → yellow-green, rare straw patches; green forest floor.
+  // 0 — BRIGHT (over the hill colour, 2026-10-15): WARM golden-olive meadow (their greens ≈ 151,149,58 / 177,161,70;
+  //     sandy-olive ground 174,151,103) — was a vivid lime that read neon under the old 1.2 saturation grade.
   {
-    fresh: hex(0x5c9a36), olive: hex(0x78ac3c), golden: hex(0x9cb448), ochre: hex(0xb4a856), earth: hex(0x7c6444), moss: hex(0x3f6a30),
-    litter: hex(0x4a5c2e), alpine: hex(0x7a8c62), rock: hex(0x6b7486), sand: hex(0xc4b080), silt: hex(0x4a5a50), forest: 0.7,
+    fresh: hex(0x7c9c50), olive: hex(0x94a85c), golden: hex(0xb0b068), ochre: hex(0xc4b678), earth: hex(0x8a6c50), moss: hex(0x587848),
+    litter: hex(0x687448), alpine: hex(0x9a9c78), rock: hex(0x7a7a86), sand: hex(0xd4b888), silt: hex(0x5a5a4a), forest: 0.7,
   },
   // 1 — OVERLAND (over the hill): golden straw meadows (olive → straw → pale gold), warm earth, saturated green
   //     under the forest islands, blue-grey rock. The straw is what the warm haze and low sun are painted onto.

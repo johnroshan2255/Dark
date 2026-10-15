@@ -229,12 +229,14 @@ function addCrag(
 /**
  * BRIGHT (palette 0) — "over the hill" canyon rock: each crag is a STACK of 2–6 broad, thick SLABS (pancakes of
  * rock 2.5–6 m high), each its own size, rotation and offset, so the cliff reads as piled blocks with overhanging
- * lips and dark undersides. Every slab is an irregular octagonal prism with BEVELLED rims (narrower foot and top
- * ring) → rounded-off blocks, not sharp prisms. FLAT-ish facets (face normal 80 %), one flat colour per slab (no
- * paint strokes / strata — the shape carries the detail), tops lighter (sun-baked), undersides dark.
- * Cost: ≈ 40 tris per slab (sides 32 + top 8, + 8 under an overhang); masses avg ~4 slabs ≈ 170 tris per crag.
+ * lips and dark undersides. Every slab is an irregular octagon with 4 rings (tucked foot, belly, rounded shoulder, top
+ * rim) and SMOOTH rounded normals (15 % facet) → soft boulders like theirs, not hard prisms; one colour per slab
+ * (no paint strokes / strata — the shape carries the detail), shaded foot → lighter shoulder and top, dark undersides.
+ * Cost: ≈ 56 tris per slab (sides 48 + top 8, + 8 under an overhang); masses avg ~4 slabs ≈ 230 tris per crag.
  */
-const SLAB_RINGS = [[0, 0.9], [0.38, 1], [1, 0.8]] as const
+/** Slab rings: height fraction, radius scale, normal tilt (rad, − = facing down / + = up) → a rounded, bevelled
+ *  block: tucked-in foot, full belly, rounded shoulder, narrower top rim. */
+const SLAB_RINGS = [[0, 0.86, -0.75], [0.22, 1, -0.05], [0.74, 0.97, 0.3], [1, 0.8, 0.95]] as const
 
 function addSlabs(
   fields: WorldFields, out: CragMesh, lx: number, lz: number, wx: number, wz: number, h0: number,
@@ -307,13 +309,19 @@ function addSlabs(
       const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
       nx /= nl; ny /= nl; nz /= nl
       const P3 = [ax, ay, az, bx, by, bz, cx2, cy, cz2], C3 = [ca, c1, c2]
+      const T3 = flip ? [A[3], C[3], B[3]] : [A[3], B[3], C[3]]
       for (let q = 0; q < 3; q++) {
         const px = P3[q * 3], py = P3[q * 3 + 1], pz = P3[q * 3 + 2]
-        // 80 % facet + 20 % radial → readable flat planes with softened edges.
+        // SOFT, rounded shading: a smooth normal per vertex (out from the slab's axis, tilted down at the foot and
+        // up over the shoulder; straight up / down at the cap centres) with only 15 % of the flat face mixed in —
+        // the light rolls over each block instead of breaking into hard facets.
         let rx = px - ref[0], rz = pz - ref[2]
-        const rl2 = Math.sqrt(rx * rx + rz * rz) || 1
-        rx /= rl2; rz /= rl2
-        let mx = nx * 0.8 + (up !== 0 ? 0 : rx * 0.2), my = ny * 0.8 + (up !== 0 ? up * 0.2 : 0), mz = nz * 0.8 + (up !== 0 ? 0 : rz * 0.2)
+        const rl2 = Math.sqrt(rx * rx + rz * rz)
+        const t = T3[q]
+        let sx2: number, sy2: number, sz2: number
+        if (rl2 < 1e-3 || t === undefined) (sx2 = 0), (sy2 = up < 0 ? -1 : 1), (sz2 = 0)
+        else (rx /= rl2), (rz /= rl2), (sx2 = rx * Math.cos(t)), (sy2 = Math.sin(t)), (sz2 = rz * Math.cos(t))
+        let mx = nx * 0.15 + sx2 * 0.85, my = ny * 0.15 + sy2 * 0.85, mz = nz * 0.15 + sz2 * 0.85
         const ml = Math.sqrt(mx * mx + my * my + mz * mz) || 1
         mx /= ml; my /= ml; mz /= ml
         out.pos.push(px, py, pz)
@@ -321,22 +329,24 @@ function addSlabs(
         out.col.push(C3[q][0], C3[q][1], C3[q][2])
       }
     }
-    const V = (r: number, k: number) => [R[(r * N + k) * 3], R[(r * N + k) * 3 + 1], R[(r * N + k) * 3 + 2]]
+    const V = (r: number, k: number) => [R[(r * N + k) * 3], R[(r * N + k) * 3 + 1], R[(r * N + k) * 3 + 2], SLAB_RINGS[r][2]]
     const ref = [cxs, 0, czs]
+    // Colour by ring: shaded foot → body → lighter shoulder (soft painted AO, no hard bands).
+    const ringCol = [lip, side3.map((v) => v * 0.94), side3, side3.map((v, i) => v + (top3[i] - v) * 0.4)]
     for (let r = 0; r < SLAB_RINGS.length - 1; r++) {
-      const ca = r === 0 ? lip : side3, cb = side3
+      const ca = ringCol[r], cb = ringCol[r + 1]
       for (let k = 0; k < N; k++) {
         const k1 = (k + 1) % N
         tri(V(r, k), V(r, k1), V(r + 1, k1), ca, ca, cb, ref, 0)
         tri(V(r, k), V(r + 1, k1), V(r + 1, k), ca, cb, cb, ref, 0)
       }
     }
-    const topC = [cxs, cyTop, czs]
+    const topC = [cxs, cyTop, czs, Math.PI / 2]
     const T = SLAB_RINGS.length - 1
     for (let k = 0; k < N; k++) tri(topC, V(T, k), V(T, (k + 1) % N), top3, top3, top3, ref, 1)
     // Underside of an overhanging slab (visible from below).
     if (si > 0) {
-      const botC = [cxs, y0 - 0.05, czs]
+      const botC = [cxs, y0 - 0.05, czs, -Math.PI / 2]
       for (let k = 0; k < N; k++) tri(botC, V(0, k), V(0, (k + 1) % N), lip, lip, lip, ref, -1)
     }
   }

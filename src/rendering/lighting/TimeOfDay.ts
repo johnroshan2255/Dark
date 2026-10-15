@@ -228,12 +228,35 @@ const GEN_EVENING = key({
 const GEN_DUSK = key({ ...DUSK, ...GEN_BASE, saturation: 0.95, vignette: 0.2 })
 const GEN_NIGHT = key({ ...NIGHT, ...GEN_BASE, vignette: 0.2 })
 
+// BRIGHT = OVER THE HILL colour (2026-10-15, sampled from their screenshots): a WARM picture — pale cream-cyan sky
+// (theirs ≈ 228,244,253 at the zenith band, not deep blue), a warm sun, a neutral-warm sky fill (a blue fill turns
+// warm albedos olive), cream aerial haze building with distance, gentle saturation (1.2 drove the meadow's blue
+// channel to 0 → neon lime) and a warm white balance. Whole-frame means: theirs ≈ 210,179,161 / 214,167,150.
+const OTH_BASE = { grain: 0, lift: c(0x050302), painted: 0 }
+const OTH_DAWN = key({
+  ...DAWN, ...OTH_BASE, sunColor: c(0xffb888), sunIntensity: 2.6, hemiSky: c(0xd8c0c0), hemiGround: c(0x8a6a50), hemiIntensity: 1.5,
+  fogColor: c(0xf4cdb8), skyZenith: c(0xb0b8d8), saturation: 1.05, contrast: 1.0, split: 0.3, toon: 0.7, clouds: 0.2, cloudWhite: 0.8,
+  tint: c(0xfff0e4), vignette: 0.06, fogStart: 80, fogEnd: 1000, fogMax: 0.8, landHaze: c(0xf0d0c4), haze: 0.45,
+})
+const OTH_DAY = key({
+  ...DAY, ...OTH_BASE, sunColor: c(0xffecd0), sunIntensity: 3.0, hemiSky: c(0xe4ddd6), hemiGround: c(0x9a8460), hemiIntensity: 1.65,
+  fogColor: c(0xecf2f2), skyZenith: c(0x88c2f0), exposure: 1.05, saturation: 1.05, contrast: 1.0, split: 0.22, toon: 0.7,
+  clouds: 0.22, cloudWhite: 1, tint: c(0xfff4e6), vignette: 0.04, fogStart: 110, fogEnd: 1400, haze: 0.3, fogMax: 0.72,
+  landHaze: c(0xf2e4d6), mistDensity: 0.002, mistBase: -4, mistFalloff: 0.1,
+})
+const OTH_EVENING = key({
+  ...EVENING, ...OTH_BASE, sunColor: c(0xffc890), sunIntensity: 3.3, hemiSky: c(0xd8c8cc), hemiGround: c(0x8a6448), hemiIntensity: 1.6,
+  fogColor: c(0xf8d4b4), skyZenith: c(0xa8b8dc), exposure: 1.35, saturation: 1.05, contrast: 1.02, split: 0.35, toon: 0.7,
+  clouds: 0.2, tint: c(0xfff0e0), vignette: 0.12, fogStart: 90, fogEnd: 1200, haze: 0.42, fogMax: 0.78, landHaze: c(0xf2d4c0),
+})
+
 /** The base schedule with each phase's params swapped for a style's. */
 function styled(map: Map<LightingParams, LightingParams>): [number, LightingParams, TimeLabel][] {
   return SCHEDULE.map(([h, p, l]) => [h, map.get(p) ?? p, l])
 }
 const STORY_SCHEDULE = styled(new Map([[DAWN, STORY_DAWN], [DAY, STORY_DAY], [EVENING, STORY_EVENING], [DUSK, STORY_DUSK], [NIGHT, STORY_NIGHT]]))
 const OVER_SCHEDULE = styled(new Map([[DAWN, OVER_DAWN], [DAY, OVER_DAY], [EVENING, OVER_EVENING], [DUSK, OVER_DUSK], [NIGHT, OVER_NIGHT]]))
+const OTH_SCHEDULE = styled(new Map([[DAWN, OTH_DAWN], [DAY, OTH_DAY], [EVENING, OTH_EVENING]]))
 const GEN_SCHEDULE = styled(new Map([[DAWN, GEN_DAWN], [DAY, GEN_DAY], [EVENING, GEN_EVENING], [DUSK, GEN_DUSK], [NIGHT, GEN_NIGHT]]))
 
 /** Named jump targets for the T key / buttons. */
@@ -354,7 +377,7 @@ export class TimeOfDay {
 
   private evaluate(): void {
     const h = this.hours
-    const sched = this.style === 'storybook' ? STORY_SCHEDULE : this.style === 'overland' ? OVER_SCHEDULE : this.style === 'genshin' ? GEN_SCHEDULE : SCHEDULE
+    const sched = this.style === 'storybook' ? STORY_SCHEDULE : this.style === 'overland' ? OVER_SCHEDULE : this.style === 'genshin' ? GEN_SCHEDULE : this.style === 'bright' ? OTH_SCHEDULE : SCHEDULE
     let i = sched.length - 1
     for (let j = 0; j < sched.length; j++) if (sched[j][0] <= h) i = j
     const [h0, p0, l0] = sched[i]

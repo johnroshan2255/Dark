@@ -19,9 +19,10 @@ const SNOW_BOUNCE = new THREE.Color(0.72, 0.8, 0.95)
 const SAND_FOG = new THREE.Color(1.0, 0.9, 0.72)
 const SAND_ZENITH = new THREE.Color(0.26, 0.48, 0.86)
 const SAND_BOUNCE = new THREE.Color(0.85, 0.6, 0.35)
+const SNOW_TINT_OTH = new THREE.Color(0.94, 0.98, 1.04)
 const OTH_SAND_FILL = new THREE.Color(1.0, 0.8, 0.7)
-const OTH_SAND_ZENITH = new THREE.Color(0.7, 0.9, 1.0)
-const OTH_SAND_HAZE = new THREE.Color(1.0, 0.9, 0.84)
+const OTH_SAND_ZENITH = new THREE.Color(0.58, 0.86, 1.0)
+const OTH_SAND_HAZE = new THREE.Color(1.0, 0.93, 0.88)
 
 // AUTUMN: warm golden air — honey haze, a warmer lower-feeling sun, an amber bounce from the leaf-strewn ground.
 const AUT_FOG = new THREE.Color(1.0, 0.86, 0.66)
@@ -91,6 +92,15 @@ export function applyBiomeAir(p: LightingParams, sand: number, snow: number, aut
     p.haze = Math.min(1, p.haze + 0.15 * sand)
     p.mistDensity *= 1 - 0.6 * sand // dry air: no valley mist over the dunes
     p.saturation *= 1 - 0.05 * sand
+  }
+  if (snow > 0.001 && isBright()) {
+    // BRIGHT snow stays BLUE-WHITE (their snow trucks: cyan-blue shade): undo the warm white balance and fill of the
+    // bright keys over the snowfield — the warm grade turned the snow beige-grey (189,187,192).
+    hueToward(p.tint, SNOW_TINT_OTH, 0.9 * snow)
+    hueToward(p.hemiSky, SNOW_BOUNCE, 0.8 * snow)
+    hueToward(p.fogColor, SNOW_FOG, 0.6 * snow)
+    hueToward(p.landHaze, SNOW_FOG, 0.7 * snow)
+    p.split *= 1 - 0.7 * snow
   }
   if (sand > 0.001 && isBright()) {
     // BRIGHT (over the hill): a pale, almost white-cyan sky, thick warm haze over a clear sky, and WARM shade — the

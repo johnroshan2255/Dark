@@ -158,7 +158,7 @@ export class MaterialLibrary {
     ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock' })
     : isBright()
     // BRIGHT (over the hill): plain flat-colour stone — the facets carry the detail, no paint strokes.
-    ? stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.25, toon: 0.3, cullFade: true, wet: true, biomeCover: 'rock' })
+    ? stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.2, toon: 0.12, cullFade: true, wet: true, biomeCover: 'rock' }) // soft: almost no cel step
     : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.35, surface: SURFACE.stone, cullFade: true, biomeCover: 'rock' })
   /**
    * CLIFF ROCK (formations + crags, world-scale merged meshes): the rock look with cliff-sized brush strokes (vertical

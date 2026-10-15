@@ -177,31 +177,20 @@ export function agave(s: SoupLike, rng: Rng): void {
   }
 }
 
-/**
- * Sagebrush / creosote: a low, wide, grey-olive mound of jittered lumps with pale tops.
- * `green` (bright = over the hill): a ROUND green desert bush ~1.4 m wide — their oasis / canyon shrubs, the
- * desert's few spots of green — 5 rounded lumps in a dome (160 tris), dark green underside → lighter top.
- */
-export function dryShrub(s: SoupLike, rng: Rng, green = false): void {
-  const dark = srgb(green ? 0x2c5a20 : 0x5a5a40), light = srgb(green ? 0x7eac3c : 0xb4ac7c)
-  const g0 = new THREE.IcosahedronGeometry(1, 0)
-  const g1 = green ? new THREE.IcosahedronGeometry(1, 1) : g0 // the green bush's big centre lump: rounder (80 tris)
-  const S = green ? 1.75 : 1
-  for (let k = 0; k < (green ? 5 : 4); k++) {
-    // Green bush: a dome — one big central lump, a ring of three, a crown lump on top.
-    const ga = (k / 4) * Math.PI * 2 + rng.range(-0.4, 0.4)
-    const c: V3 = green
-      ? (k === 0 ? [0, 0.42 * S * 0.6, 0] : k === 4 ? [rng.range(-0.08, 0.08) * S, 0.62 * S, rng.range(-0.08, 0.08) * S] : [Math.cos(ga) * 0.3 * S, 0.3 * S, Math.sin(ga) * 0.3 * S])
-      : [rng.range(-0.35, 0.35) * S, (0.25 + rng.range(0, 0.15)) * S, rng.range(-0.35, 0.35) * S]
-    const r = green ? (k === 0 ? 0.5 : k === 4 ? 0.3 : 0.36) * S * rng.range(0.9, 1.1) : rng.range(0.28, 0.42) * S
-    const pos = (k === 0 ? g1 : g0).getAttribute('position')
+/** Sagebrush / creosote: a low, wide, grey-olive mound of jittered lumps with pale tops. */
+export function dryShrub(s: SoupLike, rng: Rng): void {
+  const dark = srgb(0x5a5a40), light = srgb(0xb4ac7c)
+  const g = new THREE.IcosahedronGeometry(1, 0)
+  const pos = g.getAttribute('position')
+  for (let k = 0; k < 4; k++) {
+    const c: V3 = [rng.range(-0.35, 0.35), 0.25 + rng.range(0, 0.15), rng.range(-0.35, 0.35)]
+    const r = rng.range(0.28, 0.42)
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i)
-      const j = green ? 0.9 + 0.2 * ((Math.abs(x * 7.1 + y * 3.3 + z * 5.7 + k) % 1)) : 0.75 + 0.5 * ((Math.abs(x * 7.1 + y * 3.3 + z * 5.7 + k) % 1))
-      const p: V3 = [c[0] + x * r * j, c[1] + y * r * (green ? 0.9 : 0.75) * j, c[2] + z * r * j]
+      const j = 0.75 + 0.5 * ((Math.abs(x * 7.1 + y * 3.3 + z * 5.7 + k) % 1))
+      const p: V3 = [c[0] + x * r * j, c[1] + y * r * 0.75 * j, c[2] + z * r * j]
       s.vert(p, [x, y + 0.3, z], SOLID_UV, dark.clone().lerp(light, Math.max(0, y * 0.5 + 0.5)))
     }
   }
-  g0.dispose()
-  if (g1 !== g0) g1.dispose()
+  g.dispose()
 }
