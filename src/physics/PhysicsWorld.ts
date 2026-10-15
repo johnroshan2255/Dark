@@ -2,7 +2,7 @@ import RAPIER from '@dimforge/rapier3d-compat'
 import { CHUNK_RES, CHUNK_SIZE, CHUNK_VERTS } from '../world/constants'
 import { PROP_STRIDE, TREE_STRIDE, TRUNK_RADIUS, solidHeight, type ChunkData } from '../world/types'
 import { ROCK_HULL } from '../world/Forest/propGeometries'
-import { POI_COLLIDERS } from '../world/POI/poiGeometry'
+import { poiCollider } from '../world/POI/poiGeometry'
 import { instanceYScale } from '../optimization/instancing/InstanceBuilder'
 
 export type Rapier = typeof RAPIER
@@ -207,7 +207,7 @@ export class PhysicsWorld {
       if (t === 0) desc = R.ColliderDesc.cylinder(4.8, 0.18).setTranslation(pr[i] - half, pr[i + 1] + 4.8, pr[i + 2] - half)
       else if (t === 1) desc = R.ColliderDesc.cuboid(0.08, 0.6, 2.0).setTranslation(pr[i] - half, pr[i + 1] + 0.6, pr[i + 2] - half)
       else {
-        const c = POI_COLLIDERS[t]
+        const c = poiCollider(t)
         if (c && c.length === 3) desc = R.ColliderDesc.cuboid(c[0] * sc, c[1] * sc, c[2] * sc).setTranslation(pr[i] - half, pr[i + 1] + c[1] * sc, pr[i + 2] - half)
         else if (c) desc = R.ColliderDesc.cylinder(c[1] * sc, c[0] * sc).setTranslation(pr[i] - half, pr[i + 1] + c[1] * sc, pr[i + 2] - half)
       }

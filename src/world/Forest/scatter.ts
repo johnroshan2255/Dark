@@ -94,7 +94,21 @@ function scatter(
  *  - sparse / dry: pine stands, dead snags, some birch
  * `r` is the per-tree uniform random from the scatter cell (deterministic).
  */
+/**
+ * OASIS weight (bright, over the hill): desert ground 0.6–9 m above the water, i.e. the banks of the desert's
+ * rivers / lakes (which hold water in this style) → palms, bushes and the green band (groundColor).
+ */
+export function oasisAt(fields: WorldFields, wx: number, wz: number, h: number): number {
+  if (fields.palette !== 0) return 0
+  const wl = h - WorldFields.WATER
+  if (wl < 0.6 || wl > 9) return 0
+  const sand = fields.biome(wx, wz, _bw, h)[0]
+  if (sand < 0.35) return 0
+  return Math.min(1, (sand - 0.35) / 0.3) * (1 - Math.max(0, (wl - 3) / 6))
+}
+
 function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: number): number {
+  if (oasisAt(fields, wx, wz, h) > 0.2) return r < 0.85 ? TreeSpecies.Palm : TreeSpecies.Cactus
   const sp = pickBaseSpecies(fields, wx, wz, r, h)
   return sp === TreeSpecies.Birch ? broadleafStand(fields, wx, wz) : sp
 }
@@ -161,6 +175,11 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
       const clump = Math.min(1, Math.max(0, (fields.colorVariation(wx * 0.5 + 91, wz * 0.5 - 37) - 0.62) * 5))
       // Trees: 60 % of the grove density (the player asked for fewer — more open meadow between thinner groves).
       const density = Math.max(fields.forestDensity(wx, wz, h) * TREE_SHARE, sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - clearRoad) / 45) * (fields.palette === 1 ? 0.55 : 1) // overland: big trees, spaced
+      const oas = oasisAt(fields, wx, wz, h)
+      if (oas > 0.2) { // palm groves along the oasis water
+        const dp = 0.45 * oas
+        return r > dp ? 0 : 0.85 + (r / dp) * 0.4
+      }
       if (r > density * 0.9) return 0
       return 1.0 + (r / Math.max(density, 1e-3)) * 0.65 // tall framing trees (refs)
     },
@@ -171,6 +190,7 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
   if (treesOnly) return { trees, rocks: new Float32Array(0), plants: new Float32Array(0) }
   const rocks = scatter(ctx, ROCK_CELL, Layer.Rocks, PROP_STRIDE, (wx, wz, r, h) => {
     if (nearBridge(fields, wx, wz)) return 0
+    if (fields.palette === 0 && h < WorldFields.WATER + 0.3) return 0 // bright: no boulders in the (oasis) water
     const w = fields.biome(wx, wz, _bw, h)
     const p = 0.14 * (1 + w[0] * 1.2 + w[1] * 0.5) // sparse (≈ 9 per chunk in the forest); deserts and snowfields stonier
     if (r >= p) return 0
@@ -196,7 +216,7 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     // Desert: sparse agaves and dry shrubs instead (WorldChunk picks the desert meshes by the biome at the plant).
     // SMALL bushes only, and ~40 % of the old count (the player asked for few, small ones): 0.45–0.8 scale
     // (was 0.7–1.6 — the big leafy mounds), a lighter verge band.
-    const density = ((0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1]) * 0.4 * Math.min(1.6, reg) + w[0] * (fields.palette === 0 ? 0.11 : 0.05)) * (fields.palette === 1 ? 0.45 : 1)
+    const density = ((0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1]) * 0.4 * Math.min(1.6, reg) + w[0] * (fields.palette === 0 ? 0.11 + 0.35 * oasisAt(fields, wx, wz, h) : 0.05)) * (fields.palette === 1 ? 0.45 : 1)
     return r < density ? 0.45 + (r / Math.max(density, 1e-3)) * 0.35 : 0
   })
 

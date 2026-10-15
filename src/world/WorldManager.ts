@@ -142,7 +142,8 @@ export class WorldManager {
       desert = bw[0]
       snow = bw[1]
     }
-    return h < WorldFields.WATER && snow <= ICE_SNOW && desert < 0.4 ? WorldFields.WATER : -Infinity
+    // (Bright: the desert's rivers and lakes are oases with water — the Water shader draws them there too.)
+    return h < WorldFields.WATER && snow <= ICE_SNOW && (desert < 0.4 || this.fields.palette === 0) ? WorldFields.WATER : -Infinity
   }
 
   /**

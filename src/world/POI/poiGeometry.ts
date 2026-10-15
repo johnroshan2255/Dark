@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import { SURFACE_UV, type SurfaceName } from '../../rendering/materials/FoliageAtlas'
+import { GLOW_UV, SURFACE_UV, type SurfaceName } from '../../rendering/materials/FoliageAtlas'
 import { PropType } from './poiLayout'
 import { isBright } from '../../rendering/artStyle'
 
@@ -165,32 +165,73 @@ function gable(w: number, h: number, d: number, y: number, hex: number, trim: nu
   return out
 }
 
-/** BRIGHT (over the hill) farm buildings: board-and-batten / clapboard siding, white trim, framed windows. */
+/** A part on the GLOW surface (FoliageAtlas GLOW_UV: emissive in the shader, bloom on MEDIUM+) — lit windows. */
+function glow(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  const uv = g.getAttribute('uv') as THREE.BufferAttribute
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, GLOW_UV[0], GLOW_UV[1])
+  return g
+}
+
+/** A thick roof slab from (x0, y0) to (x1, y1) (the eave end extended by `over`), depth d, with standing-seam ribs. */
+function roofSlab(x0: number, y0: number, x1: number, y1: number, d: number, hex: number, trim: number, over = 0.55): THREE.BufferGeometry[] {
+  const dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy)
+  const ux = dx / L, uy = dy / L
+  const nx = -uy * Math.sign(ux || 1), ny = Math.abs(ux) // up-facing normal of the slope
+  const len = L + over, t = 0.26
+  const cx = x0 + ux * len / 2 + nx * t / 2, cy = y0 + uy * len / 2 + ny * t / 2
+  const ang = Math.atan2(uy, ux)
+  const out = [finish(new THREE.BoxGeometry(len, t, d + 1.0).rotateZ(ang).translate(cx, cy, 0), hex, 0.92)]
+  const rib = new THREE.Color().setHex(hex).multiplyScalar(1.12).getHex()
+  for (let z = -(d / 2 + 0.4); z <= d / 2 + 0.4; z += 0.55) out.push(finish(new THREE.BoxGeometry(len, 0.06, 0.06).rotateZ(ang).translate(cx + nx * 0.15, cy + ny * 0.15, z), rib, 1))
+  const ex = x0 + ux * len, ey = y0 + uy * len
+  out.push(finish(new THREE.BoxGeometry(0.14, 0.32, d + 1.04).translate(ex, ey, 0), trim, 1)) // fascia at the eave
+  for (const z of [-(d / 2 + 0.52), d / 2 + 0.52]) out.push(finish(new THREE.BoxGeometry(len, 0.16, 0.12).rotateZ(ang).translate(cx - nx * 0.12, cy - ny * 0.12, z), trim, 1))
+  return out
+}
+
+/**
+ * BRIGHT (over the hill) BARN, after their farm barn: a SALTBOX — the ridge off-centre, the long rear slope sweeping
+ * down over a LEAN-TO shed (open bay on posts) — weathered vertical boards with dark gaps, ribbed metal roof, off-white
+ * trim and corner boards, an X-braced sliding door on its track, a LIT loft window (glow → bloom at dusk) and lit side
+ * windows, a cupola. Footprint x −5.75…5.75 × z ±4 (collider).
+ */
 function othBarn(): THREE.BufferGeometry {
-  // Weathered barn red-orange (their barn ≈ 227,124,69 lit), warm grey roof, off-white trim — muted, not toy colours.
-  const W = 10, D = 8, H = 5.4, RH = 4.4, red = 0xb0563a, dark = 0x5a2618, white = 0xe8e0d0, roofC = 0x6a625c
+  const red = 0xb0563a, gap = 0x5a2618, white = 0xe8e0d0, roofC = 0x6a625c, lamp = 0xc08a40
+  const L0 = -2.25, R0 = 5.75, D = 8, H = 5.6, RX = 2.75, RH = 4.2, LT = -5.75, cx = (L0 + R0) / 2, W = R0 - L0
+  const k = RH / (RX - L0), ltH = H - k * (L0 - LT) // lean-to eave height on the long slope
   const parts: THREE.BufferGeometry[] = [
-    box(W, H, D, dark),
-    finish(new THREE.ExtrudeGeometry(tri(W, RH), { depth: D, bevelEnabled: false }).translate(0, H, -D / 2), red, 0.95),
-    ...gable(W, RH, D, H, roofC, white, 'ribs'),
-    ...boards('+z', D / 2, W, H, red, 1), ...boards('-z', D / 2, W, H, red, 2), ...boards('+x', W / 2, D, H, red, 3), ...boards('-x', W / 2, D, H, red, 4),
-    box(W + 0.2, 0.35, D + 0.2, 0x7a746a), // stone sill
+    box(W, H, D, gap, cx),
+    box(W + 0.2, 0.35, D + 0.2, 0x7a746a, cx), // stone sill
   ]
+  // gable end walls (asymmetric triangle) + boards on the walls
+  const gableShape = new THREE.Shape()
+  gableShape.moveTo(L0, 0); gableShape.lineTo(R0, 0); gableShape.lineTo(RX, RH); gableShape.closePath()
+  parts.push(finish(new THREE.ExtrudeGeometry(gableShape, { depth: D, bevelEnabled: false }).translate(0, H, -D / 2), red, 0.95))
+  const wallBoards = (face: Face, hd: number, w: number, h: number, sd: number, shift = 0) =>
+    boards(face, hd, w, h, red, sd).map((g) => g.translate(face === '+z' || face === '-z' ? shift : 0, 0, 0))
+  parts.push(...wallBoards('+z', D / 2, W, H, 1, cx), ...wallBoards('-z', D / 2, W, H, 2, cx))
+  parts.push(...boards('+x', 0, D, H, red, 3).map((g) => g.translate(R0, 0, 0)))
+  // roof: short front slope + the long saltbox slope over the lean-to
+  parts.push(...roofSlab(RX, H + RH, R0, H, D, roofC, white), ...roofSlab(RX, H + RH, LT, ltH, D, roofC, white, 0.45))
+  // lean-to: back + side walls of boards, an open front bay on posts, dark inside
+  parts.push(box(L0 - LT, ltH - 0.1, D - 0.2, 0x2a1c14, (L0 + LT) / 2))
+  parts.push(...boards('-x', 0, D, ltH, red, 5).map((g) => g.translate(LT, 0, 0)))
+  parts.push(...boards('-z', D / 2, L0 - LT, ltH, red, 6).map((g) => g.translate((L0 + LT) / 2, 0, 0)))
+  for (const z of [-D / 2 + 0.2, 0, D / 2 - 0.2]) parts.push(box(0.2, ltH, 0.2, 0x7a5a3a, LT + 0.15, 0, z))
   // corner boards
-  for (const [x, z] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) parts.push(box(0.26, H, 0.26, white, x * (W / 2 + 0.02), 0, z * (D / 2 + 0.02)))
-  // big sliding door with a white frame and X brace, loft door above
-  parts.push(onWall('+z', D / 2, 0, 0, 3.8, 3.9, 0.12, 0x7a3624, 0.03))
-  parts.push(onWall('+z', D / 2, -1.95, 0, 0.18, 3.9, 0.2, white), onWall('+z', D / 2, 1.95, 0, 0.18, 3.9, 0.2, white), onWall('+z', D / 2, 0, 3.9, 4.1, 0.18, 0.2, white))
+  for (const [x, z] of [[L0, -1], [R0, -1], [L0, 1], [R0, 1]]) parts.push(box(0.26, H, 0.26, white, x, 0, z * (D / 2 + 0.02)))
+  // sliding door (X brace, frame, track) centred on the body front
+  const f = (u: number, y: number, w: number, h: number, t: number, hex: number, o = 0) => onWall('+z', D / 2, u, y, w, h, t, hex, o).translate(cx, 0, 0)
+  parts.push(f(0, 0, 3.8, 3.9, 0.12, 0x7a3624, 0.03), f(-1.95, 0, 0.18, 3.9, 0.2, white), f(1.95, 0, 0.18, 3.9, 0.2, white), f(0, 3.9, 4.1, 0.18, 0.2, white), f(0, 0, 0.12, 3.8, 0.18, white))
   const brace = Math.hypot(3.7, 3.8), ba = Math.atan2(3.8, 3.7)
-  for (const sg of [-1, 1]) parts.push(finish(new THREE.BoxGeometry(brace, 0.16, 0.1).rotateZ(sg * ba).translate(0, 1.95, D / 2 + 0.2), white, 1))
-  parts.push(onWall('+z', D / 2, 0, 0, 0.12, 3.8, 0.18, white))
-  parts.push(...windowOn('+z', D / 2, 0, 5.7, 1.3, 1.3, white, 0x6a2a1a))
-  // windows along the sides and the back
-  for (const u of [-2.2, 2.2]) parts.push(...windowOn('+x', W / 2, u, 2.3, 1.0, 1.1), ...windowOn('-x', W / 2, u, 2.3, 1.0, 1.1))
-  parts.push(...windowOn('-z', D / 2, -2.5, 2.4, 1.0, 1.1), ...windowOn('-z', D / 2, 2.5, 2.4, 1.0, 1.1))
+  for (const sg of [-1, 1]) parts.push(finish(new THREE.BoxGeometry(brace, 0.16, 0.1).rotateZ(sg * ba).translate(cx, 1.95, D / 2 + 0.2), white, 1))
+  parts.push(f(0, 4.2, 6.2, 0.14, 0.24, 0x3c4048)) // door track
+  // lit loft window + lit side windows (glass on the glow surface), framed
+  parts.push(...windowOn('+z', D / 2, 0, 5.6, 1.3, 1.3, white, lamp).map((g, i) => (i === 0 ? glow(g) : g).translate(cx, 0, 0)))
+  for (const u of [-2.0, 2.0]) parts.push(...windowOn('+x', 0, u, 2.3, 1.0, 1.1, white, lamp).map((g, i) => (i === 0 ? glow(g) : g).translate(R0, 0, 0)))
+  parts.push(...windowOn('-z', D / 2, -2.0, 2.4, 1.0, 1.1, white, 0x6a7a84).map((g) => g.translate(cx, 0, 0)))
   // cupola on the ridge
-  parts.push(box(1.2, 1.0, 1.2, white, 0, H + RH - 0.35, 0), finish(new THREE.ConeGeometry(1.05, 0.8, 4).rotateY(Math.PI / 4).translate(0, H + RH + 1.05, 0), roofC, 0.9))
-  parts.push(box(1.4, 0.3, 0.14, 0x3c4048, 0, 0, D / 2 + 0.6)) // door track kicker
+  parts.push(box(1.2, 1.0, 1.2, white, RX, H + RH - 0.35, 0), finish(new THREE.ConeGeometry(1.05, 0.8, 4).rotateY(Math.PI / 4).translate(RX, H + RH + 1.05, 0), roofC, 0.9))
   return merged(parts, 'barn')
 }
 
@@ -210,7 +251,7 @@ function othHouse(): THREE.BufferGeometry {
   for (const x of [-1.5, 1.5]) parts.push(box(0.16, 2.5, 0.16, white, x, 0.45, D / 2 + 1.7))
   // windows with shutters
   for (const u of [-2.6, 2.6]) {
-    parts.push(...windowOn('+z', D / 2, u, 1.5, 1.0, 1.25, white))
+    parts.push(...windowOn('+z', D / 2, u, 1.5, 1.0, 1.25, white, 0xc08a40).map((g, i) => (i === 0 ? glow(g) : g))) // lit
     parts.push(onWall('+z', D / 2, u - 0.85, 1.4, 0.42, 1.45, 0.06, shut), onWall('+z', D / 2, u + 0.85, 1.4, 0.42, 1.45, 0.06, shut))
   }
   for (const u of [-1.4, 1.4]) parts.push(...windowOn('+x', W / 2, u, 1.6, 0.9, 1.15, white), ...windowOn('-x', W / 2, u, 1.6, 0.9, 1.15, white))
@@ -275,11 +316,17 @@ export function createPoiGeometries(): Map<number, THREE.BufferGeometry> {
 /** Collider half-extents per prop type ([hx, hy, hz] box, or [r, hh] cylinder when length 2). null = no collider. */
 export const POI_COLLIDERS: Record<number, number[] | null> = {
   [PropType.House]: [4, 2.2, 3],
-  [PropType.Barn]: [5, 2.7, 4],
+  [PropType.Barn]: [5, 2.7, 4], // bright's saltbox barn + lean-to: poiCollider()
   [PropType.Hay]: [0.6, 0.6, 0.62],
   [PropType.Cabin]: [3.2, 2.2, 2.8],
   [PropType.Tent]: [1.1, 0.8, 1.3],
   [PropType.RuinWall]: [2, 1.1, 0.35],
   [PropType.RuinPillar]: [0.4, 1.4],
   [PropType.Woodpile]: [0.5, 0.35, 0.7],
+}
+
+/** Collider of a prop type for the session's art style (bright's barn has a lean-to: x −5.75…5.75). */
+export function poiCollider(t: number): number[] | null {
+  if (t === PropType.Barn && isBright()) return [5.75, 2.8, 4]
+  return POI_COLLIDERS[t] ?? null
 }

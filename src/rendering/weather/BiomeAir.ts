@@ -20,6 +20,7 @@ const SAND_FOG = new THREE.Color(1.0, 0.9, 0.72)
 const SAND_ZENITH = new THREE.Color(0.26, 0.48, 0.86)
 const SAND_BOUNCE = new THREE.Color(0.85, 0.6, 0.35)
 const SNOW_TINT_OTH = new THREE.Color(0.94, 0.98, 1.04)
+const SNOW_SHADE_OTH = new THREE.Color(0.5, 0.72, 1.0)
 const OTH_SAND_FILL = new THREE.Color(1.0, 0.8, 0.7)
 const OTH_SAND_ZENITH = new THREE.Color(0.58, 0.86, 1.0)
 const OTH_SAND_HAZE = new THREE.Color(1.0, 0.93, 0.88)
@@ -97,7 +98,7 @@ export function applyBiomeAir(p: LightingParams, sand: number, snow: number, aut
     // BRIGHT snow stays BLUE-WHITE (their snow trucks: cyan-blue shade): undo the warm white balance and fill of the
     // bright keys over the snowfield — the warm grade turned the snow beige-grey (189,187,192).
     hueToward(p.tint, SNOW_TINT_OTH, 0.9 * snow)
-    hueToward(p.hemiSky, SNOW_BOUNCE, 0.8 * snow)
+    hueToward(p.hemiSky, SNOW_SHADE_OTH, 0.85 * snow, 1 + 0.1 * snow) // deep blue shade on the snow (theirs: cyan-blue)
     hueToward(p.fogColor, SNOW_FOG, 0.6 * snow)
     hueToward(p.landHaze, SNOW_FOG, 0.7 * snow)
     p.split *= 1 - 0.7 * snow

@@ -405,7 +405,14 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
         float mn = st_noise(wp * 0.21 + vec2(vWorldPos.y * 0.13));
         float moss = max(smoothstep(0.63, 0.7, vUpN + (mn - 0.5) * 0.2), top * smoothstep(0.55, 0.75, mn) * step(0.7, st_hash(cell + 7.7)));
         stone = mix(stone, vec3(0.2, 0.3, 0.07) * (0.8 + 0.4 * mn), moss * (1.0 - vBiome.y) * 0.75);
-        stone *= mix(vec3(1.0), vec3(0.9, 0.96, 1.08), vBiome.y);
+        stone *= mix(vec3(1.0), vec3(0.9, 0.96, 1.08), vBiome.y);${bright ? `
+        // BRIGHT: snow clings to every ledge and less-steep part of a snowy cliff, its edge broken into long
+        // horizontal brush strokes (their painted snow banks), slab tops snowed over.
+        if (vBiome.y > 0.05) {
+          float sk = st_noise(vec2(u * 0.3, vWorldPos.y * 2.4)) * 0.65 + st_noise(vec2(u * 1.2, vWorldPos.y * 7.0)) * 0.35;
+          float sc = vBiome.y * smoothstep(0.5, 0.62, vUpN + (sk - 0.5) * 0.5 + top * 0.18);
+          stone = mix(stone, vec3(0.82, 0.87, 0.95), sc);
+        }` : ''}
         diffuseColor.rgb = mix(diffuseColor.rgb, stone, cliff);
       }
     }
@@ -421,10 +428,10 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   // a soft foam/wet line right at the shore.
   // (In the desert there is no water: basins and the river's bed are dry sand / clay pans — no wet tint there.
   //  In the snow the water is frozen: no wet band or foam at the ice edge either.)
-  float wetZone = 1.0 - smoothstep(0.35, 0.6, vBiome.x + vBiome.y);
+  float wetZone = 1.0 - smoothstep(0.35, 0.6, ${bright ? 'vBiome.y' : 'vBiome.x + vBiome.y'}); // (bright: desert oases are wet)
   float wd = (${WATER_LEVEL.toFixed(2)} - vWorldPos.y);
   diffuseColor.rgb *= 1.0 - 0.35 * smoothstep(-0.8, 0.0, wd) * step(wd, 0.0) * 0.5 * wetZone; // wet dark band above
-  ${!over && !story ? '// Genshin: the lake bed glows turquoise through clear shallows, deepening to teal.\n  ' : ''}if (wd > 0.0) diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * ${!over && !story ? 'vec3(0.45, 0.9, 0.88)' : 'vec3(0.5, 0.66, 0.7)'}, ${!over && !story ? 'vec3(0.01, 0.12, 0.14)' : 'vec3(0.015, 0.045, 0.055)'}, smoothstep(0.0, ${!over && !story ? '5.0' : '3.5'}, wd)), 1.0 - smoothstep(0.35, 0.6, vBiome.x));
+  ${!over && !story ? '// Genshin: the lake bed glows turquoise through clear shallows, deepening to teal.\n  ' : ''}if (wd > 0.0) diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * ${!over && !story ? 'vec3(0.45, 0.9, 0.88)' : 'vec3(0.5, 0.66, 0.7)'}, ${!over && !story ? 'vec3(0.01, 0.12, 0.14)' : 'vec3(0.015, 0.045, 0.055)'}, smoothstep(0.0, ${!over && !story ? '5.0' : '3.5'}, wd)), ${bright ? '1.0' : '1.0 - smoothstep(0.35, 0.6, vBiome.x)'});
   wd = mix(-10.0, wd, wetZone); // kills the shore foam line below outside the wet zone
   float foam = 1.0 - smoothstep(0.0, 0.18, abs(wd - 0.04));
   if (foam > 0.0) diffuseColor.rgb += vec3(0.25, 0.27, 0.27) * foam * (0.5 + 0.5 * st_noise(wp * 3.0 + vec2(uTimeS * 0.3))); // shoreline only
@@ -545,7 +552,10 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     diffuseColor.rgb = mix(diffuseColor.rgb, strata, vBiomeW.x * 0.75);
   }` : ''}
   // Snow cover: up-facing surfaces whiten (tops of shelves, not the undersides seen from below the canopy).
-  float up = vSnowUp + (bn - 0.5) * 0.55;
+  float up = vSnowUp + (bn - 0.5) * 0.55;${o.biomeCover === 'rock' && bright ? `
+  // BRIGHT: a PAINTED snow edge on rock (their snow banks): long horizontal brush strokes break the line.
+  { float sk = st_noise(vec2((vWPos.x + vWPos.z) * 0.35, vWPos.y * 3.2)) * 0.65 + st_noise(vec2((vWPos.x - vWPos.z) * 1.1, vWPos.y * 9.0)) * 0.35;
+    up = vSnowUp + (sk - 0.5) * 0.9; }` : ''}
   // (Card canopies — Genshin / storybook — carry snow on both faces of every upward-facing card: Dragonspine's
   //  conifers are heavy with it; the overland solid shelves only on their top faces.)
   float cover = vBiomeW.y * smoothstep(${o.biomeCover === 'rock' ? '0.05, 0.4' : over ? '0.45, 0.85' : '-0.25, 0.3'}, up) * (gl_FrontFacing ? 1.0 : ${over ? '0.3' : '1.0'});

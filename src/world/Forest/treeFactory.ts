@@ -6,7 +6,7 @@ import { Rng } from '../noise/rng'
 import { TreeSpecies } from '../types'
 import { agave, dryShrub, joshua, saguaro } from './desertFlora'
 import { crownLump, Soup, srgb, sub, tuft, type V3 } from './treeParts'
-import { ANCIENT_TREE, broadleaf, cardBush, glowShrooms, gnarledSnag, leafPile, LIYUE_PINE, MAPLE_TREE, MONDSTADT_TREE, shroomTree, twistedPine } from './genshinTrees'
+import { ANCIENT_TREE, broadleaf, cardBush, glowShrooms, gnarledSnag, leafPile, LIYUE_PINE, MAPLE_TREE, MONDSTADT_TREE, shroomTree, tube, twistedPine } from './genshinTrees'
 
 /**
  * Procedural stylized trees (refer/forest, refer/roads hero) built from alpha-tested FOLIAGE CARDS on a solid
@@ -521,6 +521,7 @@ export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } 
     { id: TreeSpecies.Birch, name: 'birch', levels: build(birch, 505, 'birch'), trunkRadius: 0.3, trunkHalfHeight: 3 },
     { id: TreeSpecies.Cactus, name: 'cactus', levels: build(desert(saguaro, 'cactus'), 606, 'cactus'), trunkRadius: 0.34, trunkHalfHeight: 3 },
     { id: TreeSpecies.Joshua, name: 'joshua', levels: build(desert(joshua, 'joshua'), 707, 'joshua'), trunkRadius: 0.3, trunkHalfHeight: 1.5 },
+    { id: TreeSpecies.Palm, name: 'palm', levels: build(palm, 1414, 'palm'), trunkRadius: 0.22, trunkHalfHeight: 3.5 },
     // Region species (world/biomes/BiomeDefs.ts): autumn maple, mystic ancient giant and glowing mushroom tree.
     { id: TreeSpecies.Maple, name: 'maple', levels: build((l, r) => broadleaf(l, r, isGenshin() ? { ...MAPLE_TREE, plates: true, fork: 1.8, spread: 3.9, limbs: 5, clumpR: 1.65 } : MAPLE_TREE, 'maple'), 808, 'maple'), trunkRadius: 0.3, trunkHalfHeight: 3 },
     { id: TreeSpecies.Ancient, name: 'ancient', levels: build((l, r) => broadleaf(l, r, isGenshin() ? { ...ANCIENT_TREE, plates: true, fork: 3.0, spread: 5.4, limbs: 6, clumpR: 2.3 } : ANCIENT_TREE, 'ancient'), 909, 'ancient'), trunkRadius: 0.6, trunkHalfHeight: 4 },
@@ -553,6 +554,44 @@ function desert(fn: (s: Soup, level: number, rng: Rng) => void, name: string): (
     fn(s, level, rng)
     return s.geometry(name)
   }
+}
+
+/**
+ * OASIS PALM (bright — over the hill's oases): a slim ringed trunk 6–8.5 m tall curving out to one side, a crown of
+ * long ARCHING fronds (fern-cell leaf cards in 2–3 drooping segments, olive green like theirs), a dark crown core
+ * hiding the frond bases and a cluster of dates. Tris L0/L1/L2 ≈ 380 / 140 / 50.
+ */
+function palm(level: number, rng: Rng): THREE.BufferGeometry {
+  const s = new Soup()
+  const H = rng.range(6, 8.5), lean = rng.range(0.7, 1.7), la = rng.next() * Math.PI * 2
+  const segs = [7, 4, 2][level], sides = [6, 5, 4][level]
+  const pts: V3[] = [], radii: number[] = []
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, off = lean * Math.pow(t, 1.7)
+    pts.push([Math.cos(la) * off, t * H, Math.sin(la) * off])
+    radii.push((0.26 - 0.1 * t) * (level === 0 && i % 2 === 1 ? 1.08 : 1)) // ringed bark: every other ring bulges
+  }
+  tube(s, pts, radii, sides, srgb(0x6a5440), srgb(0xa48c6a))
+  const T = pts[segs]
+  const dark = srgb(0x3e5a26), light = srgb(0x9cb450)
+  blob(s, [T[0], T[1] - 0.05, T[2]], 0.38, 0.75, rng, srgb(0x4a5428))
+  if (level === 0) for (let k = 0; k < 3; k++) blob(s, [T[0] + rng.range(-0.25, 0.25), T[1] - 0.35, T[2] + rng.range(-0.25, 0.25)], 0.12, 1, rng, srgb(0xb0702a))
+  const n = [14, 9, 6][level]
+  for (let f = 0; f < n; f++) {
+    const a = (f / n) * Math.PI * 2 + rng.range(-0.2, 0.2)
+    const dx = Math.cos(a), dz = Math.sin(a)
+    const len = rng.range(2.2, 3.0), rise = rng.range(0.25, 0.6)
+    const p0: V3 = [T[0], T[1], T[2]]
+    const p1: V3 = [T[0] + dx * len * 0.5, T[1] + rise, T[2] + dz * len * 0.5]
+    const p2: V3 = [T[0] + dx * len * 0.95, T[1] + rise - 0.55, T[2] + dz * len * 0.95]
+    const p3: V3 = [T[0] + dx * len * 1.25, T[1] + rise - 1.5, T[2] + dz * len * 1.25]
+    const side: V3 = [-dz * 0.55, 0.04, dx * 0.55]
+    const centre: V3 = [T[0], T[1] - 0.6, T[2]]
+    card(s, p0, p1, side, ATLAS_CELLS.fern, centre, dark, light, 0.6)
+    card(s, p1, level === 2 ? p3 : p2, side, ATLAS_CELLS.fern, centre, light, light, 0.6)
+    if (level < 2) card(s, p2, p3, [side[0] * 0.8, side[1], side[2] * 0.8], ATLAS_CELLS.fern, centre, light, dark, 0.6)
+  }
+  return s.geometry('palm')
 }
 
 /** Desert undergrowth: agave rosettes and grey-olive dry shrubs (replace ferns/bushes on sand, WorldChunk). */

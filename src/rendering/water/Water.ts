@@ -82,7 +82,11 @@ export class Water {
           // Ice: where the region is snow, the surface is frozen — almost no waves, no rain rings.
           vec2 bio = biomeAt(vWorld.xz);
           // DESERT: no water at all — basins and the river bed are dry (the terrain shows its clay pan).
+          #ifdef OTH_WATER
+          float dry = 0.0; // bright: the desert's river is an OASIS (water, green banks, palms)
+          #else
           float dry = smoothstep(0.3, 0.5, bio.x);
+          #endif
           if (dry > 0.99) discard;
           // SNOW: frozen across the whole snow region (and its fringe), not only deep inside it.
           float ice = smoothstep(0.22, 0.42, bio.y);

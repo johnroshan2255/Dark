@@ -91,7 +91,9 @@ export function buildCrags(fields: WorldFields, cx: number, cz: number, heights:
       const r = hashFloat(seed, gx, gz, L + 3)
       const ws = P.ws + P.wsVar * r // half-width across the slope
       const wd = P.wd + P.wdVar * hashFloat(seed, gx, gz, L + 4) // half-depth down the slope
-      if (fields.anyRoadEdge(wx, wz) < 4 + ws) continue
+      // Clear of every road. Bright slabs need only their DOWNHILL depth clear (they face the road): the canyon
+      // walls 10 m off the road get rock too (with the old across-slope margin they stayed bare sand slopes).
+      if (fields.anyRoadEdge(wx, wz) < (fields.palette === 0 ? 2 + wd * 1.15 : 4 + ws)) continue
       if (fields.pois.near(wx, wz, 6) || fields.formations.near(wx, wz, 2) || fields.landmarks.near(wx, wz, 8) || nearBridge(fields, wx, wz, Math.max(ws, wd) * 1.4 + 4)) continue
       if (fields.palette === 0) addSlabs(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L, P.salt > 0)
       else addCrag(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L)
@@ -99,7 +101,39 @@ export function buildCrags(fields: WorldFields, cx: number, cz: number, heights:
     }
   }
   }
+  if (fields.palette === 0) count += canyonWalls(fields, cx, cz, out)
   return count
+}
+
+/**
+ * BRIGHT CANYON WALLS: where a gorge / desert canyon wall stands beside the main road (WorldFields.gorge — a narrow
+ * 5–9 m steep band the random crag cells rarely hit), both walls are lined with slab stacks every ~7 m along the
+ * road, from below road level to just over the wall top — a continuous wall of piled rock like their canyons.
+ * Deterministic per 7 m step (salted hash); clear of the road (≥ 5 m), secondary roads, places and bridges.
+ */
+function canyonWalls(fields: WorldFields, cx: number, cz: number, out: CragMesh): number {
+  const seed = fields.seed, x0 = cx * CHUNK_SIZE, z0 = cz * CHUNK_SIZE
+  const STEP = 7, L = Layer.Crags * 16 + 128
+  let n = 0
+  for (let k = Math.ceil(z0 / STEP); k * STEP < z0 + CHUNK_SIZE; k++) {
+    for (const side of [-1, 1]) {
+      const z = k * STEP + (hashFloat(seed, k, side, L) - 0.5) * 3
+      const rx = fields.roadCenterX(z)
+      const rh = fields.roadHeight(z)
+      const dOut = WorldFields.ROAD_HALF_WIDTH + 12.5 + hashFloat(seed, k, side, L + 1) * 3
+      const x = rx + side * dOut
+      if (x < x0 || x >= x0 + CHUNK_SIZE || z < z0 || z >= z0 + CHUNK_SIZE) continue
+      const top = fields.height(rx + side * (WorldFields.ROAD_HALF_WIDTH + 24), z)
+      if (top - rh < 8) continue // no wall here
+      if (fields.netRoad(x, z, 12) || fields.pois.near(x, z, 8) || nearBridge(fields, x, z, 8) || fields.landmarks.near(x, z, 8)) continue
+      const ws = 4.5 + 2.5 * hashFloat(seed, k, side, L + 2), wd = 3.5 + 1.5 * hashFloat(seed, k, side, L + 3)
+      const h0 = fields.height(x, z)
+      addSlabs(fields, out, x - x0, z - z0, x, z, h0, side, 0, (top - rh) / 12, ws, wd, seed, k, side, L + 10, false,
+        [rh - 1.5, top + 0.5 + 2 * hashFloat(seed, k, side, L + 4)])
+      n++
+    }
+  }
+  return n
 }
 
 function addCrag(
@@ -241,12 +275,13 @@ const SLAB_RINGS = [[0, 0.86, -0.75], [0.22, 1, -0.05], [0.74, 0.97, 0.3], [1, 0
 function addSlabs(
   fields: WorldFields, out: CragMesh, lx: number, lz: number, wx: number, wz: number, h0: number,
   ux: number, uz: number, g: number, ws: number, wd: number, seed: number, gx: number, gz: number, L: number, small: boolean,
+  range?: [number, number],
 ): void {
   const hf = (k: number) => hashFloat(seed, gx, gz, L + 5 + k)
   const dx = -ux, dz = -uz, sx = -dz, sz = dx
   const reach = Math.max(ws, wd)
-  const yb = h0 - g * reach * 1.2 - 1.5
-  const yt = h0 + (0.3 + 0.8 * hf(2)) * g * wd + hf(3) * 3
+  const yb = range ? range[0] : h0 - g * reach * 1.2 - 1.5
+  const yt = range ? range[1] : h0 + (0.3 + 0.8 * hf(2)) * g * wd + hf(3) * 3
   const yspan = yt - yb
   const w = fields.biome(wx, wz, _bw, h0)
   const sand = w[0], snow = w[1]

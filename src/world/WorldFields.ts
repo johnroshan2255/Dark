@@ -287,15 +287,28 @@ export class WorldFields {
    */
   private gorge(x: number, z: number, h: number): number {
     // Never around the spawn: the game opens on an open valley with the home landmark in view (landmarks.ts).
-    const m = sstep(0.56, 0.68, this.roadN(z * 0.0011, 50.5) * 0.5 + 0.5) * sstep(450, 750, Math.abs(z))
-    if (m <= 0) return h
+    const far = sstep(450, 750, Math.abs(z))
+    if (far <= 0) return h
     const d = this.roadDistance(x, z) - WorldFields.ROAD_HALF_WIDTH
-    if (d < 10 || d > 70) return h
+    if (d < 10 || d > 110) return h
+    let m = sstep(0.56, 0.68, this.roadN(z * 0.0011, 50.5) * 0.5 + 0.5)
+    // BRIGHT DESERT CANYONS (over the hill): most of the desert road runs through a CANYON — taller walls (16–34 m)
+    // that stay up farther out (to ~60–110 m), clad in the stacked slab rocks (crags on every slope ≥ 43°).
+    let canyon = 0
+    if (this.palette === 0) {
+      const sand = this.biomes.weights(this.roadCenterX(z), z, this.cbw)[0]
+      if (sand > 0.05) canyon = sand * sstep(-0.5, -0.2, this.roadN(z * 0.0017, 61.3))
+    }
+    m = Math.max(m, canyon)
+    if (m <= 0) return h
     const r = this.riverDistance(x, z) - WorldFields.RIVER_HALF_WIDTH - WorldFields.RIVER_BANK
-    const wall = sstep(10, 19, d) * (1 - sstep(38, 70, d)) * sstep(0, 30, r)
-    const height = 10 + 10 * (this.detail(z * 0.01, x > this.roadCenterX(z) ? 3.3 : 7.7) * 0.5 + 0.5)
-    return h + wall * height * m
+    const out0 = 38 + 22 * canyon, out1 = 70 + 40 * canyon
+    const wall = sstep(10, 19, d) * (1 - sstep(out0, out1, d)) * sstep(0, 30, r)
+    const n = this.detail(z * 0.01, x > this.roadCenterX(z) ? 3.3 : 7.7) * 0.5 + 0.5
+    const height = (10 + 10 * n) * (1 - canyon) + (16 + 18 * n) * canyon
+    return h + wall * height * m * far
   }
+  private readonly cbw: BiomeWeights = [0, 0]
 
   /**
    * Main-road VALLEY: relief is scaled toward the road level inside the corridor (12 % next to the road, full

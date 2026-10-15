@@ -53,6 +53,7 @@ const DUNE_L_OTH = hex(0xf2b282)
 const DUNE_D_OTH = hex(0xdc9466)
 const DUNE_RED_OTH = hex(0xc8704a)
 const PLAYA = hex(0xdcc9a2)
+const OASIS_WET = hex(0x9a7a56)
 // Snowfields (Dragonspine): bright blue-white snow, cooler shaded drifts, grey-blue rock where it's steep, ice at the water.
 const SNOW = hex(0xf4f7fc)
 const SNOW_SHADE = hex(0xcbd8ea)
@@ -138,7 +139,12 @@ export function groundColor(fields: WorldFields, x: number, z: number, h: number
     d[0] *= kk; d[1] *= kk; d[2] *= kk
     if (slope > 0.25) lerp(d, DR, Math.min(1, (slope - 0.25) * 2.5) * 0.7)
     // Below the water line the desert is DRY: a pale cracked clay pan (playa) in basins and the river's bed.
-    if (wl < 1.5) lerp(d, PLAYA, Math.min(1, (1.5 - wl) / 1.5) * 0.85)
+    if (oth) {
+      // OASIS (bright): water in the desert's river / basins → a band of green ground along it (patchy, fading out
+      // ~7 m above the water) and darker wet sand at the waterline, instead of a dry clay pan.
+      if (wl < 7) lerp(d, P.olive, Math.min(1, (7 - wl) / 4) * sstep(0.25, 0.6, m * 0.6 + fine * 0.4 + (7 - wl) / 14) * 0.85)
+      if (wl < 0.8) lerp(d, OASIS_WET, Math.min(1, (0.8 - wl) / 0.8) * 0.7)
+    } else if (wl < 1.5) lerp(d, PLAYA, Math.min(1, (1.5 - wl) / 1.5) * 0.85)
     lerp(out, d, w[0])
   }
   if (w[1] > 0.002) {
