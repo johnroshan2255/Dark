@@ -21,6 +21,9 @@ const SAND_ZENITH = new THREE.Color(0.26, 0.48, 0.86)
 const SAND_BOUNCE = new THREE.Color(0.85, 0.6, 0.35)
 const SNOW_TINT_OTH = new THREE.Color(0.94, 0.98, 1.04)
 const SNOW_SHADE_OTH = new THREE.Color(0.5, 0.72, 1.0)
+const SNOW_CYAN = new THREE.Color(0.7, 0.95, 1.12)
+const SNOW_CYAN_FILL = new THREE.Color(0.35, 0.78, 1.0)
+const sst = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t) }
 const OTH_SAND_FILL = new THREE.Color(1.0, 0.8, 0.7)
 const OTH_SAND_ZENITH = new THREE.Color(0.58, 0.86, 1.0)
 const OTH_SAND_HAZE = new THREE.Color(1.0, 0.9, 0.86)
@@ -103,6 +106,15 @@ export function applyBiomeAir(p: LightingParams, sand: number, snow: number, aut
     hueToward(p.fogColor, SNOW_FOG, 0.6 * snow)
     hueToward(p.landHaze, SNOW_FOG, 0.7 * snow)
     p.split *= 1 - 0.7 * snow
+    // BLUE HOUR on the snow (their snow-truck shot): around dusk the whole snowfield goes CYAN — the white balance and
+    // the fill swing to cyan-blue (stars ramp in at dusk → the blend weight; full night keeps its own moonlight).
+    const bh = sst(0.02, 0.3, p.stars) * (1 - sst(0.6, 0.95, p.stars)) * snow
+    if (bh > 0.001) {
+      hueToward(p.tint, SNOW_CYAN, 0.85 * bh, 1 + 0.08 * bh)
+      hueToward(p.hemiSky, SNOW_CYAN_FILL, 0.9 * bh, 1 + 0.25 * bh)
+      hueToward(p.fogColor, SNOW_CYAN_FILL, 0.6 * bh)
+      p.saturation *= 1 + 0.25 * bh
+    }
   }
   if (sand > 0.001 && isBright()) {
     // BRIGHT (over the hill): a pale, almost white-cyan sky, thick warm haze over a clear sky, and WARM shade — the

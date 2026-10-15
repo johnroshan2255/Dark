@@ -221,6 +221,34 @@ function drawTuftGenshin(g: CanvasRenderingContext2D, ox: number, oy: number, rn
   }
 }
 
+/**
+ * DOT CLUSTER (bright — over the hill's foliage): the crown is made of ROUND DABS, like pointillist paint — ~70
+ * discs of varied size inside a lumpy blob (3 overlapping lobes), each ONE flat tone (0.8–1.0; the lower / back ones
+ * a little darker), small gaps between them so the edge is a bumpy scallop of dots, never a leaf shape. All light /
+ * shade still comes from the crown's normals + vertex colours.
+ */
+function drawDots(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng): void {
+  const cx = ox + CELL / 2, cy = oy + CELL / 2, R = CELL * 0.44
+  const lobes = [0, 1, 2].map(() => [rng.range(-0.3, 0.3), rng.range(-0.25, 0.3), rng.range(0.45, 0.62)] as const)
+  const inside = (x: number, y: number) => lobes.some(([lx, ly, lr]) => (x - lx) ** 2 + (y - ly) ** 2 < lr * lr)
+  const dots: [number, number, number, number][] = []
+  for (let tries = 0; dots.length < 72 && tries < 2000; tries++) {
+    const x = rng.range(-0.9, 0.9), y = rng.range(-0.9, 0.9)
+    if (!inside(x, y)) continue
+    const r = rng.range(0.07, 0.15)
+    if (Math.abs(x) + r > 0.95 || Math.abs(y) + r > 0.95) continue
+    if (dots.some(([dx, dy, dr]) => Math.hypot(dx - x, dy - y) < (dr + r) * 0.72)) continue
+    dots.push([x, y, r, rng.range(0.8, 1.0) - (y > 0.2 ? 0.06 : 0)])
+  }
+  dots.sort((a, b) => b[1] - a[1]) // back / lower first, front / upper painted over them
+  for (const [x, y, r, v] of dots) {
+    g.fillStyle = grey(v)
+    g.beginPath()
+    g.ellipse(cx + x * R, cy + y * R, r * R, r * R * rng.range(0.85, 1.0), rng.range(0, Math.PI), 0, Math.PI * 2)
+    g.fill()
+  }
+}
+
 function drawTuft(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng, round = false): void {
   const cx = ox + CELL / 2, cy = oy + CELL * 0.5, R = CELL * 0.4
   // Lumpy blob: union of lobes (fraction of R).
@@ -290,7 +318,7 @@ function drawFern(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng)
 }
 
 /** Draws the atlas ('storybook' art style swaps the conifer spray for brush-stroke fans). */
-function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean, genshin = false): void {
+function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean, genshin = false, dots = false): void {
   const g = canvas.getContext('2d')!
   g.clearRect(0, 0, SIZE, SIZE)
   const rng = new Rng(4242)
@@ -299,7 +327,8 @@ function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean, genshin = fals
   drawLeaves(g, CELL, 0, rng)
   // The leaf-cluster cell is the Blender trees' leaf texture (assets/treeModels.ts): the painted Genshin cluster in
   // every style but storybook (its brush look keeps its own tufts).
-  if (genshin || !storybook) drawTuftGenshin(g, 0, CELL, rng)
+  if (dots) drawDots(g, 0, CELL, rng)
+  else if (genshin || !storybook) drawTuftGenshin(g, 0, CELL, rng)
   else drawTuft(g, 0, CELL, rng)
   drawFern(g, CELL, CELL, rng)
   // Opaque white block for solids (bottom-right corner of the fern cell, outside the frond).
@@ -307,10 +336,10 @@ function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean, genshin = fals
   g.fillRect(SIZE - 40, SIZE - 40, 40, 40)
 }
 
-export function createFoliageAtlas(storybook = false, genshin = false): THREE.CanvasTexture {
+export function createFoliageAtlas(storybook = false, genshin = false, dots = false): THREE.CanvasTexture {
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = SIZE
-  drawAtlas(canvas, storybook, genshin)
+  drawAtlas(canvas, storybook, genshin, dots)
   const tex = new THREE.CanvasTexture(canvas)
   tex.colorSpace = THREE.SRGBColorSpace
   tex.anisotropy = 4

@@ -225,6 +225,21 @@ export class VehicleFx {
           r = 0.8; g = 0.68; b = 0.44 // sand
           s1 = 3.0; life = 2.0; a = 0.3
         }
+        // WET MUD: dark red-brown CLUMPS flung up and back off the tread (heavy: they arc and drop), with the dust.
+        const mud = !road && bw[1] < 0.5 ? car.mudLevel : 0
+        if (mud > 0.15) {
+          r = 0.36; g = 0.24; b = 0.16; a *= 0.6 // the spray darkens too
+          for (let c = 0; c < 2 && Math.random() < mud; c++) {
+            const sp = 2 + speed * 0.3 + slip * 4
+            const d = sim.speed >= 0 ? -1 : 1
+            this.spawn({
+              x: _c.x + (Math.random() - 0.5) * 0.3, y: _c.y + 0.25, z: _c.z + (Math.random() - 0.5) * 0.3,
+              vx: _f.x * d * sp + (Math.random() - 0.5) * 2 + wx, vy: 2.5 + Math.random() * 3 + slip * 2, vz: _f.z * d * sp + (Math.random() - 0.5) * 2 + wz,
+              life: 0.7 + Math.random() * 0.4, size0: 0.14 + Math.random() * 0.08, size1: 0.1, alpha: 0.95,
+              r: 0.24 + Math.random() * 0.06, g: 0.14, b: 0.08, grav: -18,
+            })
+          }
+        }
         // Thrown against the wheel's travel and along the slide, low and outward, then it rises and thins.
         const lat = sim.lateral
         const rx = -_f.z, rz = _f.x // chassis right (world, horizontal)

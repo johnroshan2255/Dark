@@ -245,9 +245,20 @@ const OTH_DAY = key({
   landHaze: c(0xf2e4d6), mistDensity: 0.002, mistBase: -4, mistFalloff: 0.1,
 })
 const OTH_EVENING = key({
-  ...EVENING, ...OTH_BASE, sunColor: c(0xffc890), sunIntensity: 3.3, hemiSky: c(0xd8c8cc), hemiGround: c(0x8a6448), hemiIntensity: 1.6,
-  fogColor: c(0xf8d4b4), skyZenith: c(0xa8b8dc), exposure: 1.35, saturation: 1.05, contrast: 1.02, split: 0.35, toon: 0.7,
-  clouds: 0.2, tint: c(0xfff0e0), vignette: 0.12, fogStart: 90, fogEnd: 1200, haze: 0.42, fogMax: 0.78, landHaze: c(0xf2d4c0),
+  // Their golden hour (the dusk barn shot): a hot ORANGE low sun against DEEP BLUE shade — the sky fill turns blue so
+  // every shadow (and the shaded side of each trunk) reads blue, lit faces glow orange. Rich, not murky.
+  ...EVENING, ...OTH_BASE, sunColor: c(0xffa458), sunIntensity: 3.8, hemiSky: c(0x6c8ad8), hemiGround: c(0x5a4438), hemiIntensity: 1.7,
+  fogColor: c(0xf4b48a), skyZenith: c(0x4a6ac0), exposure: 1.4, saturation: 1.18, contrast: 1.06, split: 0.55, toon: 0.75,
+  clouds: 0.18, tint: c(0xfff0e0), vignette: 0.12, fogStart: 90, fogEnd: 1200, haze: 0.38, fogMax: 0.76, landHaze: c(0xd8a8b8),
+  mistDensity: 0.006, mistBase: 0, mistFalloff: 0.085,
+})
+const OTH_DUSK = key({
+  // BLUE HOUR after sunset: everything cyan-blue (their snow-truck shot), a last orange band on the horizon toward
+  // the sun (sky shader), warm windows and lanterns glowing; stars coming out.
+  ...DUSK, ...OTH_BASE, sunColor: c(0xff8a50), sunIntensity: 1.2, moonIntensity: 0.6, hemiSky: c(0x4a8ad8), hemiGround: c(0x24304a),
+  hemiIntensity: 1.9, fogColor: c(0x6a8ac8), skyZenith: c(0x1a3a8a), exposure: 1.55, saturation: 1.15, contrast: 1.04, split: 0.3,
+  toon: 0.6, stars: 0.35, clouds: 0.15, tint: c(0xe8f2ff), vignette: 0.15, fogStart: 70, fogEnd: 900, haze: 0.35, fogMax: 0.82,
+  landHaze: c(0x7a98d0), mistDensity: 0.01, mistBase: 0, mistFalloff: 0.08,
 })
 
 /** The base schedule with each phase's params swapped for a style's. */
@@ -256,7 +267,7 @@ function styled(map: Map<LightingParams, LightingParams>): [number, LightingPara
 }
 const STORY_SCHEDULE = styled(new Map([[DAWN, STORY_DAWN], [DAY, STORY_DAY], [EVENING, STORY_EVENING], [DUSK, STORY_DUSK], [NIGHT, STORY_NIGHT]]))
 const OVER_SCHEDULE = styled(new Map([[DAWN, OVER_DAWN], [DAY, OVER_DAY], [EVENING, OVER_EVENING], [DUSK, OVER_DUSK], [NIGHT, OVER_NIGHT]]))
-const OTH_SCHEDULE = styled(new Map([[DAWN, OTH_DAWN], [DAY, OTH_DAY], [EVENING, OTH_EVENING]]))
+const OTH_SCHEDULE = styled(new Map([[DAWN, OTH_DAWN], [DAY, OTH_DAY], [EVENING, OTH_EVENING], [DUSK, OTH_DUSK]]))
 const GEN_SCHEDULE = styled(new Map([[DAWN, GEN_DAWN], [DAY, GEN_DAY], [EVENING, GEN_EVENING], [DUSK, GEN_DUSK], [NIGHT, GEN_NIGHT]]))
 
 /** Named jump targets for the T key / buttons. */

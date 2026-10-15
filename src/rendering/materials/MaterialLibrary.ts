@@ -129,7 +129,7 @@ function goldCaps(m: THREE.MeshLambertMaterial): THREE.MeshLambertMaterial {
  * Keep the number of distinct programs small: see skills/webgl.
  */
 export class MaterialLibrary {
-  readonly atlas = createFoliageAtlas(isStorybook(), isGenshin())
+  readonly atlas = createFoliageAtlas(isStorybook(), isGenshin(), isBright()) // bright: round dot-dab foliage (over the hill)
   /** Hand-painted surface detail for solids and ground (shaders/paint.ts) — 0.35 MB, shared. */
   readonly brush = (globalUniforms.uBrush.value = createBrushTexture())
   /**

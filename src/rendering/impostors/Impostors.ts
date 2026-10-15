@@ -26,7 +26,9 @@ import { isGenshin, isOverland } from '../artStyle'
  * + Lambert. A tree at 150 m covers ~200 px on a 720p screen.
  */
 export const FRAMES = 8
-const GRID = 4 // species slots per atlas side
+const GRID = 4 // species slots per atlas side (16 species) — grows to GRID_MAX when more are registered
+/** Max slots per side: a 17th–25th species bakes a 5×5 atlas, scaled up so every view keeps its texels. */
+const GRID_MAX = 5
 
 export interface ImpostorAtlas {
   texture: THREE.Texture
@@ -76,8 +78,10 @@ function treeBox(g: THREE.BufferGeometry): THREE.Vector4 {
  * Bake every species (full-detail level) into one atlas. `size` = atlas px. Runs on the GPU through `renderer`;
  * restores the renderer's state afterwards.
  */
-export function bakeImpostors(renderer: THREE.WebGLRenderer, species: { id: number; geometry: THREE.BufferGeometry }[], foliageAtlas: THREE.Texture, size: number): ImpostorAtlas {
-  const cellPx = size / GRID / FRAMES
+export function bakeImpostors(renderer: THREE.WebGLRenderer, species: { id: number; geometry: THREE.BufferGeometry }[], foliageAtlas: THREE.Texture, size0: number): ImpostorAtlas {
+  const grid = species.length > GRID * GRID ? GRID_MAX : GRID
+  const size = Math.round((size0 * grid) / GRID)
+  const cellPx = size / grid / FRAMES
   const rt = new THREE.WebGLRenderTarget(size, size, { depthBuffer: true, type: THREE.UnsignedByteType })
   rt.texture.colorSpace = THREE.SRGBColorSpace
   const mat = bakeMaterial(foliageAtlas)
@@ -95,7 +99,7 @@ export function bakeImpostors(renderer: THREE.WebGLRenderer, species: { id: numb
   renderer.setClearColor(0x000000, 0)
   renderer.clear(true, true, true)
   const dir = new THREE.Vector3(), centre = new THREE.Vector3()
-  species.slice(0, GRID * GRID).forEach((sp, s) => {
+  species.slice(0, grid * grid).forEach((sp, s) => {
     const mesh = new THREE.InstancedMesh(sp.geometry, mat, 1)
     mesh.setMatrixAt(0, new THREE.Matrix4())
     mesh.frustumCulled = false
@@ -103,7 +107,7 @@ export function bakeImpostors(renderer: THREE.WebGLRenderer, species: { id: numb
     const box = treeBox(sp.geometry)
     const [cy, R, Rxz] = [box.x, box.y, box.z]
     centre.set(0, cy, 0)
-    const sx = (s % GRID) * FRAMES * cellPx, sy = Math.floor(s / GRID) * FRAMES * cellPx
+    const sx = (s % grid) * FRAMES * cellPx, sy = Math.floor(s / grid) * FRAMES * cellPx
     cam.left = -Rxz; cam.right = Rxz; cam.top = R; cam.bottom = -R
     cam.near = 0.01; cam.far = R * 4
     cam.updateProjectionMatrix()
@@ -140,7 +144,7 @@ export function bakeImpostors(renderer: THREE.WebGLRenderer, species: { id: numb
   renderer.setClearColor(prevClear, prevAlpha)
   renderer.autoClear = prevAuto
   renderer.shadowMap.enabled = prevShadow
-  while (slots.length < GRID * GRID) (slots.push(new THREE.Vector4()), boxes.push(new THREE.Vector4(5, 6, 3, 0)))
+  while (slots.length < GRID_MAX * GRID_MAX) (slots.push(new THREE.Vector4()), boxes.push(new THREE.Vector4(5, 6, 3, 0)))
   return { texture: out.texture, target: out, slots, boxes, slotOf, dispose: () => out.dispose() }
 }
 
@@ -227,15 +231,15 @@ export function createImpostorMaterial(): THREE.MeshLambertMaterial {
   const m = new THREE.MeshLambertMaterial({ alphaTest: 0.3, side: THREE.FrontSide })
   const u = {
     uImpAtlas: { value: null as THREE.Texture | null },
-    uImpSlot: { value: Array.from({ length: GRID * GRID }, () => new THREE.Vector4()) },
-    uImpBox: { value: Array.from({ length: GRID * GRID }, () => new THREE.Vector4(5, 6, 3, 0)) },
+    uImpSlot: { value: Array.from({ length: GRID_MAX * GRID_MAX }, () => new THREE.Vector4()) },
+    uImpBox: { value: Array.from({ length: GRID_MAX * GRID_MAX }, () => new THREE.Vector4(5, 6, 3, 0)) },
   }
   m.userData.impostor = u
   m.userData.blend = true
   m.onBeforeCompile = (shader) => {
     const blend = !!m.userData.blend
     Object.assign(shader.uniforms, u, { uTreeLod: globalUniforms.uTreeLod, uImpFar: globalUniforms.uImpFar })
-    shader.defines = { ...(shader.defines ?? {}), IMP_FRAMES: FRAMES.toFixed(1), IMP_SLOTS: GRID * GRID, ...(blend ? { IMP_BLEND: 1 } : {}) }
+    shader.defines = { ...(shader.defines ?? {}), IMP_FRAMES: FRAMES.toFixed(1), IMP_SLOTS: GRID_MAX * GRID_MAX, ...(blend ? { IMP_BLEND: 1 } : {}) }
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         attribute float aSlot;

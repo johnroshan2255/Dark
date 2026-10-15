@@ -448,7 +448,7 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   float wetZone = 1.0 - smoothstep(0.35, 0.6, ${bright ? 'vBiome.y' : 'vBiome.x + vBiome.y'}); // (bright: desert oases are wet)
   float wd = (${WATER_LEVEL.toFixed(2)} - vWorldPos.y);
   diffuseColor.rgb *= 1.0 - 0.35 * smoothstep(-0.8, 0.0, wd) * step(wd, 0.0) * 0.5 * wetZone; // wet dark band above
-  ${!over && !story ? '// Genshin: the lake bed glows turquoise through clear shallows, deepening to teal.\n  ' : ''}if (wd > 0.0) diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * ${!over && !story ? 'vec3(0.45, 0.9, 0.88)' : 'vec3(0.5, 0.66, 0.7)'}, ${!over && !story ? 'vec3(0.01, 0.12, 0.14)' : 'vec3(0.015, 0.045, 0.055)'}, smoothstep(0.0, ${!over && !story ? '5.0' : '3.5'}, wd)), ${bright ? '1.0' : '1.0 - smoothstep(0.35, 0.6, vBiome.x)'});
+  ${!over && !story ? '// Genshin: the lake bed glows turquoise through clear shallows, deepening to teal.\n  ' : ''}if (wd > 0.0) diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * ${bright ? 'vec3(0.85, 1.0, 1.12)' : !over && !story ? 'vec3(0.45, 0.9, 0.88)' : 'vec3(0.5, 0.66, 0.7)'}, ${bright ? 'vec3(0.12, 0.32, 0.55)' : !over && !story ? 'vec3(0.01, 0.12, 0.14)' : 'vec3(0.015, 0.045, 0.055)'}, smoothstep(0.0, ${bright ? '4.0' : !over && !story ? '5.0' : '3.5'}, wd)), ${bright ? '1.0' : '1.0 - smoothstep(0.35, 0.6, vBiome.x)'});
   wd = mix(-10.0, wd, wetZone); // kills the shore foam line below outside the wet zone
   float foam = 1.0 - smoothstep(0.0, 0.18, abs(wd - 0.04));
   if (foam > 0.0) diffuseColor.rgb += vec3(0.25, 0.27, 0.27) * foam * (0.5 + 0.5 * st_noise(wp * 3.0 + vec2(uTimeS * 0.3))); // shoreline only

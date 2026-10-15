@@ -32,7 +32,7 @@ export class Water {
         uTime: { value: 0 },
         uFog: { value: new THREE.Vector2(60, 900) },
         // Genshin lakes are clear TURQUOISE (Cider Lake, Bishui); the other styles keep a deep teal.
-        uDeep: { value: ART.style === 'bright' ? new THREE.Color(0.1, 0.36, 0.5) : ART.style === 'genshin' ? new THREE.Color(0.012, 0.15, 0.17) : new THREE.Color(0.03, 0.07, 0.085) },
+        uDeep: { value: ART.style === 'bright' ? new THREE.Color(0.17, 0.42, 0.7) : ART.style === 'genshin' ? new THREE.Color(0.012, 0.15, 0.17) : new THREE.Color(0.03, 0.07, 0.085) },
         uKeyColor: { value: new THREE.Color() },
         uKeyDir: { value: new THREE.Vector3(0, 1, 0) },
         /** Rain 0..1: dense fine ripples + a duller, greyer surface. */
@@ -107,7 +107,8 @@ export class Water {
           // BRIGHT (over the hill's oasis): calm, pale turquoise-blue water — its own colour first, a soft half-strength
           // mirror of the sky / scene on top that only takes over at grazing angles.
           refl = mix(refl, vec3(dot(refl, vec3(0.3, 0.55, 0.15))), 0.25);
-          vec3 col = mix(uDeep, refl, clamp(0.15 + fres * 0.85, 0.0, 0.7));
+          // (their oasis river: a light sky-blue body ≈ sRGB 147,194,225, the sky's pale mirror at grazing angles)
+          vec3 col = mix(uDeep, refl, clamp(0.25 + fres * 0.85, 0.0, 0.75));
           #else
           vec3 col = mix(uDeep, refl * 0.92, clamp(0.3 + fres * 1.2, 0.0, 1.0));
           #endif

@@ -15,7 +15,7 @@ import type { CragMesh } from '../Formations/crags'
  * Cost: ~2.4–4 k tris per bridge (planks dominate), one bridge per ~1 km of road; 0 draws, 0 programs.
  */
 const CELL = 500
-const BW = 2.0 // half deck width (m): 4 m — a car fits with room to steer
+const BW = 2.6 // half deck width (m): 5.2 m — a car crosses without careful steering
 const LAYER = 9 * 16 + 101
 
 export interface Bridge {
@@ -179,7 +179,7 @@ function addBridge(fields: WorldFields, b: Bridge, x0: number, z0: number, out: 
   for (let i = 0; i < seg; i++) {
     const xa = b.xa - 1.5 + ((span + 3) * i) / seg, xb = b.xa - 1.5 + ((span + 3) * (i + 1)) / seg
     const ya = deckY(b, xa) - 0.16, yb = deckY(b, xb) - 0.16
-    for (const s of [-1.2, 1.2]) beam(out, [X(xa), ya, lz + s], [X(xb), yb, lz + s], 0.11, BEAM)
+    for (const s of [-BW * 0.7, BW * 0.7]) beam(out, [X(xa), ya, lz + s], [X(xb), yb, lz + s], 0.11, BEAM)
     // Solid sub-deck 3 cm under the plank tops: the wheels' rays fell through the gaps between planks (rear wheels
     // spinning in the air); from above it reads as the dark gaps.
     const dx = xb - xa, dy = (yb - ya)

@@ -4,6 +4,8 @@ import { sampleHeight } from '../Terrain/generateTerrain'
 import { WorldFields } from '../WorldFields'
 import type { BiomeWeights } from '../Biomes'
 import { nearBridge } from '../Road/bridges'
+import { MAIN_DITCH_IN, MAIN_DITCH_W } from '../Road/RoadDetail'
+const MAIN_DITCH_OUT = MAIN_DITCH_IN + MAIN_DITCH_W
 
 /**
  * CRAGS — Genshin's rocky hillsides (Starsnatch Cliff, Mt. Hulao, Stone Gate): a heightfield slope is only a smooth
@@ -131,6 +133,23 @@ function canyonWalls(fields: WorldFields, cx: number, cz: number, out: CragMesh)
       addSlabs(fields, out, x - x0, z - z0, x, z, h0, side, 0, (top - rh) / 12, ws, wd, seed, k, side, L + 10, false,
         [rh - 1.5, top + 0.5 + 2 * hashFloat(seed, k, side, L + 4)])
       n++
+      // BOULDER FIELD (their canyon floors): big angular boulders between the road and the wall, 1.5–4 m tall,
+      // 1–2 per step and side, never closer than 2.5 m to the road's edge.
+      for (let b = 0; b < 2; b++) {
+        if (hashFloat(seed, k, side * 3 + b, L + 20) > 0.75) continue
+        const zb = z + (hashFloat(seed, k, side * 3 + b, L + 21) - 0.5) * 6
+        const rxb = fields.roadCenterX(zb)
+        const bs = 1.4 + 1.8 * hashFloat(seed, k, side * 3 + b, L + 23)
+        // (the slab reaches ≤ 1.15 × its size from its centre → its edge stays ≥ 0.8 m beyond the gutter)
+        const db = MAIN_DITCH_OUT + 0.8 + bs * 1.15 + hashFloat(seed, k, side * 3 + b, L + 22) * 2.5 // on the canyon floor, before the wall
+        const xb = rxb + side * db
+        if (xb < x0 || xb >= x0 + CHUNK_SIZE || zb < z0 || zb >= z0 + CHUNK_SIZE) continue
+        if (fields.netRoad(xb, zb, 8 + bs) || nearBridge(fields, xb, zb, 4 + bs)) continue
+        const hb0 = fields.height(xb, zb)
+        addSlabs(fields, out, xb - x0, zb - z0, xb, zb, hb0, side, 0, 0.4, bs, bs * 0.9, seed, k * 7 + b, side, L + 80, true,
+          [hb0 - 0.5, hb0 + bs * (0.55 + 0.4 * hashFloat(seed, k, side * 3 + b, L + 24))]) // squat: wider than tall
+        n++
+      }
       // STEPPED SHELF at the wall's foot on every other step (their canyon floors: low layered ledges), 1–2 slabs.
       if (k % 2 === 0 && hashFloat(seed, k, side, L + 5) < 0.5) {
         const xs = rx + side * (dOut - 5.2), sw = 3 + 2.5 * hashFloat(seed, k, side, L + 6), sd = 2 + 1.2 * hashFloat(seed, k, side, L + 7)

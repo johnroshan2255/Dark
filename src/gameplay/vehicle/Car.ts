@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type { PhysicsWorld } from '../../physics/PhysicsWorld'
 import type { Input } from '../../input/Input'
 import type { WorldFields } from '../../world/WorldFields'
@@ -6,6 +7,7 @@ import type { CharacterModel } from '../player/CharacterModel'
 import { EYE_HEIGHT, type PlayerController } from '../player/PlayerController'
 import type { TruckModel } from '../../assets/loadModels'
 import { stylize } from '../../rendering/shaders/stylize'
+import { isBright } from '../../rendering/artStyle'
 import { CHUNK_SIZE } from '../../world/constants'
 import { chunkKey } from '../../world/types'
 import { STOCK_TRUCK, TruckSim, type TruckTune } from './VehicleSim'
@@ -229,7 +231,7 @@ if (tyreW > 0.0) {
       // not black; white = the model's own colours (stock look).
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
-uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss; uniform float uSnowCoat; uniform float uSandCoat;
+uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss; uniform float uSnowCoat; uniform float uSandCoat; uniform float uMudCoat;
 float carCoat = 0.0;
 float dirtHash(vec3 p) { return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
 float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -255,6 +257,18 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
           // and washes off elsewhere. Sand: a fine dust film over the whole car, caked sand low down and dust settled
           // on the flat tops. Snow: caps on every up-facing panel (roof, hood, rack, bed) spreading in clumps as it
           // builds, and packed snow sprayed up the sides / arches / bumpers and into the tyres. Both stay matte.
+          if (uMudCoat > 0.003) {
+            // Wet red-brown mud: thrown up the sides from the wheels (splatter blobs climbing with the coat), caked
+            // on the lower body and tyres, a sheen on the wet clumps (kept glossy: carCoat stays low on it).
+            float hM = vDirtP.y - uGroundY;
+            float nM = dirtNoise(vDirtP * 5.0) * 0.6 + dirtNoise(vDirtP * 16.0) * 0.4;
+            float topM = 0.35 + 1.0 * uMudCoat;
+            float cake = (1.0 - smoothstep(topM - 0.25, topM + 0.1, hM + (nM - 0.5) * 0.6)) * smoothstep(0.62 - uMudCoat * 0.45, 0.72 - uMudCoat * 0.45, nM);
+            float blob = step(1.0 - uMudCoat * 0.35 * (1.0 - smoothstep(0.3, 1.8, hM)), dirtHash(floor(vDirtP * 22.0)));
+            float mud = clamp(max(max(cake, blob * 0.9), vTyre * 0.7 * uMudCoat), 0.0, 0.95);
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.2, 0.11, 0.06) * (0.8 + 0.4 * nM), mud);
+            carCoat = max(carCoat, mud * 0.4);
+          }
           if (uSandCoat + uSnowCoat > 0.003) {
             float up = normalize(vDirtN).y;
             float nS = dirtNoise(vDirtP * 4.3) * 0.65 + dirtNoise(vDirtP * 13.0) * 0.35;
@@ -317,6 +331,7 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.wheels.castShadow = true
     this.wheels.frustumCulled = false // instances move with the body; the truck is one small object
     this.body.add(this.wheels)
+    if (isBright()) this.addKit(truck)
     // BRAKES (Blender `caliper_*`, scripts/blender/vehicle_brakes.py): disc + hat + caliper or a drum behind each
     // wheel, on the car program — hub, steering and suspension like the wheel, never the spin (a plain disc looks
     // the same turning). One draw per axle (right = left turned 180°); no shadow pass (inside the wheel).
@@ -701,6 +716,55 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     return v.applyMatrix4(this.root.matrixWorld)
   }
 
+  /**
+   * EXPEDITION KIT (bright — their trucks carry it): orange SAND LADDERS (recovery boards) — a stack of two strapped
+   * flat on the roof and one on the side of the rear body. Mount points are measured from this car's own body
+   * mesh (the highest point over the cab; the outer side face behind the cab), so it fits every model. One small
+   * mesh on the body (+1 draw, +1 in the shadow pass), ≈ 300 tris.
+   */
+  private addKit(truck: TruckModel): void {
+    const pos = truck.body.getAttribute('position') as THREE.BufferAttribute
+    const L = truck.rear - truck.front
+    let top = -Infinity, side = -Infinity, ymin = Infinity, ymax = -Infinity
+    for (let i = 0; i < pos.count; i++) { const y = pos.getY(i); ymin = Math.min(ymin, y); ymax = Math.max(ymax, y) }
+    const zc0 = truck.front + 0.25 * L, zc1 = truck.front + 0.55 * L // over the cab
+    const zs0 = truck.front + 0.6 * L, zs1 = truck.front + 0.88 * L // the rear body's side
+    const ys0 = ymin + 0.45 * (ymax - ymin), ys1 = ymin + 0.7 * (ymax - ymin)
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i)
+      if (Math.abs(x) < 0.5 && z > zc0 && z < zc1) top = Math.max(top, y)
+      if (z > zs0 && z < zs1 && y > ys0 && y < ys1) side = Math.max(side, Math.abs(x))
+    }
+    if (!isFinite(top) || !isFinite(side)) return
+    const parts: THREE.BufferGeometry[] = []
+    const orange = new THREE.Color(0xff7a2a).convertSRGBToLinear(), strap = new THREE.Color(0x2a2a2e).convertSRGBToLinear()
+    const colour = (g: THREE.BufferGeometry, c: THREE.Color) => {
+      const n = g.getAttribute('position').count, a = new Float32Array(n * 3)
+      for (let i = 0; i < n; i++) (a[i * 3] = c.r), (a[i * 3 + 1] = c.g), (a[i * 3 + 2] = c.b)
+      g.setAttribute('color', new THREE.BufferAttribute(a, 3))
+      g.deleteAttribute('uv')
+      return g
+    }
+    // One ladder lying in the xz plane, long along z: a 1.15 × 0.32 board with raised cleats across it.
+    const ladder = (): THREE.BufferGeometry[] => {
+      const g = [colour(new THREE.BoxGeometry(0.32, 0.035, 1.15), orange)]
+      for (let k = 0; k < 9; k++) g.push(colour(new THREE.BoxGeometry(0.3, 0.03, 0.04).translate(0, 0.03, -0.5 + k * 0.125), orange))
+      return g
+    }
+    const zm = (zc0 + zc1) / 2
+    for (let i = 0; i < 2; i++) for (const g of ladder()) parts.push(g.translate(0, top + 0.05 + i * 0.07, zm))
+    for (const x of [-0.25, 0.25]) parts.push(colour(new THREE.BoxGeometry(0.04, 0.03, 1.2).translate(0, 0, 0).rotateY(Math.PI / 2).translate(0, top + 0.2, zm + x), strap))
+    // the side one: stood on its edge against the rear body's outer face (right side), cleats outward
+    for (const g of ladder()) parts.push(g.rotateZ(-Math.PI / 2).translate(side + 0.04, (ys0 + ys1) / 2, (zs0 + zs1) / 2))
+    const geo = mergeGeometries(parts)!
+    parts.forEach((g) => g.dispose())
+    const mat = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'truckkit', rim: 0.14, toon: 0.3 })
+    const kit = new THREE.Mesh(geo, mat)
+    kit.name = 'kit'
+    kit.castShadow = true
+    this.body.add(kit)
+  }
+
   /** Ground wetness 0..1 (Game sets it from the weather): wet asphalt, mud and grass grip less. */
   wetness = 0
 
@@ -715,11 +779,17 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     uGloss: { value: 1 },
     uSnowCoat: { value: 0 },
     uSandCoat: { value: 0 },
+    uMudCoat: { value: 0 },
+  }
+  /** Wet mud under the wheels 0..1 (mud tracks' wet stretches, wet off-road ground) — VehicleFx flings clumps. */
+  get mudLevel(): number {
+    const w = this.dirtMix.w
+    return Math.min(1, w[6] + this.wetness * (1 - w[0]) * 0.8)
   }
   /** Snow / sand build-up on the body, 0..1 (read-only outside; dev shots may set it through `coat`). */
-  get coat(): { snow: number; sand: number } {
+  get coat(): { snow: number; sand: number; mud: number } {
     const u = this.tyreU
-    return { get snow() { return u.uSnowCoat.value }, set snow(v: number) { u.uSnowCoat.value = v }, get sand() { return u.uSandCoat.value }, set sand(v: number) { u.uSandCoat.value = v } }
+    return { get snow() { return u.uSnowCoat.value }, set snow(v: number) { u.uSnowCoat.value = v }, get sand() { return u.uSandCoat.value }, set sand(v: number) { u.uSandCoat.value = v }, get mud() { return u.uMudCoat.value }, set mud(v: number) { u.uMudCoat.value = v } }
   }
   /** Shear on HIGH+ (Game sets it from the quality tier). */
   tyreShear = false
@@ -769,6 +839,10 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     const wash = (wading ? 0.08 : 0) + this.wetness * 0.02
     u.uSnowCoat.value = Math.max(0, Math.min(1, u.uSnowCoat.value + dt * (sn * (0.012 * pace + 0.002) - (1 - sn) * (0.004 + 0.01 * sa) - wash)))
     u.uSandCoat.value = Math.max(0, Math.min(1, u.uSandCoat.value + dt * (sa * 0.01 * pace - (1 - sa) * 0.0015 - sn * 0.01 - wash * 1.5)))
+    // WET MUD (their muddy trucks): splashes on fast in mud / wet off-road ground (~25 s of driving at 36 km/h,
+    // faster with wheel spin), dries and flakes off slowly on dry ground, washes off in water / rain on asphalt.
+    const md = this.mudLevel
+    u.uMudCoat.value = Math.max(0, Math.min(1, u.uMudCoat.value + dt * (md * 0.04 * pace - (1 - md) * 0.0012 - (wading ? 0.08 : 0) - this.wetness * this.dirtMix.w[0] * 0.01)))
   }
   /** Region weights under the car (refreshed with the dirt colour, 2 Hz): [forest, desert, snow, autumn, mystic]. */
   private readonly coatW = new Float32Array(8)
