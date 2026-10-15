@@ -1,7 +1,7 @@
 import { useEffect, useRef, type CSSProperties } from 'react'
 import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
-import { POI_ICONS, poiName } from '../world/POI/pois'
+import { poiIcon, poiName } from '../world/POI/pois'
 import { LANDMARK_ICONS, landmarkName } from '../world/Landmarks/landmarks'
 import { BIOME_NAMES } from '../world/Biomes'
 import { isBright } from '../rendering/artStyle'
@@ -74,7 +74,7 @@ export function GameHud({ game }: { game: Game }) {
         const f = game.world.fields
         const box = [pp.x - 1500, pp.z - 1500, pp.x + 1500, pp.z + 1500] as const
         places = [
-          ...f.pois.inBox(...box).map((p) => ({ x: p.x, z: p.z, radius: p.radius, icon: POI_ICONS[p.type], name: poiName(p) })),
+          ...f.pois.inBox(...box).map((p) => ({ x: p.x, z: p.z, radius: p.radius, icon: poiIcon(p), name: poiName(p) })),
           ...f.landmarks.inBox(...box).map((l) => ({ x: l.x, z: l.z, radius: l.radius + 12, icon: LANDMARK_ICONS[l.kind], name: landmarkName(l) })),
         ]
           .sort((a, b) => Math.hypot(a.x - pp.x, a.z - pp.z) - Math.hypot(b.x - pp.x, b.z - pp.z))

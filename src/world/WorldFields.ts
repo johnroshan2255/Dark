@@ -97,6 +97,7 @@ export class WorldFields {
       riverDistance: (x, z) => this.riverDistance(x, z),
       water: WorldFields.WATER,
       biome: (x, z) => this.biomes.weights(x, z, poiBw),
+      homestead: () => this.palette === 0,
     })
     const fmBw: BiomeWeights = [0, 0]
     this.formations = new FormationField({

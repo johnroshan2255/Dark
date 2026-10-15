@@ -39,6 +39,14 @@ export const BREAKABLES: Record<number, Breakable> = {
   // Buildings: only a fast truck (~65–80 km/h) goes through a wall; it costs most of the speed.
   [PropType.Cabin]: { speed: 18, loss: 0.6, debris: { pieces: [{ half: [0.12, 0.12, 1.4], color: WOOD, n: 8 }, { half: [1.1, 0.06, 0.9], color: ROOF, n: 3 }] } },
   [PropType.House]: { speed: 21, loss: 0.65, debris: { pieces: [{ half: [1.2, 0.9, 0.12], color: WALL, n: 7 }, { half: [1.3, 0.06, 1.1], color: ROOF, n: 4 }] } },
+  // Cozy details: knocked flying at a walk / jog — they barely slow the truck.
+  [PropType.Barrel]: { speed: 2.5, loss: 0.05, debris: { pieces: [{ half: [0.06, 0.4, 0.14], color: WOOD, n: 5 }] } },
+  [PropType.Crate]: { speed: 2, loss: 0.04, debris: { pieces: [{ half: [0.3, 0.03, 0.08], color: WOOD, n: 5 }] } },
+  [PropType.Mailbox]: { speed: 2, loss: 0.03, debris: { pieces: [{ half: [0.14, 0.12, 0.22], color: 0x4a6e8a, n: 1 }, { half: [0.05, 0.5, 0.05], color: DARK_WOOD, n: 1 }] } },
+  [PropType.Signpost]: { speed: 3, loss: 0.05, debris: { pieces: [{ half: [0.06, 1.1, 0.06], color: DARK_WOOD, n: 1 }, { half: [0.45, 0.07, 0.02], color: WOOD, n: 2 }] } },
+  [PropType.LampPost]: { speed: 4, loss: 0.08, debris: { pieces: [{ half: [0.06, 1.3, 0.06], color: DARK_WOOD, n: 1 }] } },
+  [PropType.Bench]: { speed: 2.5, loss: 0.05, debris: { pieces: [{ half: [0.8, 0.03, 0.1], color: WOOD, n: 3 }] } },
+  [PropType.FlowerBed]: { speed: 2, loss: 0.04, debris: { pieces: [{ half: [0.6, 0.1, 0.03], color: WOOD, n: 3 }] } },
   [PropType.Barn]: { speed: 22, loss: 0.65, debris: { pieces: [{ half: [1.4, 1.0, 0.12], color: BARN_RED, n: 8 }, { half: [1.5, 0.06, 1.2], color: ROOF, n: 4 }] } },
 }
 

@@ -12,7 +12,7 @@ import { FM_TOP } from '../types'
 /** Patch-corner offsets checked on a rock top (GrassField.fillTile). */
 const EDGE_PROBE = [[0.9, 0.9], [-0.9, 0.9], [0.9, -0.9], [-0.9, -0.9]] as const
 import { isGenshin, isOverland } from '../../rendering/artStyle'
-import { farmFieldAt } from '../POI/pois'
+import { farmFieldAt, homeYardAt } from '../POI/pois'
 import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Biomes'
 import { blendBy } from '../biomes/BiomeDefs'
 
@@ -372,7 +372,7 @@ export class GrassField {
       // keeps its grass — it used to stop at ~37° and left the green banks bare. Rock tops: always flat enough.)
       const rockK = onRock ? 1 : Math.min(1, Math.max(0, (ny - 0.64) / 0.08))
       const fp = this.fields.pois.near(wx, wz)
-      if (rockK <= 0 || gh < WorldFields.WATER + 0.5 || d.netEdge[ni] < -0.3 || (fp && farmFieldAt(fp, wx, wz))) {
+      if (rockK <= 0 || gh < WorldFields.WATER + 0.5 || d.netEdge[ni] < -0.3 || (fp && (farmFieldAt(fp, wx, wz) || homeYardAt(fp, wx, wz)))) {
         ZERO.toArray(mats, (base + i) * 16)
         dens[base + i] = 0
         continue

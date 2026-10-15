@@ -21,6 +21,8 @@ export interface Poi {
   baseH: number
   /** Hash for per-place variety (crop type, colours…). */
   variant: number
+  /** Bright: the "farm" is a cozy HOMESTEAD — just the house in a fenced yard (no barn, no fields). */
+  home?: boolean
 }
 
 export interface PoiHost {
@@ -31,9 +33,14 @@ export interface PoiHost {
   water: number
   /** Region biome weights [desert, snow] — places are only built in the green lands (none in snow or sand). */
   biome?(x: number, z: number): [number, number]
+  /** Bright: farms are homesteads (smaller yard, the house only). */
+  homestead?(): boolean
 }
 
 const RADIUS = [48, 16, 18, 14]
+/** Homestead yard radius (bright's farm). */
+const HOME_RADIUS = 26
+const farmR = (h: PoiHost) => (h.homestead?.() ? HOME_RADIUS : RADIUS[0])
 
 export class PoiField {
   private readonly cache = new Map<string, Poi[]>()
@@ -53,9 +60,9 @@ export class PoiField {
       for (const side of [first, -first]) {
         const x = h.roadCenterX(z) + side * 61 // field edge ~13 m off the road (past the shoulder) → in view from the road
         if (h.riverDistance(x, z) < 70) continue
-        const base = this.flatEnough(x, z, RADIUS[PoiType.Farm])
+        const base = this.flatEnough(x, z, farmR(h))
         if (base === null) continue
-        this.homeFarm = { type: PoiType.Farm, x, z, rot: side > 0 ? 0 : Math.PI, radius: RADIUS[0], baseH: base, variant: hashFloat(s, 1222) }
+        this.homeFarm = { type: PoiType.Farm, x, z, rot: side > 0 ? 0 : Math.PI, radius: farmR(h), baseH: base, variant: hashFloat(s, 1222), home: h.homestead?.() }
         break
       }
     }
@@ -95,8 +102,8 @@ export class PoiField {
       const side = hashFloat(s, ci, cj, 1203) < 0.5 ? -1 : 1
       const x = h.roadCenterX(z) + side * (58 + hashFloat(s, ci, cj, 1204) * 45)
       if (x >= x0 && x < x0 + POI_REGION && h.riverDistance(x, z) > 70 && clear(x, z, 160)) {
-        const base = this.flatEnough(x, z, RADIUS[PoiType.Farm])
-        if (base !== null) list.push({ type: PoiType.Farm, x, z, rot: side > 0 ? 0 : Math.PI, radius: RADIUS[0], baseH: base, variant: hashFloat(s, ci, cj, 1205) })
+        const base = this.flatEnough(x, z, farmR(h))
+        if (base !== null) list.push({ type: PoiType.Farm, x, z, rot: side > 0 ? 0 : Math.PI, radius: farmR(h), baseH: base, variant: hashFloat(s, ci, cj, 1205), home: h.homestead?.() })
       }
     }
     // One smaller place in the wild.
@@ -157,10 +164,17 @@ export const FARM_FIELDS: [number, number, number, number][] = [
 
 /** 0 outside fields; 1 inside a farm crop field (tilled soil, crops, no grass/trees). */
 export function farmFieldAt(p: Poi, x: number, z: number): number {
-  if (p.type !== PoiType.Farm) return 0
+  if (p.type !== PoiType.Farm || p.home) return 0
   const [lx, lz] = toLocal(p, x, z)
   for (const f of FARM_FIELDS) if (lx > f[0] && lx < f[2] && lz > f[1] && lz < f[3]) return 1
   return 0
+}
+
+/** Inside a homestead's fenced yard (+ the back yard) — a mown lawn: no tall grass. */
+export function homeYardAt(p: Poi, x: number, z: number): boolean {
+  if (!p.home) return false
+  const [lx, lz] = toLocal(p, x, z)
+  return lx > -9.5 && lx < 14 && Math.abs(lz) < 10.5
 }
 
 const NAMES: string[][] = [
@@ -170,9 +184,14 @@ const NAMES: string[][] = [
   ["Traveller's Camp", 'Scout Camp', 'Ember Camp', 'Starlight Camp'],
 ]
 export const POI_ICONS = ['🌾', '🏠', '🏛️', '⛺']
+const HOME_NAMES = ['Willow Cottage', 'Hearthstone House', 'Birch Hollow', 'Lantern House', 'Old Miller\'s House', 'Meadow Cottage']
+/** HUD icon of a place (bright homesteads: a house). */
+export function poiIcon(p: Poi): string {
+  return p.home ? '🏡' : POI_ICONS[p.type]
+}
 
 /** Deterministic display name of a place (HUD markers and the arrival banner). */
 export function poiName(p: Poi): string {
-  const n = NAMES[p.type]
+  const n = p.home ? HOME_NAMES : NAMES[p.type]
   return n[Math.floor(p.variant * n.length) % n.length]
 }

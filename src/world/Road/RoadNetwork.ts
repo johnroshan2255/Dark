@@ -617,8 +617,13 @@ export class RoadNetwork {
     return r2 && !earlier.some((o) => RoadNetwork.crosses(r2, o)) ? r2 : null
   }
 
+  /** The road from a place (its driveway; null if none). */
+  placeRoad(p: { x: number; z: number }): NetRoad | null {
+    return this.driveway(p)
+  }
+
   /** Camp track: a connector (trail) to the nearest road within 700 m. */
-  private campRoad(c: { x: number; z: number }): NetRoad | null {
+  campRoad(c: { x: number; z: number }): NetRoad | null {
     const key = `camp:${Math.floor(c.x)},${Math.floor(c.z)}`
     const hit = this.drives.get(key)
     if (hit !== undefined) return hit

@@ -2,7 +2,7 @@ import { scatterForest } from './Forest/scatter'
 import { caveAir, caveLight, cavePlan, caveWallTone, STONE_BED } from './Formations/caves'
 import { stoneBed } from './Formations/stone'
 import { scatterRoadProps } from './Road/roadProps'
-import { layoutPois } from './POI/poiLayout'
+import { layoutPois, PropType } from './POI/poiLayout'
 import { CELL_SIZE, CHUNK_SIZE, CHUNK_VERTS } from './constants'
 import { generateTerrain } from './Terrain/generateTerrain'
 import { FM_TOP, type ChunkData } from './types'
@@ -10,7 +10,9 @@ import { WorldFields } from './WorldFields'
 import { buildFormation, FORMATION_BED } from './Formations/formations'
 import { buildCrags } from './Formations/crags'
 import { buildBridges } from './Road/bridges'
-import { buildCamps } from './Road/camps'
+import { buildCamps, campsIn } from './Road/camps'
+import type { NetRoad } from './Road/RoadNetwork'
+import { sampleHeight } from './Terrain/generateTerrain'
 
 /**
  * Deterministic chunk generator: (seed, cx, cz) → ChunkData.
@@ -29,10 +31,34 @@ export class WorldGenerator {
     this.fields.palette = palette
   }
 
+  /**
+   * SIGNPOSTS (bright): where a place's / camp's road joins the network, a wooden signpost 7 m up the drive, beside
+   * it, its arrow pointing to the place. Deterministic (from the road geometry).
+   */
+  private signposts(cx: number, cz: number, heights: Float32Array, out: number[]): void {
+    const f = this.fields, x0 = cx * CHUNK_SIZE, z0 = cz * CHUNK_SIZE
+    const roads: NetRoad[] = []
+    for (const p of f.pois.inBox(x0 - 1400, z0 - 1400, x0 + CHUNK_SIZE + 1400, z0 + CHUNK_SIZE + 1400)) { const r = f.network.placeRoad(p); if (r) roads.push(r) }
+    for (const c of campsIn(f, z0 - 1400, z0 + CHUNK_SIZE + 1400)) { const r = f.network.campRoad(c); if (r) roads.push(r) }
+    for (const r of roads) {
+      if (r.cum[r.n - 1] < 20) continue
+      // the sample ~7 m before the junction end
+      let i = r.n - 1
+      while (i > 1 && r.cum[r.n - 1] - r.cum[i] < 7) i--
+      const dx = r.xs[i - 1] - r.xs[i + 1], dz = r.zs[i - 1] - r.zs[i + 1], l = Math.hypot(dx, dz) || 1
+      const ux = dx / l, uz = dz / l // toward the place
+      const off = r.halfWidth + 1.4
+      const x = r.xs[i] - uz * off - x0, z = r.zs[i] + ux * off - z0
+      if (x < 0 || x >= CHUNK_SIZE || z < 0 || z >= CHUNK_SIZE) continue
+      out.push(x, sampleHeight(heights, x, z), z, Math.atan2(-uz, ux), 1, PropType.Signpost)
+    }
+  }
+
   private props(cx: number, cz: number, heights: Float32Array): Float32Array {
     const out = scatterRoadProps(this.fields, cx, cz, heights)
     const x0 = cx * CHUNK_SIZE, z0 = cz * CHUNK_SIZE
-    layoutPois(this.fields.pois.inBox(x0, z0, x0 + CHUNK_SIZE, z0 + CHUNK_SIZE), cx, cz, heights, this.seed, out)
+    layoutPois(this.fields.pois.inBox(x0, z0, x0 + CHUNK_SIZE, z0 + CHUNK_SIZE), cx, cz, heights, this.seed, out, this.fields.palette === 0)
+    if (this.fields.palette === 0) this.signposts(cx, cz, heights, out)
     return new Float32Array(out)
   }
 

@@ -260,8 +260,104 @@ function othHouse(): THREE.BufferGeometry {
   return merged(parts, 'house')
 }
 
+/** Cylinder part (posts, barrels, logs) along +y, `sides` facets. */
+const cyl = (r0: number, r1: number, h: number, sides: number, hex: number, x = 0, y = 0, z = 0, surf: SurfaceName = 'plain') =>
+  finish(new THREE.CylinderGeometry(r1, r0, h, sides).translate(x, y + h / 2, z), hex, 0.8, surf)
+
+/**
+ * COZY DETAILS (over the hill's lived-in places): small props merged into the place mesh (no extra draws).
+ * Warm lights (lantern glass, lamp) are on the GLOW surface → they glow at dusk / night (bloom on MEDIUM+).
+ */
+function cozyProps(m: Map<number, THREE.BufferGeometry>): void {
+  const wood = 0x8a6440, dark = 0x5a3e28, weathered = 0xb8ab94, iron = 0x3a3a3e, warm = 0xffb850
+  // Porch / garden chair: slatted seat, back, legs.
+  m.set(PropType.Chair, merged([
+    box(0.5, 0.06, 0.5, wood, 0, 0.42, 0, 'wood'), box(0.5, 0.5, 0.06, wood, 0, 0.48, -0.22, 'wood'),
+    ...[[-0.2, -0.2], [0.2, -0.2], [-0.2, 0.2], [0.2, 0.2]].map(([x, z]) => box(0.05, 0.42, 0.05, dark, x, 0, z)),
+    box(0.05, 0.25, 0.05, dark, -0.22, 0.48, 0), box(0.05, 0.25, 0.05, dark, 0.22, 0.48, 0),
+  ], 'chair'))
+  // Hanging / standing lantern: iron frame, glowing glass.
+  m.set(PropType.Lantern, merged([
+    box(0.2, 0.04, 0.2, iron, 0, 0, 0), glow(box(0.14, 0.22, 0.14, warm, 0, 0.04, 0)), box(0.2, 0.04, 0.2, iron, 0, 0.26, 0),
+    finish(new THREE.ConeGeometry(0.13, 0.1, 4).rotateY(Math.PI / 4).translate(0, 0.35, 0), iron, 0.9), box(0.03, 0.08, 0.03, iron, 0, 0.4, 0),
+  ], 'lantern'))
+  // Barrel with hoops.
+  m.set(PropType.Barrel, merged([
+    cyl(0.3, 0.3, 0.85, 10, 0x8a5a34, 0, 0, 0, 'wood'), cyl(0.31, 0.31, 0.06, 10, iron, 0, 0.12), cyl(0.31, 0.31, 0.06, 10, iron, 0, 0.66),
+    cyl(0.27, 0.27, 0.02, 10, 0x6a4428, 0, 0.85),
+  ], 'barrel'))
+  // Wooden crate (planked).
+  m.set(PropType.Crate, merged([box(0.6, 0.5, 0.6, 0xa07a4c, 0, 0, 0, 'wood'), box(0.62, 0.06, 0.62, dark, 0, 0.22, 0), box(0.06, 0.5, 0.62, dark, 0, 0, 0)], 'crate'))
+  // Picket fence: 2 m section of pointed weathered-white pickets on two rails (along x).
+  {
+    const parts = [box(2, 0.06, 0.05, weathered, 0, 0.3, 0), box(2, 0.06, 0.05, weathered, 0, 0.7, 0)]
+    for (let i = 0; i < 8; i++) {
+      const x = -0.875 + i * 0.25
+      parts.push(box(0.09, 0.85, 0.03, weathered, x, 0, 0.04), finish(new THREE.ConeGeometry(0.065, 0.12, 4).rotateY(Math.PI / 4).translate(x, 0.91, 0.04), weathered, 1))
+    }
+    parts.push(box(0.1, 1.0, 0.1, 0x9a8c74, -1, 0, 0))
+    m.set(PropType.Picket, merged(parts, 'picket'))
+  }
+  // Mailbox on a post (red flag up).
+  m.set(PropType.Mailbox, merged([
+    box(0.1, 1.05, 0.1, dark, 0, 0, 0), box(0.28, 0.24, 0.45, 0x4a6e8a, 0, 1.05, 0),
+    finish(new THREE.CylinderGeometry(0.14, 0.14, 0.45, 8, 1, false, 0, Math.PI).rotateX(Math.PI / 2).rotateZ(Math.PI / 2).translate(0, 1.29, 0), 0x4a6e8a, 1),
+    box(0.03, 0.2, 0.08, 0xc23a2a, 0.16, 1.2, -0.12),
+  ], 'mailbox'))
+  // Stepping stones: 3 flat irregular slabs along +z.
+  m.set(PropType.Stones, merged([0, 1, 2].map((i) => finish(new THREE.CylinderGeometry(0.38 + 0.06 * (i % 2), 0.42, 0.08, 7).rotateY(i * 1.3).scale(1, 1, 0.8).translate((i % 2) * 0.15 - 0.07, 0.01, i * 0.9), 0x9a948a, 0.85, 'stone')), 'stones'))
+  // Flower bed: a low plank box of soil with colourful blooms on leafy mounds.
+  {
+    const parts = [box(2.4, 0.22, 0.9, 0x7a5434, 0, 0, 0, 'wood'), box(2.3, 0.04, 0.8, 0x4a3424, 0, 0.2, 0)]
+    const cols = [0xe86a8a, 0xf2c84a, 0xf0f0f0, 0xb07ae8, 0xf08a3a]
+    for (let i = 0; i < 9; i++) {
+      const x = -0.95 + (i % 5) * 0.48 + (i >= 5 ? 0.24 : 0), z = i >= 5 ? 0.18 : -0.16
+      parts.push(finish(new THREE.IcosahedronGeometry(0.2, 0).scale(1, 0.7, 1).translate(x, 0.32, z), 0x4f7a34, 0.7))
+      parts.push(finish(new THREE.IcosahedronGeometry(0.09, 0).translate(x + 0.04, 0.46, z), cols[i % cols.length], 1))
+    }
+    m.set(PropType.FlowerBed, merged(parts, 'flowerbed'))
+  }
+  // Laundry line: two T-posts, a line, hanging cloths.
+  {
+    const parts = [box(0.08, 1.9, 0.08, dark, -2, 0, 0), box(0.08, 1.9, 0.08, dark, 2, 0, 0), box(4, 0.02, 0.02, 0xd8d0c0, 0, 1.8, 0)]
+    const cloth = [0xf2efe6, 0x6a8ab8, 0xd86a5a, 0xf2efe6, 0xe8c86a]
+    let x = -1.6
+    for (let i = 0; i < 5; i++) {
+      const w = 0.4 + (i % 3) * 0.15, h = 0.5 + (i % 2) * 0.25
+      parts.push(box(w, h, 0.02, cloth[i], x + w / 2, 1.8 - h, 0))
+      x += w + 0.12
+    }
+    m.set(PropType.Laundry, merged(parts, 'laundry'))
+  }
+  // Chopping stump with an axe in it.
+  m.set(PropType.Stump, merged([
+    cyl(0.32, 0.3, 0.5, 9, 0x7a5236, 0, 0, 0, 'bark'), cyl(0.29, 0.29, 0.02, 9, 0xc8a878, 0, 0.5),
+    finish(new THREE.BoxGeometry(0.04, 0.6, 0.04).rotateZ(-0.5).translate(0.14, 0.78, 0), 0x8a6a44, 1), box(0.18, 0.1, 0.03, 0x8a8a90, 0, 0.5, 0),
+  ], 'stump'))
+  // Wooden bench.
+  m.set(PropType.Bench, merged([
+    box(1.6, 0.06, 0.4, wood, 0, 0.42, 0, 'wood'), box(1.6, 0.3, 0.05, wood, 0, 0.6, -0.18, 'wood'),
+    ...[-0.7, 0.7].flatMap((x) => [box(0.06, 0.42, 0.36, dark, x, 0, 0), box(0.06, 0.32, 0.05, dark, x, 0.45, -0.18)]),
+  ], 'bench'))
+  // Signpost: a post with two arrow boards (to the place / back to the road).
+  m.set(PropType.Signpost, merged([
+    box(0.12, 2.2, 0.12, dark, 0, 0, 0),
+    finish(new THREE.ExtrudeGeometry((() => { const sh = new THREE.Shape(); sh.moveTo(0, -0.14); sh.lineTo(0.85, -0.14); sh.lineTo(1.05, 0); sh.lineTo(0.85, 0.14); sh.lineTo(0, 0.14); sh.closePath(); return sh })(), { depth: 0.04, bevelEnabled: false }).translate(0.04, 1.85, -0.02), 0xc8a06a, 1, 'wood'),
+    finish(new THREE.ExtrudeGeometry((() => { const sh = new THREE.Shape(); sh.moveTo(0, -0.12); sh.lineTo(-0.7, -0.12); sh.lineTo(-0.88, 0); sh.lineTo(-0.7, 0.12); sh.lineTo(0, 0.12); sh.closePath(); return sh })(), { depth: 0.04, bevelEnabled: false }).rotateY(0.5).translate(-0.04, 1.5, 0), 0xb08a58, 1, 'wood'),
+    finish(new THREE.ConeGeometry(0.1, 0.12, 4).rotateY(Math.PI / 4).translate(0, 2.26, 0), dark, 1),
+  ], 'signpost'))
+  // Lamp post at the gate: a pole with an arm and a hanging glowing lantern.
+  m.set(PropType.LampPost, merged([
+    box(0.12, 2.6, 0.12, dark, 0, 0, 0), box(0.7, 0.07, 0.07, dark, 0.3, 2.45, 0), box(0.04, 0.2, 0.04, iron, 0.6, 2.25, 0),
+    box(0.22, 0.04, 0.22, iron, 0.6, 1.95, 0), glow(box(0.16, 0.24, 0.16, warm, 0.6, 1.99, 0)), finish(new THREE.ConeGeometry(0.15, 0.12, 4).rotateY(Math.PI / 4).translate(0.6, 2.3, 0), iron, 1),
+  ], 'lamppost'))
+  // Log seat (round log lying on its side).
+  m.set(PropType.LogSeat, merged([finish(new THREE.CylinderGeometry(0.22, 0.24, 1.6, 8).rotateZ(Math.PI / 2).translate(0, 0.22, 0), 0x6e4a2e, 0.8, 'bark')], 'logseat'))
+}
+
 export function createPoiGeometries(): Map<number, THREE.BufferGeometry> {
   const m = new Map<number, THREE.BufferGeometry>()
+  cozyProps(m)
   if (isBright()) {
     m.set(PropType.House, othHouse())
     m.set(PropType.Barn, othBarn())
@@ -323,6 +419,14 @@ export const POI_COLLIDERS: Record<number, number[] | null> = {
   [PropType.RuinWall]: [2, 1.1, 0.35],
   [PropType.RuinPillar]: [0.4, 1.4],
   [PropType.Woodpile]: [0.5, 0.35, 0.7],
+  [PropType.Barrel]: [0.3, 0.42],
+  [PropType.Crate]: [0.3, 0.25, 0.3],
+  [PropType.Mailbox]: [0.1, 0.6],
+  [PropType.Signpost]: [0.08, 1.1],
+  [PropType.LampPost]: [0.08, 1.3],
+  [PropType.Bench]: [0.8, 0.35, 0.22],
+  [PropType.Stump]: [0.3, 0.25],
+  [PropType.FlowerBed]: [1.2, 0.15, 0.45],
 }
 
 /** Collider of a prop type for the session's art style (bright's barn has a lean-to: x −5.75…5.75). */
