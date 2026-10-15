@@ -44,7 +44,14 @@ export const MAIN_W = 11.5
 /** Main ribbon rows every MAIN_STEP m of z (grid-aligned → chunk borders are rows). */
 export const MAIN_STEP = 2
 /** Lateral vertex offsets of a main-road row (one side; mirrored): road, shoulder, ditch (t = 0, .2, .5, .8, 1), verge. */
-export const MAIN_U = [0, 1.35, 2.7, 3.3, 3.52, 3.85, 4.18, 4.4, 5.5, 6.9, 8.4, 10, MAIN_W]
+export const MAIN_U = [0, 0.45, 0.85, 1.05, 1.2, 1.35, 1.5, 1.65, 1.9, 2.3, 2.7, 2.95, 3.3, 3.52, 3.85, 4.18, 4.4, 5.5, 6.9, 8.4, 10, MAIN_W]
+/**
+ * BRIGHT (over the hill) main-road TRACK: the dirt road is carved, not painted — two wheel RUTS (centre ±1.35 m,
+ * ~0.75 m wide, 0.1–0.2 m deep), the crown between them left standing, soft BERMS of pushed-up dirt at the edges
+ * (≤ 0.22 m), and CLODS: the whole surface rises and falls ±4 cm in ~2–4 m lumps. MAIN_U has a vertex at every
+ * breakpoint. Max depth 0.24 m (< SINK).
+ */
+const MAIN_RUT_C = 1.35, MAIN_RUT_HW = 0.42
 /** A main-road grid vertex sinks when it lies within this of the centre for every z within ±2 m. */
 const MAIN_SINK = MAIN_W - 2.4
 
@@ -89,6 +96,11 @@ function profile(hw: number, rutC: number, rutHW: number, rutD: number, berm: nu
 export const TRACKS: Record<number, TrackProfile> = {
   [RoadType.Gravel]: profile(2.3, 0.8, 0.33, 0.05, 0.035, 2.65, 0.9, 0.24),
   [RoadType.Trail]: profile(1.35, 0.74, 0.3, 0.07, 0.022, 1.55, 0.6, 0.14),
+}
+/** BRIGHT (over the hill) mud tracks: deep ruts, tall soft berms, clods (same vertex layout as TRACKS). */
+export const TRACKS_OTH: Record<number, TrackProfile> = {
+  [RoadType.Gravel]: profile(2.3, 0.8, 0.33, 0.13, 0.16, 2.65, 0.9, 0.24),
+  [RoadType.Trail]: profile(1.35, 0.74, 0.3, 0.16, 0.13, 1.55, 0.6, 0.14),
 }
 const TRACK_W_MAX = Math.max(TRACKS[RoadType.Gravel].W, TRACKS[RoadType.Trail].W)
 const TRACK_R_MAX = Math.max(TRACKS[RoadType.Gravel].R, TRACKS[RoadType.Trail].R)
@@ -202,7 +214,7 @@ export class RoadDetail {
     let t = this.tracks.get(r.key)
     if (t && t.road === r) return t
     const f = this.f
-    const prof = TRACKS[r.type]
+    const prof = (f.palette === 0 ? TRACKS_OTH : TRACKS)[r.type]
     const L = r.cum[r.n - 1]
     const rows = Math.floor(L / TRACK_STEP) + 1
     const id = keyHash(r.key)
@@ -331,8 +343,10 @@ export class RoadDetail {
     // Grader berm (the windrow of loose material) at the edges.
     const qb = Math.abs(au - (pr.hw - 0.25)) / 0.4
     const berm = qb < 1 ? pr.berm * (1 - qb * qb) * (1 - qb * qb) : 0
+    // Bright: CLODS — the whole track surface rises and falls ±5 cm in ~1.5–3 m lumps (their rough dirt).
+    const clod = this.f.palette === 0 && au < pr.hw + 0.3 ? (vnoise1(seed, t.id + 4, s / 1.7 + u * 1.3) - 0.5) * 0.1 : 0
     // A pothole digs into whatever it is in (a rut, the hump); the ditch is separate (outside the edge).
-    const delta = fe * (berm * (1 - rutW) - Math.max(rutD + phD, dd))
+    const delta = fe * (berm * (1 - rutW) + clod - Math.max(rutD + phD, dd))
     out.rut = rutW * fe
     out.pothole = ph * fe
     out.ditch = dw * fe
@@ -371,6 +385,7 @@ export class RoadDetail {
     out.type = -1
     out.rut = out.pothole = out.ditch = out.mud = out.wet = out.delta = 0
     out.feat = 1
+    if (this.f.palette === 0 && Math.abs(u) < MAIN_DITCH_IN) return this.mainTrack(x, z, u, out)
     const t = (Math.abs(u) - MAIN_DITCH_IN) / MAIN_DITCH_W
     if (t <= 0 || t >= 1) return 0
     const g = this.mainGate(x, z)
@@ -379,6 +394,27 @@ export class RoadDetail {
     out.ditch = prof * g
     out.wet = 0.55 * prof * g
     out.delta = -MAIN_DITCH_D * (0.85 + 0.3 * vnoise1(this.f.seed, 7, z / 23)) * prof * g
+    return out.delta
+  }
+
+  /** Bright main road: ruts, crown, berms and clods (see MAIN_U). Off over causeways / in the snow banks. */
+  private mainTrack(x: number, z: number, u: number, out: DetailInfo): number {
+    const f = this.f
+    const g = sstep(WATER_LEVEL + 1.9, WATER_LEVEL + 2.6, f.roadHeight(z)) * (1 - sstep(0.3, 0.7, f.biome(x, z, this.bw)[1]))
+    if (g <= 0) return 0
+    const seed = f.seed
+    const au = Math.abs(u)
+    const q = Math.abs(au - MAIN_RUT_C) / MAIN_RUT_HW
+    const rutW = q < 1 ? 1 - sstep(0.3, 1, q) : 0
+    const rutD = (0.13 + 0.1 * vnoise1(seed, 31, z / 9)) * rutW
+    const bq = Math.abs(au - 2.85) / 0.5
+    const berm = bq < 1 ? (0.12 + 0.1 * vnoise1(seed, u > 0 ? 33 : 34, z / 3.1)) * (1 - bq * bq) * (1 - bq * bq) : 0
+    const clod = (vnoise1(seed, 35, z / 2.1 + u * 1.1) - 0.5) * 0.12 * (1 - sstep(2.9, 3.3, au))
+    const mud = 0.3 * sstep(0.7, 0.9, vnoise1(seed, 36, z / 18)) // damp stretches: darker ruts
+    out.rut = rutW * g
+    out.mud = mud * g
+    out.wet = rutW * (0.1 + 0.4 * mud) * g
+    out.delta = g * (berm + clod - rutD)
     return out.delta
   }
 

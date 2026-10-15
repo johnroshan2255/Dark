@@ -262,7 +262,7 @@ varying vec3 vFogSky; varying vec3 vWPos;
 ${fs.includes('uSkyMist') ? '' : MIST_GLSL}
 ${o.terrain || o.surface !== undefined ? 'uniform sampler2D uBrush;\n' : ''}${o.surface !== undefined ? paintFragPars(o.cliffStone ? STONE_CLIFF_UV : undefined).replace('uniform sampler2D uBrush;', '') : ''}${o.surface === 'atlas' ? '\nvarying float vGlow;' : ''}
 ${o.biomeCover ? 'varying vec2 vBiomeW; varying float vSnowUp;\n' + (o.terrain ? '' : NOISE) : ''}
-${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying float vMud; varying vec3 vWorldPos; varying float vUpN; varying vec2 vNxz;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\nfloat cliffW = 0.0; vec3 cliffTilt = vec3(0.0); // cliff weight + per-block normal tilt: set in the colour block, read in the normal block\n' + NOISE + GUST_GLSL + TRAIL_GLSL : ''}
+${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying float vMud; varying vec3 vWorldPos; varying float vUpN; varying vec2 vNxz;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\nfloat cliffW = 0.0; vec3 cliffTilt = vec3(0.0); // cliff weight + per-block normal tilt: set in the colour block, read in the normal block\nfloat roadDirt = 0.0; // bare dirt road weight (bright: clumpy relief in the normal block)\n' + NOISE + GUST_GLSL + TRAIL_GLSL : ''}
 ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
     )
     // Genshin CEL SHADING: N·L through a narrow ramp → lit / shadow sides with a crisp soft-edged terminator
@@ -297,7 +297,24 @@ ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
     vec2 sg = softGroundGrad(vWorldPos.xz, vBiome, length(vWorldPos - cameraPosition));
     if (dot(sg, sg) > 1e-8) normal = normalize(normal + mat3(viewMatrix) * vec3(-sg.x, 0.0, -sg.y));
   }
-  // FACETED CLIFFS (Genshin's angular rock): each block of the face (found in the colour block above) is lit by
+${bright ? `  // BRIGHT DIRT ROADS (over the hill): CLUMPY earth — clods ~0.4 m and grit ~0.12 m tilt the normal so the light
+  // breaks up across the track (their rough churned dirt), on top of the carved ruts / berms (Road/RoadDetail).
+  if (roadDirt > 0.02 && uSurfaceDetail > 0.5) {
+    float dd = length(vWorldPos - cameraPosition);
+    float nearR = 1.0 - smoothstep(20.0, 55.0, dd);
+    if (nearR > 0.0) {
+      vec2 p = vWorldPos.xz;
+      float e = 0.04;
+      float h0 = st_noise(p * 1.7) * 0.45 + st_noise(p * 5.0) * 0.4 + st_noise(p * 13.0) * 0.15;
+      float hx = st_noise((p + vec2(e, 0.0)) * 1.7) * 0.45 + st_noise((p + vec2(e, 0.0)) * 5.0) * 0.4 + st_noise((p + vec2(e, 0.0)) * 13.0) * 0.15;
+      float hz = st_noise((p + vec2(0.0, e)) * 1.7) * 0.45 + st_noise((p + vec2(0.0, e)) * 5.0) * 0.4 + st_noise((p + vec2(0.0, e)) * 13.0) * 0.15;
+      vec2 cg = vec2(hx - h0, hz - h0) / e * 0.16 * roadDirt * nearR;
+      normal = normalize(normal + mat3(viewMatrix) * vec3(-cg.x, 0.0, -cg.y));
+      // Clod tone: darker hollows, lighter tops (reads even under flat light).
+      diffuseColor.rgb *= 1.0 + (h0 - 0.5) * 0.45 * roadDirt * nearR;
+    }
+  }
+` : ''}  // FACETED CLIFFS (Genshin's angular rock): each block of the face (found in the colour block above) is lit by
   // its own tilted normal → planes of light and shade without extra geometry.
   if (cliffW > 0.01) normal = normalize(normal + mat3(viewMatrix) * cliffTilt * cliffW);`,
       )
@@ -488,6 +505,7 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     ${bright ? `// BRIGHT (over the hill): the desert track IS the sand — packed a shade darker with two darker wheel ruts.
     road = mix(road, diffuseColor.rgb * (0.88 - rutS * 0.16) * (0.95 + 0.1 * n2), vBiome.x * 0.92);` : 'road = mix(road, diffuseColor.rgb, vBiome.x * 0.4 * smoothstep(0.35, 0.75, st_noise(wp * 0.45 + 3.0)));'}
     diffuseColor.rgb = mix(diffuseColor.rgb, road, 1.0 - smoothstep(HALF + 0.9, HALF + 1.6, lat));
+    roadDirt = (1.0 - smoothstep(HALF + 0.3, HALF + 1.0, lat)) * (1.0 - vBiome.y);
   }
   // OFF-ROAD TRACKS (network roads: GRAVEL type 0, TRAIL type 1 — the "mud roads"). Road/RoadDetail carves their
   // geometry on the LOD0 ribbon (two wheel ruts, the centre hump left standing, potholes, ditches); this paints it:
@@ -521,6 +539,7 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     surf = mix(surf, vec3(0.7, 0.75, 0.84) * (0.88 + 0.15 * s1) * (1.0 - rut * 0.2), vBiome.y * 0.8);
     surf = mix(surf, diffuseColor.rgb, vBiome.x * 0.5 * smoothstep(0.3, 0.7, s3));
     diffuseColor.rgb = mix(diffuseColor.rgb, surf, bare);
+    roadDirt = max(roadDirt, bare * (1.0 - vBiome.y));
   }
   // MUD + STANDING WATER (vMud: the road ribbon's damp weight, 0 elsewhere): dark wet earth in the rut bottoms,
   // potholes and ditch bottoms; the deepest hollows of muddy stretches always hold water, and every hollow collects

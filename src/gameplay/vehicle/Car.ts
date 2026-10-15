@@ -262,8 +262,11 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
             float low = 1.0 - smoothstep(0.0, 1.6, h);
             // (Specks smaller than ~a pixel fade to their mean coverage — no sparkle at a distance.)
             float specP = uSandCoat * (0.25 + 0.55 * low) * (0.6 + 0.8 * nS);
-            float specFar = smoothstep(0.5, 1.2, length(fwidth(vDirtP)) * 55.0);
-            float speck = mix(step(1.0 - specP, dirtHash(vDirtP * 55.0)), specP, specFar);
+            // ~7 mm round-ish specks (2 hash layers), averaged once they get near pixel size → fine grit, not squares.
+            float specFar = smoothstep(0.45, 1.3, length(fwidth(vDirtP)) * 90.0);
+            vec3 sp = vDirtP * 90.0;
+            float sk = max(step(1.0 - specP * 0.7, dirtHash(sp)), step(1.0 - specP * 0.5, dirtHash(sp * 1.37 + 3.1)));
+            float speck = mix(sk, specP * 0.85, specFar);
             float sand = uSandCoat * (0.06 + 0.06 * nS) + speck * 0.7;
             sand += (1.0 - smoothstep(0.1, 0.3 + 0.6 * uSandCoat, h + (nS - 0.5) * 0.4)) * smoothstep(0.35, 0.65, nS + 0.25 * uSandCoat) * uSandCoat;
             sand += smoothstep(0.5, 0.85, up) * smoothstep(0.35, 0.7, nS) * 0.5 * uSandCoat + vTyre * 0.35 * uSandCoat;
@@ -273,7 +276,7 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
             // Packed snow up the sides: a solid band whose top edge climbs with the coat (≈ 0.3 m → 1.25 m), ragged.
             float sTop = 0.25 + 1.0 * uSnowCoat;
             float spray = (1.0 - smoothstep(sTop - 0.12, sTop + 0.12, h + (nS - 0.5) * 0.5)) * smoothstep(1.0 - uSnowCoat * 1.3, 1.15 - uSnowCoat * 1.3, nS + 0.05);
-            spray = max(spray, mix(step(1.0 - uSnowCoat * 0.6 * low, dirtHash(vDirtP * 40.0)), uSnowCoat * 0.6 * low, specFar)); // flecks thrown up the sides
+            spray = max(spray, mix(step(1.0 - uSnowCoat * 0.6 * low, dirtHash(vDirtP * 90.0)), uSnowCoat * 0.6 * low, specFar)); // flecks thrown up the sides
             float snow = clamp(max(max(cap, spray), vTyre * 0.55 * uSnowCoat), 0.0, 0.95);
             diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86, 0.9, 0.97) * (0.9 + 0.12 * nS) * mix(0.85, 1.0, up * 0.5 + 0.5), snow);
             carCoat = max(carCoat, max(snow, sand * 0.8));
