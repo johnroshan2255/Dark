@@ -28,11 +28,16 @@ export const BIOME_BLEND = 260
  *  green lands keep their hilltops green (snow belongs to the snow regions, Dragonspine). */
 export const SNOW_LINE = [135, 175] as const
 /**
- * World generator version: mixed into the region layout, shown with the seed in the HUD. Bump it whenever a change
- * makes the same seed produce a different world, so shared `?seed=` links and co-op peers can tell (v1 = the
- * original random forest / desert / snow cells).
+ * World generator version, shown with the seed in the HUD. Bump it whenever a change makes the same seed produce a
+ * different world, so shared `?seed=` links and co-op peers can tell (v1 = the original random forest / desert /
+ * snow cells; v2 = the region climate layout; v3 = connected road network, bright rope bridges + slab crags).
  */
-export const WORLD_GEN_VERSION = 3 // 3: connected road network (tree rooted at the main road), bright rope bridges + slab crags
+export const WORLD_GEN_VERSION = 3
+/**
+ * Region LAYOUT version: mixed into the climate noise. Kept apart from WORLD_GEN_VERSION so a change that doesn't
+ * touch the regions (roads, bridges…) doesn't move every desert and snowfield of every seed. Bump only to reshuffle.
+ */
+export const REGION_LAYOUT_VERSION = 2
 
 /** Weights (sum ≤ 1 for the named types; the rest is green land): [desert, snow]. */
 export type BiomeWeights = [number, number]
@@ -59,7 +64,7 @@ export class BiomeField {
   /** Side of the main road (+1 / −1 in j) that runs forest → autumn → desert; the other runs mystic → snow. */
   private readonly drySide: number
   constructor(private readonly seed: number) {
-    const v = WORLD_GEN_VERSION
+    const v = REGION_LAYOUT_VERSION
     this.temp = createNoise2D(hash4(seed, 3101, v))
     this.moist = createNoise2D(hash4(seed, 3102, v))
     this.magic = createNoise2D(hash4(seed, 3103, v))
