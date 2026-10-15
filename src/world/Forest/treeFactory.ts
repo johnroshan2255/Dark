@@ -601,7 +601,7 @@ export function createDesertUndergrowth(): { agave: THREE.BufferGeometry; shrub:
   agave(a, rng)
   // Bright (over the hill): the desert bush is LEAFY like the trees (leaf-cluster cards, their olive-yellow
   // ≈ 151,149,58 → 177,161,70), ~1.5 m across — not a solid green ball.
-  if (isBright()) return { agave: a.geometry('agave'), shrub: cardBush(rng, srgb(0x3e5a2a), srgb(0xa4c870)).scale(1.9, 1.6, 1.9) }
+  if (isBright()) return { agave: a.geometry('agave'), shrub: cardBush(rng, srgb(0x3e5a2a), srgb(0xa4c870), true).scale(1.9, 1.6, 1.9) }
   const b = new Soup()
   dryShrub(b, rng)
   return { agave: a.geometry('agave'), shrub: b.geometry('dryShrub') }
@@ -645,6 +645,6 @@ export function createUndergrowth(): { fern: THREE.BufferGeometry; bush: THREE.B
   // Genshin: the bush is built like the crowns — leaf-cluster cards with one smooth normal field (genshinTrees).
   if (isGenshin()) { const gb = cardBush(rng, srgb(0x1e5a44), srgb(0x8cc860)); return { fern, bush: gb } }
   // Bright (over the hill): leafy bushes made like the tree crowns (leaf-cluster cards), warm olive → yellow-green.
-  if (isBright()) return { fern, bush: cardBush(rng, srgb(0x3a4c24), srgb(0xa4b25a)) }
+  if (isBright()) return { fern, bush: cardBush(rng, srgb(0x3a4c24), srgb(0xa4b25a), true) }
   return { fern, bush: b.geometry('bush') }
 }

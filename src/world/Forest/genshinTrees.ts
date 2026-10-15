@@ -327,7 +327,9 @@ function crownLobes(tips: [V3, number][], o: BroadleafOpts, level: number, rng: 
  *    vegetation shader brightens the silhouette against the sky, as in Genshin.
  * Cost: 2 tris per card (≈ 12–14 lobes × 7 cards on L0 ≈ 200 tris + small cores) — less than the billboard crowns.
  */
-function cardCrown(s: Soup, tips: [V3, number][], o: BroadleafOpts, level: number, rng: Rng, dark: THREE.Color, light: THREE.Color, cardK = 1): void {
+/** Leafy option (bright bushes): no opaque core lump — the volume is filled with leaf cards only (`per` per cluster). */
+interface CardCrownOpts { leafy?: boolean }
+function cardCrown(s: Soup, tips: [V3, number][], o: BroadleafOpts, level: number, rng: Rng, dark: THREE.Color, light: THREE.Color, cardK = 1, co: CardCrownOpts = {}): void {
   const lobes = crownLobes(tips, o, level, rng)
   const g: V3 = [0, 0, 0]
   for (const p of lobes) { g[0] += p.c[0] / lobes.length; g[1] += p.c[1] / lobes.length; g[2] += p.c[2] / lobes.length }
@@ -354,7 +356,7 @@ function cardCrown(s: Soup, tips: [V3, number][], o: BroadleafOpts, level: numbe
   // surroundings — the old dark cores read as diamonds) that FILLS the crown, so no branch / sky shows through gaps
   // between cards. Opaque and drawn first → the cards behind it are early-z rejected (cheaper than more cards).
   const c = new THREE.Color(), cLo = new THREE.Color(), cHi = new THREE.Color()
-  for (const p of lobes) {
+  if (!co.leafy) for (const p of lobes) {
     colAt([p.c[0], p.c[1] - p.r * 0.6, p.c[2]], cLo)
     colAt([p.c[0], p.c[1] + p.r * 0.6, p.c[2]], cHi)
     const k = level === 0 ? 0.62 : level === 1 ? 0.72 : 1.0
@@ -363,12 +365,13 @@ function cardCrown(s: Soup, tips: [V3, number][], o: BroadleafOpts, level: numbe
   const [u0, v0, u1, v1] = cellUv(ATLAS_CELLS.tuft)
   // Cards per cluster: full (9) near; level 1 (LOW up close, mid range elsewhere) 4 bigger ones over the core; level 2
   // (far) 2 big ones — enough for a leafy silhouette around the lump (each is 2 tris, small on screen).
-  const per = level === 0 ? 9 : level === 1 ? 4 : 2
+  // (Leafy bushes: no core to hide gaps behind, so twice the cards, filling the inside too — all leaves, no ball.)
+  const per = co.leafy ? (level === 0 ? 18 : level === 1 ? 8 : 4) : level === 0 ? 9 : level === 1 ? 4 : 2
   for (const p of lobes) {
     for (let i = 0; i < per; i++) {
       // Position: in the lobe, biased to its outer shell (and away from the crown centre).
       const u = rng.next() * 2 - 1, a = rng.next() * Math.PI * 2, q = Math.sqrt(1 - u * u)
-      const rr = p.r * (0.5 + 0.45 * Math.sqrt(rng.next()))
+      const rr = p.r * (co.leafy ? 0.15 + 0.8 * Math.sqrt(rng.next()) : 0.5 + 0.45 * Math.sqrt(rng.next()))
       const pos: V3 = [p.c[0] + q * Math.cos(a) * rr, p.c[1] + u * rr * 0.75, p.c[2] + q * Math.sin(a) * rr]
       // Orientation: a random direction pulled toward "outward" (cards mostly face out of the crown).
       const out = nAt(pos)
@@ -616,9 +619,10 @@ export function glowShrooms(rng: Rng): THREE.BufferGeometry {
  * GENSHIN BUSH (close-up reference): the card crown method at bush scale — ~14 fixed leaf-cluster cards over a low
  * dome (0.65 m radius), spherized normals from the dome centre, darker toward the centre and the ground.
  */
-export function cardBush(rng: Rng, dark: THREE.Color, light: THREE.Color): THREE.BufferGeometry {
+export function cardBush(rng: Rng, dark: THREE.Color, light: THREE.Color, leafy = false): THREE.BufferGeometry {
   const s = new Soup()
   const tips: [V3, number][] = [[[0, 0.35, 0], 1]]
-  cardCrown(s, tips, { ...MONDSTADT_TREE, clumpR: 0.55, plates: true }, 1, rng, dark, light)
+  // leafy (bright): made only of leaf cards like the trees' outer leaves — no solid green ball inside; near detail.
+  cardCrown(s, tips, { ...MONDSTADT_TREE, clumpR: 0.55, plates: true }, leafy ? 0 : 1, rng, dark, light, 1, { leafy })
   return s.geometry('bush')
 }
