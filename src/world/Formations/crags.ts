@@ -261,16 +261,18 @@ function addCrag(
 }
 
 /**
- * BRIGHT (palette 0) — "over the hill" canyon rock: each crag is a STACK of 2–6 broad, thick SLABS (pancakes of
- * rock 2.5–6 m high), each its own size, rotation and offset, so the cliff reads as piled blocks with overhanging
- * lips and dark undersides. Every slab is an irregular octagon with 4 rings (tucked foot, belly, rounded shoulder, top
- * rim) and SMOOTH rounded normals (15 % facet) → soft boulders like theirs, not hard prisms; one colour per slab
- * (no paint strokes / strata — the shape carries the detail), shaded foot → lighter shoulder and top, dark undersides.
- * Cost: ≈ 56 tris per slab (sides 48 + top 8, + 8 under an overhang); masses avg ~4 slabs ≈ 230 tris per crag.
+ * BRIGHT (palette 0) — "over the hill" canyon rock (their canyon / boulder close-ups): each crag is a STACK of 2–6
+ * thick SLABS, each its own size, rotation and offset (piled blocks, overhanging lips, dark undersides). A slab is
+ * REAL ROCK, not a pillow: an irregular 7–11-sided outline (12-gon directions, some dropped, strong radius jitter),
+ * near-vertical sides with a small chamfer at the foot and the top rim, a FLAT top; FLAT-SHADED planes (face
+ * normals), each plane its own tone (±7 %), lit flat tops, darker foot. Arithmetic + sqrt only (no trig).
+ * Cost: ≈ 9 sides × (3 bands × 2 + 1 cap) ≈ 63 tris per slab (+9 under an overhang); ~250 tris per crag.
  */
-/** Slab rings: height fraction, radius scale, normal tilt (rad, − = facing down / + = up) → a rounded, bevelled
- *  block: tucked-in foot, full belly, rounded shoulder, narrower top rim. */
-const SLAB_RINGS = [[0, 0.86, -0.75], [0.22, 1, -0.05], [0.74, 0.97, 0.3], [1, 0.8, 0.95]] as const
+/** Ring layout: height fraction, radius scale — foot chamfer, body, top chamfer, top rim. */
+const SLAB_RINGS = [[0, 0.9], [0.12, 1], [0.86, 0.98], [1, 0.9]] as const
+// 12-gon directions (exact constants).
+const C30 = 0.8660254, S30 = 0.5
+const DIR12 = [1, 0, C30, S30, S30, C30, 0, 1, -S30, C30, -C30, S30, -1, 0, -C30, -S30, -S30, -C30, 0, -1, S30, -C30, C30, -S30]
 
 function addSlabs(
   fields: WorldFields, out: CragMesh, lx: number, lz: number, wx: number, wz: number, h0: number,
@@ -292,97 +294,80 @@ function addSlabs(
   br += (0.62 - br) * sand; bg += (0.31 - bg) * sand; bb += (0.19 - bb) * sand
   br += (0.42 - br) * snow; bg += (0.46 - bg) * snow; bb += (0.54 - bb) * snow
   const cover = [0.13 + (0.7 - 0.13) * sand + (0.86 - 0.13) * snow, 0.27 + (0.42 - 0.27) * sand + (0.89 - 0.27) * snow, 0.05 + (0.24 - 0.05) * sand + (0.95 - 0.05) * snow]
-  // Slabs: 2.5–6 m thick each (small blocks: 1–2 slabs).
   const nMax = small ? 2 : 6
   const n = Math.max(1, Math.min(nMax, Math.round(yspan / (3.2 + 2.2 * hf(4)))))
   const slabH = yspan / n
   let ox0 = lx, oz0 = lz
+  let face = 0
+  // One flat-shaded triangle; winding / normal faces away from (rx, rz) (sides) or up / down (caps).
+  const tri = (A: number[], B: number[], C: number[], col: number[], rx: number, rz: number, up: number): void => {
+    let bx = B[0], by = B[1], bz = B[2], cx2 = C[0], cy = C[1], cz2 = C[2]
+    const ax = A[0], ay = A[1], az = A[2]
+    let nx = (by - ay) * (cz2 - az) - (bz - az) * (cy - ay)
+    let ny = (bz - az) * (cx2 - ax) - (bx - ax) * (cz2 - az)
+    let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx2 - ax)
+    const flip = up !== 0 ? ny * up < 0 : nx * ((ax + bx + cx2) / 3 - rx) + nz * ((az + bz + cz2) / 3 - rz) < 0
+    if (flip) {
+      nx = -nx; ny = -ny; nz = -nz
+      const tx = bx, ty = by, tz = bz; bx = cx2; by = cy; bz = cz2; cx2 = tx; cy = ty; cz2 = tz
+    }
+    const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+    nx /= nl; ny /= nl; nz /= nl
+    out.pos.push(ax, ay, az, bx, by, bz, cx2, cy, cz2)
+    out.nor.push(nx, ny, nz, nx, ny, nz, nx, ny, nz)
+    out.col.push(col[0], col[1], col[2], col[0], col[1], col[2], col[0], col[1], col[2])
+  }
   for (let si = 0; si < n; si++) {
-    const hs = (k: number) => hf(200 + si * 23 + k)
-    const y0 = yb + si * slabH - (si > 0 ? 0.25 : 0), y1 = yb + (si + 1) * slabH
-    // Upper slabs a little smaller on average, each wider or narrower (pancake stack with lips), leaning out.
-    const sc = (1 - 0.35 * (si / Math.max(1, n))) * (0.78 + 0.34 * hs(0))
+    const hs = (k: number) => hf(200 + si * 31 + k)
+    const y0 = yb + si * slabH - (si > 0 ? 0.2 : 0), y1 = yb + (si + 1) * slabH
+    const sc = (1 - 0.3 * (si / Math.max(1, n))) * (0.8 + 0.32 * hs(0))
     const lean = (hs(1) - 0.35) * 0.18 * wd, side = (hs(2) - 0.5) * 0.3 * ws
     const cxs = ox0 + dx * lean + sx * side, czs = oz0 + dz * lean + sz * side
     ox0 = lx + (cxs - lx) * 0.5; oz0 = lz + (czs - lz) * 0.5
     let rc = hs(3) - 0.5, rs = hs(4) - 0.5
     const rl = Math.sqrt(rc * rc + rs * rs) || 1
     rc /= rl; rs /= rl
-    // Ring vertices (chunk-local).
-    const R: number[] = []
-    const jit: number[] = []
-    for (let k = 0; k < N; k++) jit.push(0.8 + 0.22 * hs(10 + k))
+    // Irregular outline: the 12-gon with ~1/4 of its corners dropped (never two in a row), radius jitter 0.7–1.12.
+    const ca: number[] = [], cb: number[] = [], rad: number[] = []
+    for (let k = 0; k < 12; k++) {
+      if (k % 2 === 1 && hs(10 + k) < 0.55) continue
+      const hx = DIR12[k * 2], hz = DIR12[k * 2 + 1]
+      ca.push(hx * rc - hz * rs); cb.push(hx * rs + hz * rc); rad.push(0.7 + 0.42 * hs(30 + k))
+    }
+    const N2 = ca.length
+    const R: number[][] = []
     for (let r = 0; r < SLAB_RINGS.length; r++) {
       const [fy, rs2] = SLAB_RINGS[r]
-      const y = y0 + (y1 - y0) * fy + (r === SLAB_RINGS.length - 1 ? (hs(30 + r) - 0.5) * 0.25 : 0)
-      for (let k = 0; k < N; k++) {
-        const hx = DIRS[k * 2], hz = DIRS[k * 2 + 1]
-        const ca = hx * rc - hz * rs, cb = hx * rs + hz * rc
-        const a = ca * wd * sc * rs2 * jit[k], b = cb * ws * sc * rs2 * jit[k]
-        R.push(cxs + dx * a + sx * b, y + (r === SLAB_RINGS.length - 1 ? (hs(40 + k) - 0.5) * 0.18 * slabH : 0), czs + dz * a + sz * b)
+      const y = y0 + (y1 - y0) * fy
+      for (let k = 0; k < N2; k++) {
+        // sides lean a little in or out per ring (slightly slanted planes, not a perfect prism)
+        const lj = r === 1 || r === 2 ? 0.96 + 0.08 * hs(50 + r * 12 + k) : 1
+        const a = ca[k] * wd * sc * rs2 * rad[k] * lj, b = cb[k] * ws * sc * rs2 * rad[k] * lj
+        R.push([cxs + dx * a + sx * b, y, czs + dz * a + sz * b])
       }
     }
-    // Slab colour: its own tone (±9 %), darker toward the buried foot of the stack, lighter tops.
-    const tone = v0 * (0.91 + 0.18 * hs(5)) * (0.72 + 0.28 * Math.min(1, (si + 0.5) / n))
-    const side3 = [br * tone, bg * tone, bb * tone]
-    const lip = [side3[0] * 0.62, side3[1] * 0.62, side3[2] * 0.66] // under the bevel / underside: in shade
-    const top3 = [side3[0] * 1.14, side3[1] * 1.12, side3[2] * 1.1]
-    if (si === n - 1) { const k = 0.55 + 0.25 * hs(6); top3[0] += (cover[0] - top3[0]) * k; top3[1] += (cover[1] - top3[1]) * k; top3[2] += (cover[2] - top3[2]) * k }
-    const cyTop = y1 + 0.08 * slabH
-    const tri = (A: number[], B: number[], C: number[], ca: number[], cb: number[], cc: number[], ref: number[], up: number): void => {
-      let ax = A[0], ay = A[1], az = A[2], bx = B[0], by = B[1], bz = B[2], cx2 = C[0], cy = C[1], cz2 = C[2]
-      let nx = (by - ay) * (cz2 - az) - (bz - az) * (cy - ay)
-      let ny = (bz - az) * (cx2 - ax) - (bx - ax) * (cz2 - az)
-      let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx2 - ax)
-      let c1 = cb, c2 = cc
-      const flip = up !== 0 ? ny * up < 0 : nx * ((ax + bx + cx2) / 3 - ref[0]) + nz * ((az + bz + cz2) / 3 - ref[2]) < 0
-      if (flip) {
-        nx = -nx; ny = -ny; nz = -nz
-        const tx = bx, ty = by, tz = bz; bx = cx2; by = cy; bz = cz2; cx2 = tx; cy = ty; cz2 = tz
-        c1 = cc; c2 = cb
-      }
-      const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
-      nx /= nl; ny /= nl; nz /= nl
-      const P3 = [ax, ay, az, bx, by, bz, cx2, cy, cz2], C3 = [ca, c1, c2]
-      const T3 = flip ? [A[3], C[3], B[3]] : [A[3], B[3], C[3]]
-      for (let q = 0; q < 3; q++) {
-        const px = P3[q * 3], py = P3[q * 3 + 1], pz = P3[q * 3 + 2]
-        // SOFT, rounded shading: a smooth normal per vertex (out from the slab's axis, tilted down at the foot and
-        // up over the shoulder; straight up / down at the cap centres) with only 15 % of the flat face mixed in —
-        // the light rolls over each block instead of breaking into hard facets.
-        let rx = px - ref[0], rz = pz - ref[2]
-        const rl2 = Math.sqrt(rx * rx + rz * rz)
-        const t = T3[q]
-        let sx2: number, sy2: number, sz2: number
-        if (rl2 < 1e-3 || t === undefined) (sx2 = 0), (sy2 = up < 0 ? -1 : 1), (sz2 = 0)
-        else (rx /= rl2), (rz /= rl2), (sx2 = rx * Math.cos(t)), (sy2 = Math.sin(t)), (sz2 = rz * Math.cos(t))
-        let mx = nx * 0.15 + sx2 * 0.85, my = ny * 0.15 + sy2 * 0.85, mz = nz * 0.15 + sz2 * 0.85
-        const ml = Math.sqrt(mx * mx + my * my + mz * mz) || 1
-        mx /= ml; my /= ml; mz /= ml
-        out.pos.push(px, py, pz)
-        out.nor.push(mx, my, mz)
-        out.col.push(C3[q][0], C3[q][1], C3[q][2])
-      }
-    }
-    const V = (r: number, k: number) => [R[(r * N + k) * 3], R[(r * N + k) * 3 + 1], R[(r * N + k) * 3 + 2], SLAB_RINGS[r][2]]
-    const ref = [cxs, 0, czs]
-    // Colour by ring: shaded foot → body → lighter shoulder (soft painted AO, no hard bands).
-    const ringCol = [lip, side3.map((v) => v * 0.94), side3, side3.map((v, i) => v + (top3[i] - v) * 0.4)]
+    // Colours: the slab's tone, a per-PLANE variation, a darker foot, lit flat top.
+    const tone = v0 * (0.9 + 0.2 * hs(5)) * (0.74 + 0.26 * Math.min(1, (si + 0.5) / n))
+    const base = [br * tone, bg * tone, bb * tone]
+    const top3 = [base[0] * 1.12, base[1] * 1.1, base[2] * 1.08]
+    if (si === n - 1) { const k = 0.5 + 0.3 * hs(6); top3[0] += (cover[0] - top3[0]) * k; top3[1] += (cover[1] - top3[1]) * k; top3[2] += (cover[2] - top3[2]) * k }
+    const plane = () => { const t = 0.93 + 0.14 * hashFloat(seed, gx, gz, L + 900 + face++); return [base[0] * t, base[1] * t, base[2] * t] }
+    const V = (r: number, k: number) => R[r * N2 + (k % N2)]
     for (let r = 0; r < SLAB_RINGS.length - 1; r++) {
-      const ca = ringCol[r], cb = ringCol[r + 1]
-      for (let k = 0; k < N; k++) {
-        const k1 = (k + 1) % N
-        tri(V(r, k), V(r, k1), V(r + 1, k1), ca, ca, cb, ref, 0)
-        tri(V(r, k), V(r + 1, k1), V(r + 1, k), ca, cb, cb, ref, 0)
+      const dk = r === 0 ? 0.72 : r === 2 ? 1.04 : 1 // foot chamfer in shade, top chamfer catching light
+      for (let k = 0; k < N2; k++) {
+        const c = plane()
+        const cc = [c[0] * dk, c[1] * dk, c[2] * dk]
+        tri(V(r, k), V(r, k + 1), V(r + 1, k + 1), cc, cxs, czs, 0)
+        tri(V(r, k), V(r + 1, k + 1), V(r + 1, k), cc, cxs, czs, 0)
       }
     }
-    const topC = [cxs, cyTop, czs, Math.PI / 2]
     const T = SLAB_RINGS.length - 1
-    for (let k = 0; k < N; k++) tri(topC, V(T, k), V(T, (k + 1) % N), top3, top3, top3, ref, 1)
-    // Underside of an overhanging slab (visible from below).
+    const capC = [cxs, y1 + 0.02, czs]
+    for (let k = 0; k < N2; k++) tri(capC, V(T, k), V(T, k + 1), top3, cxs, czs, 1)
     if (si > 0) {
-      const botC = [cxs, y0 - 0.05, czs, -Math.PI / 2]
-      for (let k = 0; k < N; k++) tri(botC, V(0, k), V(0, (k + 1) % N), lip, lip, lip, ref, -1)
+      const botC = [cxs, y0 - 0.02, czs], under = [base[0] * 0.55, base[1] * 0.55, base[2] * 0.6]
+      for (let k = 0; k < N2; k++) tri(botC, V(0, k), V(0, k + 1), under, cxs, czs, -1)
     }
   }
 }
