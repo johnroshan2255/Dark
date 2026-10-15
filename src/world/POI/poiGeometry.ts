@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { SURFACE_UV, type SurfaceName } from '../../rendering/materials/FoliageAtlas'
 import { PropType } from './poiLayout'
+import { isBright } from '../../rendering/artStyle'
 
 /**
  * Low-poly, Genshin-bright geometry for procedural places. All on the shared vegetation/atlas material
@@ -89,8 +90,120 @@ function crossQuads(w: number, h: number, hex: number, n: number, taper = 0.3): 
   return merged(parts, 'crop')
 }
 
+/**
+ * Part on a wall face: `face` = the wall's outward normal (+z front, −z back, +x / −x sides) at half-depth `hd`;
+ * u = position along the wall (left → right seen from outside), y = bottom, w × h, protruding `t` from the wall.
+ */
+type Face = '+z' | '-z' | '+x' | '-x'
+function onWall(face: Face, hd: number, u: number, y: number, w: number, h: number, t: number, hex: number, out = 0): THREE.BufferGeometry {
+  const c = hd + t / 2 + out
+  if (face === '+z') return box(w, h, t, hex, u, y, c)
+  if (face === '-z') return box(w, h, t, hex, -u, y, -c)
+  if (face === '+x') return box(t, h, w, hex, c, y, -u)
+  return box(t, h, w, hex, -c, y, u)
+}
+
+/** A framed window on a wall: glass, a white frame, a cross mullion, a sill. */
+function windowOn(face: Face, hd: number, u: number, y: number, w: number, h: number, frame = 0xf2efe6, glass = 0x8fb4c8): THREE.BufferGeometry[] {
+  const f = 0.11
+  return [
+    onWall(face, hd, u, y, w, h, 0.06, glass),
+    onWall(face, hd, u, y - f, w + 2 * f, f, 0.1, frame), onWall(face, hd, u, y + h, w + 2 * f, f, 0.1, frame),
+    onWall(face, hd, u - w / 2 - f / 2, y, f, h, 0.1, frame), onWall(face, hd, u + w / 2 + f / 2, y, f, h, 0.1, frame),
+    onWall(face, hd, u, y + h / 2 - 0.03, w, 0.06, 0.08, frame), onWall(face, hd, u - 0.03, y, 0.06, h, 0.08, frame),
+    onWall(face, hd, u, y - f - 0.06, w + 0.4, 0.08, 0.2, frame),
+  ]
+}
+
+/** Vertical battens (board-and-batten siding) along a wall of width `w`, every `step` m. */
+function battens(face: Face, hd: number, w: number, h: number, hex: number, step = 0.62): THREE.BufferGeometry[] {
+  const out: THREE.BufferGeometry[] = []
+  const n = Math.floor(w / step)
+  for (let i = 1; i < n; i++) out.push(onWall(face, hd, -w / 2 + i * (w / n), 0, 0.09, h, 0.05, hex))
+  return out
+}
+
+/** Horizontal clapboard lines along a wall. */
+function clapboards(face: Face, hd: number, w: number, h: number, hex: number, step = 0.42): THREE.BufferGeometry[] {
+  const out: THREE.BufferGeometry[] = []
+  for (let y = step; y < h - 0.1; y += step) out.push(onWall(face, hd, 0, y, w, 0.06, 0.04, hex))
+  return out
+}
+
+/** Steep gable roof as two thick slabs from the ridge past the eaves (0.55 m overhang) + white fascia and rake trim. */
+function gable(w: number, h: number, d: number, y: number, hex: number, trim: number): THREE.BufferGeometry[] {
+  const ang = Math.atan2(h, w / 2), ca = Math.cos(ang), sa = Math.sin(ang)
+  const len = Math.hypot(w / 2, h) + 0.55, t = 0.26
+  const out: THREE.BufferGeometry[] = []
+  for (const side of [-1, 1]) {
+    // centre of the slab: half its length down the slope from the ridge, lifted onto the wall by half its thickness
+    const cx = side * (ca * len / 2 + sa * t / 2), cy = y + h - sa * len / 2 + ca * t / 2
+    out.push(finish(new THREE.BoxGeometry(len, t, d + 1.0).rotateZ(-side * ang).translate(cx, cy, 0), hex, 0.92))
+    for (const z of [-(d / 2 + 0.52), d / 2 + 0.52]) out.push(finish(new THREE.BoxGeometry(len, 0.16, 0.12).rotateZ(-side * ang).translate(cx - side * sa * 0.12, cy - ca * 0.12, z), trim, 1))
+    const ex = side * ca * len, ey = y + h - sa * len
+    out.push(finish(new THREE.BoxGeometry(0.14, 0.32, d + 1.04).translate(ex, ey, 0), trim, 1))
+  }
+  return out
+}
+
+/** BRIGHT (over the hill) farm buildings: board-and-batten / clapboard siding, white trim, framed windows. */
+function othBarn(): THREE.BufferGeometry {
+  const W = 10, D = 8, H = 5.4, RH = 4.4, red = 0xc4502a, dark = 0xa63f22, white = 0xf2efe6, roofC = 0x5c6068
+  const parts: THREE.BufferGeometry[] = [
+    box(W, H, D, red),
+    finish(new THREE.ExtrudeGeometry(tri(W, RH), { depth: D, bevelEnabled: false }).translate(0, H, -D / 2), red, 0.95),
+    ...gable(W, RH, D, H, roofC, white),
+    ...battens('+z', D / 2, W, H, dark), ...battens('-z', D / 2, W, H, dark), ...battens('+x', W / 2, D, H, dark), ...battens('-x', W / 2, D, H, dark),
+  ]
+  // corner boards
+  for (const [x, z] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) parts.push(box(0.26, H, 0.26, white, x * (W / 2 + 0.02), 0, z * (D / 2 + 0.02)))
+  // big sliding door with a white frame and X brace, loft door above
+  parts.push(onWall('+z', D / 2, 0, 0, 3.8, 3.9, 0.12, 0x8c3420))
+  parts.push(onWall('+z', D / 2, -1.95, 0, 0.18, 3.9, 0.2, white), onWall('+z', D / 2, 1.95, 0, 0.18, 3.9, 0.2, white), onWall('+z', D / 2, 0, 3.9, 4.1, 0.18, 0.2, white))
+  const brace = Math.hypot(3.7, 3.8), ba = Math.atan2(3.8, 3.7)
+  for (const sg of [-1, 1]) parts.push(finish(new THREE.BoxGeometry(brace, 0.16, 0.1).rotateZ(sg * ba).translate(0, 1.95, D / 2 + 0.2), white, 1))
+  parts.push(onWall('+z', D / 2, 0, 0, 0.12, 3.8, 0.18, white))
+  parts.push(...windowOn('+z', D / 2, 0, 5.7, 1.3, 1.3, white, 0x6a2a1a))
+  // windows along the sides and the back
+  for (const u of [-2.2, 2.2]) parts.push(...windowOn('+x', W / 2, u, 2.3, 1.0, 1.1), ...windowOn('-x', W / 2, u, 2.3, 1.0, 1.1))
+  parts.push(...windowOn('-z', D / 2, -2.5, 2.4, 1.0, 1.1), ...windowOn('-z', D / 2, 2.5, 2.4, 1.0, 1.1))
+  // cupola on the ridge
+  parts.push(box(1.2, 1.0, 1.2, white, 0, H + RH - 0.35, 0), finish(new THREE.ConeGeometry(1.05, 0.8, 4).rotateY(Math.PI / 4).translate(0, H + RH + 1.05, 0), roofC, 0.9))
+  parts.push(box(1.4, 0.3, 0.14, 0x3c4048, 0, 0, D / 2 + 0.6)) // door track kicker
+  return merged(parts, 'barn')
+}
+
+function othHouse(): THREE.BufferGeometry {
+  const W = 8, D = 6, H = 4.4, RH = 3.0, wall = 0xeee2c6, line = 0xd6c8aa, white = 0xfaf8f0, roofC = 0x9c3c2c, shut = 0x3c6a78
+  const parts: THREE.BufferGeometry[] = [
+    box(W, H, D, wall),
+    finish(new THREE.ExtrudeGeometry(tri(W, RH), { depth: D, bevelEnabled: false }).translate(0, H, -D / 2), wall, 0.95),
+    ...gable(W, RH, D, H, roofC, white),
+    ...clapboards('+z', D / 2, W, H, line), ...clapboards('-z', D / 2, W, H, line), ...clapboards('+x', W / 2, D, H, line), ...clapboards('-x', W / 2, D, H, line),
+    box(W + 0.3, 0.45, D + 0.3, 0x8a8478, 0, 0, 0), // foundation
+  ]
+  for (const [x, z] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) parts.push(box(0.22, H, 0.22, white, x * (W / 2 + 0.02), 0, z * (D / 2 + 0.02)))
+  // door + porch (deck, two posts, a small shed roof)
+  parts.push(onWall('+z', D / 2, 0, 0.45, 1.1, 2.2, 0.1, 0x5a7a44), onWall('+z', D / 2, 0, 2.65, 1.4, 0.16, 0.16, white))
+  parts.push(box(3.4, 0.25, 1.8, 0x7a5a40, 0, 0.2, D / 2 + 0.9), box(3.6, 0.14, 2.1, roofC, 0, 2.95, D / 2 + 1.0))
+  for (const x of [-1.5, 1.5]) parts.push(box(0.16, 2.5, 0.16, white, x, 0.45, D / 2 + 1.7))
+  // windows with shutters
+  for (const u of [-2.6, 2.6]) {
+    parts.push(...windowOn('+z', D / 2, u, 1.5, 1.0, 1.25, white))
+    parts.push(onWall('+z', D / 2, u - 0.85, 1.4, 0.42, 1.45, 0.06, shut), onWall('+z', D / 2, u + 0.85, 1.4, 0.42, 1.45, 0.06, shut))
+  }
+  for (const u of [-1.4, 1.4]) parts.push(...windowOn('+x', W / 2, u, 1.6, 0.9, 1.15, white), ...windowOn('-x', W / 2, u, 1.6, 0.9, 1.15, white))
+  parts.push(...windowOn('-z', D / 2, 0, 1.6, 1.0, 1.15, white), ...windowOn('+z', D / 2, 0, H + 0.6, 0.8, 0.8, white))
+  parts.push(box(0.8, 2.6, 0.8, 0x8a5a48, 2.6, H + 0.8, -1.2), box(1.0, 0.18, 1.0, 0x6a6460, 2.6, H + 3.4, -1.2))
+  return merged(parts, 'house')
+}
+
 export function createPoiGeometries(): Map<number, THREE.BufferGeometry> {
   const m = new Map<number, THREE.BufferGeometry>()
+  if (isBright()) {
+    m.set(PropType.House, othHouse())
+    m.set(PropType.Barn, othBarn())
+  } else {
   m.set(PropType.House, merged([
     box(8, 4.4, 6, 0xeadcc0, 0, 0, 0, 'wood'),
     roof(9.2, 2.8, 7, 0xc8583a, 4.4),
@@ -104,6 +217,7 @@ export function createPoiGeometries(): Map<number, THREE.BufferGeometry> {
     box(3.6, 3.8, 0.15, 0x7a2420, 0, 0, 4.02, 'wood'),
     box(0.25, 3.8, 0.2, 0xf1ece0, -1.8, 0, 4.1), box(0.25, 3.8, 0.2, 0xf1ece0, 1.8, 0, 4.1), box(3.8, 0.25, 0.2, 0xf1ece0, 0, 3.8, 4.1),
   ], 'barn'))
+  }
   m.set(PropType.Hay, merged([finish(new THREE.CylinderGeometry(0.62, 0.62, 1.2, 10).rotateZ(Math.PI / 2).translate(0, 0.62, 0), 0xd9b44a, 0.75)], 'hay'))
   m.set(PropType.Wheat, crossQuads(0.5, 0.95, 0xd8b650, 2))
   m.set(PropType.Corn, merged([crossQuads(0.35, 1.9, 0x8aa83e, 2), finish(new THREE.ConeGeometry(0.07, 0.35, 4).translate(0.05, 1.3, 0), 0xe8c85a)], 'corn'))

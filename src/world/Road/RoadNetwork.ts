@@ -5,7 +5,10 @@ import type { PoiField } from '../POI/pois'
  * Secondary road network (deterministic, global, evaluated per point like every other field):
  *  - Region grid of REGION m. Each region has ONE node: the highest of 4 hashed candidates (not in water)
  *    → roads lead up to hilltops / viewpoints.
- *  - A node links east / north to its neighbour with probability, and nodes near the main road link to it.
+ *  - CONNECTED by construction (a spanning tree rooted at the main road, like a drainage network): every node's
+ *    road leads to a neighbour nearer the main road or onto the main road itself (`parentLink`); a node that can't
+ *    get there has no road at all. Extra E / N loop roads join two connected nodes (`loopLink`). So no road ever
+ *    starts or ends in the middle of nowhere — only at the main road, a hilltop node or a place.
  *  - Each link = quadratic Bézier with a hashed bend, sampled into a polyline; heights along it follow the
  *    ground (valley floor + flattened places) with the grade limited to MAX_GRADE, never below the water.
  *  - Types: GRAVEL (wider, links to the main road) and TRAIL (narrow dirt track between hills).
@@ -13,6 +16,7 @@ import type { PoiField } from '../POI/pois'
  * region are cached per region (built lazily; cache bounded).
  */
 export const RoadType = { Gravel: 0, Trail: 1 } as const
+const NB4 = [[-1, 0], [1, 0], [0, -1], [0, 1]] as const
 export const REGION = 380
 /** Polyline samples: one every ~SAMPLE_STEP m (18–64 per link) so the graded road follows the ground between samples. */
 const SAMPLE_STEP = 14
@@ -74,6 +78,9 @@ export class RoadNetwork {
   private readonly nodes = new Map<string, [number, number] | null>()
   private readonly cellRoads = new Map<string, NetRoad[]>()
   private readonly built = new Map<string, NetRoad | null>()
+  private readonly parents = new Map<string, NetRoad | null>()
+  private readonly loops = new Map<string, NetRoad | null>()
+  private readonly drives = new Map<string, NetRoad | null>()
 
   constructor(private readonly host: NetworkHost) {}
 
@@ -123,50 +130,150 @@ export class RoadNetwork {
     return false
   }
 
-  /** The grid (E / N) links of the nodes around region (ci, cj): deterministic, independent of build order. */
-  private gridLinks(ci: number, cj: number): NetRoad[] {
-    const s = this.host.seed
-    const out: NetRoad[] = []
-    for (let j = cj - 2; j <= cj + 2; j++) {
-      for (let i = ci - 2; i <= ci + 2; i++) {
-        const a = this.node(i, j)
-        if (!a) continue
-        const e = this.node(i + 1, j)
-        if (e && hashFloat(s, i, j, 960) < 0.55) {
-          const r = this.link(`${i},${j}>e`, a, e, hashFloat(s, i, j, 962) < 0.4 ? RoadType.Gravel : RoadType.Trail)
-          if (r) out.push(r)
+  /** Distance (m) of node (i, j) from the main road's centreline (Infinity: no node) and its side (±1). */
+  private dist(i: number, j: number): number {
+    const a = this.node(i, j)
+    return a ? Math.abs(a[0] - this.host.roadCenterX(a[1])) : Infinity
+  }
+  private side(i: number, j: number): number {
+    const a = this.node(i, j)
+    return a && a[0] < this.host.roadCenterX(a[1]) ? -1 : 1
+  }
+  /** Strict priority between nodes: nearer the main road first, then (j, i) — total, so every check terminates. */
+  private before(p: number, q: number, i: number, j: number): boolean {
+    const dp = this.dist(p, q), d = this.dist(i, j)
+    return dp < d || (dp === d && (q < j || (q === j && p < i)))
+  }
+
+  /**
+   * TREE LINK of node (i, j) — the road from this hilltop toward the main road (a drainage-network / spanning-tree
+   * construction, the standard way to grow a CONNECTED road net procedurally). A node's parent is the main road
+   * itself (when it is within 0.9 region) or one of its 4 neighbours on the same side of the main road that is
+   * strictly nearer to it (≥ 40 m) and itself connected. Candidates: main first, then the shortest; the first whose
+   * graded road is buildable (length, no cliff, clear of the main corridor) and crosses no higher-priority tree
+   * link wins. Distances strictly decrease along parents → no cycles, every kept node reaches the main road, and the
+   * recursion terminates. A node with no valid parent gets NO road at all (before: links were kept or dropped one by
+   * one on their own hash, leaving trail chains that started and ended in the middle of nowhere).
+   */
+  private parentLink(i: number, j: number): NetRoad | null {
+    const key = `${i},${j}`
+    const hit = this.parents.get(key)
+    if (hit !== undefined) return hit
+    const a = this.node(i, j)
+    let best: NetRoad | null = null
+    if (a) {
+      const s = this.host.seed
+      const d = this.dist(i, j), side = this.side(i, j)
+      const cands: NetRoad[] = []
+      if (d < REGION * 0.9) {
+        const r = this.shape(`${i},${j}>m`, a, null, RoadType.Gravel)
+        if (r) cands.push(r)
+      }
+      const nbs: NetRoad[] = []
+      for (const [di, dj] of NB4) {
+        const b = this.node(i + di, j + dj)
+        if (!b || this.side(i + di, j + dj) !== side || this.dist(i + di, j + dj) > d - 40) continue
+        if (!this.parentLink(i + di, j + dj)) continue // that neighbour is cut off itself
+        const type = hashFloat(s, i, j, 962 + di * 3 + dj) < 0.4 ? RoadType.Gravel : RoadType.Trail
+        const r = this.shape(`${i},${j}>p${di},${dj}`, a, b, type)
+        if (r) nbs.push(r)
+      }
+      nbs.sort((x, y) => x.cum[x.n - 1] - y.cum[y.n - 1])
+      cands.push(...nbs)
+      for (const r of cands) {
+        let ok = true
+        for (let q = j - 2; q <= j + 2 && ok; q++) {
+          for (let p = i - 2; p <= i + 2 && ok; p++) {
+            if ((p === i && q === j) || !this.before(p, q, i, j)) continue
+            const o = this.parentLink(p, q)
+            if (o && RoadNetwork.crosses(r, o)) ok = false
+          }
         }
-        const nn = this.node(i, j + 1)
-        if (nn && hashFloat(s, i, j, 961) < 0.55) {
-          const r = this.link(`${i},${j}>n`, a, nn, hashFloat(s, i, j, 963) < 0.4 ? RoadType.Gravel : RoadType.Trail)
-          if (r) out.push(r)
+        if (ok) { best = r; break }
+      }
+    }
+    if (this.parents.size > 6000) this.parents.clear()
+    this.parents.set(key, best)
+    return best
+  }
+
+  /**
+   * LOOP LINKS: extra E / N roads between two CONNECTED neighbouring nodes on the same side (≈ 35 %), so the net has
+   * circuits instead of being only a tree — never a dead end, because both ends already reach the main road. Skipped
+   * where it would duplicate a tree link or cross any tree link; N loops also yield to E loops (E loops depend on
+   * tree links only → no cyclic dependency).
+   */
+  private loopLink(i: number, j: number, dir: 'e' | 'n'): NetRoad | null {
+    const key = `${i},${j}>${dir}`
+    const hit = this.loops.get(key)
+    if (hit !== undefined) return hit
+    let r: NetRoad | null = null
+    const s = this.host.seed
+    const bi = dir === 'e' ? i + 1 : i, bj = dir === 'e' ? j : j + 1
+    const a = this.node(i, j), b = this.node(bi, bj)
+    const pa = a && b ? this.parentLink(i, j) : null, pb = a && b ? this.parentLink(bi, bj) : null
+    if (a && b && pa && pb && this.side(i, j) === this.side(bi, bj) && hashFloat(s, i, j, dir === 'e' ? 960 : 961) < 0.35 &&
+      pa.key !== `${i},${j}>p${bi - i},${bj - j}` && pb.key !== `${bi},${bj}>p${i - bi},${j - bj}`) {
+      r = this.shape(key, a, b, hashFloat(s, i, j, dir === 'e' ? 962 : 963) < 0.4 ? RoadType.Gravel : RoadType.Trail)
+      for (let q = j - 2; q <= j + 2 && r; q++) {
+        for (let p = i - 2; p <= i + 2 && r; p++) {
+          const o = this.parentLink(p, q)
+          if (o && RoadNetwork.crosses(r, o)) r = null
+          if (r && dir === 'n') {
+            const e = this.loopLink(p, q, 'e')
+            if (e && RoadNetwork.crosses(r, e)) r = null
+          }
         }
       }
     }
-    return out
+    if (this.loops.size > 6000) this.loops.clear()
+    this.loops.set(key, r)
+    return r
   }
 
-  /** The node → main-road links around region (ci, cj) (depend only on grid links → deterministic). */
-  private mainLinks(ci: number, cj: number): NetRoad[] {
-    const out: NetRoad[] = []
-    for (let j = cj - 2; j <= cj + 2; j++) {
-      for (let i = ci - 2; i <= ci + 2; i++) {
-        const a = this.node(i, j)
-        if (!a || Math.abs(a[0] - this.host.roadCenterX(a[1])) >= REGION * 0.9) continue
-        const r = this.link(`${i},${j}>m`, a, null, RoadType.Gravel)
-        if (r) out.push(r)
+  /** Tree + loop links of the nodes in [i0, i1] × [j0, j1]. */
+  private netLinks(i0: number, j0: number, i1: number, j1: number, out: NetRoad[]): NetRoad[] {
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        for (const r of [this.parentLink(i, j), this.loopLink(i, j, 'e'), this.loopLink(i, j, 'n')]) if (r && !out.includes(r)) out.push(r)
       }
     }
     return out
   }
 
   /**
-   * Road between two points (or to the main road when `b` is null). Links are REJECTED when they would cut
-   * across another road (an "intercept" — two graded roads crossing mid-way at different heights): grid links
-   * never cross the main road's corridor (nodes on opposite sides connect through it), node→main links never
-   * cross a grid link, and driveways cross neither. Priority grid < main < driveway keeps it order-independent.
+   * Driveway from a place to the main road: the shared geometry + grading (`shape`), rejected if it would cut across
+   * any network road, or the driveway of a place EARLIER in (z, x) order (strict order → the recursion terminates and
+   * every client gets the same result).
    */
-  private link(key: string, a: [number, number], b: [number, number] | null, type: number): NetRoad | null {
+  private driveway(p: { x: number; z: number }): NetRoad | null {
+    const key = `poi:${Math.floor(p.x)},${Math.floor(p.z)}`
+    const hit = this.drives.get(key)
+    if (hit !== undefined) return hit
+    let r = this.shape(key, [p.x, p.z], null, RoadType.Gravel)
+    if (r) {
+      const ci = Math.floor(p.x / REGION), cj = Math.floor(p.z / REGION)
+      const others = this.netLinks(ci - 2, cj - 2, ci + 2, cj + 2, [])
+      for (const q of this.host.pois?.inBox(p.x - 800, p.z - 800, p.x + 800, p.z + 800) ?? []) {
+        if (q.z > p.z || (q.z === p.z && q.x >= p.x)) continue
+        if (Math.abs(q.x - this.host.roadCenterX(q.z)) > REGION * 1.8) continue
+        const o = this.driveway(q)
+        if (o) others.push(o)
+      }
+      for (const o of others) if (RoadNetwork.crosses(r, o)) { r = null; break }
+    }
+    if (this.drives.size > 4000) this.drives.clear()
+    this.drives.set(key, r)
+    return r
+  }
+
+  /**
+   * One road's GEOMETRY between two points (or to the main road when `b` is null): a quadratic Bézier with a hashed
+   * bend, graded along the ground. null when too short / long, when a node-to-node road would run through the main
+   * road's corridor (nodes on opposite sides connect through it), or when it would climb a cliff. Crossing rules
+   * between roads are the callers' (parentLink / loopLink / driveway).
+   */
+  private shape(key: string, a: [number, number], b: [number, number] | null, type: number): NetRoad | null {
     let r = this.built.get(key)
     if (r !== undefined) return r
     const s = this.host.seed
@@ -194,32 +301,11 @@ export class RoadNetwork {
       zs[i] = u * u * a[1] + 2 * u * t * cz + t * t * bz
       raw[i] = this.host.baseHeight(xs[i], zs[i])
     }
-    // Crossing guards (see the doc comment). The main-road corridor: bed + shoulder + a margin.
+    // The main-road corridor (bed + shoulder + a margin): only roads that END on the main road may enter it.
     const CORRIDOR = 2.7 + 9 + 4
-    const kind = key.startsWith('poi:') ? 2 : key.endsWith('>m') ? 1 : 0
-    if (kind === 0) {
+    if (b) {
       for (let i = 0; i < SAMPLES; i++) {
         if (Math.abs(xs[i] - this.host.roadCenterX(zs[i])) < CORRIDOR) {
-          this.built.set(key, null)
-          return null
-        }
-      }
-    } else {
-      const probe: NetRoad = { key, type, halfWidth: 0, n: SAMPLES, xs, zs, hs, gs: raw, cum: raw, minX: Math.min(...xs), minZ: Math.min(...zs), maxX: Math.max(...xs), maxZ: Math.max(...zs) }
-      const ci = Math.floor(a[0] / REGION), cj = Math.floor(a[1] / REGION)
-      const others = kind === 1 ? this.gridLinks(ci, cj) : [...this.gridLinks(ci, cj), ...this.mainLinks(ci, cj)]
-      if (kind === 2 && this.host.pois) {
-        // Driveways vs driveways: a place yields to the driveways of places EARLIER in (z, x) order — a strict
-        // order, so the recursion through link() terminates and the result is the same on every client.
-        for (const q of this.host.pois.inBox(a[0] - 800, a[1] - 800, a[0] + 800, a[1] + 800)) {
-          if (q.z > a[1] || (q.z === a[1] && q.x >= a[0])) continue
-          if (Math.abs(q.x - this.host.roadCenterX(q.z)) > REGION * 1.8) continue
-          const o = this.link(`poi:${Math.floor(q.x)},${Math.floor(q.z)}`, [q.x, q.z], null, RoadType.Gravel)
-          if (o) others.push(o)
-        }
-      }
-      for (const o of others) {
-        if (RoadNetwork.crosses(probe, o)) {
           this.built.set(key, null)
           return null
         }
@@ -279,35 +365,13 @@ export class RoadNetwork {
     const key = `${ci},${cj}`
     let list = this.cellRoads.get(key)
     if (list) return list
-    list = []
-    const s = this.host.seed
     const x0 = ci * REGION - 40, z0 = cj * REGION - 40, x1 = (ci + 1) * REGION + 40, z1 = (cj + 1) * REGION + 40
-    for (let j = cj - 2; j <= cj + 1; j++) {
-      for (let i = ci - 2; i <= ci + 1; i++) {
-        const a = this.node(i, j)
-        if (!a) continue
-        const cand: NetRoad[] = []
-        const e = this.node(i + 1, j)
-        if (e && hashFloat(s, i, j, 960) < 0.55) {
-          const r = this.link(`${i},${j}>e`, a, e, hashFloat(s, i, j, 962) < 0.4 ? RoadType.Gravel : RoadType.Trail)
-          if (r) cand.push(r)
-        }
-        const nn = this.node(i, j + 1)
-        if (nn && hashFloat(s, i, j, 961) < 0.55) {
-          const r = this.link(`${i},${j}>n`, a, nn, hashFloat(s, i, j, 963) < 0.4 ? RoadType.Gravel : RoadType.Trail)
-          if (r) cand.push(r)
-        }
-        if (Math.abs(a[0] - this.host.roadCenterX(a[1])) < REGION * 0.9) {
-          const r = this.link(`${i},${j}>m`, a, null, RoadType.Gravel)
-          if (r) cand.push(r)
-        }
-        for (const r of cand) if (r.maxX >= x0 && r.minX <= x1 && r.maxZ >= z0 && r.minZ <= z1 && !list.includes(r)) list.push(r)
-      }
-    }
-    // Driveways: every place gets a gravel road to the main road.
+    // Links run from a node to a 4-neighbour or the main road (bent ≤ 0.3 × length) → nodes within ±2 regions.
+    list = this.netLinks(ci - 2, cj - 2, ci + 2, cj + 2, []).filter((r) => r.maxX >= x0 && r.minX <= x1 && r.maxZ >= z0 && r.minZ <= z1)
+    // Driveways: every place gets a gravel road to the main road (unless it would cut across another road).
     for (const p of this.host.pois?.inBox(x0 - 400, z0 - 400, x1 + 400, z1 + 400) ?? []) {
       if (Math.abs(p.x - this.host.roadCenterX(p.z)) > REGION * 1.8) continue
-      const r = this.link(`poi:${Math.floor(p.x)},${Math.floor(p.z)}`, [p.x, p.z], null, RoadType.Gravel)
+      const r = this.driveway(p)
       if (r && r.maxX >= x0 && r.minX <= x1 && r.maxZ >= z0 && r.minZ <= z1 && !list.includes(r)) list.push(r)
     }
     if (this.cellRoads.size > 2000) this.cellRoads.clear()

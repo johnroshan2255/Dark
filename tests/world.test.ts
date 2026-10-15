@@ -18,7 +18,7 @@ import { WorldGenerator } from '../src/world/WorldGenerator'
 import { createPropGeometries } from '../src/world/Forest/propGeometries'
 import { buildInstanceAttributes } from '../src/optimization/instancing/InstanceBuilder'
 import { Biome, BIOME_COUNT } from '../src/world/Biomes'
-import { RoadNetwork } from '../src/world/Road/RoadNetwork'
+import { RoadNetwork, type NetRoad as RoadNetworkRoad } from '../src/world/Road/RoadNetwork'
 
 let failures = 0
 const check = (name: string, ok: boolean, detail = '') => {
@@ -233,6 +233,35 @@ for (const seed of [7, 1337, 42]) {
   }
   check(`secondary roads never cross each other (${roads} roads, 3 seeds)`, roads > 50 && crossings === 0, `${crossings} crossings`)
   check('grid links stay out of the main road corridor', corridor === 0, `${corridor} in the corridor`)
+}
+
+// Secondary roads are CONNECTED: every road reaches the main road through other roads (no trail chain that starts
+// and ends in the middle of nowhere). Union of road end points; roads gathered over a wider window than checked.
+{
+  let cut = 0, checked = 0
+  for (const seed of [7, 1337, 42, 6]) {
+    const f = new WorldGenerator(seed).fields
+    const roads = new Set<RoadNetworkRoad>()
+    for (let cj = -7; cj <= 9; cj++) for (let ci = -6; ci <= 6; ci++) for (const r of f.network.roadsIn(ci, cj)) roads.add(r)
+    const parent = new Map<string, string>()
+    const find = (k: string): string => { let r = k; while (parent.get(r) !== r) r = parent.get(r)!; parent.set(k, r); return r }
+    const add = (k: string) => { if (!parent.has(k)) parent.set(k, k) }
+    const key = (x: number, z: number) => `${Math.round(x)},${Math.round(z)}`
+    const MAIN = 'main'
+    add(MAIN)
+    for (const r of roads) {
+      const a = key(r.xs[0], r.zs[0]), b = Math.abs(r.xs[r.n - 1] - f.roadCenterX(r.zs[r.n - 1])) < 3 ? MAIN : key(r.xs[r.n - 1], r.zs[r.n - 1])
+      add(a); add(b)
+      parent.set(find(a), find(b))
+    }
+    for (const r of roads) {
+      const cx = Math.floor(r.xs[0] / 380), cz = Math.floor(r.zs[0] / 380)
+      if (cx < -3 || cx > 3 || cz < -4 || cz > 6) continue
+      checked++
+      if (find(key(r.xs[0], r.zs[0])) !== find(MAIN)) { cut++; console.log(`  cut off: seed ${seed} ${r.key}`) }
+    }
+  }
+  check(`every secondary road reaches the main road (${checked} roads, 4 seeds)`, checked > 50 && cut === 0, `${cut} cut off`)
 }
 
 // Landmarks (giant trees, windmills, ruins, towers…): deterministic, dry, off the road; the home one in view.

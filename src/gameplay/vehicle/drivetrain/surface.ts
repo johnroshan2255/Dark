@@ -1,6 +1,7 @@
 import { WorldFields as WF } from '../../../world/WorldFields'
 import { MAIN_DITCH_IN, detailInfo } from '../../../world/Road/RoadDetail'
 import { Surf, blendRoughness, type SurfaceMix } from './tyre'
+import { nearBridge } from '../../../world/Road/bridges'
 
 /**
  * What the tyres are on, in DARK (skills/realistic-vehicle-system §8.7): deterministic from the seed — the main
@@ -22,6 +23,11 @@ export function sampleSurface(fields: WF, x: number, z: number, wet: number, out
   w.fill(0)
   out.wet = wet
   out.wash = 0
+  // A rope bridge's plank deck (bright): dry wood — grips like packed dirt (the water under it is not the surface).
+  if (nearBridge(fields, x, z, 0)) {
+    w[Surf.Dirt] = 1
+    return blendRoughness(out)
+  }
   if (fields.surface(x, z) === WF.WATER) {
     w[Surf.Ice] = 1
     return blendRoughness(out)

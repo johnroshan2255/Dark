@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { MIST_GLSL, SKY_GLSL, skyUniforms } from '../sky/skyShader'
 import { globalUniforms, GUST_GLSL, SWAY_GLSL } from './uniforms'
-import { isGenshin, isOverland, isStorybook } from '../artStyle'
+import { isBright, isGenshin, isOverland, isStorybook } from '../artStyle'
 import { ATLAS_SURF, PAINT_VERT_PARS, STONE_CLIFF_UV, paintFragPars, paintVert } from './paint'
 import { WorldFields } from '../../world/WorldFields'
 import { BIOME_GLSL } from '../biome/BiomeMap'
@@ -142,6 +142,7 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
   const story = isStorybook() && !o.lit
   const over = isOverland()
   const gen = isGenshin()
+  const bright = isBright()
   material.onBeforeCompile = (shader, renderer) => {
     prev(shader, renderer)
     const u = globalUniforms
@@ -348,7 +349,8 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     // Mesa cliffs (Sumeru): broad, soft red-orange sandstone bands with faint fine layering — not zebra stripes.
     float band = smoothstep(0.15, 0.85, sin(vWorldPos.y * 0.42 + st_noise(wp * 0.05) * 3.0) * 0.5 + 0.5);
     float band2 = sin(vWorldPos.y * 2.6 + n1 * 2.0) * 0.5 + 0.5;
-    vec3 strata = mix(vec3(0.62, 0.3, 0.15), vec3(0.78, 0.47, 0.27), band) * (0.93 + 0.1 * band2) * (fine ? 0.9 + 0.2 * st_noise(wp * 0.11) : 1.0);
+    ${bright ? `// BRIGHT (over the hill): flat warm sandstone — the cliff's block facets (cliffTilt below) carry the detail.
+    vec3 strata = vec3(0.6, 0.31, 0.19) * (0.9 + 0.14 * n1);` : 'vec3 strata = mix(vec3(0.62, 0.3, 0.15), vec3(0.78, 0.47, 0.27), band) * (0.93 + 0.1 * band2) * (fine ? 0.9 + 0.2 * st_noise(wp * 0.11) : 1.0);'}
     diffuseColor.rgb = mix(diffuseColor.rgb, strata, steep * vBiome.x * 0.85);
   }
   // CLIFFS (green lands + snow; the desert has its own strata above) — Genshin's rock (Starsnatch Cliff, Mt. Hulao,
@@ -367,7 +369,7 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
       // in block units (rel.y > 0: upper part).
       float u = abs(vNxz.x) > abs(vNxz.y) ? wp.y : wp.x;
       // Genshin (Mondstadt cliffs): broad HORIZONTAL plates (~16 m × 7 m) — layered rock, not tall columns.
-      vec2 fp = ${gen ? 'vec2(u / 16.0, vWorldPos.y / 7.0)' : 'vec2(u / 11.0, vWorldPos.y / 24.0)'};
+      vec2 fp = ${gen ? 'vec2(u / 16.0, vWorldPos.y / 7.0)' : bright ? 'vec2(u / 13.0, vWorldPos.y / 5.5)' /* stacked horizontal slabs */ : 'vec2(u / 11.0, vWorldPos.y / 24.0)'};
       vec2 ip = floor(fp), cell = ip, rel = vec2(0.0);
       if (fine) {
         float bd = 9.0;
@@ -398,8 +400,8 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
         // Match the crags standing on it (cliffRock material, Formations/crags.ts): the same vertical brush streaks
         // (paint.ts STONE at STONE_CLIFF_UV) and the same mid-tone — the slope faces the sky more than the crags'
         // walls, so its albedo sits lower (×0.74; measured on screen: was ~18 % brighter than the crags).
-        vec4 cb = texture2D(uBrush, vec2(u * 0.07, vWorldPos.y * 0.022));
-        stone *= (0.74 + 0.36 * cb.g + 0.3 * (cb.r - 0.5)) * 0.74;
+        ${bright ? `stone *= 0.9; // BRIGHT: flat per-block tone, no brush streaks` : `vec4 cb = texture2D(uBrush, vec2(u * 0.07, vWorldPos.y * 0.022));
+        stone *= (0.74 + 0.36 * cb.g + 0.3 * (cb.r - 0.5)) * 0.74;`}
         float mn = st_noise(wp * 0.21 + vec2(vWorldPos.y * 0.13));
         float moss = max(smoothstep(0.63, 0.7, vUpN + (mn - 0.5) * 0.2), top * smoothstep(0.55, 0.75, mn) * step(0.7, st_hash(cell + 7.7)));
         stone = mix(stone, vec3(0.2, 0.3, 0.07) * (0.8 + 0.4 * mn), moss * (1.0 - vBiome.y) * 0.75);
@@ -410,7 +412,7 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   }
   if (vBiome.y > 0.01) {
     if (fine) {
-      float sparkle = step(0.988, st_hash(floor(wp * 22.0))) * 0.5;
+      float sparkle = ${bright ? '0.0; // bright: matte snow (no confetti)' : 'step(0.988, st_hash(floor(wp * 22.0))) * 0.5;'}
       diffuseColor.rgb *= 1.0 + vBiome.y * ((st_noise(wp * 0.25) - 0.5) * 0.1 + sparkle);
     }
     diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.94, 0.97, 1.05), vBiome.y * 0.5);
@@ -476,7 +478,8 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     float rutS = 1.0 - smoothstep(0.2, 0.6, abs(lat - 1.35));
     vec3 packedSnow = vec3(0.68, 0.73, 0.82) * (0.9 + 0.12 * n2) * (1.0 - rutS * 0.25);
     road = mix(road, packedSnow, vBiome.y * 0.85);
-    road = mix(road, diffuseColor.rgb, vBiome.x * 0.4 * smoothstep(0.35, 0.75, st_noise(wp * 0.45 + 3.0)));
+    ${bright ? `// BRIGHT (over the hill): the desert track IS the sand — packed a shade darker with two darker wheel ruts.
+    road = mix(road, diffuseColor.rgb * (0.88 - rutS * 0.16) * (0.95 + 0.1 * n2), vBiome.x * 0.92);` : 'road = mix(road, diffuseColor.rgb, vBiome.x * 0.4 * smoothstep(0.35, 0.75, st_noise(wp * 0.45 + 3.0)));'}
     diffuseColor.rgb = mix(diffuseColor.rgb, road, 1.0 - smoothstep(HALF + 0.9, HALF + 1.6, lat));
   }
   // OFF-ROAD TRACKS (network roads: GRAVEL type 0, TRAIL type 1 — the "mud roads"). Road/RoadDetail carves their
@@ -531,7 +534,11 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
         '#include <alphamap_fragment>',
         /* glsl */ `{
   float bn = st_noise(vWPos.xz * 1.4 + vec2(vWPos.y * 0.9));
-  ${o.biomeCover === 'rock' ? `// Desert sandstone: wavy horizontal strata in warm reds and creams.
+  ${o.biomeCover === 'rock' && bright ? `// BRIGHT desert: flat warm sandstone, keeping the vertex tone (slab shading) — no strata.
+  if (vBiomeW.x > 0.02) {
+    float lum = dot(diffuseColor.rgb, vec3(0.3, 0.55, 0.15));
+    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.62, 0.32, 0.2) * clamp(lum / 0.3, 0.6, 1.4), vBiomeW.x * 0.8);
+  }` : o.biomeCover === 'rock' ? `// Desert sandstone: wavy horizontal strata in warm reds and creams.
   if (vBiomeW.x > 0.02) {
     float band = sin(vWPos.y * 3.3 + bn * 2.4) * 0.5 + 0.5;
     vec3 strata = mix(vec3(0.62, 0.3, 0.16), vec3(0.86, 0.62, 0.4), band) * (0.8 + 0.3 * bn);
@@ -578,7 +585,8 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
   // Emissive mushrooms (vGlow): their own light on top of the lit colour — bright in the shade, glowing at night,
   // bloom picks it up on MEDIUM+ (LOW: no bloom, a bright flat colour).
   outgoingLight = mix(outgoingLight, max(outgoingLight, diffuseColor.rgb * 1.9), vGlow);` : ''}
-  ${o.terrain ? `{ // Sun glints on snow and sand: sparse cells that flash toward the key light (view dependent).
+  ${o.terrain && !bright ? `{ // Sun glints on snow and sand: sparse cells that flash toward the key light (view dependent).
+    // (Not in bright: over the hill's sand and snow are matte — the glints read as white confetti around the car.)
     float gd = length(vWorldPos - cameraPosition);
     float soft = (vBiome.y + vBiome.x * 0.55) * uSurfaceDetail;
     if (soft > 0.02 && gd < 45.0) {

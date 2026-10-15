@@ -203,7 +203,7 @@ export class Car {
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', `#include <common>
 attribute float paintMask; varying float vPaint;
-attribute float tyreW; varying float vTyre; varying vec3 vDirtP;
+attribute float tyreW; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
 uniform vec4 uTyre[4]; uniform float uTyreShear[4]; uniform float uTyreR;`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>
 vPaint = paintMask;
@@ -223,12 +223,13 @@ if (tyreW > 0.0) {
   #ifdef USE_INSTANCING
   wp = instanceMatrix * wp;
   #endif
-  vDirtP = (modelMatrix * wp).xyz; }`)
+  vDirtP = (modelMatrix * wp).xyz;
+  vDirtN = (vec4(transformedNormal, 0.0) * viewMatrix).xyz; } // world-space normal (snow settles on up-facing panels)`)
       // Paint REPLACES the panel's hue (keeps its shading/luminance) so a red coat on a blue textured van is red,
       // not black; white = the model's own colours (stock look).
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint; varying float vTyre; varying vec3 vDirtP;
-uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss;
+        .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
+uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss; uniform float uSnowCoat; uniform float uSandCoat;
 float carCoat = 0.0;
 float dirtHash(vec3 p) { return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
 float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -249,7 +250,34 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
           // Tyres take grey-brown dust, not mud paint.
           vec3 dcol = mix(uDirtCol, vec3(0.42, 0.4, 0.37), vTyre * 0.6) * (0.75 + 0.35 * n);
           carCoat = clamp(coat, 0.0, 0.85);
-          diffuseColor.rgb = mix(diffuseColor.rgb, dcol, carCoat); }`)
+          diffuseColor.rgb = mix(diffuseColor.rgb, dcol, carCoat);
+          // SAND + SNOW BUILD-UP (over the hill): grows while driving in the desert / snow (Car.updateDirt), melts
+          // and washes off elsewhere. Sand: a fine dust film over the whole car, caked sand low down and dust settled
+          // on the flat tops. Snow: caps on every up-facing panel (roof, hood, rack, bed) spreading in clumps as it
+          // builds, and packed snow sprayed up the sides / arches / bumpers and into the tyres. Both stay matte.
+          if (uSandCoat + uSnowCoat > 0.003) {
+            float up = normalize(vDirtN).y;
+            float nS = dirtNoise(vDirtP * 4.3) * 0.65 + dirtNoise(vDirtP * 13.0) * 0.35;
+            // Fine speckled grunge (their dusty / muddy trucks): ~2 cm specks, denser low down and as the coat grows.
+            float low = 1.0 - smoothstep(0.0, 1.6, h);
+            // (Specks smaller than ~a pixel fade to their mean coverage — no sparkle at a distance.)
+            float specP = uSandCoat * (0.25 + 0.55 * low) * (0.6 + 0.8 * nS);
+            float specFar = smoothstep(0.5, 1.2, length(fwidth(vDirtP)) * 55.0);
+            float speck = mix(step(1.0 - specP, dirtHash(vDirtP * 55.0)), specP, specFar);
+            float sand = uSandCoat * (0.06 + 0.06 * nS) + speck * 0.7;
+            sand += (1.0 - smoothstep(0.1, 0.3 + 0.6 * uSandCoat, h + (nS - 0.5) * 0.4)) * smoothstep(0.35, 0.65, nS + 0.25 * uSandCoat) * uSandCoat;
+            sand += smoothstep(0.5, 0.85, up) * smoothstep(0.35, 0.7, nS) * 0.5 * uSandCoat + vTyre * 0.35 * uSandCoat;
+            sand = clamp(sand, 0.0, 0.85);
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.74, 0.5, 0.34) * (0.85 + 0.25 * nS), sand);
+            float cap = smoothstep(0.45, 0.8, up) * smoothstep(1.0 - uSnowCoat, 1.2 - uSnowCoat, nS + 0.12);
+            // Packed snow up the sides: a solid band whose top edge climbs with the coat (≈ 0.3 m → 1.25 m), ragged.
+            float sTop = 0.25 + 1.0 * uSnowCoat;
+            float spray = (1.0 - smoothstep(sTop - 0.12, sTop + 0.12, h + (nS - 0.5) * 0.5)) * smoothstep(1.0 - uSnowCoat * 1.3, 1.15 - uSnowCoat * 1.3, nS + 0.05);
+            spray = max(spray, mix(step(1.0 - uSnowCoat * 0.6 * low, dirtHash(vDirtP * 40.0)), uSnowCoat * 0.6 * low, specFar)); // flecks thrown up the sides
+            float snow = clamp(max(max(cap, spray), vTyre * 0.55 * uSnowCoat), 0.0, 0.95);
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86, 0.9, 0.97) * (0.9 + 0.12 * nS) * mix(0.85, 1.0, up * 0.5 + 0.5), snow);
+            carCoat = max(carCoat, max(snow, sand * 0.8));
+          } }`)
         // GLOSS (MEDIUM+): painted metal catches the sun as a highlight and the sky at grazing angles (Fresnel);
         // rubber and the dirt coat stay matte. Fog applies after it, like the rest of the colour.
         .replace('#include <tonemapping_fragment>', `{
@@ -682,6 +710,13 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     uDirtCol: { value: new THREE.Color(0.3, 0.22, 0.14) },
     uGroundY: { value: 0 },
     uGloss: { value: 1 },
+    uSnowCoat: { value: 0 },
+    uSandCoat: { value: 0 },
+  }
+  /** Snow / sand build-up on the body, 0..1 (read-only outside; dev shots may set it through `coat`). */
+  get coat(): { snow: number; sand: number } {
+    const u = this.tyreU
+    return { get snow() { return u.uSnowCoat.value }, set snow(v: number) { u.uSnowCoat.value = v }, get sand() { return u.uSandCoat.value }, set sand(v: number) { u.uSandCoat.value = v } }
   }
   /** Shear on HIGH+ (Game sets it from the quality tier). */
   tyreShear = false
@@ -707,6 +742,7 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     if (this.dirtT <= 0) {
       this.dirtT = 0.5
       sampleSurface(this.fields, this.pos.x, this.pos.z, this.wetness, this.dirtMix)
+      this.fields.region(this.pos.x, this.pos.z, this.coatW)
       const w = this.dirtMix.w
       this.dirtTarget.setRGB(0, 0, 0)
       for (let i = 0; i < DIRT_COLS.length; i++) {
@@ -719,7 +755,20 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     const d = u.uDirt.value + dt * (off * 0.012 * Math.min(2, v / 10) - (1 - off) * 0.002 * Math.min(1, v / 10) - this.wetness * 0.01)
     u.uDirt.value = Math.max(0.3, Math.min(0.95, d))
     if (v > 1) u.uDirtCol.value.lerp(this.dirtTarget, Math.min(1, dt * 0.05 * Math.min(2, v / 8)))
+    // SNOW / SAND BUILD-UP: by the region under the car (the main road in the snow is packed snow too). Snow cakes
+    // on in ~80 s of driving at 36 km/h (faster at speed and with wheel spin), settles slowly on a car parked in the
+    // snowfield, melts over ~4 min elsewhere (faster in the desert's heat, in rain and in water). Sand dust builds
+    // the same way in the desert and washes off in rain, snow or water.
+    const sn = this.coatW[2], sa = this.coatW[1]
+    const ws = this.sim.wheelSlip, spin = Math.min(1, (ws[0] + ws[1] + ws[2] + ws[3]) * 0.5)
+    const pace = Math.min(2, v / 10) * (1 + spin)
+    const wading = this.pos.y < -5.6 // WorldFields.WATER + 0.4: wheels in a river or lake
+    const wash = (wading ? 0.08 : 0) + this.wetness * 0.02
+    u.uSnowCoat.value = Math.max(0, Math.min(1, u.uSnowCoat.value + dt * (sn * (0.012 * pace + 0.002) - (1 - sn) * (0.004 + 0.01 * sa) - wash)))
+    u.uSandCoat.value = Math.max(0, Math.min(1, u.uSandCoat.value + dt * (sa * 0.01 * pace - (1 - sa) * 0.0015 - sn * 0.01 - wash * 1.5)))
   }
+  /** Region weights under the car (refreshed with the dirt colour, 2 Hz): [forest, desert, snow, autumn, mystic]. */
+  private readonly coatW = new Float32Array(8)
 
   /** Settings → Controls (Simulation handling): gearbox mode and aids level ('auto' = the class default; Full on
    *  touch). */

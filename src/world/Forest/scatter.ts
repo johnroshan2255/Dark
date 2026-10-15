@@ -7,6 +7,7 @@ import { detailInfo } from '../Road/RoadDetail'
 import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Biomes'
 import { BIOMES, pickRegion, pickWeighted, regionRoll } from '../biomes/BiomeDefs'
 import { CRAG_SLOPE0, gridSlope } from '../Formations/crags'
+import { nearBridge } from '../Road/bridges'
 
 const _bw: BiomeWeights = [0, 0]
 const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
@@ -152,6 +153,7 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     (wx, wz, r, h) => {
       const d = fields.roadDistance(wx, wz)
       if (d < clearRoad) return 0
+      if (nearBridge(fields, wx, wz, 4)) return 0 // rope bridges: a clear way across
       // Forest thickens with distance from the road (verge → treeline), instead of a wall at the kerb.
       // Desert (Sumeru): mostly BARE sand and rock — cacti and Joshua trees only in scattered clumps (~1/4 of
       // the ground), a lone one now and then between them (forestDensity is ~0 on sand).
@@ -168,6 +170,7 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
   // Far forest (FarForest): trees only — the impostor ring needs nothing else.
   if (treesOnly) return { trees, rocks: new Float32Array(0), plants: new Float32Array(0) }
   const rocks = scatter(ctx, ROCK_CELL, Layer.Rocks, PROP_STRIDE, (wx, wz, r, h) => {
+    if (nearBridge(fields, wx, wz)) return 0
     const w = fields.biome(wx, wz, _bw, h)
     const p = 0.14 * (1 + w[0] * 1.2 + w[1] * 0.5) // sparse (≈ 9 per chunk in the forest); deserts and snowfields stonier
     if (r >= p) return 0
@@ -179,7 +182,7 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
   })
 
   const plants = scatter(ctx, PLANT_CELL, Layer.Plants, PROP_STRIDE, (wx, wz, r, h) => {
-    if (fields.roadDistance(wx, wz) < WorldFields.ROAD_HALF_WIDTH + 0.3) return 0
+    if (fields.roadDistance(wx, wz) < WorldFields.ROAD_HALF_WIDTH + 0.3 || nearBridge(fields, wx, wz, 1)) return 0
     // Undergrowth: dense on the verges (refer/roads: ferns lining the road), sparse under canopy; none on snow.
     const rd = fields.roadDistance(wx, wz) - WorldFields.ROAD_HALF_WIDTH
     const verge = rd > 1.5 && rd < 12 ? 0.45 * (1 - Math.abs(rd - 5) / 7) : 0
@@ -193,7 +196,7 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     // Desert: sparse agaves and dry shrubs instead (WorldChunk picks the desert meshes by the biome at the plant).
     // SMALL bushes only, and ~40 % of the old count (the player asked for few, small ones): 0.45–0.8 scale
     // (was 0.7–1.6 — the big leafy mounds), a lighter verge band.
-    const density = ((0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1]) * 0.4 * Math.min(1.6, reg) + w[0] * 0.05) * (fields.palette === 1 ? 0.45 : 1)
+    const density = ((0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1]) * 0.4 * Math.min(1.6, reg) + w[0] * (fields.palette === 0 ? 0.11 : 0.05)) * (fields.palette === 1 ? 0.45 : 1)
     return r < density ? 0.45 + (r / Math.max(density, 1e-3)) * 0.35 : 0
   })
 

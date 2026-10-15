@@ -3,6 +3,7 @@ import { hashFloat, Layer } from '../noise/rng'
 import { sampleHeight } from '../Terrain/generateTerrain'
 import { WorldFields } from '../WorldFields'
 import type { BiomeWeights } from '../Biomes'
+import { nearBridge } from '../Road/bridges'
 
 /**
  * CRAGS — Genshin's rocky hillsides (Starsnatch Cliff, Mt. Hulao, Stone Gate): a heightfield slope is only a smooth
@@ -91,8 +92,9 @@ export function buildCrags(fields: WorldFields, cx: number, cz: number, heights:
       const ws = P.ws + P.wsVar * r // half-width across the slope
       const wd = P.wd + P.wdVar * hashFloat(seed, gx, gz, L + 4) // half-depth down the slope
       if (fields.anyRoadEdge(wx, wz) < 4 + ws) continue
-      if (fields.pois.near(wx, wz, 6) || fields.formations.near(wx, wz, 2) || fields.landmarks.near(wx, wz, 8)) continue
-      addCrag(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L)
+      if (fields.pois.near(wx, wz, 6) || fields.formations.near(wx, wz, 2) || fields.landmarks.near(wx, wz, 8) || nearBridge(fields, wx, wz, Math.max(ws, wd) * 1.4 + 4)) continue
+      if (fields.palette === 0) addSlabs(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L, P.salt > 0)
+      else addCrag(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L)
       count++
     }
   }
@@ -221,5 +223,121 @@ function addCrag(
     const ra = rock(a, c0).slice(), rb = rock(b, c1).slice()
     mix(ra, cover, 0.4); mix(rb, cover, 0.4)
     tri(-1, a, b, capCol, ra, rb, capX, capZ, true)
+  }
+}
+
+/**
+ * BRIGHT (palette 0) — "over the hill" canyon rock: each crag is a STACK of 2–6 broad, thick SLABS (pancakes of
+ * rock 2.5–6 m high), each its own size, rotation and offset, so the cliff reads as piled blocks with overhanging
+ * lips and dark undersides. Every slab is an irregular octagonal prism with BEVELLED rims (narrower foot and top
+ * ring) → rounded-off blocks, not sharp prisms. FLAT-ish facets (face normal 80 %), one flat colour per slab (no
+ * paint strokes / strata — the shape carries the detail), tops lighter (sun-baked), undersides dark.
+ * Cost: ≈ 40 tris per slab (sides 32 + top 8, + 8 under an overhang); masses avg ~4 slabs ≈ 170 tris per crag.
+ */
+const SLAB_RINGS = [[0, 0.9], [0.38, 1], [1, 0.8]] as const
+
+function addSlabs(
+  fields: WorldFields, out: CragMesh, lx: number, lz: number, wx: number, wz: number, h0: number,
+  ux: number, uz: number, g: number, ws: number, wd: number, seed: number, gx: number, gz: number, L: number, small: boolean,
+): void {
+  const hf = (k: number) => hashFloat(seed, gx, gz, L + 5 + k)
+  const dx = -ux, dz = -uz, sx = -dz, sz = dx
+  const reach = Math.max(ws, wd)
+  const yb = h0 - g * reach * 1.2 - 1.5
+  const yt = h0 + (0.3 + 0.8 * hf(2)) * g * wd + hf(3) * 3
+  const yspan = yt - yb
+  const w = fields.biome(wx, wz, _bw, h0)
+  const sand = w[0], snow = w[1]
+  // Base rock colour (linear): warm sandstone in the desert, cool blue-grey stone in the green lands, grey-blue in
+  // the snow; ±10 % per crag.
+  const v0 = 0.9 + 0.2 * hf(41)
+  let br = 0.3 + 0.04 * hf(42), bg = 0.3 + 0.02 * hf(43), bb = 0.32 + 0.03 * hf(44)
+  br += (0.62 - br) * sand; bg += (0.31 - bg) * sand; bb += (0.19 - bb) * sand
+  br += (0.42 - br) * snow; bg += (0.46 - bg) * snow; bb += (0.54 - bb) * snow
+  const cover = [0.13 + (0.7 - 0.13) * sand + (0.86 - 0.13) * snow, 0.27 + (0.42 - 0.27) * sand + (0.89 - 0.27) * snow, 0.05 + (0.24 - 0.05) * sand + (0.95 - 0.05) * snow]
+  // Slabs: 2.5–6 m thick each (small blocks: 1–2 slabs).
+  const nMax = small ? 2 : 6
+  const n = Math.max(1, Math.min(nMax, Math.round(yspan / (3.2 + 2.2 * hf(4)))))
+  const slabH = yspan / n
+  let ox0 = lx, oz0 = lz
+  for (let si = 0; si < n; si++) {
+    const hs = (k: number) => hf(200 + si * 23 + k)
+    const y0 = yb + si * slabH - (si > 0 ? 0.25 : 0), y1 = yb + (si + 1) * slabH
+    // Upper slabs a little smaller on average, each wider or narrower (pancake stack with lips), leaning out.
+    const sc = (1 - 0.35 * (si / Math.max(1, n))) * (0.78 + 0.34 * hs(0))
+    const lean = (hs(1) - 0.35) * 0.18 * wd, side = (hs(2) - 0.5) * 0.3 * ws
+    const cxs = ox0 + dx * lean + sx * side, czs = oz0 + dz * lean + sz * side
+    ox0 = lx + (cxs - lx) * 0.5; oz0 = lz + (czs - lz) * 0.5
+    let rc = hs(3) - 0.5, rs = hs(4) - 0.5
+    const rl = Math.sqrt(rc * rc + rs * rs) || 1
+    rc /= rl; rs /= rl
+    // Ring vertices (chunk-local).
+    const R: number[] = []
+    const jit: number[] = []
+    for (let k = 0; k < N; k++) jit.push(0.8 + 0.22 * hs(10 + k))
+    for (let r = 0; r < SLAB_RINGS.length; r++) {
+      const [fy, rs2] = SLAB_RINGS[r]
+      const y = y0 + (y1 - y0) * fy + (r === SLAB_RINGS.length - 1 ? (hs(30 + r) - 0.5) * 0.25 : 0)
+      for (let k = 0; k < N; k++) {
+        const hx = DIRS[k * 2], hz = DIRS[k * 2 + 1]
+        const ca = hx * rc - hz * rs, cb = hx * rs + hz * rc
+        const a = ca * wd * sc * rs2 * jit[k], b = cb * ws * sc * rs2 * jit[k]
+        R.push(cxs + dx * a + sx * b, y + (r === SLAB_RINGS.length - 1 ? (hs(40 + k) - 0.5) * 0.18 * slabH : 0), czs + dz * a + sz * b)
+      }
+    }
+    // Slab colour: its own tone (±9 %), darker toward the buried foot of the stack, lighter tops.
+    const tone = v0 * (0.91 + 0.18 * hs(5)) * (0.72 + 0.28 * Math.min(1, (si + 0.5) / n))
+    const side3 = [br * tone, bg * tone, bb * tone]
+    const lip = [side3[0] * 0.62, side3[1] * 0.62, side3[2] * 0.66] // under the bevel / underside: in shade
+    const top3 = [side3[0] * 1.14, side3[1] * 1.12, side3[2] * 1.1]
+    if (si === n - 1) { const k = 0.55 + 0.25 * hs(6); top3[0] += (cover[0] - top3[0]) * k; top3[1] += (cover[1] - top3[1]) * k; top3[2] += (cover[2] - top3[2]) * k }
+    const cyTop = y1 + 0.08 * slabH
+    const tri = (A: number[], B: number[], C: number[], ca: number[], cb: number[], cc: number[], ref: number[], up: number): void => {
+      let ax = A[0], ay = A[1], az = A[2], bx = B[0], by = B[1], bz = B[2], cx2 = C[0], cy = C[1], cz2 = C[2]
+      let nx = (by - ay) * (cz2 - az) - (bz - az) * (cy - ay)
+      let ny = (bz - az) * (cx2 - ax) - (bx - ax) * (cz2 - az)
+      let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx2 - ax)
+      let c1 = cb, c2 = cc
+      const flip = up !== 0 ? ny * up < 0 : nx * ((ax + bx + cx2) / 3 - ref[0]) + nz * ((az + bz + cz2) / 3 - ref[2]) < 0
+      if (flip) {
+        nx = -nx; ny = -ny; nz = -nz
+        const tx = bx, ty = by, tz = bz; bx = cx2; by = cy; bz = cz2; cx2 = tx; cy = ty; cz2 = tz
+        c1 = cc; c2 = cb
+      }
+      const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+      nx /= nl; ny /= nl; nz /= nl
+      const P3 = [ax, ay, az, bx, by, bz, cx2, cy, cz2], C3 = [ca, c1, c2]
+      for (let q = 0; q < 3; q++) {
+        const px = P3[q * 3], py = P3[q * 3 + 1], pz = P3[q * 3 + 2]
+        // 80 % facet + 20 % radial → readable flat planes with softened edges.
+        let rx = px - ref[0], rz = pz - ref[2]
+        const rl2 = Math.sqrt(rx * rx + rz * rz) || 1
+        rx /= rl2; rz /= rl2
+        let mx = nx * 0.8 + (up !== 0 ? 0 : rx * 0.2), my = ny * 0.8 + (up !== 0 ? up * 0.2 : 0), mz = nz * 0.8 + (up !== 0 ? 0 : rz * 0.2)
+        const ml = Math.sqrt(mx * mx + my * my + mz * mz) || 1
+        mx /= ml; my /= ml; mz /= ml
+        out.pos.push(px, py, pz)
+        out.nor.push(mx, my, mz)
+        out.col.push(C3[q][0], C3[q][1], C3[q][2])
+      }
+    }
+    const V = (r: number, k: number) => [R[(r * N + k) * 3], R[(r * N + k) * 3 + 1], R[(r * N + k) * 3 + 2]]
+    const ref = [cxs, 0, czs]
+    for (let r = 0; r < SLAB_RINGS.length - 1; r++) {
+      const ca = r === 0 ? lip : side3, cb = side3
+      for (let k = 0; k < N; k++) {
+        const k1 = (k + 1) % N
+        tri(V(r, k), V(r, k1), V(r + 1, k1), ca, ca, cb, ref, 0)
+        tri(V(r, k), V(r + 1, k1), V(r + 1, k), ca, cb, cb, ref, 0)
+      }
+    }
+    const topC = [cxs, cyTop, czs]
+    const T = SLAB_RINGS.length - 1
+    for (let k = 0; k < N; k++) tri(topC, V(T, k), V(T, (k + 1) % N), top3, top3, top3, ref, 1)
+    // Underside of an overhanging slab (visible from below).
+    if (si > 0) {
+      const botC = [cxs, y0 - 0.05, czs]
+      for (let k = 0; k < N; k++) tri(botC, V(0, k), V(0, (k + 1) % N), lip, lip, lip, ref, -1)
+    }
   }
 }

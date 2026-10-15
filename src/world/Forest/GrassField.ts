@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { nearBridge } from '../Road/bridges'
 import { CELL_SIZE, CHUNK_SIZE, CHUNK_VERTS } from '../constants'
 import { hashFloat } from '../noise/rng'
 import { sampleHeight } from '../Terrain/generateTerrain'
@@ -291,7 +292,7 @@ export class GrassField {
       // verge pushes it up; the shader shows that fraction of each patch's blades.
       const meadow = this.meadowAt(wx, wz)
       const density = Math.min(1, Math.max(meadow, verge * bare))
-      if (!chunk || road < 0.3 || density < 0.03) {
+      if (!chunk || road < 0.3 || density < 0.03 || nearBridge(this.fields, wx, wz, 0.3)) { // (no grass through a bridge deck)
         ZERO.toArray(mats, (base + i) * 16)
         dens[base + i] = 0
         continue

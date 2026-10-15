@@ -72,7 +72,7 @@ export class Weather {
     const c = this.cloud, r = this.rain
     if (c > 0.001) {
       // Overcast: a low grey lid — the sky, fog and haze all go to the same grey, the sun goes flat.
-      p.clouds = Math.max(p.clouds, 0.35 + c * 0.6)
+      p.clouds = Math.max(p.clouds, (0.35 + c * 0.6) * Math.min(1, c / 0.15)) // ramps in (a trace of cloud jumped to 0.35)
       p.cloudWhite = Math.max(0, p.cloudWhite - c * 0.7)
       p.storm = Math.max(p.storm, c * 0.7)
       p.sunIntensity *= 1 - 0.7 * c

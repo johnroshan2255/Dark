@@ -25,6 +25,8 @@ export const isStorybook = (): boolean => ART.style === 'storybook'
 export const isOverland = (): boolean => ART.style === 'overland'
 /** 'genshin' shares every 'bright' code path (geometry, shaders); only colours and light differ. */
 export const isGenshin = (): boolean => ART.style === 'genshin'
+/** 'bright' only (the style the player uses) — over-the-hill rock, sand and snow (2026-10-15). */
+export const isBright = (): boolean => ART.style === 'bright'
 
 /**
  * Ground palette id handed to the generator workers (WorldFields.palette): the ground/grass albedo is baked

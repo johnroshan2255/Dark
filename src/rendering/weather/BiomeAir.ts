@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import type { LightingParams } from '../lighting/TimeOfDay'
+import { isBright } from '../artStyle'
 
 /**
  * BIOME AIR: the region under the player re-tints the blended time-of-day params in place (before the lights,
@@ -18,6 +19,9 @@ const SNOW_BOUNCE = new THREE.Color(0.72, 0.8, 0.95)
 const SAND_FOG = new THREE.Color(1.0, 0.9, 0.72)
 const SAND_ZENITH = new THREE.Color(0.26, 0.48, 0.86)
 const SAND_BOUNCE = new THREE.Color(0.85, 0.6, 0.35)
+const OTH_SAND_FILL = new THREE.Color(1.0, 0.8, 0.7)
+const OTH_SAND_ZENITH = new THREE.Color(0.7, 0.9, 1.0)
+const OTH_SAND_HAZE = new THREE.Color(1.0, 0.9, 0.84)
 
 // AUTUMN: warm golden air — honey haze, a warmer lower-feeling sun, an amber bounce from the leaf-strewn ground.
 const AUT_FOG = new THREE.Color(1.0, 0.86, 0.66)
@@ -87,5 +91,20 @@ export function applyBiomeAir(p: LightingParams, sand: number, snow: number, aut
     p.haze = Math.min(1, p.haze + 0.15 * sand)
     p.mistDensity *= 1 - 0.6 * sand // dry air: no valley mist over the dunes
     p.saturation *= 1 - 0.05 * sand
+  }
+  if (sand > 0.001 && isBright()) {
+    // BRIGHT (over the hill): a pale, almost white-cyan sky, thick warm haze over a clear sky, and WARM shade — the
+    // blue sky fill on orange sand read as olive (measured shadowed sand 95,90,67 vs their 178,134,98).
+    hueToward(p.hemiSky, OTH_SAND_FILL, 0.75 * sand, 1 + 0.4 * sand)
+    hueToward(p.fogColor, OTH_SAND_HAZE, 0.8 * sand, 1 + 0.25 * sand)
+    // Zenith at the HORIZON's brightness (pale sky by day, still dark at night) — hueToward kept the deep-blue
+    // zenith's low luminance, which turned the pale target into a grey lid.
+    _c.copy(OTH_SAND_ZENITH).multiplyScalar(lum(p.fogColor) / lum(OTH_SAND_HAZE))
+    p.skyZenith.lerp(_c, 0.85 * sand)
+    hueToward(p.landHaze, OTH_SAND_HAZE, 0.8 * sand)
+    p.clouds *= 1 - 0.75 * sand
+    p.hemiIntensity *= 1 + 0.3 * sand // lighter, warm shade (theirs ≈ 178,134,98)
+    p.haze = Math.min(1, p.haze + 0.12 * sand)
+    p.split *= 1 - 0.8 * sand // no cool split-toned shadows
   }
 }

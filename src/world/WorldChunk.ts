@@ -386,6 +386,9 @@ export class WorldChunk implements Cullable {
       const x = this.origin[0] + pl[o], z = this.origin[1] + pl[o + 2]
       const region = pickRegion(fields.region(x, z, _wn, pl[o + 1]), regionRoll(fields.seed, x, z, 5150))
       kind[k] = pickWeighted(BIOMES[region].plants, (pl[o] * 7.31 + pl[o + 2] * 3.17) % 1)
+      // Bright (over the hill): the desert's undergrowth is round green bushes only — one draw per chunk (agaves +
+      // bushes were 2: LOW desert views went 72 → 87 draws).
+      if (fields.palette === 0 && kind[k] === Plant.Agave) kind[k] = Plant.Shrub
     }
     const plantTint = (o: number, out: [number, number, number]) => {
       out[0] = out[1] = out[2] = 1

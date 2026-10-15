@@ -4,7 +4,7 @@ import { SURFACE } from '../shaders/paint'
 import { stylize } from '../shaders/stylize'
 import { globalUniforms, GUST_GLSL, SWAY_GLSL } from '../shaders/uniforms'
 import { createBrushTexture } from './BrushTexture'
-import { isGenshin, isOverland, isStorybook } from '../artStyle'
+import { isBright, isGenshin, isOverland, isStorybook } from '../artStyle'
 import { createFoliageAtlas } from './FoliageAtlas'
 import { createImpostorMaterial } from '../impostors/Impostors'
 
@@ -156,13 +156,16 @@ export class MaterialLibrary {
   /** OVERLAND: soft plain-colour boulders (no stone paint strokes); otherwise smooth painted STONE. */
   readonly rock = isOverland()
     ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock' })
+    : isBright()
+    // BRIGHT (over the hill): plain flat-colour stone — the facets carry the detail, no paint strokes.
+    ? stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.25, toon: 0.3, cullFade: true, wet: true, biomeCover: 'rock' })
     : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.35, surface: SURFACE.stone, cullFade: true, biomeCover: 'rock' })
   /**
    * CLIFF ROCK (formations + crags, world-scale merged meshes): the rock look with cliff-sized brush strokes (vertical
    * streaks on walls) and softer shading than the boulders — Genshin shades scenery softly (hard cel ramps on big
    * flat facets read as a toy). One extra program, no extra draws (the formation mesh just uses it).
    */
-  readonly cliffRock = isOverland()
+  readonly cliffRock = isOverland() || isBright()
     ? this.rock
     : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', rim: 0.25, surface: SURFACE.stone, cliffStone: true, toon: 0.6, cullFade: true, wet: true, biomeCover: 'rock' })
   /** Grass layers (GrassField): near (dense, curved blades) and far (sparse, wide) — same program, own bands. */

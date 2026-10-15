@@ -32,7 +32,7 @@ export const SNOW_LINE = [135, 175] as const
  * makes the same seed produce a different world, so shared `?seed=` links and co-op peers can tell (v1 = the
  * original random forest / desert / snow cells).
  */
-export const WORLD_GEN_VERSION = 2
+export const WORLD_GEN_VERSION = 3 // 3: connected road network (tree rooted at the main road), bright rope bridges + slab crags
 
 /** Weights (sum ≤ 1 for the named types; the rest is green land): [desert, snow]. */
 export type BiomeWeights = [number, number]

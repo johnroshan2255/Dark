@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { ATLAS_CELLS, cellUv, SOLID_UV, SURFACE_UV } from '../../rendering/materials/FoliageAtlas'
-import { isGenshin, isOverland, isStorybook } from '../../rendering/artStyle'
+import { isBright, isGenshin, isOverland, isStorybook } from '../../rendering/artStyle'
 import { Rng } from '../noise/rng'
 import { TreeSpecies } from '../types'
 import { agave, dryShrub, joshua, saguaro } from './desertFlora'
@@ -561,7 +561,7 @@ export function createDesertUndergrowth(): { agave: THREE.BufferGeometry; shrub:
   const a = new Soup()
   agave(a, rng)
   const b = new Soup()
-  dryShrub(b, rng)
+  dryShrub(b, rng, isBright())
   return { agave: a.geometry('agave'), shrub: b.geometry('dryShrub') }
 }
 

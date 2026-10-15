@@ -32,7 +32,7 @@ export class Water {
         uTime: { value: 0 },
         uFog: { value: new THREE.Vector2(60, 900) },
         // Genshin lakes are clear TURQUOISE (Cider Lake, Bishui); the other styles keep a deep teal.
-        uDeep: { value: ART.style === 'bright' || ART.style === 'genshin' ? new THREE.Color(0.012, 0.15, 0.17) : new THREE.Color(0.03, 0.07, 0.085) },
+        uDeep: { value: ART.style === 'bright' ? new THREE.Color(0.1, 0.36, 0.5) : ART.style === 'genshin' ? new THREE.Color(0.012, 0.15, 0.17) : new THREE.Color(0.03, 0.07, 0.085) },
         uKeyColor: { value: new THREE.Color() },
         uKeyDir: { value: new THREE.Vector3(0, 1, 0) },
         /** Rain 0..1: dense fine ripples + a duller, greyer surface. */
@@ -52,7 +52,7 @@ export class Water {
           vWorld = w.xyz;
           gl_Position = projectionMatrix * viewMatrix * w;
         }`,
-      fragmentShader: /* glsl */ `
+      fragmentShader: /* glsl */ `${ART.style === 'bright' ? '#define OTH_WATER 1\n' : ''}
         ${SKY_GLSL}
         ${MIST_GLSL}
         ${BIOME_GLSL}
@@ -70,6 +70,9 @@ export class Water {
           float dist = length(toCam);
           vec3 V = toCam / dist;
           vec2 w = wave(vWorld.xz, uTime) * mix(0.35, 0.08, smoothstep(20.0, 400.0, dist));
+          #ifdef OTH_WATER
+          w *= 0.45; // calm
+          #endif
           // Rain: fast fine ripples pepper the surface (only near — they alias far away) and dull the mirror.
           if (uRain > 0.01) {
             float rr = sky_noise(vWorld.xz * 3.5 + vec2(uTime * 1.7, -uTime * 2.3)) - 0.5;
@@ -96,7 +99,14 @@ export class Water {
           }
           float fres = 0.04 + 0.96 * pow(clamp(1.0 - dot(N, V), 0.0, 1.0), 5.0);
           // Calm stylized lake: mostly mirror of the sky (refer vista), darker body looking straight down.
+          #ifdef OTH_WATER
+          // BRIGHT (over the hill's oasis): calm, pale turquoise-blue water — its own colour first, a soft half-strength
+          // mirror of the sky / scene on top that only takes over at grazing angles.
+          refl = mix(refl, vec3(dot(refl, vec3(0.3, 0.55, 0.15))), 0.25);
+          vec3 col = mix(uDeep, refl, clamp(0.15 + fres * 0.85, 0.0, 0.7));
+          #else
           vec3 col = mix(uDeep, refl * 0.92, clamp(0.3 + fres * 1.2, 0.0, 1.0));
+          #endif
           col = mix(col, vec3(0.16, 0.19, 0.21) * 0.6 + refl * 0.35, uRain * 0.5); // grey, less mirror in the rain
           // See-through when looking down (the tinted bed shows), mirror at grazing angles, opaque far away.
           float alpha = mix(0.45, 0.97, clamp(fres * 1.6, 0.0, 1.0));
@@ -127,8 +137,12 @@ export class Water {
             col = mix(col, iced, ice);
             alpha = mix(alpha, 1.0, ice);
           }
+          #ifdef OTH_WATER
+          col += uKeyColor * pow(max(dot(R, uKeyDir), 0.0), 40.0) * 0.25; // a soft broad sheen, no sparkles
+          #else
           float spec = pow(max(dot(R, uKeyDir), 0.0), 400.0);
           col += uKeyColor * spec * 6.0;
+          #endif
           float fogF = max(smoothstep(uFog.x, uFog.y, dist), skyHaze(dist));
           fogF = 1.0 - (1.0 - fogF) * (1.0 - mistAmount(-V, dist)); // + the volumetric ground mist
           col = mix(col, skyColor(-V, false), fogF);

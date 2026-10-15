@@ -9,6 +9,7 @@ import { FM_TOP, type ChunkData } from './types'
 import { WorldFields } from './WorldFields'
 import { buildFormation, FORMATION_BED } from './Formations/formations'
 import { buildCrags } from './Formations/crags'
+import { buildBridges } from './Road/bridges'
 
 /**
  * Deterministic chunk generator: (seed, cx, cz) → ChunkData.
@@ -65,13 +66,14 @@ export class WorldGenerator {
         const wx = m.positions[i] - f.x, wz = m.positions[i + 2] - f.z
         const lx = wx * fc + wz * fs, lz = -wx * fs + wz * fc, ly = m.positions[i + 1] - f.y
         const bed = plan ? stoneBed(f.seed + 5, lx, ly, lz, STONE_BED) : stoneBed(f.seed, lx, ly, lz, FORMATION_BED)
-        const band = 0.65 * bed + 0.35 * (Math.sin(y * 0.9 + Math.sin(x * 0.07 + z * 0.05) * 2) * 0.5 + 0.5)
+        // (Bright = over the hill: one flat tone per bed — layered slabs, no painted stripes.)
+        const band = this.fields.palette === 0 ? 0.3 + 0.4 * bed : 0.65 * bed + 0.35 * (Math.sin(y * 0.9 + Math.sin(x * 0.07 + z * 0.05) * 2) * 0.5 + 0.5)
         // Baked AO (surface nets): dark crevices between the blocks and under the ledges.
         const ao = 0.38 + 0.62 * m.ao[i / 3]
         // Rock (linear RGB): warm tan-grey (Genshin's cliff stone, lit ≈ sRGB 145–155, 132–138, 112–120) / sandstone /
         // blue-grey, each bed its own tone.
         let r = 0.25 + 0.13 * band, g = 0.205 + 0.1 * band, bl = 0.14 + 0.07 * band
-        if (sand > 0.5) (r = 0.42 + 0.2 * band), (g = 0.2 + 0.1 * band), (bl = 0.09 + 0.05 * band)
+        if (sand > 0.5) this.fields.palette === 0 ? ((r = 0.5 + 0.16 * band), (g = 0.25 + 0.08 * band), (bl = 0.15 + 0.05 * band)) : ((r = 0.42 + 0.2 * band), (g = 0.2 + 0.1 * band), (bl = 0.09 + 0.05 * band))
         else if (snow > 0.5) (r = 0.2 + 0.1 * band), (g = 0.22 + 0.1 * band), (bl = 0.26 + 0.1 * band)
         // Ground cover on top faces (and the pillars' grassy crowns).
         const up = m.normals[i + 1]
@@ -115,6 +117,7 @@ export class WorldGenerator {
     }
     const crag = { pos: [] as number[], nor: [] as number[], col: [] as number[] }
     buildCrags(this.fields, cx, cz, heights, crag)
+    buildBridges(this.fields, cx, cz, crag) // bright: rope bridges over the river (same mesh + collider)
     for (let i = 0; i < crag.pos.length; i += 3) {
       const x = crag.pos[i], y = crag.pos[i + 1], z = crag.pos[i + 2]
       idx.push(pos.length / 3)

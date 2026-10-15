@@ -47,6 +47,10 @@ const PALETTES: Palette[] = [
 const DUNE_L = hex(0xf0c27a)
 const DUNE_D = hex(0xd69a55)
 const DUNE_RED = hex(0xc06a38)
+// Bright (palette 0, over the hill): orange-salmon sand (their lit desert ≈ sRGB 237,147,101), terracotta in the dips.
+const DUNE_L_OTH = hex(0xf2b282)
+const DUNE_D_OTH = hex(0xdc9466)
+const DUNE_RED_OTH = hex(0xc8704a)
 const PLAYA = hex(0xdcc9a2)
 // Snowfields (Dragonspine): bright blue-white snow, cooler shaded drifts, grey-blue rock where it's steep, ice at the water.
 const SNOW = hex(0xf4f7fc)
@@ -124,12 +128,14 @@ export function groundColor(fields: WorldFields, x: number, z: number, h: number
     lerp(out, a, wn[Biome.Mystic])
   }
   if (w[0] > 0.002) {
-    const d: RGB = [DUNE_L[0], DUNE_L[1], DUNE_L[2]]
-    lerp(d, DUNE_D, sstep(0.3, 0.75, m) * 0.8)
-    lerp(d, DUNE_RED, sstep(0.55, 0.9, p) * 0.35)
+    const oth = fields.palette === 0
+    const DL = oth ? DUNE_L_OTH : DUNE_L, DD = oth ? DUNE_D_OTH : DUNE_D, DR = oth ? DUNE_RED_OTH : DUNE_RED
+    const d: RGB = [DL[0], DL[1], DL[2]]
+    lerp(d, DD, sstep(0.3, 0.75, m) * 0.8)
+    lerp(d, DR, sstep(0.55, 0.9, p) * 0.35)
     const kk = 0.92 + 0.16 * fine
     d[0] *= kk; d[1] *= kk; d[2] *= kk
-    if (slope > 0.25) lerp(d, DUNE_RED, Math.min(1, (slope - 0.25) * 2.5) * 0.7)
+    if (slope > 0.25) lerp(d, DR, Math.min(1, (slope - 0.25) * 2.5) * 0.7)
     // Below the water line the desert is DRY: a pale cracked clay pan (playa) in basins and the river's bed.
     if (wl < 1.5) lerp(d, PLAYA, Math.min(1, (1.5 - wl) / 1.5) * 0.85)
     lerp(out, d, w[0])

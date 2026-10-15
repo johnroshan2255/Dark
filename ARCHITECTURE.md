@@ -81,6 +81,17 @@ World (seed)
   (`src/world/Streaming/chunk.worker.ts`). Same seed ⇒ same world on every client. Generation uses only
   arithmetic + `Math.floor` (no `Math.random`, no `sin/cos` in anything gameplay-relevant).
 - **Road** is a global analytic function `roadCenterX(z)` so any chunk can evaluate it without neighbours.
+- **Secondary roads are CONNECTED by construction** (`Road/RoadNetwork.ts`): one hilltop node per 380 m region; each
+  node's road goes to a 4-neighbour strictly nearer the main road (same side, itself connected) or onto the main road
+  (a spanning tree rooted at the main road, like a drainage network — distances strictly decrease, so no cycles and
+  every kept node reaches the main road); a node with no buildable route gets no road. Extra E / N loop roads only
+  join two connected nodes. Before, links were kept per hash and 42 % of roads (76 / 180, 4 seeds) formed chains cut
+  off from the main road ("roads ending mid-way"); `npm test` now checks every road reaches the main road.
+- **Rope bridges** (bright, `Road/bridges.ts`): every ~500 m (half the cells) a plank suspension bridge spans the
+  river gorge beside the main road from bank top to where the far bank meets the deck (clears the ground all the
+  way); appended to the chunk's formation mesh → 0 draws, the exact trimesh collider (walk / drive across; 4 m deck,
+  solid sub-deck under the planks so wheel rays never fall through the gaps); trees, rocks, plants, grass and crags
+  keep clear; the deck counts as dry dirt for the tyres (`drivetrain/surface.ts`). ~2.5–4 k tris per bridge.
 - **Terrain layering** (`WorldFields.height`, skills/terrain §2): natural relief (biome-shaped) → main-road
   VALLEY (slope-limited banks, never walls) → river → PLACES flattened to a base measured on that ground →
   SECONDARY ROADS graded within ±3 m of it, meeting the ground on embankments → main road bed. Each stage is
@@ -294,6 +305,12 @@ margin of 0.35 chunk (LOD), so standing on a border does not thrash.
   `engine`), a reverse gear, load-dependent loudness (coasting is quieter) and a dip at every shift, boost rush, tyre squeal from
   wheel slip, bike rolling + freewheel, rain, the theme (fades out with the dark and the nightmare). One-shots: doors,
   engine start/stop, footsteps on every foot plant of the animation (`CharacterModel.steps`). Loaded after the first gesture; the game never waits for audio.
+- **Snow / sand build-up on the car** (`Car.ts` `updateDirt`, car shader): `uSnowCoat` / `uSandCoat` (0..1) grow
+  with speed and wheel spin while the region under the car is snow / desert (snow ≈ 80 s at 36 km/h; a parked car
+  in the snowfield slowly collects it), melt / wash off elsewhere, in rain and in water. Snow: caps on up-facing
+  panels spreading in clumps + a packed band up the sides whose top climbs to ~1.25 m + flecks; sand: a fine
+  speckled dust film (specks below a pixel fade to their mean — no sparkle), caked low down, dust on the tops. Matte.
+  ~25 ALU on car fragments, 0 draws; `g.car.coat` for dev shots.
 - **Vehicle effects** (`src/rendering/particles/VehicleFx.ts`): exhaust puffs + tyre smoke/dust as one tier-capped
   point-sprite draw (`quality.particles.vehicle`), driven by the vehicle simulation's per-wheel slip.
 
