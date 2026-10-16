@@ -37,7 +37,12 @@ export interface Formation {
   seed: number
   /** Built ON the main road: an arch spanning it, or a cave hill it tunnels straight through. */
   road?: boolean
+  /** ROAD TUNNEL: the road's centre through the hill, local (z, y) offsets at local x = −BORE_X + i·BORE_DX — the bore
+   *  follows it (a straight bore met the walls where the road bends or dips: cars hit the rock at the road's edge). */
+  bore?: number[]
 }
+
+const BORE_X = 48, BORE_DX = 4
 
 export interface FormationHost {
   seed: number
@@ -146,6 +151,7 @@ export class FormationField {
         // Arch: its span across the road (local x ⟂ road, local z = road). Cave: the tunnel along the road (local x = road).
         const rot = kind === FormationKind.Arch ? Math.atan2(-rdx, rdz) : Math.atan2(rdz, rdx)
         f = { kind, x: rx, z, y: ry - (kind === FormationKind.Arch ? 1.5 : 0.6), rot, radius: kind === FormationKind.Cave ? 34 : 22, seed: hash4(s, k, 4206, 2), road: true }
+        if (kind === FormationKind.Cave) f.bore = roadBore(h, f)
       }
     }
     if (this.roadCache.size > 2000) this.roadCache.clear()
@@ -242,6 +248,25 @@ const smin = (a: number, b: number, k: number) => {
   return b + (a - b) * h - k * h * (1 - h)
 }
 
+/** The road's centreline through a road tunnel in its local frame (see Formation.bore): sampled every 1 m of z, resampled
+ *  to uniform local x. Height offsets are relative to the road at the formation's centre. */
+function roadBore(h: FormationHost, f: Formation): number[] {
+  const c = Math.cos(f.rot), sn = Math.sin(f.rot), y0 = h.roadHeight(f.z)
+  const lx: number[] = [], lz: number[] = [], ly: number[] = []
+  for (let z = f.z - BORE_X - 12; z <= f.z + BORE_X + 12; z += 1) {
+    const dx = h.roadCenterX(z) - f.x, dz = z - f.z
+    lx.push(dx * c + dz * sn); lz.push(-dx * sn + dz * c); ly.push(h.roadHeight(z) - y0)
+  }
+  const out: number[] = []
+  let j = 0
+  for (let x = -BORE_X; x <= BORE_X; x += BORE_DX) {
+    while (j < lx.length - 2 && lx[j + 1] < x) j++
+    const t = Math.max(0, Math.min(1, (x - lx[j]) / (lx[j + 1] - lx[j] || 1)))
+    out.push(lz[j] + (lz[j + 1] - lz[j]) * t, ly[j] + (ly[j + 1] - ly[j]) * t)
+  }
+  return out
+}
+
 /** Signed distance of a formation in its local frame (origin on the base, y up, x along its axis). */
 export function formationSdf(f: Formation): (x: number, y: number, z: number) => number {
   const s = f.seed
@@ -260,11 +285,18 @@ export function formationSdf(f: Formation): (x: number, y: number, z: number) =>
     }
     case FormationKind.Cave: {
       if (f.road) {
-        // ROAD TUNNEL: a long rock hill the road runs straight through (local x = the road) — a 5.6 m-radius bore
-        // whose floor lies below the road bed, so the road itself is the floor.
+        // ROAD TUNNEL: a long rock hill the road runs through (local x = the road) — a 5.6 m-radius bore whose floor
+        // lies below the road bed, so the road itself is the floor; it bends and climbs with the road (f.bore).
+        const b = f.bore, nb = b ? b.length / 2 : 0
         return (x, y, z) => {
           const hill = sdEllipsoid(x, y - 2, z, 34, 15, 17) + rough(x, y, z, 2.4)
-          const bore = sdCapsule(x, y, z, -46, 2.6, 0, 46, 2.6, 0, 5.6) + noise3(s + 3, x * 0.2, y * 0.2, z * 0.2) * 0.5
+          let oz = 0, oy = 0
+          if (nb) {
+            const t = Math.max(0, Math.min(nb - 1.001, (x + BORE_X) / BORE_DX)), i = Math.floor(t), u = t - i
+            oz = b![i * 2] + (b![i * 2 + 2] - b![i * 2]) * u
+            oy = b![i * 2 + 1] + (b![i * 2 + 3] - b![i * 2 + 1]) * u
+          }
+          const bore = sdCapsule(x, y - oy, z - oz, -46, 2.6, 0, 46, 2.6, 0, 5.6) + noise3(s + 3, x * 0.2, y * 0.2, z * 0.2) * 0.5
           return Math.max(hill, -bore)
         }
       }

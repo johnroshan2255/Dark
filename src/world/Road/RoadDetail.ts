@@ -1,5 +1,5 @@
 import { hash4 } from '../noise/rng'
-import { RoadType, type NetRoad, type RoadRef } from './RoadNetwork'
+import { RoadType, roadHeightAt, type NetRoad, type RoadRef } from './RoadNetwork'
 import type { WorldFields } from '../WorldFields'
 import type { BiomeWeights } from '../Biomes'
 import { WATER_LEVEL } from '../types'
@@ -35,23 +35,26 @@ import { WATER_LEVEL } from '../types'
 /** Grid vertices under a ribbon are lowered this much (m) — more than the deepest detail (~0.45 m). */
 export const SINK = 1.2
 
-/** Main road (WorldFields.ROAD_HALF_WIDTH 2.7): a 0.6 m gravel shoulder, then a 1.1 m wide, ~0.32 m deep ditch. */
+/** Main road (WorldFields.ROAD_HALF_WIDTH 2.7): a 0.6 m gravel shoulder, then a 1.1 m wide, ~0.16 m deep ditch —
+ *  a shallow swale (cosine section, walls ≤ ~18°) a 0.38 m tyre rolls in and out of; 0.32 m with 49° walls trapped
+ *  cars that slid into it (headless drive probe, 2026-10-16). */
 export const MAIN_DITCH_IN = 3.3
 export const MAIN_DITCH_W = 1.1
-export const MAIN_DITCH_D = 0.32
+export const MAIN_DITCH_D = 0.16
 /** Main-road ribbon half-width (m): the ditch's outer edge (4.4) + the sink margins. */
 export const MAIN_W = 11.5
 /** Main ribbon rows every MAIN_STEP m of z (grid-aligned → chunk borders are rows). */
 export const MAIN_STEP = 2
 /** Lateral vertex offsets of a main-road row (one side; mirrored): road, shoulder, ditch (t = 0, .2, .5, .8, 1), verge. */
-export const MAIN_U = [0, 0.45, 0.85, 1.05, 1.2, 1.35, 1.5, 1.65, 1.9, 2.3, 2.7, 2.95, 3.3, 3.52, 3.85, 4.18, 4.4, 5.5, 6.9, 8.4, 10, MAIN_W]
+export const MAIN_U = [0, 0.3, 0.45, 0.6, 0.8, 1.0, 1.15, 1.3, 1.6, 1.95, 2.25, 2.55, 2.85, 3.1, 3.3, 3.52, 3.85, 4.18, 4.4, 5.5, 6.9, 8.4, 10, MAIN_W]
 /**
- * BRIGHT (over the hill) main-road TRACK: the dirt road is carved, not painted — two wheel RUTS (centre ±1.35 m,
- * ~0.75 m wide, 0.1–0.2 m deep), the crown between them left standing, soft BERMS of pushed-up dirt at the edges
- * (≤ 0.22 m), and CLODS: the whole surface rises and falls ±4 cm in ~2–4 m lumps. MAIN_U has a vertex at every
- * breakpoint. Max depth 0.24 m (< SINK).
+ * BRIGHT (over the hill) main-road TRACK: the dirt road is carved, not painted — two wheel RUTS under the wheels
+ * (centre ±0.8 m = a car's track, ~0.9 m wide, 5–9 cm deep, sloping walls), the crown between them left standing,
+ * low BERMS of pushed-up dirt at the edges (≤ 7 cm), and CLODS: the surface rises and falls ±2.5 cm in ~3 m lumps.
+ * Sized to be DRIVEN: ruts at ±1.35 m / 0.24 m with steep walls caught the tyres (track ±0.73 m) and steered the car
+ * into the gutter. MAIN_U has a vertex at every breakpoint.
  */
-const MAIN_RUT_C = 1.35, MAIN_RUT_HW = 0.42
+const MAIN_RUT_C = 0.8, MAIN_RUT_HW = 0.45
 /** A main-road grid vertex sinks when it lies within this of the centre for every z within ±2 m. */
 const MAIN_SINK = MAIN_W - 2.4
 
@@ -94,13 +97,14 @@ function profile(hw: number, rutC: number, rutHW: number, rutD: number, berm: nu
 
 /** Gravel road (half-width 2.3) and trail (1.35): RoadNetwork's two types. */
 export const TRACKS: Record<number, TrackProfile> = {
-  [RoadType.Gravel]: profile(2.3, 0.8, 0.33, 0.05, 0.035, 2.65, 0.9, 0.24),
-  [RoadType.Trail]: profile(1.35, 0.74, 0.3, 0.07, 0.022, 1.55, 0.6, 0.14),
+  [RoadType.Gravel]: profile(2.3, 0.8, 0.33, 0.05, 0.035, 2.65, 0.9, 0.13),
+  [RoadType.Trail]: profile(1.35, 0.74, 0.3, 0.07, 0.022, 1.55, 0.6, 0.09),
 }
-/** BRIGHT (over the hill) mud tracks: deep ruts, tall soft berms, clods (same vertex layout as TRACKS). */
+/** BRIGHT (over the hill) mud tracks: visible ruts, soft berms, clods (same vertex layout as TRACKS) — kept drivable
+ *  (rut + berm ≤ ~0.15 m: 0.29 m caught the tyres). */
 export const TRACKS_OTH: Record<number, TrackProfile> = {
-  [RoadType.Gravel]: profile(2.3, 0.8, 0.33, 0.13, 0.16, 2.65, 0.9, 0.24),
-  [RoadType.Trail]: profile(1.35, 0.74, 0.3, 0.16, 0.13, 1.55, 0.6, 0.14),
+  [RoadType.Gravel]: profile(2.3, 0.8, 0.33, 0.075, 0.06, 2.65, 0.9, 0.13),
+  [RoadType.Trail]: profile(1.35, 0.74, 0.3, 0.085, 0.05, 1.55, 0.6, 0.09),
 }
 const TRACK_W_MAX = Math.max(TRACKS[RoadType.Gravel].W, TRACKS[RoadType.Trail].W)
 const TRACK_R_MAX = Math.max(TRACKS[RoadType.Gravel].R, TRACKS[RoadType.Trail].R)
@@ -159,6 +163,8 @@ const sstep = (a: number, b: number, x: number): number => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)))
   return t * t * (3 - 2 * t)
 }
+/** Gutter cross-section at t ∈ (0, 1) across it: 0 at both edges with zero slope, 1 in the middle (cosine). */
+const swale = (t: number): number => 0.5 - 0.5 * Math.cos(2 * Math.PI * t)
 /** 1-D value noise in [0, 1) from integer hashes (deterministic everywhere). */
 const vnoise1 = (seed: number, id: number, x: number): number => {
   const i = Math.floor(x), f = x - i, s = f * f * (3 - 2 * f)
@@ -189,7 +195,7 @@ export class RoadDetail {
     const t = l > 0 ? Math.min(1, Math.max(0, (s - r.cum[i]) / l)) : 0
     out[0] = r.xs[i] + (r.xs[i + 1] - r.xs[i]) * t
     out[1] = r.zs[i] + (r.zs[i + 1] - r.zs[i]) * t
-    out[2] = r.hs[i] + (r.hs[i + 1] - r.hs[i]) * t
+    out[2] = roadHeightAt(r, i, t)
     return i
   }
 
@@ -315,7 +321,7 @@ export class RoadDetail {
     const q = Math.min(Math.abs(u - w - pr.rutC), Math.abs(u - w + pr.rutC)) / pr.rutHW
     const rutW = q < 1 ? 1 - sstep(0.35, 1, q) : 0
     const rutD = this.row(t.rut, s) * rutW
-    // Potholes: one chance per 7 m cell, in a rut or the centre, 1.1–2.3 m long, 0.6–1 m wide, 0.07–0.23 m deep.
+    // Potholes: one chance per 7 m cell, in a rut or the centre, 1.1–2.3 m long, 0.6–1 m wide, 0.05–0.16 m deep.
     let ph = 0, phD = 0
     const seed = this.f.seed
     const c0 = Math.floor(s / 7)
@@ -330,21 +336,21 @@ export class RoadDetail {
       const e = ((s - sc) / a) ** 2 + ((u - uc) / b) ** 2
       if (e >= 1) continue
       const pw = (1 - e) * (1 - e)
-      const d = (0.07 + 0.11 * (hash4(seed, t.id, c, 96) / 4294967296) + 0.05 * mud) * pw
+      const d = (0.05 + 0.08 * (hash4(seed, t.id, c, 96) / 4294967296) + 0.03 * mud) * pw
       if (d > phD) (phD = d), (ph = pw)
     }
-    // Ditch (rounded V) just outside the edge.
+    // Ditch (a shallow swale, cosine section: no lip at its edges) just outside the edge.
     let dd = 0, dw = 0
     const td = (au - pr.ditchIn) / pr.ditchW
     if (td > 0 && td < 1) {
-      dw = (1 - (2 * td - 1) ** 2) * this.row(t.ditch, s)
+      dw = swale(td) * this.row(t.ditch, s)
       dd = pr.ditchD * dw * (0.85 + 0.3 * vnoise1(seed, t.id + 2, s / 11))
     }
     // Grader berm (the windrow of loose material) at the edges.
     const qb = Math.abs(au - (pr.hw - 0.25)) / 0.4
     const berm = qb < 1 ? pr.berm * (1 - qb * qb) * (1 - qb * qb) : 0
-    // Bright: CLODS — the whole track surface rises and falls ±5 cm in ~1.5–3 m lumps (their rough dirt).
-    const clod = this.f.palette === 0 && au < pr.hw + 0.3 ? (vnoise1(seed, t.id + 4, s / 1.7 + u * 1.3) - 0.5) * 0.1 : 0
+    // Bright: CLODS — the whole track surface rises and falls ±2.5 cm in ~3 m lumps (their rough dirt).
+    const clod = this.f.palette === 0 && au < pr.hw + 0.3 ? (vnoise1(seed, t.id + 4, s / 2.6 + u * 0.9) - 0.5) * 0.05 : 0
     // A pothole digs into whatever it is in (a rut, the hump); the ditch is separate (outside the edge).
     const delta = fe * (berm * (1 - rutW) + clod - Math.max(rutD + phD, dd))
     out.rut = rutW * fe
@@ -391,7 +397,7 @@ export class RoadDetail {
     if (t <= 0 || t >= 1) return 0
     const g = this.mainGate(x, z)
     if (g <= 0) return 0
-    const prof = 1 - (2 * t - 1) ** 2
+    const prof = swale(t)
     out.ditch = prof * g
     out.wet = 0.55 * prof * g
     out.delta = -MAIN_DITCH_D * (0.85 + 0.3 * vnoise1(this.f.seed, 7, z / 23)) * prof * g
@@ -406,11 +412,11 @@ export class RoadDetail {
     const seed = f.seed
     const au = Math.abs(u)
     const q = Math.abs(au - MAIN_RUT_C) / MAIN_RUT_HW
-    const rutW = q < 1 ? 1 - sstep(0.55, 1, q) : 0 // flat-bottomed, steep-walled (hard, like the mud tracks)
-    const rutD = (0.15 + 0.09 * vnoise1(seed, 31, z / 9)) * rutW
-    const bq = Math.abs(au - 2.85) / 0.5
-    const berm = bq < 1 ? (0.12 + 0.1 * vnoise1(seed, u > 0 ? 33 : 34, z / 3.1)) * (1 - bq * bq) * (1 - bq * bq) : 0
-    const clod = (vnoise1(seed, 35, z / 2.1 + u * 1.1) - 0.5) * 0.12 * (1 - sstep(2.9, 3.3, au))
+    const rutW = q < 1 ? 1 - sstep(0.3, 1, q) : 0 // flat middle, sloping walls a tyre climbs out of
+    const rutD = (0.05 + 0.04 * vnoise1(seed, 31, z / 9)) * rutW
+    const bq = Math.abs(au - 2.7) / 0.6
+    const berm = bq < 1 ? (0.035 + 0.035 * vnoise1(seed, u > 0 ? 33 : 34, z / 3.1)) * (1 - bq * bq) * (1 - bq * bq) : 0
+    const clod = (vnoise1(seed, 35, z / 3.2 + u * 0.8) - 0.5) * 0.05 * (1 - sstep(2.9, 3.3, au))
     const mud = 0.3 * sstep(0.7, 0.9, vnoise1(seed, 36, z / 18)) // damp stretches: darker ruts
     out.rut = rutW * g
     out.mud = mud * g

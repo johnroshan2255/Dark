@@ -85,6 +85,22 @@ Single runs of the fixed term swing ±0.3 ms (±7 ms projected) — always repea
   the browser's upscale made tree/grass edges visibly blocky on a phone.
 - Still required: a real Snapdragon 6xx device (§10) — the M4 projection is a ratio estimate.
 
+**HIGH on Snapdragon 6xx (2026-10-16)** — what was checked (headless; still no real device):
+- WebGL limits (scratchpad `glaudit` + a GLSL preprocessor for the varyings): HIGH's 58–61 programs use ≤ 145 uniform
+  rows (min 224), ≤ 5 samplers (16), ≤ 15 varyings (15 — at the WebGL2 minimum, Adreno 6xx has 32): compiles on any
+  conformant driver. Keep new varyings OFF the stylized Lambert programs (they are at the minimum).
+- Phone emulation (915×412 @2.625, touch, Android UA, CPU ×4–6, HIGH): ready in 15 s, ~150 MB GPU (textures +
+  renderbuffers), 112 MB heap, main thread 7–11 ms/frame; touch stick drives, BRAKE (Space) stops, no errors.
+- GPU: HIGH 4–6 ms on the M4 at 1372×618 → ≈ 60–100 ms on Adreno 610/619 (R 15–25): HIGH can't hold 60 there —
+  Hold 60 lowers it. Fixed: frames > 250 ms were all dropped as "tab switches" (a 2–4 fps device never adapted; now
+  3 in a row count, clamped); FAR over budget (≥ 1.8× / 3.5×) Hold 60 acts on one window, settles 1.2 s and lowers
+  2–3 steps at once — modelled time to 60 fps on HIGH 48–84 s → 13–18 s (`tests/adaptive.test.ts` 6b).
+- SwiftShader (software GL) is the slow-GPU stand-in for transition robustness: HIGH → floor in ~30 s, no errors.
+- Found + fixed on the way: LandmarkSystem merged indexed + non-indexed / mismatched-attribute landmark kinds → the
+  whole far band (every distant landmark) was missing on all devices. Touch HUD: compass strip 200 px, speedometer
+  at 42 % so neither runs under the buttons.
+- Snapdragon 600 itself (2013, Adreno 320): no WebGL2 in Chrome there → three r186 can't run; target is 6xx.
+
 **MSAA × depth readers (2026-10-05)** — the biggest single cost found: with MSAA 4× (the old HIGH/ULTRA default)
 every pass that SAMPLES scene depth (SSAO, volumetric light, grading) forces a multisampled depth resolve. Measured
 HIGH 1080p (M4): vista 14.4 → 8.0 ms, forest 9.4 → 6.5 ms, 720p 12.5 → 6.6 ms with FXAA; SSAO alone 4.6 → 0.9 ms;

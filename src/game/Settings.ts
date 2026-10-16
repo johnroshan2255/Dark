@@ -27,8 +27,8 @@ export interface Settings {
   handling: 'arcade' | 'sim'
   /** Simulation handling: the shift map ('auto') or the player's gears ('manual': X up / Z down). */
   gearbox: 'auto' | 'manual'
-  /** Simulation handling: driving aids (TCS, ABS, ESC, counter-steer); 'auto' = the car's class default, Full on
-   *  touch screens (skills/realistic-vehicle-system §8.7). */
+  /** Simulation handling: driving aids (TCS, ABS, ESC, counter-steer, grip-limited steering, the GTA handbrake);
+   *  'auto' = Full on every device (GTA-smooth, 2026-10-16); 'off' = the raw machine (skills/realistic-vehicle-system §8.7). */
   aids: 'auto' | 'off' | 'std' | 'full'
   /** Simulation handling: OFF-ROAD ASSIST (gameplay) — more engine torque, and walls up to 80° climbable in 1st
    *  (TruckSim slope limiter, 4WD / lockers, TCS on the climb). Off = the real machine. */

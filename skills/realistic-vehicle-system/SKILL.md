@@ -481,6 +481,8 @@ rolls back before the clutch bites.
 combined slip (Pacejka similarity): ρx = κ/κ_p, ρy = tan α / tan α_p, ρ = hypot(ρx, ρy)
   C = (1.6·ρx² + 1.3·ρy²)/ρ²,  B = tan(π/2C)  (peak at ρ = 1),  F = μ·Fz·sin(C·atan(B·ρ))
   Fx = F·ρx/ρ,  Fy = −0.95·F·ρy/ρ                 κ_p = 0.10 (× 1.3 off-road), α_p = kind peak / surface stiffness
+  loose ground past the peak (ρ > 1): F += (1 − F)·0.75·offroad   (LOOSE_KEEP: soil keeps ~90 % of the peak)
+  tread heat on loose ground × (1 − 0.8·offroad)                     (TYRE.looseHeat: the soil moves, not the rubber)
 then the §8.6 caps; rolling resistance: friction torque on ω (c_rr·Fz·r), never reversing it
 ```
 
@@ -489,6 +491,21 @@ ellipse: that longitudinal curve peaks at κ ≈ 0.18, the lateral one with E 0.
 and an ellipse lets a locked wheel keep ~70 % side grip (it steers instead of skidding straight). The similarity
 method points the force along the slip vector: a locked wheel slides along its velocity, a spinning one loses side
 grip. A locked wheel keeps ~65 % of the peak.
+GTA-SMOOTH DEFAULT (2026-10-16, user: "make car driving smooth like in GTA; Space is for brake"): aids 'auto' = FULL
+on keys and touch (Car.driveSettings). With aids on: GRIP-LIMITED steering (δ ≤ atan(L·1.05·μg/v²): a full key at speed
+asks for the grip there is — before, half lock at 60 km/h asked ~3 g and a 0.5 s lane change spun the pickup 135°),
+an ASSIST ABS on Full for cars without one, and the GTA HANDBRAKE: Space with the wheel straight (|steer| < 0.2) = a
+hard stop on all four (brake 0.9, ABS), Space + steer = rear lock (handbrake turn). Measured (pickup, 60 km/h, game):
+lane change heading ±3° (was a 135° spin), S 24 m / 9° yaw (33 m / 50°), Space 23 m / 8° (41 m / 572°), Space + A
+turn 167°. Aids Off = the raw machine, unchanged. Tests: "aids Full — …" ×3 per car. Also: the frame clock is the
+rAF vsync timestamp (scene/GameLoopDriver) — R3F's performance.now() delta jittered ±0.5 ms → the 60 Hz fixed step
+ran 0/2 times per frame, chase camera 11 → 1.6 mm/frame² jitter.
+
+LOOSE GROUND (2026-10-16, user: "even a small hill — the tyres just spin there"): with the asphalt falloff on every
+surface, a floored aids-off rear-drive pickup spun at κ ≈ 8 on a 10° grass hill, lost ~40 % of its force, cooked the
+tread to 200 °C (−30 % grip) and rolled back — in game 0 m up every 10° hillside tried. Soil traction–slip curves
+plateau instead of dropping, and the soil, not the rubber, takes the slip energy: now it climbs (14–28 m in 8 s in
+2H, tread ~60 °C); asphalt is unchanged. Test: every car floored up a 10° grass hill (tests/drivetrain.test.ts).
 
 This produces, with no special cases:
 - understeer from entering too fast;

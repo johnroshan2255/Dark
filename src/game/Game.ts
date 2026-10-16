@@ -614,7 +614,7 @@ export class Game {
     const s = this.post.renderScale
     switch (d.kind) {
       case 'scaleDown':
-        this.post.setRenderScale(Math.max(this.holdMode ? Math.min(q.renderScale.min, 0.65) : q.renderScale.min, s - 0.1))
+        this.post.setRenderScale(Math.max(this.holdMode ? Math.min(q.renderScale.min, 0.65) : q.renderScale.min, s - 0.1 * (d.steps ?? 1)))
         break
       case 'scaleUp':
         this.post.setRenderScale(Math.min(q.renderScale.max, s + 0.1))
@@ -625,11 +625,15 @@ export class Game {
           if (d.reason === 'probe reverted' && this.holdRestored) this.holdSticky.add(this.holdRestored)
           this.holdRestored = null
           this.holdStepAt = performance.now()
-          const f = nextHoldStep(this.presetFeatures, this.held)
-          if (f) {
+          // (far over budget: 2–3 features at once — one applyQuality, one recompile)
+          const down: string[] = []
+          for (let k = 0; k < (d.steps ?? 1); k++) {
+            const f = nextHoldStep(this.presetFeatures, this.held)
+            if (!f) break
             this.held.push(f)
-            this.applyQuality(q.name, `hold 60: ${f} down`)
+            down.push(f)
           }
+          if (down.length) this.applyQuality(q.name, `hold 60: ${down.join(' + ')} down`)
           return
         }
         const t = tierBelow(q.name)

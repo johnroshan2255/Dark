@@ -69,6 +69,8 @@ export const TYRE = {
   gripFrom: 120,
   gripTo: 300,
   gripLoss: 0.3,
+  /** Share of the tread heat a fully off-road surface (dirt, grass, mud, sand, snow) takes away. */
+  looseHeat: 0.8,
   /** Smoke from the tread surface: starts at `smokeFrom` °C, thick at `smokeFull` (VehicleFx reads `smoke`). */
   smokeFrom: 140,
   smokeFull: 230,
@@ -342,8 +344,13 @@ export class Drivetrain {
     const h = dt / SUBSTEPS
     const speed = ch.speed
     this.refused = false
-    this.handbrake = input.handbrake
+    // GTA HANDBRAKE (aids Full): pulled with the wheel straight it is a hard stop on all four wheels (ABS) and the
+    // car stays straight; pulled while steering it locks the rear — a handbrake turn. (Aids off: always the lever on
+    // the rear; locked rears with straight fronts swapped ends, 1.6 turns from 60 km/h.)
+    const hbStop = input.handbrake && this.aids === 'full' && Math.abs(input.steer) < 0.2 && Math.abs(speed) > 1.5
+    this.handbrake = input.handbrake && !hbStop
     this.pedals(dt, input, speed)
+    if (hbStop) (this.brake = Math.max(this.brake, 0.9)), (this.gas = 0)
     // ---- steering (§8.7): speed-sensitive lock, rack rate, counter-steer help, exact Ackermann ----
     this.steering(dt, input, ch)
     // ---- driveline layout this step ----
@@ -351,7 +358,7 @@ export class Drivetrain {
     const G = this.ratioNow()
     // Handbrake: the auto-clutch opens (a driver's left foot goes down with the lever) — the engine keeps its revs
     // and the locked rear isn't fighting the drive; it bites again on release, kicking the slide on.
-    const declutch = input.handbrake && (gb.kind === 'manual' || gb.kind === 'dct')
+    const declutch = this.handbrake && (gb.kind === 'manual' || gb.kind === 'dct')
     const coupled = G !== 0 && !(this.shifting && gb.kind === 'manual') && this.selector !== 'P' && this.selector !== 'N' && !declutch
     // ---- shift logic (stepped boxes, once per step) ----
     this.shiftLogic(dt, ch, w)
@@ -423,13 +430,14 @@ export class Drivetrain {
         // EBD (with ABS) / a load-sensing proportioning valve (older trucks): rear brakes follow the rear axle's
         // load — under hard braking a tall car's rear goes light, and full rear pressure would lock it and yaw.
         if (i >= 2) Tb *= Math.max(0.35, Math.min(1, wi.Fz / this.FzStatic[i]))
-        if (R.brakes.abs && this.aids !== 'off' && Math.abs(speed) > 2 && wi.contact) {
+        // (aids Full: an assist ABS on every car — a hard stop stays straight, like the GTA brakes)
+        if ((R.brakes.abs || this.aids === 'full') && this.aids !== 'off' && Math.abs(speed) > 2 && wi.contact) {
           if (this.kappa[i] < -0.15) this.absRel[i] = 1
           else if (this.kappa[i] > -0.06) this.absRel[i] = 0
           if (this.absRel[i] && this.brake > 0.05) (Tb *= 0.25), (absActive = true)
         } else this.absRel[i] = 0
         Tb += (this.escBrake[i] + this.tcsBrake[i]) * this.brakeMax[i]
-        if (input.handbrake && (i >> 1) === R.axles.length - 1) Tb += 1.5 * gp.mu * this.FzStatic[i] * r + 0.6 * this.brakeMax[i]
+        if (this.handbrake && (i >> 1) === R.axles.length - 1) Tb += 1.5 * gp.mu * this.FzStatic[i] * r + 0.6 * this.brakeMax[i]
         if (this.selector === 'P') Tb += 1e6
         const crr = gp.crr + gp.sand * 0.1 * Math.min(1, Math.abs(this.kappa[i]))
         const Tf = Tb + (wi.contact ? crr * Math.max(0, wi.Fz) * r : 0)
@@ -641,7 +649,9 @@ export class Drivetrain {
       const gSA = (TYRE.gSA + TYRE.gSAv * sq) * sz * wet, gBA = (TYRE.gBA + TYRE.gBAv * sq) * sz, gSB = TYRE.gSB * sz
       let Ts = this.treadT[i], Tb = this.coreT[i]
       const ut = Math.sqrt(Math.abs(this.omega[i] * r)), ur = Math.sqrt(Math.hypot(wi.vx, wi.vy))
-      let q = TYRE.eta * Math.max(0.15, (ut + 0.2) / (ut + ur + 0.4)) * P
+      // On loose ground the soil moves through the patch (it is dug and thrown, not rubbed), so the tread takes a
+      // fraction of the sliding power: a wheelspin on grass dirties the tyre, it doesn't cook it to 200 °C.
+      let q = TYRE.eta * Math.max(0.15, (ut + 0.2) / (ut + ur + 0.4)) * P * (1 - TYRE.looseHeat * this.grips[i].offroad)
       if (this.fire[i] > 0) {
         // Burning rubber heats its own tread; the flame dies down as the tread burns away, and the head wind of a
         // moving car blows it off the rubber (less of its heat comes back).
@@ -728,7 +738,11 @@ export class Drivetrain {
     // steer: the input's side = the way the rear is sliding) gets the full mechanical lock, as on a real car —
     // without it a slide can't be caught above walking pace.
     const slideK = Math.max(0, Math.min(1, (Math.abs(aRear) - 0.06) / 0.2)) * (c.steer * aRear > 0 ? 1 : 0)
-    const lock = R.steering.lock / (1 + v * 0.06 * (1 - slideK))
+    let lock = R.steering.lock / (1 + v * 0.06 * (1 - slideK))
+    // GRIP-LIMITED steering (aids std / full — GTA-smooth keys): a full key at speed asks for about the cornering the
+    // front tyres can give on this surface (δ ≈ L·μg / v², a touch of understeer), never 3× it — beyond the limit the
+    // rear stepped out and a 0.5 s lane change at 60 km/h spun the truck 135°. Counter-steer keeps the full lock.
+    if (this.aids !== 'off' && v > 4 && slideK < 0.5) lock = Math.min(lock, Math.max(0.03, Math.atan((R.wheelbase * 1.05 * this.grips[0].mu * ch.g) / (v * v))))
     let target = c.steer * lock
     // Counter-steer help (aids std / full): steer into a rear slide.
     if (this.aids !== 'off' && v > 3 && Math.abs(aRear) > 0.14) target += 0.4 * aRear

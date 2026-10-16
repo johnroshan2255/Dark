@@ -1,5 +1,4 @@
 import * as THREE from 'three'
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type { PhysicsWorld } from '../../physics/PhysicsWorld'
 import type { Input } from '../../input/Input'
 import type { WorldFields } from '../../world/WorldFields'
@@ -7,7 +6,6 @@ import type { CharacterModel } from '../player/CharacterModel'
 import { EYE_HEIGHT, type PlayerController } from '../player/PlayerController'
 import type { TruckModel } from '../../assets/loadModels'
 import { stylize } from '../../rendering/shaders/stylize'
-import { isBright } from '../../rendering/artStyle'
 import { CHUNK_SIZE } from '../../world/constants'
 import { chunkKey } from '../../world/types'
 import { STOCK_TRUCK, TruckSim, type TruckTune } from './VehicleSim'
@@ -331,7 +329,6 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.wheels.castShadow = true
     this.wheels.frustumCulled = false // instances move with the body; the truck is one small object
     this.body.add(this.wheels)
-    if (isBright()) this.addKit(truck)
     // BRAKES (Blender `caliper_*`, scripts/blender/vehicle_brakes.py): disc + hat + caliper or a drum behind each
     // wheel, on the car program — hub, steering and suspension like the wheel, never the spin (a plain disc looks
     // the same turning). One draw per axle (right = left turned 180°); no shadow pass (inside the wheel).
@@ -716,55 +713,6 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     return v.applyMatrix4(this.root.matrixWorld)
   }
 
-  /**
-   * EXPEDITION KIT (bright — their trucks carry it): orange SAND LADDERS (recovery boards) — a stack of two strapped
-   * flat on the roof and one on the side of the rear body. Mount points are measured from this car's own body
-   * mesh (the highest point over the cab; the outer side face behind the cab), so it fits every model. One small
-   * mesh on the body (+1 draw, +1 in the shadow pass), ≈ 300 tris.
-   */
-  private addKit(truck: TruckModel): void {
-    const pos = truck.body.getAttribute('position') as THREE.BufferAttribute
-    const L = truck.rear - truck.front
-    let top = -Infinity, side = -Infinity, ymin = Infinity, ymax = -Infinity
-    for (let i = 0; i < pos.count; i++) { const y = pos.getY(i); ymin = Math.min(ymin, y); ymax = Math.max(ymax, y) }
-    const zc0 = truck.front + 0.25 * L, zc1 = truck.front + 0.55 * L // over the cab
-    const zs0 = truck.front + 0.6 * L, zs1 = truck.front + 0.88 * L // the rear body's side
-    const ys0 = ymin + 0.45 * (ymax - ymin), ys1 = ymin + 0.7 * (ymax - ymin)
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i)
-      if (Math.abs(x) < 0.5 && z > zc0 && z < zc1) top = Math.max(top, y)
-      if (z > zs0 && z < zs1 && y > ys0 && y < ys1) side = Math.max(side, Math.abs(x))
-    }
-    if (!isFinite(top) || !isFinite(side)) return
-    const parts: THREE.BufferGeometry[] = []
-    const orange = new THREE.Color(0xff7a2a).convertSRGBToLinear(), strap = new THREE.Color(0x2a2a2e).convertSRGBToLinear()
-    const colour = (g: THREE.BufferGeometry, c: THREE.Color) => {
-      const n = g.getAttribute('position').count, a = new Float32Array(n * 3)
-      for (let i = 0; i < n; i++) (a[i * 3] = c.r), (a[i * 3 + 1] = c.g), (a[i * 3 + 2] = c.b)
-      g.setAttribute('color', new THREE.BufferAttribute(a, 3))
-      g.deleteAttribute('uv')
-      return g
-    }
-    // One ladder lying in the xz plane, long along z: a 1.15 × 0.32 board with raised cleats across it.
-    const ladder = (): THREE.BufferGeometry[] => {
-      const g = [colour(new THREE.BoxGeometry(0.32, 0.035, 1.15), orange)]
-      for (let k = 0; k < 9; k++) g.push(colour(new THREE.BoxGeometry(0.3, 0.03, 0.04).translate(0, 0.03, -0.5 + k * 0.125), orange))
-      return g
-    }
-    const zm = (zc0 + zc1) / 2
-    for (let i = 0; i < 2; i++) for (const g of ladder()) parts.push(g.translate(0, top + 0.05 + i * 0.07, zm))
-    for (const x of [-0.25, 0.25]) parts.push(colour(new THREE.BoxGeometry(0.04, 0.03, 1.2).translate(0, 0, 0).rotateY(Math.PI / 2).translate(0, top + 0.2, zm + x), strap))
-    // the side one: stood on its edge against the rear body's outer face (right side), cleats outward
-    for (const g of ladder()) parts.push(g.rotateZ(-Math.PI / 2).translate(side + 0.04, (ys0 + ys1) / 2, (zs0 + zs1) / 2))
-    const geo = mergeGeometries(parts)!
-    parts.forEach((g) => g.dispose())
-    const mat = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'truckkit', rim: 0.14, toon: 0.3 })
-    const kit = new THREE.Mesh(geo, mat)
-    kit.name = 'kit'
-    kit.castShadow = true
-    this.body.add(kit)
-  }
-
   /** Ground wetness 0..1 (Game sets it from the weather): wet asphalt, mud and grass grip less. */
   wetness = 0
 
@@ -847,14 +795,15 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
   /** Region weights under the car (refreshed with the dirt colour, 2 Hz): [forest, desert, snow, autumn, mystic]. */
   private readonly coatW = new Float32Array(8)
 
-  /** Settings → Controls (Simulation handling): gearbox mode and aids level ('auto' = the class default; Full on
-   *  touch). */
+  /** Settings → Controls (Simulation handling): gearbox mode and aids level ('auto' = Full — TCS, ESC, ABS,
+   *  counter-steer, grip-limited steering, the GTA handbrake — on keys and touch alike; 'off' = the raw machine). */
   driveSettings(gearbox: 'auto' | 'manual', aids: 'auto' | 'off' | 'std' | 'full', touch: boolean, offroadAssist = true): void {
     this.sim.offroadAssist = offroadAssist
     const D = this.sim.drivetrain
     if (!D) return
     D.manual = gearbox === 'manual' && D.stepped
-    D.aids = aids === 'auto' ? (touch ? 'full' : D.R.aids) : aids
+    D.aids = aids === 'auto' ? 'full' : aids
+    void touch
   }
 
   /** X / Z (manual gearbox): one gear up / down; a refused shift (over-rev) says so. */

@@ -119,7 +119,7 @@ export function SettingsPanel({ game }: { game: Game }) {
           <Seg testid="gearbox" value={st.gearbox} onChange={(v) => set({ gearbox: v })} opts={[{ label: 'Automatic', value: 'auto' }, { label: 'Manual (X / Z)', value: 'manual' }]} />
         </Row>
         <Row label="Driving aids (simulation)">
-          <Seg testid="aids" value={st.aids} onChange={(v) => set({ aids: v })} opts={[{ label: 'Car default', value: 'auto' }, { label: 'Off', value: 'off' }, { label: 'Standard', value: 'std' }, { label: 'Full', value: 'full' }]} />
+          <Seg testid="aids" value={st.aids} onChange={(v) => set({ aids: v })} opts={[{ label: 'Auto (smooth)', value: 'auto' }, { label: 'Off', value: 'off' }, { label: 'Standard', value: 'std' }, { label: 'Full', value: 'full' }]} />
         </Row>
         <Row label="Off-road assist (simulation)">
           <Seg testid="offroad" value={st.offroadAssist} onChange={(v) => set({ offroadAssist: v })} opts={[{ label: 'On — more torque, 80° walls', value: true }, { label: 'Off — the real machine', value: false }]} />
@@ -132,7 +132,7 @@ export function SettingsPanel({ game }: { game: Game }) {
         </Row>
         <div style={{ ...label, marginTop: 18, marginBottom: 8 }}>Keys</div>
         <div style={keys}>
-          {[['W A S D', 'Drive / walk'], ['S + steer', 'Drift (tap at speed)'], ['Shift', 'Nitro · sprint'], ['Space', 'Drift (truck) · jump'], ['E', 'Get in / out'], ['X · Z', 'Gear up / down (manual)'], ['Q', 'Low range'], ['K', 'Lock differentials'], ['F', 'Headlights · torch'], ['V', 'Camera'], ['T · G', 'Day / night · next time'], ['N', 'Nightmare'], ['O', 'Settings'], ['R', 'Weather'], ['F3', 'FPS overlay']].map(([k, v]) => (
+          {[['W A S D', 'Drive / walk (S = brake · reverse)'], ['Space', 'Handbrake: stop · steer + Space = slide turn · jump'], ['Shift', 'Nitro · sprint'], ['E', 'Get in / out'], ['X · Z', 'Gear up / down (manual)'], ['Q', 'Low range'], ['K', '4WD (4H) · lock differentials'], ['F', 'Headlights · torch'], ['V', 'Camera'], ['T · G', 'Day / night · next time'], ['N', 'Nightmare'], ['O', 'Settings'], ['R', 'Weather'], ['F3', 'FPS overlay']].map(([k, v]) => (
             <div key={k} style={keyRow}><span style={keyCap}>{k}</span><span>{v}</span></div>
           ))}
         </div>

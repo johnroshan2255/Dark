@@ -37,7 +37,8 @@ export function GameHud({ game }: { game: Game }) {
   const aidsEl = useRef<HTMLDivElement>(null)
   const strip = isBright() // fixed per session (art style)
   const touch = useStore(game.store, (st) => st.touch)
-  const stripW = touch ? 300 : 520
+  // (touch: narrow enough to stay clear of the top-right buttons on a 915 px-wide phone — 300 ran under FPS)
+  const stripW = touch ? 200 : 520
   const dead = useStore(game.store, (st) => st.dead)
   const fpsCap = useStore(game.store, (st) => st.fpsCap)
   useEffect(() => {
@@ -242,7 +243,7 @@ export function GameHud({ game }: { game: Game }) {
       </div>
       )}
       <div ref={banner} style={bannerStyle} />
-      <div ref={speedo} style={speedoStyle}>
+      <div ref={speedo} style={touch ? { ...speedoStyle, left: '42%' } : speedoStyle}>{/* (touch: left of LIGHTS / RIDE) */}
         <div><span ref={gearEl} style={gearStyle} /><span ref={speedNum} style={speedNumStyle}>0</span><span style={speedUnit}>km/h</span></div>
         <div style={nitroTrack}><div ref={nitroBar} style={nitroFill} /></div>
         <div ref={aidsEl} style={aidsStyle} />

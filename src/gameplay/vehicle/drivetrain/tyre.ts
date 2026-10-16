@@ -161,6 +161,9 @@ export function gripFor(kind: TyreKindDef, s: SurfaceMix, scale: number, out: Gr
   return out
 }
 
+/** Share of the post-peak force drop a fully off-road surface takes back (0 = asphalt-like falloff, 1 = flat). */
+export const LOOSE_KEEP = 0.75
+
 /**
  * Combined slip (Pacejka's similarity method): slip ratio κ and slip angle α are normalised by their peaks, the
  * force magnitude is the Magic Formula of the combined normalised slip ρ (peak at ρ = 1, shape C 1.6 along the
@@ -179,7 +182,12 @@ export function combinedSlip(kappa: number, alpha: number, g: Grip, out: number[
   const rho = Math.sqrt(r2)
   const C = (1.6 * rx * rx + 1.3 * ry * ry) / r2
   const B = Math.tan(Math.PI / (2 * C))
-  const F = Math.sin(C * Math.atan(B * rho))
+  let F = Math.sin(C * Math.atan(B * rho))
+  // LOOSE GROUND past the peak: a spinning / sliding tyre on dirt, grass, mud, sand or snow keeps shearing and
+  // digging the soil, so its force stays near the peak (soil traction–slip curves rise to a plateau; rubber on
+  // asphalt is the one that drops ~40 % once it slides). Without this a rear-drive truck floored on a 10° dirt
+  // hill spun its tyres at 600 % slip and rolled back; with it, it climbs while the tyres spin.
+  if (rho > 1 && g.offroad > 0) F += (1 - F) * LOOSE_KEEP * g.offroad
   out[0] = (F * rx) / rho
   out[1] = (-0.95 * F * ry) / rho
 }

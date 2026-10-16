@@ -93,6 +93,24 @@ World (seed)
   (`finishRoad`): fixed heights (ends, place discs) with a band that widens just enough for a ramp; roads that would
   float over a valley or climb a cliff are rejected. Tests: every road reaches the main road, 0 dead ends, every place
   / camp has a road, every bridge connected, 0 crossings (4 seeds). Cost: ~25 ms of worker time per 380 m region.
+  Heights between the ~14 m samples are PARABOLIC VERTICAL CURVES (`roadHeightAt`, C1 along the road — every reader
+  of `hs` goes through it): linear interpolation left a sharp crest / sag at each sample (a −45 % → 0 % break at a
+  ford stopped a truck dead).
+  DRIVABLE LINKS (2026-10-16): straight Bézier links between hilltop nodes ran up 45–90 % pitches. A CHOSEN tree /
+  loop / closure link steeper than DRIVE_GRADE (0.3) is re-routed (`drivable` → `routeTo`): A* to the node (or onto
+  the main road) with a slope limit judged per 12 m step and over two steps (no sawtooth), ≤ 90° turn per step and per
+  two steps (hairpins ≥ ~15 m radius), higher-priority roads as walls, a penalty for running along the main road,
+  rounded only where that stays drivable, graded at MAX_GRADE. Kept only if flatter, ≤ DETOUR_MAX × the length its
+  drop needs, within BOX_MARGIN of its ends (region lists stay valid) and it `fits` the terrain shaping: its
+  embankment never reaches the main road's shoulder, its own legs or a nearby road (`bankMax`: else the terrain blend
+  walls the gap or humps the other road). Selection still runs on the cheap straight shapes — the first candidate
+  that is drivable (as is or routed) wins. Seeds 7 / 1337 / 42 (7 × 7 regions): road length steeper than 45 %
+  360 / 394 / 1074 m → 208 / 138 / 450 m; road surface off its grade by > 0.5 m 22 / 328 / 1368 → 64 / 246 / 534 m.
+  Cost: ~15 ms per routed link, ~1.3 / 2.6 / 8.7 s for the 49 regions (was 0.2 / 0.6 / 5 s; connector searches now
+  stop after the first pass that reaches no road at all instead of flooding the grid three times).
+- **Road tunnels** (`Formations/formations.ts`, Cave on the main road): the 5.6 m bore BENDS and CLIMBS with the road
+  (`Formation.bore`: the road's local (z, y) every 4 m, sampled at placement) — a straight bore left rock 0.3 m from
+  the centre where the road curved. Test: no rock within 4.2 m of the centre at 0.3–1.8 m height (2 seeds).
 - **Secondary roads are CONNECTED by construction** (`Road/RoadNetwork.ts`): one hilltop node per 380 m region; each
   node's road goes to a 4-neighbour strictly nearer the main road (same side, itself connected) or onto the main road
   (a spanning tree rooted at the main road, like a drainage network — distances strictly decrease, so no cycles and

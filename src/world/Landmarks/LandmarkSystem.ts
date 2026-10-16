@@ -91,6 +91,17 @@ export class LandmarkSystem {
       g.setAttribute('aBaseY', new THREE.BufferAttribute(new Float32Array(g.getAttribute('position').count).fill(l.y), 1))
       return g
     })
+    // Kinds differ (some indexed, some not; the world tree alone has `bbCenter`): mergeGeometries needs one layout,
+    // or it returns null and the WHOLE band (every landmark at that distance) vanished. Give non-indexed parts a
+    // trivial index and zero-fill attributes only some parts have.
+    const indexed = parts.some((p) => p.index)
+    const names = new Map<string, THREE.BufferAttribute>()
+    for (const p of parts) for (const [n, at] of Object.entries(p.attributes)) if (!names.has(n)) names.set(n, at as THREE.BufferAttribute)
+    for (const p of parts) {
+      const count = p.getAttribute('position').count
+      for (const [n, at] of names) if (!p.getAttribute(n)) p.setAttribute(n, new THREE.BufferAttribute(new (at.array.constructor as Float32ArrayConstructor)(count * at.itemSize), at.itemSize, at.normalized))
+      if (indexed && !p.index) p.setIndex([...Array(count).keys()])
+    }
     const g = mergeGeometries(parts)
     parts.forEach((p) => p.dispose())
     g?.computeBoundingSphere()

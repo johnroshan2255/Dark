@@ -62,7 +62,7 @@ export function MainMenu({ game }: { game: Game }) {
         )}
         <div style={{ ...label, marginTop: 8, color: ACCENT }}>Change car ›</div>
       </button>
-      <div style={{ position: 'absolute', right: 20, top: 16, ...label, opacity: 0.6 }}>{touch ? 'Touch controls' : 'WASD · Shift boost · Space drift · E enter · F lights'}</div>
+      <div style={{ position: 'absolute', right: 20, top: 16, ...label, opacity: 0.6 }}>{touch ? 'Touch controls' : 'WASD · Space brake · Shift boost · E enter · F lights'}</div>
     </div>
   )
 }

@@ -26,6 +26,35 @@ const MAX_SAMPLES = 64
 const MAX_GRADE = 0.22
 /** The road stays within this height of the ground it crosses (m): cuts/fills are banks, never walls or ramps. */
 const MAX_OFFSET = 3
+/**
+ * DRIVABLE grade (rise per metre, ≈ 17°): a straight node link steeper than this anywhere is re-routed over the
+ * terrain (A*, contour-following, switchbacks) when that gives a flatter road. Before: straight Béziers between
+ * hilltops ran up 45–90 % pitches — no car climbs them (a 4×4 in low range stalled at 50 %).
+ */
+const DRIVE_GRADE = 0.3
+/** A re-routed link stays within this of its ends' box (m): nodes lie ≥ 57 m inside their region and a link's far
+ *  end is a neighbour node or the main road ≤ 0.9 region off, so the road stays within 2 regions of its node — the
+ *  region lists (links of nodes within 2 regions) still see it everywhere. */
+const BOX_MARGIN = 420
+/** A re-routed link may be at most this × the straight one's length (else the straight one stays). */
+const DETOUR_MAX = 4
+
+/**
+ * Largest height difference (m) two roads `d` m apart (centre to centre) may have: one's embankment (WorldFields:
+ * NET_SHOULDER 4 + NET_EMBANKMENT 1.6 · |Δh| beyond its edge, ≤ 38 m) must not reach the other's edge (half-widths
+ * ≤ 2.3 m). Where it did, the terrain blend (a weighted mean of the roads' heights) raised a 2.7 m hump INTO the
+ * lower road and walled the ground between them.
+ */
+const bankMax = (d: number) => (d - 4.6 - 4) / 1.6
+/** Centre distance past which two roads' embankments can never touch (m). */
+const BANK_REACH = 4.6 + 38
+
+/** Steepest sample-to-sample grade of a graded road. */
+function maxGrade(r: NetRoad): number {
+  let g = 0
+  for (let i = 1; i < r.n; i++) g = Math.max(g, Math.abs(r.hs[i] - r.hs[i - 1]) / Math.max(0.5, r.cum[i] - r.cum[i - 1]))
+  return g
+}
 
 export interface NetRoad {
   /** Build key: `i,j>e` / `i,j>n` (grid), `i,j>m` (to the main road), `poi:x,z` (driveway). */
@@ -45,6 +74,32 @@ export interface NetRoad {
   minZ: number
   maxX: number
   maxZ: number
+  /** A straight node link's ends (for `drivable`): the node, the other node (null = the main road), length, drop.
+   *  On the road itself — not in a bounded cache — so the result never depends on what was evicted (co-op). */
+  link?: { a: [number, number]; b: [number, number] | null; len: number; drop: number }
+}
+
+/**
+ * Graded height of road `r` on segment i at parameter t ∈ [0, 1]. The samples' grade breaks (every ~14 m) are rounded
+ * into parabolic VERTICAL CURVES, as road design does: each interior sample's curve spans ± half the shorter adjacent
+ * segment, tangent to both grades at its ends (correction Δg·(c − |d|)² / 4c), so the height is C1 along the road.
+ * Linear interpolation left a sharp crest / sag at every sample — a −45 % → 0 % break at the foot of a hill (a ford's
+ * causeway) dug the bumper in and stopped a truck dead from 40 km/h. Ends (junctions, the main road, bridges) are exact.
+ */
+export function roadHeightAt(r: NetRoad, i: number, t: number): number {
+  const h0 = r.hs[i], h1 = r.hs[i + 1], l = r.cum[i + 1] - r.cum[i]
+  let h = h0 + (h1 - h0) * t
+  if (!(l > 0)) return h
+  const g = (h1 - h0) / l, s = t * l
+  if (i > 0) {
+    const lp = r.cum[i] - r.cum[i - 1], c = 0.5 * Math.min(l, lp)
+    if (c > 0 && s < c) h += (g - (h0 - r.hs[i - 1]) / lp) * (c - s) ** 2 / (4 * c)
+  }
+  if (i < r.n - 2) {
+    const ln = r.cum[i + 2] - r.cum[i + 1], c = 0.5 * Math.min(l, ln), d = l - s
+    if (c > 0 && d < c) h += ((r.hs[i + 2] - h1) / ln - g) * (c - d) ** 2 / (4 * c)
+  }
+  return h
 }
 
 export interface RoadHit {
@@ -195,16 +250,33 @@ export class RoadNetwork {
       }
       nbs.sort((x, y) => x.cum[x.n - 1] - y.cum[y.n - 1])
       cands.push(...nbs)
-      for (const r of cands) {
-        let ok = true
-        for (let q = j - 2; q <= j + 2 && ok; q++) {
-          for (let p = i - 2; p <= i + 2 && ok; p++) {
+      const clear = (r: NetRoad) => {
+        for (let q = j - 2; q <= j + 2; q++) {
+          for (let p = i - 2; p <= i + 2; p++) {
             if ((p === i && q === j) || !this.before(p, q, i, j)) continue
             const o = this.parentLink(p, q)
-            if (o && RoadNetwork.crosses(r, o)) ok = false
+            if (o && RoadNetwork.crosses(r, o)) return false
           }
         }
-        if (ok) { best = r; break }
+        return true
+      }
+      // The first candidate that is DRIVABLE (straight, or re-routed: `drivable`) wins; the first clear one only if
+      // none is (a steep straight link whose route doesn't fit the terrain may have a neighbour that routes fine).
+      let walls: NetRoad[] | null = null
+      for (const r of cands) {
+        if (!clear(r)) continue
+        if (!best) best = r
+        if (maxGrade(r) <= DRIVE_GRADE) { best = r; break }
+        if (!walls) {
+          walls = []
+          for (let q = j - 2; q <= j + 2; q++) for (let p = i - 2; p <= i + 2; p++) {
+            if ((p === i && q === j) || !this.before(p, q, i, j)) continue
+            const o = this.parentLink(p, q)
+            if (o) walls.push(o)
+          }
+        }
+        const d = this.drivable(r, walls)
+        if (d !== r && clear(d)) { best = d; break }
       }
     }
     if (this.parents.size > 6000) this.parents.clear()
@@ -229,16 +301,31 @@ export class RoadNetwork {
     const pa = a && b ? this.parentLink(i, j) : null, pb = a && b ? this.parentLink(bi, bj) : null
     if (a && b && pa && pb && this.side(i, j) === this.side(bi, bj) && hashFloat(s, i, j, dir === 'e' ? 960 : 961) < 0.35 &&
       pa.key !== `${i},${j}>p${bi - i},${bj - j}` && pb.key !== `${bi},${bj}>p${i - bi},${j - bj}`) {
-      r = this.shape(key, a, b, hashFloat(s, i, j, dir === 'e' ? 962 : 963) < 0.4 ? RoadType.Gravel : RoadType.Trail)
-      for (let q = j - 2; q <= j + 2 && r; q++) {
-        for (let p = i - 2; p <= i + 2 && r; p++) {
-          const o = this.parentLink(p, q)
-          if (o && RoadNetwork.crosses(r, o)) r = null
-          if (r && dir === 'n') {
-            const e = this.loopLink(p, q, 'e')
-            if (e && RoadNetwork.crosses(r, e)) r = null
+      const clear = (r: NetRoad) => {
+        for (let q = j - 2; q <= j + 2; q++) {
+          for (let p = i - 2; p <= i + 2; p++) {
+            const o = this.parentLink(p, q)
+            if (o && RoadNetwork.crosses(r, o)) return false
+            if (dir === 'n') {
+              const e = this.loopLink(p, q, 'e')
+              if (e && RoadNetwork.crosses(r, e)) return false
+            }
           }
         }
+        return true
+      }
+      r = this.shape(key, a, b, hashFloat(s, i, j, dir === 'e' ? 962 : 963) < 0.4 ? RoadType.Gravel : RoadType.Trail)
+      if (r && !clear(r)) r = null
+      if (r && maxGrade(r) > DRIVE_GRADE) {
+        const walls: NetRoad[] = []
+        for (let q = j - 2; q <= j + 2; q++) for (let p = i - 2; p <= i + 2; p++) {
+          const o = this.parentLink(p, q)
+          if (o) walls.push(o)
+          const e = dir === 'n' ? this.loopLink(p, q, 'e') : null
+          if (e) walls.push(e)
+        }
+        const d = this.drivable(r, walls)
+        if (d !== r && clear(d)) r = d
       }
     }
     if (this.loops.size > 6000) this.loops.clear()
@@ -293,16 +380,31 @@ export class RoadNetwork {
         if (r) cands.push(r)
       }
       cands.sort((x, y) => x.cum[x.n - 1] - y.cum[y.n - 1])
-      for (const r of cands) {
-        let ok = true
-        for (let q = j - 2; q <= j + 2 && ok; q++) {
-          for (let p = i - 2; p <= i + 2 && ok; p++) {
+      const clear = (r: NetRoad) => {
+        for (let q = j - 2; q <= j + 2; q++) {
+          for (let p = i - 2; p <= i + 2; p++) {
             const o = this.parentLink(p, q)
-            if (o && RoadNetwork.crosses(r, o)) ok = false
-            for (const d of ['e', 'n'] as const) { const l = ok ? this.loopLink(p, q, d) : null; if (l && RoadNetwork.crosses(r, l)) ok = false }
+            if (o && RoadNetwork.crosses(r, o)) return false
+            for (const d of ['e', 'n'] as const) { const l = this.loopLink(p, q, d); if (l && RoadNetwork.crosses(r, l)) return false }
           }
         }
-        if (ok) { best = r; break }
+        return true
+      }
+      let walls: NetRoad[] | null = null
+      for (const r of cands) {
+        if (!clear(r)) continue
+        if (!best) best = r
+        if (maxGrade(r) <= DRIVE_GRADE) { best = r; break }
+        if (!walls) {
+          walls = []
+          for (let q = j - 2; q <= j + 2; q++) for (let p = i - 2; p <= i + 2; p++) {
+            const o = this.parentLink(p, q)
+            if (o) walls.push(o)
+            for (const d of ['e', 'n'] as const) { const l = this.loopLink(p, q, d); if (l) walls.push(l) }
+          }
+        }
+        const d = this.drivable(r, walls)
+        if (d !== r && clear(d)) { best = d; break }
       }
     }
     if (this.tents.size > 6000) this.tents.clear()
@@ -390,17 +492,43 @@ export class RoadNetwork {
     const hit = this.built.get(key)
     if (hit !== undefined) return hit
     // Stricter and stricter slope limits until the graded road passes (a path along 40° ground can't be graded).
+    // A pass that reaches NO road at all (it flooded the whole grid) ends it: a stricter one reaches less.
     let r: NetRoad | null = null
     for (const maxG of [0.93, 0.5, 0.32]) {
       this.built.delete(key)
       r = this.search(key, a, ah, goals, type, R, sideOf, maxG)
-      if (r) break
+      if (r || !this.reached) break
     }
     this.built.set(key, r)
     return r
   }
 
-  private search(key: string, a: [number, number], ah: number | undefined, goals: NetRoad[], type: number, R: number, sideOf: number, maxG: number): NetRoad | null {
+  /**
+   * A drivable ROUTE between two nodes (or a node and the main road when `b` is null) for a link whose straight
+   * shape is too steep: the same A* with `b` as its only goal (the main road's corridor is a wall), strictest slope
+   * limit first. Keeps the link's key (the tree / loop / closure rules match on it). null: no route.
+   */
+  private routeTo(key: string, a: [number, number], b: [number, number] | null, type: number, len: number, walls: NetRoad[] = []): NetRoad | null {
+    const R = Math.min(1400, len + 240)
+    // (cost ≥ length: a route longer than the detour cap is never kept anyway)
+    const cap = DETOUR_MAX * Math.max(len, 60) * 4
+    for (const maxG of [0.32, 0.45, 0.6]) {
+      const r = this.search(key, a, undefined, [], type, R, 0, maxG, b ?? undefined, walls, cap, true)
+      if (r) return r
+    }
+    return null
+  }
+
+  /** Did the last `search` reach a goal (its road may still have failed grading)? */
+  private reached = false
+
+  /**
+   * `to` (a node) / `link`: a node link's route (`routeTo`) — A* to the point, the main road's corridor a wall, a
+   * penalty for running along the main road, `walls` never crossed, cost-capped at `maxCost`; the slope limit is
+   * judged per 12 m step and over two steps (no sawtooth), the path rounded only where that keeps it drivable.
+   * Otherwise the original connector search (driveways, camps, bridge ends) — unchanged.
+   */
+  private search(key: string, a: [number, number], ah: number | undefined, goals: NetRoad[], type: number, R: number, sideOf: number, maxG: number, to?: [number, number], walls: NetRoad[] = [], maxCost = Infinity, link = false): NetRoad | null {
     const C = R > 1500 ? 24 : 12, N = Math.ceil(R / C) * 2 + 1, half = (N - 1) / 2
     const ox = a[0] - half * C, oz = a[1] - half * C
     // Heights on a HALF-cell grid (cell centres at even indices, step midpoints at odd ones), each sampled once.
@@ -425,6 +553,19 @@ export class RoadNetwork {
         }
       }
     }
+    // WALLS: roads this one must not cross (rasterised every 4 m) — except within 30 m of its own ends (junctions).
+    const wall = new Uint8Array(walls.length ? N * N : 0)
+    for (const r of walls) {
+      for (let i = 0; i < r.n - 1; i++) {
+        const l = Math.hypot(r.xs[i + 1] - r.xs[i], r.zs[i + 1] - r.zs[i]), n = Math.max(1, Math.ceil(l / 4))
+        for (let k = 0; k <= n; k++) {
+          const x = r.xs[i] + (r.xs[i + 1] - r.xs[i]) * (k / n), z = r.zs[i] + (r.zs[i + 1] - r.zs[i]) * (k / n)
+          if (Math.hypot(x - a[0], z - a[1]) < 30 || (to && Math.hypot(x - to[0], z - to[1]) < 30)) continue
+          const gi = Math.round((x - ox) / C), gj = Math.round((z - oz) / C)
+          if (gi >= 0 && gj >= 0 && gi < N && gj < N) wall[gj * N + gi] = 1
+        }
+      }
+    }
     const main = (i: number) => {
       const x = ox + (i % N) * C, z = oz + Math.floor(i / N) * C
       return Math.abs(x - this.host.roadCenterX(z)) < C * 0.75
@@ -434,6 +575,8 @@ export class RoadNetwork {
       return Math.abs(x - this.host.roadCenterX(z)) < 2.7 + 9
     }
     const start = half * N + half
+    const toCell = to ? Math.round((to[1] - oz) / C) * N + Math.round((to[0] - ox) / C) : -1
+    if (to && (Math.abs(Math.round((to[0] - ox) / C) - half) > half || Math.abs(Math.round((to[1] - oz) / C) - half) > half)) return null
     const dist = new Float32Array(N * N).fill(Infinity), prev = new Int32Array(N * N).fill(-1)
     // binary heap of (cost, cell)
     const hc: number[] = [], hi: number[] = []
@@ -457,19 +600,29 @@ export class RoadNetwork {
       }
       return top
     }
+    // A* toward a point target (straight-line distance: admissible, every step costs ≥ its length); a search for
+    // the first road of many stays a plain Dijkstra (h = 0).
+    const tx = to ? Math.round((to[0] - ox) / C) : 0, tz = to ? Math.round((to[1] - oz) / C) : 0
+    const heur = to ? (i: number) => C * Math.hypot((i % N) - tx, ((i / N) | 0) - tz) : () => 0
     dist[start] = 0
-    push(0, start)
+    push(heur(start), start)
     let end = -1
+    this.reached = false
     const water = this.host.water
     while (hc.length) {
+      const fi = hc[0]
       const i = pop()
       const d0 = dist[i]
+      if (fi > d0 + heur(i) + 1e-3) continue // a stale heap entry
+      if (d0 > maxCost) break // (a strict pass that would need a far longer road than the lax one: give up)
       // A goal only where the ground is at the road's level (a road at the foot of a cliff is not reached from its top).
-      if (i !== start) {
+      if (to) {
+        if (i === toCell) { end = i; break }
+      } else if (i !== start) {
         const gg = goal.get(i)
         if (gg) {
           const k = Math.min(gg[0].n - 2, Math.floor(gg[1])), t = gg[1] - k
-          if (Math.abs(hAt(i) - (gg[0].hs[k] + (gg[0].hs[k + 1] - gg[0].hs[k]) * t)) < 3) { end = i; break }
+          if (Math.abs(hAt(i) - roadHeightAt(gg[0], k, t)) < 3) { end = i; break }
         } else if (!sideOf && main(i)) {
           const z = oz + Math.floor(i / N) * C
           if (Math.abs(hAt(i) - this.host.mainRoadHeight(z)) < 3) { end = i; break }
@@ -482,26 +635,50 @@ export class RoadNetwork {
         const jx = ix + dx, jz = iz + dz
         if (jx < 0 || jz < 0 || jx >= N || jz >= N) continue
         const j = jz * N + jx
+        // (a diagonal step may not slip between two wall cells either)
+        if (wall.length && (wall[j] || (dx && dz && wall[iz * N + jx] && wall[jz * N + ix]))) continue
         const len = C * (dx && dz ? 1.41421356 : 1)
         const h1 = hAt(j)
-        // (+ the ground halfway: a cliff edge inside a cell is not crossed unseen)
+        // Grade over the step (what the graded road climbs: small bumps inside a cell are graded over) against the
+        // pass's limit; the ground halfway against the cliff limit (a cliff edge inside a cell is not crossed unseen).
         const hm = hHalf(ix + jx, iz + jz)
-        const g = Math.max(Math.abs(hm - h0), Math.abs(h1 - hm)) / (len * 0.5)
-        if (g > maxG) continue // (> 43°: a cliff; 31–43°: a steep ramp, heavily penalised)
-        if (inCorr(j) && !(!sideOf && main(j))) continue // only into the main road's corridor to END on it
+        const gh = Math.max(Math.abs(hm - h0), Math.abs(h1 - hm)) / (len * 0.5)
+        const g = link ? Math.abs(h1 - h0) / len : gh
+        if (g > maxG || gh > 0.93) continue // (> 43°: a cliff; 31–43°: a steep ramp, heavily penalised)
+        // …and over TWO steps (from the previous cell): a 12 m sawtooth (down-diagonal, back, down-diagonal) keeps
+        // every step under the limit while running straight down the slope — smoothing then makes it a straight
+        // plunge. Real contour legs and hairpins pass.
+        const pi = prev[i]
+        if (link && pi >= 0 && maxG < 0.9) {
+          const d2 = C * Math.hypot((pi % N) - jx, ((pi / N) | 0) - jz)
+          if (d2 > 0 && Math.abs(h1 - hAt(pi)) / d2 > maxG + 0.04) continue
+        }
+        // A link turns ≤ 90° per step AND over two steps: a hairpin spans ≥ 4–5 cells (≥ ~15 m radius, a mountain
+        // road's) — one turning round a cell or two (5–6 m) ran the truck (11.8 m turning circle) off a causeway.
+        if (link && pi >= 0) {
+          const ax = ix - (pi % N), az = iz - ((pi / N) | 0)
+          if (ax * dx + az * dz < 0) continue
+          const ppi = prev[pi]
+          if (ppi >= 0 && ((pi % N) - (ppi % N)) * dx + (((pi / N) | 0) - ((ppi / N) | 0)) * dz < 0) continue
+        }
+        if (inCorr(j) && (to || !(!sideOf && main(j)))) continue // only into the main road's corridor to END on it
         // Another road's cell where it can't be joined (it runs on a fill / in a cut here): a WALL — never cross it.
         const gj = goal.get(j)
         if (gj) {
           const k = Math.min(gj[0].n - 2, Math.floor(gj[1])), t = gj[1] - k
-          if (Math.abs(h1 - (gj[0].hs[k] + (gj[0].hs[k + 1] - gj[0].hs[k]) * t)) >= 3) continue
+          if (Math.abs(h1 - roadHeightAt(gj[0], k, t)) >= 3) continue
         }
         if (sideOf && Math.sign(ox + jx * C - this.host.roadCenterX(oz + jz * C)) !== sideOf) continue
         const wet = h1 < water + 0.6 ? 6 : 0
-        const c = d0 + len * (1 + 14 * g * g + (g > 0.6 ? 40 : 0) + wet)
-        if (c < dist[j]) { dist[j] = c; prev[j] = i; push(c, j) }
+        // Beside the main road (≤ 30 m, not ending on it): heavily penalised — a route may come down onto it, not run
+        // along it on the hillside above (that left a 12 m wall at the main road's shoulder).
+        const along = link && !main(j) && Math.abs(ox + jx * C - this.host.roadCenterX(oz + jz * C)) < 30 ? 12 : 0
+        const c = d0 + len * (1 + 14 * g * g + (g > 0.6 ? 40 : 0) + wet + along)
+        if (c < dist[j]) { dist[j] = c; prev[j] = i; push(c + heur(j), j) }
       }
     }
     let road: NetRoad | null = null
+    this.reached = end >= 0
     if (end >= 0) {
       // cells → points (start exact), end snapped onto the goal road / main road centreline
       const cells: number[] = []
@@ -509,13 +686,16 @@ export class RoadNetwork {
       cells.reverse()
       let pts: [number, number][] = cells.map((i) => [ox + (i % N) * C, oz + Math.floor(i / N) * C])
       pts[0] = [a[0], a[1]]
-      const g = goal.get(end)
+      const g = to ? undefined : goal.get(end)
       let endH: number
-      if (g) {
+      if (to) {
+        pts[pts.length - 1] = [to[0], to[1]]
+        endH = this.host.baseHeight(to[0], to[1]) // = the node's own height (its roads start there)
+      } else if (g) {
         const [r, f] = g, k = Math.min(r.n - 2, Math.floor(f)), t = f - k
         const px = r.xs[k] + (r.xs[k + 1] - r.xs[k]) * t, pz = r.zs[k] + (r.zs[k + 1] - r.zs[k]) * t
         pts[pts.length - 1] = [px, pz]
-        endH = r.hs[k] + (r.hs[k + 1] - r.hs[k]) * t
+        endH = roadHeightAt(r, k, t)
       } else {
         const z = pts[pts.length - 1][1]
         pts[pts.length - 1] = [this.host.roadCenterX(z), z]
@@ -530,49 +710,73 @@ export class RoadNetwork {
         for (let i = 1; i < p.length - 1; i++) { const d = Math.abs((bx - ax) * (az - p[i][1]) - (ax - p[i][0]) * (bz - az)) / L; if (d > md) (md = d), (mi = i) }
         return md > eps ? [...rdp(p.slice(0, mi + 1), eps).slice(0, -1), ...rdp(p.slice(mi), eps)] : [p[0], p[p.length - 1]]
       }
-      const exact = rdp(pts.slice(), 1)
-      pts = rdp(pts, 4)
-      for (let it = 0; it < 2; it++) {
-        const q: [number, number][] = [pts[0]]
-        for (let i = 0; i < pts.length - 1; i++) {
-          const [x0, z0] = pts[i], [x1, z1] = pts[i + 1]
-          if (i > 0) q.push([x0 * 0.75 + x1 * 0.25, z0 * 0.75 + z1 * 0.25])
-          if (i < pts.length - 2) q.push([x0 * 0.25 + x1 * 0.75, z0 * 0.25 + z1 * 0.75])
+      const chaikin = (p: [number, number][], n: number): [number, number][] => {
+        for (let it = 0; it < n; it++) {
+          const q: [number, number][] = [p[0]]
+          for (let i = 0; i < p.length - 1; i++) {
+            const [x0, z0] = p[i], [x1, z1] = p[i + 1]
+            if (i > 0) q.push([x0 * 0.75 + x1 * 0.25, z0 * 0.75 + z1 * 0.25])
+            if (i < p.length - 2) q.push([x0 * 0.25 + x1 * 0.75, z0 * 0.25 + z1 * 0.75])
+          }
+          q.push(p[p.length - 1])
+          p = q
         }
-        q.push(pts[pts.length - 1])
-        pts = q
+        return p
       }
-      // The rounded curve cuts corners: if it runs over a drop the cell path avoided (> 0.9 rise per metre between
-      // 3 m probes), keep the exact cell path instead.
-      for (let i = 0; i < pts.length - 1 && pts !== exact; i++) {
-        const l = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]), n = Math.max(1, Math.ceil(l / 3))
-        let hp = this.host.baseHeight(pts[i][0], pts[i][1])
-        for (let k = 1; k <= n; k++) {
-          const hq = this.host.baseHeight(pts[i][0] + (pts[i + 1][0] - pts[i][0]) * (k / n), pts[i][1] + (pts[i + 1][1] - pts[i][1]) * (k / n))
-          if (Math.abs(hq - hp) > (l / n) * 0.9) { pts = exact; break }
-          hp = hq
-        }
-      }
-      let total = 0
-      for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
-      const S = Math.max(2, Math.min(160, Math.round(total / 10) + 1))
-      if (total >= 4) {
+      // Resample ~10 m; the ground under each sample; `cliff` = it runs over a drop (> 0.9 rise per metre between
+      // 3 m probes), `steep` = the steepest sample-to-sample ground grade.
+      const resample = (p: [number, number][]) => {
+        let total = 0
+        for (let i = 1; i < p.length; i++) total += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1])
+        const S = Math.max(2, Math.min(160, Math.round(total / 10) + 1))
         const xs = new Float32Array(S), zs = new Float32Array(S), raw = new Float32Array(S)
         let seg = 0, acc = 0
         for (let k = 0; k < S; k++) {
           const want = (total * k) / (S - 1)
-          while (seg < pts.length - 2 && acc + Math.hypot(pts[seg + 1][0] - pts[seg][0], pts[seg + 1][1] - pts[seg][1]) < want) { acc += Math.hypot(pts[seg + 1][0] - pts[seg][0], pts[seg + 1][1] - pts[seg][1]); seg++ }
-          const l = Math.hypot(pts[seg + 1][0] - pts[seg][0], pts[seg + 1][1] - pts[seg][1]) || 1
+          while (seg < p.length - 2 && acc + Math.hypot(p[seg + 1][0] - p[seg][0], p[seg + 1][1] - p[seg][1]) < want) { acc += Math.hypot(p[seg + 1][0] - p[seg][0], p[seg + 1][1] - p[seg][1]); seg++ }
+          const l = Math.hypot(p[seg + 1][0] - p[seg][0], p[seg + 1][1] - p[seg][1]) || 1
           const t = Math.min(1, Math.max(0, (want - acc) / l))
-          xs[k] = pts[seg][0] + (pts[seg + 1][0] - pts[seg][0]) * t
-          zs[k] = pts[seg][1] + (pts[seg + 1][1] - pts[seg][1]) * t
+          xs[k] = p[seg][0] + (p[seg + 1][0] - p[seg][0]) * t
+          zs[k] = p[seg][1] + (p[seg + 1][1] - p[seg][1]) * t
           raw[k] = this.host.baseHeight(xs[k], zs[k])
         }
         raw[S - 1] = endH
         if (ah !== undefined) raw[0] = ah
+        let cliff = false
+        for (let i = 0; i < p.length - 1 && !cliff; i++) {
+          const l = Math.hypot(p[i + 1][0] - p[i][0], p[i + 1][1] - p[i][1]), n = Math.max(1, Math.ceil(l / 3))
+          let hp = this.host.baseHeight(p[i][0], p[i][1])
+          for (let k = 1; k <= n && !cliff; k++) {
+            const hq = this.host.baseHeight(p[i][0] + (p[i + 1][0] - p[i][0]) * (k / n), p[i][1] + (p[i + 1][1] - p[i][1]) * (k / n))
+            if (Math.abs(hq - hp) > (l / n) * 0.9) cliff = true
+            hp = hq
+          }
+        }
+        let steep = 0
+        const step = total / (S - 1)
+        for (let k = 2; k < S - 1; k++) steep = Math.max(steep, Math.abs(raw[k] - raw[k - 1]) / Math.max(1, step))
+        return { xs, zs, raw, total, cliff, steep }
+      }
+      // Rounded (RDP 4 m + Chaikin ×2) first; a rounded curve cuts the corners of a switchback straight up the hill,
+      // so if it climbs steeper than the pass allowed (or runs over a drop) fall back to a lightly rounded path, then
+      // to the exact cell path.
+      const exact = rdp(pts.slice(), 1)
+      const tries = [chaikin(rdp(pts, 4), 2), chaikin(exact, 1), exact]
+      let pick = resample(tries[0])
+      if (!link) { if (pick.cliff) pick = resample(exact) } // (a connector: the exact cell path where the curve runs over a drop)
+      else {
+        const lim = Math.min(0.93, maxG + 0.1)
+        for (let k = 1; k < tries.length && (pick.cliff || pick.steep > lim); k++) {
+          const q = resample(tries[k])
+          if (!q.cliff && (pick.cliff || q.steep < pick.steep)) pick = q
+        }
+      }
+      if (pick.total >= 4) {
         this.built.delete(key)
-        // (A routed track already hugs the ground; on the strictest pass it may be a steep 4×4 track: grade 0.45.)
-        road = this.finishRoad(key, type, xs, zs, raw, maxG < 0.4 ? 0.45 : MAX_GRADE)
+        // A link is graded like every road (rise-limited to MAX_GRADE within ±MAX_OFFSET of the ground): its 12 m steps
+        // are drivable, the ground's 2 m bumps between them are cut / filled (a 0.45 limit left 40–70 % pitches).
+        // (A connector already hugs the ground; on the strictest pass it may be a steep 4×4 track: grade 0.45.)
+        road = this.finishRoad(key, type, pick.xs, pick.zs, pick.raw, link || maxG >= 0.4 ? MAX_GRADE : 0.45)
       }
     }
     return road
@@ -595,14 +799,27 @@ export class RoadNetwork {
   /** DRIVEWAY of a place: its tentative connector unless it crosses the tentative one of a place EARLIER in (z, x)
    *  order within 800 m (pairwise, non-recursive); then the next candidates are not tried (rare). */
   private driveway(p: { x: number; z: number }): NetRoad | null {
+    const fk = `${Math.floor(p.x)},${Math.floor(p.z)}`
+    const done = this.finalDrives.get(fk)
+    if (done !== undefined) return done
+    const out = this.driveway0(p)
+    if (this.finalDrives.size > 4000) this.finalDrives.clear()
+    this.finalDrives.set(fk, out)
+    return out
+  }
+  private readonly finalDrives = new Map<string, NetRoad | null>()
+  private driveway0(p: { x: number; z: number }): NetRoad | null {
     const r = this.tentDrive(p)
     if (!r) return null
+    // Earlier places' BUILT drives (strict (z, x) order → the recursion is finite): only those exist to cross or join
+    // (a dropped tentative one is not a road — ending on one was a dead end, avoiding one lost the place its road).
     const earlier: NetRoad[] = []
     let clash = false
     const box = Math.max(800, r.maxX - r.minX + 400, r.maxZ - r.minZ + 400)
     for (const q of this.host.pois?.inBox(p.x - box, p.z - box, p.x + box, p.z + box) ?? []) {
       if (q.z > p.z || (q.z === p.z && q.x >= p.x)) continue
-      const o = this.tentDrive(q)
+      if (!this.tentDrive(q)) continue
+      const o = this.driveway(q)
       if (!o) continue
       earlier.push(o)
       if (RoadNetwork.crosses(r, o)) clash = true
@@ -708,7 +925,73 @@ export class RoadNetwork {
     if (!b) raw[SAMPLES - 1] = this.host.mainRoadHeight(bz)
     else if (endH !== undefined) raw[SAMPLES - 1] = endH // a junction: the joined road's own height
     if (startH !== undefined) raw[0] = startH // a bridge deck end
-    return this.finishRoad(key, type, xs, zs, raw)
+    const r2 = this.finishRoad(key, type, xs, zs, raw)
+    if (r2 && endH === undefined && startH === undefined && mainZ === undefined) r2.link = { a, b, len, drop: Math.abs(r2.hs[0] - r2.hs[SAMPLES - 1]) }
+    return r2
+  }
+
+  private readonly drivables = new Map<string, NetRoad>()
+
+  /**
+   * The DRIVABLE version of a chosen node link: if its straight shape is steeper than DRIVE_GRADE anywhere, the
+   * terrain-following route between the same ends (`routeTo`), same key — when that is flatter, not an absurd
+   * detour (≤ DETOUR_MAX × the straight length, or × what the height difference needs at DRIVE_GRADE) and stays
+   * within BOX_MARGIN of its ends' box (the region lists see every road within 2 regions of its node). Only CHOSEN
+   * links are routed (the candidates are compared on their cheap straight shapes): ~15 ms per steep link.
+   * Callers re-check crossings on the result and keep the straight one if it crosses.
+   */
+  /**
+   * Does a routed road suit the terrain shaping (WorldFields embankments: NET_SHOULDER 4 + 1.6·|Δh| ≤ 38 m beyond
+   * its edge)?
+   *  - Its embankment never reaches the main road's 12 m shoulder: centre distance ≥ 12 + 2.3 + 4 + 1.6·|Δh| (except
+   *    its last 40 m, coming down onto it) — a hillside route 35 m off and 22 m above the main road walled it 12 m.
+   *  - Its switchback legs (> 50 m apart along it) never come so close at such a height difference that one's
+   *    embankment reaches the other (`bankMax`) — two legs 9 m apart and 6.8 m apart in height made a 72° bank.
+   *    Same against the roads already there (`others`), away from its own ends (the junctions).
+   */
+  private fits(q: NetRoad, others: NetRoad[]): boolean {
+    const L = q.cum[q.n - 1]
+    for (let k = 1; k < q.n - 1; k++) {
+      if (q.cum[k] >= L - 40) break
+      const z = q.zs[k]
+      if (Math.abs(q.xs[k] - this.host.roadCenterX(z)) < Math.min(52.5, 18.5 + 1.6 * Math.abs(q.hs[k] - this.host.mainRoadHeight(z)))) return false
+    }
+    for (let i = 0; i < q.n; i++) {
+      for (let j = i + 1; j < q.n; j++) {
+        if (q.cum[j] - q.cum[i] <= 50) continue
+        const d = Math.hypot(q.xs[j] - q.xs[i], q.zs[j] - q.zs[i])
+        if (d < BANK_REACH && Math.abs(q.hs[j] - q.hs[i]) > bankMax(d)) return false
+      }
+    }
+    const x0 = q.xs[0], z0 = q.zs[0], x1 = q.xs[q.n - 1], z1 = q.zs[q.n - 1]
+    for (const o of others) {
+      if (o.maxX < q.minX - BANK_REACH || o.minX > q.maxX + BANK_REACH || o.maxZ < q.minZ - BANK_REACH || o.minZ > q.maxZ + BANK_REACH) continue
+      for (let i = 0; i < q.n; i++) {
+        if (Math.hypot(q.xs[i] - x0, q.zs[i] - z0) < 40 || Math.hypot(q.xs[i] - x1, q.zs[i] - z1) < 40) continue // (the junction itself)
+        for (let j = 0; j < o.n; j++) {
+          const d = Math.hypot(o.xs[j] - q.xs[i], o.zs[j] - q.zs[i])
+          if (d < BANK_REACH && Math.abs(o.hs[j] - q.hs[i]) > bankMax(d)) return false
+        }
+      }
+    }
+    return true
+  }
+
+  private drivable(r: NetRoad, walls: NetRoad[]): NetRoad {
+    const hit = this.drivables.get(r.key)
+    if (hit) return hit
+    let out = r
+    const e = r.link
+    if (e && maxGrade(r) > DRIVE_GRADE) {
+      const q = this.routeTo(r.key + '~d', e.a, e.b, r.type, e.len, walls)
+      const bx0 = Math.min(r.xs[0], r.xs[r.n - 1]) - BOX_MARGIN, bx1 = Math.max(r.xs[0], r.xs[r.n - 1]) + BOX_MARGIN
+      const bz0 = Math.min(r.zs[0], r.zs[r.n - 1]) - BOX_MARGIN, bz1 = Math.max(r.zs[0], r.zs[r.n - 1]) + BOX_MARGIN
+      if (q && q.cum[q.n - 1] <= DETOUR_MAX * Math.max(e.len, 60, e.drop / DRIVE_GRADE) && maxGrade(q) < maxGrade(r) - 0.05 &&
+        q.minX >= bx0 && q.maxX <= bx1 && q.minZ >= bz0 && q.maxZ <= bz1 && this.fits(q, walls)) out = { ...q, key: r.key }
+    }
+    if (this.drivables.size > 4000) this.drivables.clear()
+    this.drivables.set(r.key, out)
+    return out
   }
 
   /**
@@ -831,7 +1114,7 @@ export class RoadNetwork {
         const d = Math.sqrt(px * px + pz * pz)
         if (d < bestD) {
           bestD = d
-          bestH = r.hs[i] + (r.hs[i + 1] - r.hs[i]) * t
+          bestH = roadHeightAt(r, i, t)
           bestI = i
           bestT = t
         }

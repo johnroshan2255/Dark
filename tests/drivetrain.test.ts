@@ -195,6 +195,19 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
       p.dispose()
     }
   }
+  // LOOSE GROUND: floored from a standstill (the keyboard's W, aids off, the default drive — 2H on a part-time
+  // 4×4) up a 10° grass hill, the car climbs even while its tyres spin; spinning on grass doesn't cook the tread.
+  {
+    const p = world(10)
+    const t = car(p, id, { aids: 'off', surface: Surf.Grass })
+    t.place(...onRamp(10, 6))
+    run(p, t, 0.5, {})
+    const y0 = t.body.translation().y
+    run(p, t, 6, { throttle: 1 })
+    const climbed = t.body.translation().y - y0
+    check(`${id}: floored up a 10° grass hill from a standstill (aids off) — climbs, tread < 120 °C`, climbed > 1.5 && hottest(t) < 120, `+${climbed.toFixed(1)} m in 6 s, ${(t.speed * 3.6).toFixed(0)} km/h, tread ${hottest(t).toFixed(0)} °C`)
+    p.dispose()
+  }
   if (RS.drive.low > 1) {
     const p = world(35)
     const t = car(p, id)
@@ -255,8 +268,9 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     p.dispose()
   }
   {
-    // TYRE HEAT at the limit: 30 s (~3 laps) of a steady circle at the car's cornering limit (half lock, 50 km/h
-    // held, full aids so no car spins off its line) — the tyres warm to working temperature, never smoke or burn.
+    // TYRE HEAT at the limit: 30 s (~3 laps) of a steady circle at the car's cornering limit (full steer — with aids
+    // the lock is grip-limited, so a full key IS the limit; 50 km/h held, full aids so no car spins off its line) —
+    // the tyres warm to working temperature, never smoke or burn.
     const p = world()
     const t = car(p, id, { aids: 'full' })
     run(p, t, 1, {})
@@ -264,7 +278,7 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     const lat: number[] = []
     let hot = 0
     for (let k = 0; k < 60 * 30; k++) {
-      run(p, t, 1 / 60, { throttle: Math.max(0, Math.min(0.6, 0.3 + 0.3 * (14 - t.speed))), steer: 0.5 * Math.min(1, k / 120) })
+      run(p, t, 1 / 60, { throttle: Math.max(0, Math.min(0.6, 0.3 + 0.3 * (14 - t.speed))), steer: Math.min(1, k / 120) })
       if (k > 300) lat.push(Math.abs(t.speed * t.body.angvel().y))
       hot = Math.max(hot, hottest(t))
     }
@@ -272,6 +286,39 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     const g50 = lat[lat.length >> 1] / 9.81
     check(`${id}: 30 s cornering at its limit (${g50.toFixed(2)} g) only warms the tyres (< 110 °C, no fire)`, g50 > 0.6 && hot < 110 && !t.drivetrain!.burning, `${hot.toFixed(0)} °C`)
     p.dispose()
+  }
+  {
+    // GTA-SMOOTH (aids Full, the default): a full-key lane change at 60 km/h (0.5 s left, 0.5 s right, let go) keeps
+    // the car pointed down the road; a straight handbrake (Space) is a hard, straight stop; Space + steer still slides.
+    const at60 = () => {
+      const p = world(), t = car(p, id, { aids: 'full' })
+      run(p, t, 1, {})
+      while (t.speed < 60 / 3.6) run(p, t, 0.1, { throttle: 1 })
+      return { p, t }
+    }
+    {
+      const { p, t } = at60(), h0 = t.heading
+      run(p, t, 0.5, { throttle: 0.3, steer: -1 }); run(p, t, 0.5, { throttle: 0.3, steer: 1 }); run(p, t, 3, { throttle: 0.3 })
+      const dh = deg(Math.abs(Math.atan2(Math.sin(t.heading - h0), Math.cos(t.heading - h0))))
+      check(`${id}: aids Full — full-key lane change at 60 km/h doesn't spin (heading ±${dh.toFixed(0)}°, ${(t.speed * 3.6).toFixed(0)} km/h)`, dh < 30 && t.speed > 30 / 3.6 && t.axesUp() > 0.8)
+      p.dispose()
+    }
+    {
+      const { p, t } = at60(), h0 = t.heading, z0 = t.body.translation()
+      let yaw = 0, prev = t.heading
+      run(p, t, 6, { handbrake: true }, () => { let d = t.heading - prev; d = Math.atan2(Math.sin(d), Math.cos(d)); yaw += Math.abs(d); prev = t.heading })
+      const z1 = t.body.translation(), dist = Math.hypot(z1.x - z0.x, z1.z - z0.z)
+      check(`${id}: aids Full — Space with the wheel straight from 60 km/h stops straight (${dist.toFixed(0)} m, yawed ${deg(yaw).toFixed(0)}°)`, Math.abs(t.speed) < 0.5 && dist < 40 && deg(yaw) < 20)
+      void h0
+      p.dispose()
+    }
+    {
+      const { p, t } = at60()
+      let maxSlip = 0
+      run(p, t, 1.5, { throttle: 0, steer: 0.6, handbrake: true }, () => { maxSlip = Math.max(maxSlip, Math.atan2(Math.abs(t.lateral), Math.max(1, Math.abs(t.speed)))) })
+      check(`${id}: aids Full — Space + steer still slides the rear (a handbrake turn, slip ${deg(maxSlip).toFixed(0)}°)`, deg(maxSlip) > 15 && t.axesUp() > 0.5)
+      p.dispose()
+    }
   }
   {
     // Handbrake at speed while steering: the rear slides (|slip| > 15°), the car stays on its wheels.

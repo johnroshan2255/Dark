@@ -70,6 +70,14 @@ function run(opts: { seconds: number; frameMs: (scale: number, tier: number) => 
   for (let i = 0; i < 600; i++) if (a.sample(i % 100 === 99 ? 2000 : 16.67, NaN, 4, { canScaleDown: true, canScaleUp: false, canTierDown: true, canTierUp: false })) changes++
   check('ignores >250 ms hitches (tab switch)', changes === 0)
 }
+// 6b. A device that is SUSTAINED over 250 ms a frame (a weak phone on HIGH, 2–4 fps) still steps down — before, every
+//     such frame was dropped as a "tab switch" and it never adapted.
+{
+  const a = new AdaptiveQuality()
+  let downs = 0, t = 0
+  while (t < 30_000) { const d = a.sample(400, NaN, 4, { canScaleDown: true, canScaleUp: false, canTierDown: true, canTierUp: false }); if (d?.kind === 'scaleDown' || d?.kind === 'tierDown') downs++; t += 400 }
+  check('sustained > 250 ms frames (a 2.5 fps device) step down', downs >= 3, `${downs} steps in 30 s`)
+}
 // 7. HOLD 60 on a chosen ULTRA preset: features step down costliest-first, never below their floors, and a device
 //    whose frame time depends on the features settles at 60 fps with as much kept as it can afford.
 {

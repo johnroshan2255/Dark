@@ -15,10 +15,11 @@ import { PROP_STRIDE, TREE_STRIDE, TreeSpecies } from '../src/world/types'
 import { Rng } from '../src/world/noise/rng'
 import { sampleHeight } from '../src/world/Terrain/generateTerrain'
 import { WorldGenerator } from '../src/world/WorldGenerator'
+import { formationSdf, FormationKind } from '../src/world/Formations/formations'
 import { createPropGeometries } from '../src/world/Forest/propGeometries'
 import { buildInstanceAttributes } from '../src/optimization/instancing/InstanceBuilder'
 import { Biome, BIOME_COUNT } from '../src/world/Biomes'
-import { RoadNetwork, type NetRoad as RoadNetworkRoad } from '../src/world/Road/RoadNetwork'
+import { RoadNetwork, roadHeightAt, type NetRoad as RoadNetworkRoad } from '../src/world/Road/RoadNetwork'
 import { builtBridge } from '../src/world/Road/bridges'
 import { campsIn } from '../src/world/Road/camps'
 
@@ -314,6 +315,52 @@ for (const seed of [7, 1337, 42]) {
   check('landmarks are deterministic', same)
   check(`landmarks stand on dry ground off the road (${total} in 3 × 16 km²)`, total > 40 && bad === 0, `${bad} misplaced`)
   check('the home landmark is in view of the spawn (3 seeds)', homeSeen === 3, `${homeSeen}/3`)
+}
+
+// DRIVABLE network: steep straight links between hilltops are re-routed along the terrain (RoadNetwork.drivable) —
+// before, 45–90 % pitches (no car climbs them) summed to 360–1070 m per seed over 7 × 7 regions.
+{
+  let steep = 0, total = 0
+  for (const seed of [7, 1337]) {
+    const f = new WorldGenerator(seed).fields
+    const seen = new Set<string>()
+    for (let i = -3; i <= 3; i++) for (let j = -3; j <= 3; j++) for (const r of f.network.roadsIn(i, j)) {
+      if (seen.has(r.key)) continue
+      seen.add(r.key)
+      const L = r.cum[r.n - 1]
+      const hAt = (s: number) => { let i = 0; while (i < r.n - 2 && r.cum[i + 1] < s) i++; const l = r.cum[i + 1] - r.cum[i]; return roadHeightAt(r, i, l > 0 ? Math.min(1, Math.max(0, (s - r.cum[i]) / l)) : 0) }
+      for (let s = 0; s + 4 <= L; s += 2) { total += 2; if (Math.abs(hAt(s + 4) - hAt(s)) / 4 > 0.45) steep += 2 }
+    }
+  }
+  check(`secondary roads are drivable: ≤ 2.5 % of their length steeper than 45 % (2 seeds, ${(total / 1000).toFixed(1)} km)`, steep <= total * 0.025, `${steep} m`)
+}
+
+// Road tunnels: the bore follows the main road through the hill (bends and grade) — no rock within the road's
+// width + a car's half-width (a straight bore left rock 0.3 m from the centre where the road bent).
+{
+  let tunnels = 0, tight = 1e9
+  for (const seed of [7, 1337]) {
+    const f = new WorldGenerator(seed).fields
+    for (let k = -30; k <= 30; k++) {
+      const F = f.formations.roadFormation(k)
+      if (!F || F.kind !== FormationKind.Cave) continue
+      tunnels++
+      const sdf = formationSdf(F), c = Math.cos(F.rot), sn = Math.sin(F.rot)
+      for (let z = F.z - 40; z <= F.z + 40; z += 2) {
+        const cx = f.roadCenterX(z), ry = f.roadHeight(z)
+        const dir = f.roadCenterX(z + 1) - f.roadCenterX(z - 1), L = Math.hypot(dir, 2), px = 2 / L, pz = -dir / L
+        for (const side of [-1, 1]) for (let d = 0; d <= 4.2; d += 0.2) {
+          let hit = false
+          for (const hy of [0.3, 1.0, 1.8]) {
+            const dx = cx + side * px * d - F.x, dz = z + side * pz * d - F.z
+            if (sdf(dx * c + dz * sn, ry + hy - F.y, -dx * sn + dz * c) < 0) hit = true
+          }
+          if (hit) { tight = Math.min(tight, d); break }
+        }
+      }
+    }
+  }
+  check(`road tunnels leave the road clear (${tunnels} tunnels, 2 seeds)`, tunnels > 10 && tight > 3.7, tight < 1e8 ? `rock ${tight.toFixed(1)} m from the centre` : "no rock within 4.2 m")
 }
 
 process.exit(failures ? 1 : 0)

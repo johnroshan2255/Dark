@@ -13,6 +13,8 @@
 export interface AdaptiveDecision {
   kind: 'scaleDown' | 'scaleUp' | 'tierDown' | 'tierUp'
   reason: string
+  /** How many steps at once (down only): 1 normally; 2–3 when the frame is FAR over budget (see `sample`). */
+  steps?: number
 }
 
 export interface AdaptiveInput {
@@ -44,6 +46,8 @@ export class AdaptiveQuality {
   private lastProbe: AdaptiveDecision['kind'] | null = null
   /** Doubles after every reverted probe (60 s → 120 s → … ≤ 10 min). */
   private probeBackoffS = 60
+  /** Consecutive frames over 250 ms. */
+  private longRun = 0
   /** Last window stats (for HUD). */
   mean = 0
   slowFraction = 0
@@ -68,7 +72,13 @@ export class AdaptiveQuality {
    * @param cpuMs main-thread frame work
    */
   sample(frameMs: number, gpuMs: number, cpuMs: number, can: AdaptiveInput): AdaptiveDecision | null {
-    if (!this.enabled || frameMs <= 0 || frameMs > 250) return null // tab hidden / debugger pause
+    if (!this.enabled || frameMs <= 0) return null
+    // One frame > 250 ms is a hidden tab / a debugger pause: ignored. SUSTAINED ones are a device that slow (a weak
+    // phone on HIGH at 2–4 fps): counted (clamped) so it steps down — before, it was ignored forever and never adapted.
+    if (frameMs > 250) {
+      if (++this.longRun < 3) return null
+      frameMs = 250
+    } else this.longRun = 0
     const dt = frameMs / 1000
     if (this.graceS > 0) {
       this.graceS -= dt
@@ -109,15 +119,20 @@ export class AdaptiveQuality {
       this.headroomSeconds = 0
       this.badStreak++
       this.state = `over budget (${this.mean.toFixed(1)} ms)`
-      if (this.badStreak < 2 || this.cooldownS > 0) return null
+      // FAR over budget (a phone on HIGH: 40–100 ms frames) → act on one bad window, settle briefly, 2–3 steps at
+      // once. Stepping one feature per ~4 s took 50–85 s of stutter to reach 60 on a Snapdragon 6xx model; Hold 60's
+      // probed restores bring back what turns out affordable. Mild overruns keep the careful single steps.
+      const severe = this.mean > BUDGET_MS * 1.8
+      const steps = this.mean > BUDGET_MS * 3.5 ? 3 : severe ? 2 : 1
+      if (this.badStreak < (severe ? 1 : 2) || this.cooldownS > 0) return null
       this.badStreak = 0
       if (can.canScaleDown) {
-        this.cooldownS = 1
-        return { kind: 'scaleDown', reason: this.state }
+        this.cooldownS = severe ? 0.5 : 1
+        return { kind: 'scaleDown', reason: this.state, steps }
       }
       if (can.canTierDown) {
-        this.settle(3)
-        return { kind: 'tierDown', reason: this.state }
+        this.settle(severe ? 1.2 : 3)
+        return { kind: 'tierDown', reason: this.state, steps }
       }
       this.state = 'at minimum quality'
       return null

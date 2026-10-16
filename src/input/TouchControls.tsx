@@ -16,6 +16,7 @@ export function TouchControls({ game }: { game: Game }) {
   const flashlight = useStore(game.store, (s) => s.flashlight)
   const phase = useStore(game.store, (s) => s.phase)
   const cam = useStore(game.store, (s) => s.settings.camera)
+  const sim = useStore(game.store, (s) => s.settings.handling === 'sim')
   const driving = useStore(game.store, (s) => s.driving)
   const flying = useStore(game.store, (s) => s.flying)
   const boat = useStore(game.store, (s) => s.boat)
@@ -162,9 +163,10 @@ export function TouchControls({ game }: { game: Game }) {
           </button>
         )}
         {driving ? (
-          // Held like the handbrake (Space): steer + hold = drift (or pull the stick back while steering).
+          // Held like the handbrake (Space). Simulation (aids on): straight = a hard stop, steering = a handbrake turn;
+          // arcade: steer + hold = drift (or pull the stick back while steering).
           <button style={{ ...btn, width: 76, height: 76 }} data-testid="btn-jump" {...hold('Space')}>
-            DRIFT
+            {sim ? 'BRAKE' : 'DRIFT'}
           </button>
         ) : (
           <button style={{ ...btn, width: 76, height: 76 }} data-testid="btn-jump" onPointerDown={tap('Space')}>
