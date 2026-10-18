@@ -452,6 +452,35 @@ export class AudioSystem {
    * puff, louder with the impact speed, quieter with distance. Synthesized from the shared noise (no files).
    * @param type prop type (0 pole, 1 fence, 4 hay, 10/11 stone…)
    */
+  /** A car EXPLODING (Damage at 100 %): a deep boom + a long rumbling roar of the fireball, by distance. */
+  explosion(distance: number): void {
+    const ctx = this.ctx
+    if (!ctx || !this.sfx || ctx.state !== 'running') return
+    const t = ctx.currentTime
+    const vol = 1.6 / (1 + Math.max(0, distance - 8) / 14)
+    const boom = ctx.createOscillator()
+    boom.frequency.setValueAtTime(90, t)
+    boom.frequency.exponentialRampToValueAtTime(28, t + 0.9)
+    const bg = ctx.createGain()
+    bg.gain.setValueAtTime(vol, t)
+    bg.gain.exponentialRampToValueAtTime(0.001, t + 1.2)
+    boom.connect(bg).connect(this.sfx)
+    boom.start(t)
+    boom.stop(t + 1.25)
+    const n = this.noiseSource(ctx)
+    const lp = ctx.createBiquadFilter()
+    lp.type = 'lowpass'
+    lp.frequency.setValueAtTime(2400, t)
+    lp.frequency.exponentialRampToValueAtTime(220, t + 2.2)
+    const ng = ctx.createGain()
+    ng.gain.setValueAtTime(0, t)
+    ng.gain.linearRampToValueAtTime(vol * 1.1, t + 0.02)
+    ng.gain.exponentialRampToValueAtTime(0.001, t + 2.4)
+    n.connect(lp).connect(ng).connect(this.sfx)
+    n.start(t)
+    n.stop(t + 2.5)
+  }
+
   crash(type: number, speed: number, distance: number): void {
     const ctx = this.ctx
     if (!ctx || !this.sfx || ctx.state !== 'running') return

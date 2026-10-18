@@ -2,12 +2,14 @@ import type { CSSProperties } from 'react'
 import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
 import { vehicleClass, vehicleDef, vehicleRating, vehicleStats } from '../gameplay/vehicle/catalogue'
-import { CAR_IMAGES } from './carImages'
-import { ACCENT, bigButton, fullscreen, glass, heading, label, statFill, statRow, statTrack, vignette } from './theme'
+import { KeyArt } from './KeyArt'
+import { ACCENT, FONT, fullscreen, glass, label, LIME, statFill, statRow, statTrack, vignette } from './theme'
 
 /**
- * MAIN MENU — the first screen after loading (the world is live behind it, the camera circling your car):
- * PLAY, GARAGE, SETTINGS stacked on the left like a racing-game front end; the current car's card on the right.
+ * MAIN MENU — the first screen after loading, over the still KEY ART (the world streams in behind it, not drawn):
+ * the title top-left, PLAY / GARAGE / SETTINGS stacked bottom-left over the dusk scrim, the current car's card beside
+ * them (no picture: the key art's truck, bottom-right, stays clear). Responsive (ui/frontend.css): phone landscape
+ * shrinks everything and drops the stats, phone portrait stacks the buttons full-width with a slim card above them.
  */
 export function MainMenu({ game }: { game: Game }) {
   const landing = useStore(game.store, (s) => s.landing)
@@ -20,37 +22,36 @@ export function MainMenu({ game }: { game: Game }) {
   const def = vehicleDef(current)
   const tune = game.tuning(current)
   void settings
-  const w = touch ? 200 : 280
   return (
     <div style={fullscreen} data-testid="menu">
+      <KeyArt />
       <div style={vignette} />
-      <div style={{ position: 'absolute', left: touch ? 18 : 40, top: touch ? 12 : 40 }}>
-        <div style={heading(touch ? 34 : 64)}>DARK</div>
-        <div style={{ ...label, marginTop: 8 }}>A new world every night · world #{String(seed).slice(0, 8)}</div>
+      <div className="fe-brand">
+        <h1 className="fe-title">DARK</h1>
+        <div className="fe-tag">A new world every night · <b>world #{String(seed).slice(0, 8)}</b></div>
       </div>
-      <div style={{ position: 'absolute', left: touch ? 18 : 40, bottom: touch ? 14 : 44, display: 'flex', flexDirection: 'column', gap: touch ? 8 : 12 }}>
-        <button style={{ ...bigButton(true, w), height: touch ? 44 : 60 }} onClick={() => game.play()} data-testid="play">
-          <span>Play</span><span>▶</span>
+      <div className="fe-actions">
+        <button className="fe-btn fe-btn--primary" onClick={() => game.play()} data-testid="play">
+          <span>Play</span><span className="fe-chev">▶</span>
         </button>
-        <button style={{ ...bigButton(false, w), height: touch ? 40 : 52 }} onClick={() => game.showScreen('garage')} data-testid="menu-garage">
-          <span>Garage</span><span style={{ color: ACCENT }}>›</span>
+        <button className="fe-btn" onClick={() => game.showScreen('garage')} data-testid="menu-garage">
+          <span>Garage</span><span className="fe-chev">›</span>
         </button>
-        <button style={{ ...bigButton(false, w), height: touch ? 40 : 52 }} onClick={() => game.openSettings(true)} data-testid="menu-settings">
-          <span>Settings</span><span style={{ color: ACCENT }}>›</span>
+        <button className="fe-btn" onClick={() => game.openSettings(true)} data-testid="menu-settings">
+          <span>Settings</span><span className="fe-chev">›</span>
         </button>
       </div>
       {/* Current car card */}
-      <button style={{ ...card, ...(touch ? { width: 230, right: 14, bottom: 14, padding: 8 } : {}) }} onClick={() => game.showScreen('garage')} data-testid="menu-car">
-        <img src={CAR_IMAGES[def.id]} alt="" style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover', borderRadius: 8, display: 'block' }} />
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 8 }}>
-          <div>
-            <div style={{ font: '800 16px system-ui, sans-serif', color: '#fff' }}>{def.name}</div>
-            <div style={{ ...label, marginTop: 2 }}>{def.maker} · {def.year} · {vehicleClass(tune)}</div>
+      <button className="fe-card" style={glass} onClick={() => game.showScreen('garage')} data-testid="menu-car">
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ font: `800 16px ${FONT}`, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{def.name}</div>
+              <div style={{ ...label, marginTop: 2 }}>{def.maker} · {def.year} · {vehicleClass(tune)}</div>
+            </div>
+            <div style={rating}>{vehicleRating(tune)}</div>
           </div>
-          <div style={rating}>{vehicleRating(tune)}</div>
-        </div>
-        {!touch && (
-          <div style={{ display: 'grid', gap: 5, marginTop: 8 }}>
+          <div className="fe-stats">
             {vehicleStats(tune).map((st) => (
               <div key={st.label} style={statRow}>
                 <span>{st.label}</span>
@@ -59,13 +60,12 @@ export function MainMenu({ game }: { game: Game }) {
               </div>
             ))}
           </div>
-        )}
-        <div style={{ ...label, marginTop: 8, color: ACCENT }}>Change car ›</div>
+          <div className="fe-change" style={{ ...label, marginTop: 8, color: ACCENT }}>Change car ›</div>
+        </div>
       </button>
-      <div style={{ position: 'absolute', right: 20, top: 16, ...label, opacity: 0.6 }}>{touch ? 'Touch controls' : 'WASD · Space brake · Shift boost · E enter · F lights'}</div>
+      <div className="fe-hint">{touch ? 'Touch controls' : 'WASD · Space brake · Shift boost · E enter · F lights'}</div>
     </div>
   )
 }
 
-const card: CSSProperties = { ...glass, position: 'absolute', right: 40, bottom: 44, width: 300, padding: 10, textAlign: 'left', cursor: 'pointer', color: '#fff' }
-const rating: CSSProperties = { font: '900 30px system-ui, sans-serif', color: ACCENT, letterSpacing: -1 }
+const rating: CSSProperties = { font: `900 30px ${FONT}`, color: LIME, letterSpacing: -1, textShadow: '0 0 18px rgba(205,232,74,0.35)' }

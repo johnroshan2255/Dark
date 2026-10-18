@@ -1,0 +1,133 @@
+/*
+ * FRONT END (main menu, garage, settings, "entering the world") over the key art. Colours: ui/theme.ts (the sunset
+ * of src/assets/ui/key-art.jpg). Here: what inline styles can't do — hover / press states and the layouts that
+ * change shape on a phone (landscape ≈ 844 × 390, portrait ≈ 390 × 844) or a small laptop window.
+ */
+:root {
+  --fe-gx: clamp(16px, 4vw, 56px);
+  --fe-gy: clamp(14px, 5vh, 52px);
+  --fe-cream: #fff4e3;
+  --fe-amber: #ffb45c;
+  --fe-lime: #cde84a;
+  --fe-edge: rgba(255, 214, 170, 0.18);
+  --fe-dusk: rgba(28, 24, 52, 0.62);
+  --fe-grad: linear-gradient(135deg, #ffd27a 0%, #ff9a45 55%, #f26b3a 100%);
+}
+
+/* ---- buttons: one look everywhere (menu, garage, settings) ---- */
+.fe-btn {
+  position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; height: clamp(44px, 7.2vh, 60px); padding: 0 clamp(16px, 1.6vw, 24px);
+  border-radius: 14px; border: 1px solid var(--fe-edge); background: var(--fe-dusk); color: var(--fe-cream);
+  font: 900 clamp(14px, 1.25vw, 17px) system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; letter-spacing: 0.26em;
+  text-transform: uppercase; text-align: left; cursor: pointer; overflow: hidden;
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); box-shadow: 0 8px 24px rgba(10, 6, 24, 0.35);
+  transition: transform 0.15s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.fe-btn .fe-chev { color: var(--fe-amber); font-size: 1.2em; transition: transform 0.2s ease; }
+.fe-btn:hover { border-color: rgba(255, 180, 92, 0.6); background: rgba(48, 38, 80, 0.72); }
+.fe-btn:hover .fe-chev { transform: translateX(4px); }
+.fe-btn:active { transform: scale(0.98); }
+.fe-btn:focus-visible { outline: 2px solid var(--fe-amber); outline-offset: 2px; }
+.fe-btn:disabled { opacity: 0.5; cursor: default; }
+.fe-btn--primary {
+  height: clamp(48px, 8.4vh, 68px); border-color: rgba(255, 230, 190, 0.55); background: var(--fe-grad); color: #2a1405;
+  box-shadow: 0 12px 32px rgba(242, 107, 58, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+.fe-btn--primary .fe-chev { color: #2a1405; }
+.fe-btn--primary:hover { background: var(--fe-grad); border-color: #fff1d6; box-shadow: 0 14px 38px rgba(242, 107, 58, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.55); }
+/* a slow sheen across PLAY */
+.fe-btn--primary::after {
+  content: ''; position: absolute; inset: 0; background: linear-gradient(105deg, transparent 35%, rgba(255, 255, 255, 0.35) 50%, transparent 65%);
+  transform: translateX(-120%); animation: fe-sheen 4.5s ease-in-out infinite;
+}
+@keyframes fe-sheen { 0%, 60% { transform: translateX(-120%); } 85%, 100% { transform: translateX(120%); } }
+@media (prefers-reduced-motion: reduce) { .fe-btn--primary::after { animation: none; } }
+.fe-btn--compact { width: auto; height: clamp(38px, 6vh, 50px); letter-spacing: 0.18em; font-size: clamp(12px, 1.1vw, 15px); }
+
+/* ---- main menu ---- */
+.fe-brand { position: absolute; left: var(--fe-gx); top: var(--fe-gy); max-width: min(560px, 70vw); }
+.fe-title {
+  margin: 0; font: 900 clamp(40px, 7.5vw, 104px)/0.9 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: 0.3em; color: var(--fe-cream); text-shadow: 0 4px 30px rgba(120, 40, 10, 0.55), 0 1px 0 rgba(255, 210, 150, 0.4);
+}
+.fe-tag { margin-top: clamp(6px, 1.4vh, 14px); font: 700 clamp(10px, 1.05vw, 13px) system-ui, sans-serif; letter-spacing: 0.24em; text-transform: uppercase; color: rgba(255, 236, 214, 0.82); }
+.fe-tag b { color: var(--fe-amber); font-weight: 800; }
+.fe-actions { position: absolute; left: var(--fe-gx); bottom: var(--fe-gy); width: clamp(220px, 25vw, 320px); display: flex; flex-direction: column; gap: clamp(8px, 1.4vh, 14px); }
+/* the car card beside the buttons (the key art's truck, bottom-right, stays clear) */
+.fe-card { position: absolute; left: calc(var(--fe-gx) + clamp(220px, 25vw, 320px) + clamp(12px, 1.6vw, 24px)); bottom: var(--fe-gy); width: clamp(220px, 20vw, 290px); text-align: left; cursor: pointer; color: var(--fe-cream); padding: clamp(10px, 1.2vw, 16px); }
+.fe-stats { display: grid; gap: 5px; margin-top: 8px; }
+.fe-card:hover { border-color: rgba(255, 180, 92, 0.55) !important; }
+.fe-hint { position: absolute; right: var(--fe-gx); top: var(--fe-gy); font: 700 11px system-ui, sans-serif; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(255, 236, 214, 0.6); }
+
+/* ---- settings ---- */
+.fe-settings { position: absolute; inset: clamp(10px, 4vh, 40px) clamp(10px, 3vw, 40px); display: grid; grid-template-columns: clamp(150px, 18vw, 240px) 1fr; gap: clamp(10px, 2vw, 24px); min-height: 0; }
+.fe-settings > * { min-width: 0; } /* (a grid item's min-content — the tab strip — must not widen the page) */
+.fe-settings-nav { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.fe-settings-heading { font-size: clamp(20px, 2.6vw, 34px) !important; letter-spacing: 0.1em !important; }
+.fe-settings-tabs { display: flex; flex-direction: column; gap: 6px; }
+.fe-settings-page { min-height: 0; overflow-y: auto; padding: clamp(12px, 2vw, 24px); -webkit-overflow-scrolling: touch; }
+.fe-settings-page, .fe-garage-bottom * { scrollbar-width: thin; scrollbar-color: rgba(255, 180, 92, 0.45) transparent; }
+.fe-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.fe-row-label { width: 170px; flex-shrink: 0; font: 800 11px system-ui, sans-serif; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(255, 236, 214, 0.72); }
+.fe-help { margin: -4px 0 12px 182px; max-width: 560px; font: 11px/1.5 system-ui, sans-serif; color: rgba(255, 236, 214, 0.62); }
+.fe-seg { padding: 8px 14px; border-radius: 999px; border: 1px solid var(--fe-edge); background: rgba(255, 236, 214, 0.05); color: #e9e0d6; font: 700 12px system-ui, sans-serif; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.fe-seg:hover { border-color: rgba(255, 180, 92, 0.5); }
+.fe-seg[aria-pressed='true'] { border-color: var(--fe-amber); background: rgba(255, 154, 69, 0.22); color: #ffe6c4; }
+
+/* ---- garage: the car photo on the right, the strip + tuning panel on the left ---- */
+.fe-garage-photo { position: absolute; right: var(--fe-gx); top: 16vh; bottom: 8vh; width: 42vw; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.fe-garage-photo::before { content: ''; position: absolute; left: 12%; right: 12%; bottom: 22%; height: 14%; border-radius: 50%; background: radial-gradient(closest-side, rgba(255, 170, 90, 0.28), rgba(10, 6, 24, 0.55) 55%, transparent); filter: blur(6px); }
+.fe-garage-photo img { position: relative; max-width: 100%; max-height: 100%; object-fit: contain; filter: drop-shadow(0 26px 30px rgba(8, 4, 20, 0.55)); animation: fe-photo-in 0.35s ease; }
+@keyframes fe-photo-in { from { opacity: 0.4; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.fe-garage-top { position: absolute; left: var(--fe-gx); right: var(--fe-gx); top: var(--fe-gy); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fe-garage-top .fe-btn { width: clamp(110px, 13vw, 200px); }
+.fe-garage-bottom { position: absolute; left: var(--fe-gx); right: calc(var(--fe-gx) + 42vw + 16px); bottom: var(--fe-gy); display: grid; gap: clamp(6px, 1.4vh, 12px); max-height: 62vh; grid-template-rows: auto 1fr; }
+
+/* ---- phone LANDSCAPE / short windows ---- */
+@media (max-height: 520px) {
+  .fe-title { font-size: clamp(32px, 9vh, 52px); }
+  .fe-actions { width: clamp(190px, 28vw, 250px); gap: 7px; }
+  .fe-btn { height: 40px; font-size: 13px; letter-spacing: 0.2em; }
+  .fe-btn--primary { height: 46px; }
+  .fe-card { left: calc(var(--fe-gx) + clamp(190px, 28vw, 250px) + 12px); width: clamp(180px, 26vw, 230px); padding: 9px; }
+  .fe-card .fe-stats, .fe-hint { display: none; }
+  .fe-settings-tabs button { padding: 9px 12px !important; font-size: 11px !important; }
+  .fe-row-label { width: 130px; }
+  .fe-help { margin-left: 142px; }
+  .fe-garage-bottom { max-height: 74vh; }
+  .fe-garage-photo { top: 18vh; bottom: 4vh; }
+  .fe-car-img, .fe-selected { display: none !important; }
+  .fe-car-card { width: 160px !important; padding: 6px 8px !important; }
+}
+
+/* ---- phone PORTRAIT / narrow windows ---- */
+@media (max-width: 640px) {
+  .fe-brand { max-width: calc(100vw - 32px); }
+  .fe-title { font-size: clamp(38px, 13vw, 60px); letter-spacing: 0.24em; }
+  .fe-actions { left: 16px; right: 16px; width: auto; bottom: 16px; }
+  /* the car card sits above the buttons, slim: name + rating (the key art fills the top ~62 % — KeyArt) */
+  .fe-actions { gap: 8px; }
+  .fe-card { left: 16px; right: 16px; width: auto; bottom: calc(16px + 52px + 46px * 2 + 8px * 2 + 10px); padding: 10px 14px; }
+  .fe-card .fe-stats, .fe-card .fe-change, .fe-hint { display: none; }
+  .fe-btn { height: 46px; }
+  .fe-btn--primary { height: 52px; }
+  .fe-settings { inset: 8px; grid-template-columns: 1fr; grid-template-rows: auto 1fr; gap: 8px; }
+  .fe-settings-nav { flex-direction: row; align-items: center; gap: 8px; }
+  .fe-settings-nav .fe-settings-heading { display: none; }
+  .fe-settings-tabs { flex-direction: row; overflow-x: auto; flex: 1; scrollbar-width: none; }
+  .fe-settings-tabs::-webkit-scrollbar { display: none; }
+  .fe-settings-tabs button { width: auto !important; padding: 9px 12px !important; }
+  .fe-settings-nav .fe-spacer { display: none; }
+  .fe-settings-nav .fe-btn { width: auto; flex-shrink: 0; }
+  .fe-row { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .fe-row-label { width: auto; }
+  .fe-help { margin-left: 0; }
+  .fe-garage-top { flex-wrap: wrap; }
+  .fe-garage-bottom { left: 8px; right: 8px; bottom: 8px; max-height: calc(100vh - 150px - 30vh); }
+  .fe-garage-photo { left: 8px; right: 8px; width: auto; top: 140px; bottom: auto; height: 28vh; }
+  .fe-car-card { width: 150px !important; }
+  .fe-perf { grid-template-columns: 1fr !important; gap: 14px !important; }
+  .fe-perf-side { border-left: none !important; padding-left: 0 !important; }
+}

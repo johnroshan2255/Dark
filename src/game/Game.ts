@@ -1,8 +1,8 @@
 import * as THREE from 'three'
 import { CaveSystem } from '../gameplay/caves/CaveSystem'
 import { MOUTH_X } from '../world/Formations/caves'
-import { ART, isGenshin, isOverland, type ArtStyle } from '../rendering/artStyle'
-import { downscaleTexture, loadModels, loadVehicle, type GameModels } from '../assets/loadModels'
+import { ART, groundPalette, isGenshin, isOverland, type ArtStyle } from '../rendering/artStyle'
+import { downscaleTexture, loadModels, loadVehicle, type GameModels, type TruckModel } from '../assets/loadModels'
 import { tuningFor, vehicleDef, type VehicleTuning } from '../gameplay/vehicle/catalogue'
 import { CHUNK_SIZE } from '../world/constants'
 import { ChunkDebug } from '../debug/ChunkDebug'
@@ -22,7 +22,10 @@ import { VehicleFx } from '../rendering/particles/VehicleFx'
 import { TyreMarks } from '../rendering/particles/TyreMarks'
 import { RainParticles } from '../rendering/particles/RainParticles'
 import { Weather } from '../rendering/weather/Weather'
-import { CameraController, type CameraMode } from '../gameplay/player/CameraController'
+import { Discovery } from '../gameplay/explore/Discovery'
+import { TreeShadows } from '../rendering/shadows/TreeShadows'
+import { DynamicShadow, dynamicCaster } from '../rendering/shadows/DynamicShadow'
+import { CameraController, recentreGate, type CameraMode } from '../gameplay/player/CameraController'
 import { CharacterModel, createBlobShadow } from '../gameplay/player/CharacterModel'
 import { PlayerController } from '../gameplay/player/PlayerController'
 import { Input } from '../input/Input'
@@ -110,6 +113,12 @@ export class Game {
   readonly player: PlayerController
   readonly character: CharacterModel
   readonly blobShadow = createBlobShadow()
+  /** Image tree shadows (the LOW shadow level: no shadow map — rendering/shadows/TreeShadows). */
+  readonly treeShadows = new TreeShadows()
+  /** The moving things' shadows while the sun map is cached (rendering/shadows/DynamicShadow). */
+  readonly dynShadow = new DynamicShadow()
+  private lastChunkN = -1
+  private shadowRefreshT = 0
   readonly beam = new LightBeam()
   readonly bike: Bike
   car: Car
@@ -179,6 +188,8 @@ export class Game {
   readonly tyreMarks = new TyreMarks()
   /** Dynamic weather (clouds / rain / wind) and its rain streaks. */
   readonly weather: Weather
+  /** Summit lookouts found in this world (the HUD's exploration loop: gameplay/explore/Discovery). */
+  readonly discovery: Discovery
   readonly rain = new RainParticles()
   private rainBudget = 1
   private renderer: THREE.WebGLRenderer | null = null
@@ -218,6 +229,7 @@ export class Game {
     this.tod.setStyle(ART.style)
     this.lighting = new LightingSystem(this.tod)
     this.weather = new Weather(opts.seed, globalUniforms.uWind.value)
+    this.discovery = new Discovery(opts.seed)
     this.store = createStore<GameStateShape>({
       status: 'ready',
       error: null,
@@ -242,6 +254,7 @@ export class Game {
       lights: false,
       landing: opts.play !== true,
       screen: 'menu',
+      worldReady: false,
       vehicle: models.truck.id,
       vehicleLoading: null,
       held: null,
@@ -253,7 +266,10 @@ export class Game {
     // Spawn on the road near the origin.
     const z = 8
     const x = this.world.fields.roadCenterX(z)
-    const spawn = new THREE.Vector3(x, this.world.fields.surface(x, z) + 0.05, z)
+    // (provisional height: the ground WITHOUT the secondary roads — `surface` here ran the whole road network's A*
+    // round the spawn on the main thread (driveways, summit trails: 3–12 s before the menu could open). The exact
+    // placement waits for the first chunk, whose worker built those roads and hands them over — `pendingSpawn`.)
+    const spawn = new THREE.Vector3(x, this.world.fields.heightNoNet(x, z) + 0.05, z)
     this.player = new PlayerController(physics, this.input, spawn)
     // Face down the road (+Z): forward = (-sin yaw, -cos yaw) = normalize(dx/dz, 1).
     this.player.yaw = Math.atan2(-(this.world.fields.roadCenterX(z + 1) - x), -1)
@@ -273,10 +289,9 @@ export class Game {
     this.cameraCtl.mode = this.settings.camera
     this.horizon = new HorizonTerrain(opts.seed)
     this.world.farForest.ground = this.horizon // far trees stand on the drawn horizon hills
-    this.landmarks = new LandmarkSystem(this.world.fields.landmarks, this.materials.landmark, physics)
+    this.landmarks = new LandmarkSystem(this.world.fields.landmarks, this.materials.landmark, physics, opts.seed, groundPalette())
     this.caves = new CaveSystem(this.world.fields)
     this.bike = new Bike(this.materials.character, this.player, this.character, this.world.fields, physics, this.input)
-    this.bike.parkNear(spawn, this.player.yaw, 2.4)
     this.car = new Car(this.materials.character, models.truck, physics, this.world.fields, this.player, this.character, this.input, this.tuning(models.truck.id))
     this.car.sim.arcade = this.settings.handling === 'arcade' // realistic simulation by default (VehicleSim); arcade = Asphalt-style option
     this.car.driveSettings(this.settings.gearbox, this.settings.aids, this.input.touch, this.settings.offroadAssist)
@@ -299,15 +314,26 @@ export class Game {
       const cz = z + 14
       const f = this.world.fields
       const cx = f.roadCenterX(cz) + 1.4 // right lane (poles stand at +5.6 m)
-      this.car.park(cx, cz, Math.atan2(-(f.roadCenterX(cz + 1) - f.roadCenterX(cz)), -1)) // along the road there
-      // Start looking at the HOME LANDMARK (a giant oak in sight on the high ground — a place to go, Genshin's
-      // opening vista), else at the car (it's what you drive first; the compass shows it either way).
-      const home = f.landmarks.home()
-      this.player.yaw = home ? Math.atan2(-(home.x - x), -(home.z - z)) : Math.atan2(-(cx - x), -(cz - z))
-      if (home) this.player.pitch = 0.04
+      const yawP = this.player.yaw
+      this.pendingSpawn = { x: cx, z: cz, place: () => {
+        this.player.teleport(spawn.setY(f.surface(x, z) + 0.05))
+        this.bike.parkNear(spawn, yawP, 2.4)
+        this.car.park(cx, cz, Math.atan2(-(f.roadCenterX(cz + 1) - f.roadCenterX(cz)), -1)) // along the road there
+        if (opts.at === 'cave') this.spawnAtCave()
+      } }
+      // Start looking at the car (it's what you drive first; the compass shows it either way), then — once the
+      // landmark worker has placed it (~0.5–3 s, LandmarkSystem) — at the HOME LANDMARK (a giant oak in sight on the
+      // high ground — a place to go, Genshin's opening vista), unless the player has already taken control.
+      this.player.yaw = Math.atan2(-(cx - x), -(cz - z))
       this.character.yaw = this.player.yaw
+      const yaw0 = this.player.yaw
+      this.landmarks.onHome = (home) => {
+        if (!home || opts.at === 'cave' || this.player.yaw !== yaw0) return
+        this.player.yaw = Math.atan2(-(home.x - x), -(home.z - z))
+        this.player.pitch = 0.04
+        this.character.yaw = this.player.yaw
+      }
     }
-    if (opts.at === 'cave') this.spawnAtCave()
     this.monsters = new MonsterSystem(this.world.fields, this.player, this.health, this.audio)
     this.monsters.solid = (x, z, nearY) => this.physics.groundBelow(x, z, nearY + 0.6, this.world.fields.surface(x, z))
     this.lightning = new Lightning(this.world.fields, this.player, this.health, this.audio)
@@ -446,6 +472,29 @@ export class Game {
         this.store.set({ boat: car.boatMode })
       } else if (e === 'clunk') this.audio.play('door', 0.5, 0.55) // a hull part locking home
       else if (e === 'hint') this.notify(car.hint)
+      else if (e === 'explode') {
+        // 100 %: the fireball. Anyone close is hurt (the driver, just thrown out, the most); the camera jolts.
+        const at = car.engineWorld(new THREE.Vector3())
+        this.vehicleFx.explode(at)
+        this.audio.explosion(this.camera ? this.camera.position.distanceTo(at) : 10)
+        this.cameraCtl.shake = 1
+        const d = this.player.curr.distanceTo(at)
+        if (d < 9) this.health.damage(Math.round(90 * (1 - d / 9) + 10), 'explosion')
+        this.store.set({ carDamage: 100, driving: false })
+        this.notify('The car blew up!', 3500)
+        this.wreckClock = 12
+      }
+    }
+    // CRASH DAMAGE (Car / Damage): the crunch, a jolt, and the warnings as it gets worse.
+    car.onDamage = (amount, at, sev) => {
+      if (car !== this.car) return
+      const before = this.store.get().carDamage ?? 0, now = Math.round(car.damageLevel * 100)
+      this.audio.crash(10, 6 + sev * 2.5, this.camera ? this.camera.position.distanceTo(at) : 6)
+      if (car.driving) this.cameraCtl.shake = Math.min(1, this.cameraCtl.shake + 0.2 + sev / 14)
+      this.store.set({ carDamage: now })
+      if (before < 50 && now >= 50 && now < 90) this.notify('The engine is smoking — the car is badly damaged', 3200)
+      else if (before < 90 && now >= 90 && now < 100) this.notify('The engine is on FIRE — get out!', 3500)
+      void amount
     }
   }
 
@@ -548,10 +597,9 @@ export class Game {
     this.world.setQuality(q)
     this.syncImpostors()
     this.lighting.setQuality(q)
+    this.treeShadows.enabled = q.imageShadows
     this.monsters.budget = q.monsters
-    this.monsters.rig.castShadow = q.objectShadows
-    this.bike.castShadow = q.objectShadows
-    this.car.castShadow = q.objectShadows
+    this.applyCasters()
     this.car.tyreShear = q.name === 'high' || q.name === 'ultra' // tread shear in corners (a few ALU per tyre vertex)
     this.car.gloss = q.name !== 'low'
     // LOW: half-size truck texture (1024² → 512², ~4 MB less GPU memory). Flat-coloured models have none.
@@ -570,6 +618,7 @@ export class Game {
     this.caves.fxShare = q.particles.rain
     this.reflection.scale = q.reflections
     this.reflection.every = q.reflectionEvery
+    this.reflection.skyline = q.reflectionSkyline
     this.post.setAO(q.ao.scale, q.ao.samples, q.ao.radius)
     this.horizon.configure(q.horizon)
     this.post.setPixelBudget(q.pixelBudget)
@@ -587,6 +636,22 @@ export class Game {
   }
 
   /** User overrides on top of the tier defaults ('auto' = tier value). */
+  /**
+   * Who casts into which shadow map. CACHED sun map (MEDIUM+): the car, bike, monsters and the player cast into the
+   * per-frame dynamic map (their meshes on DYN_LAYER), not the sun's — it re-renders only when the player moved a
+   * quarter of it. Otherwise into the sun's map as before (objectShadows).
+   */
+  private applyCasters(): void {
+    const q = this.quality
+    // (with a cached sun map, or with IMAGE tree shadows and no map at all — MEDIUM / HIGH)
+    const dyn = q.objectShadows && (q.shadows ? q.shadowCache : q.imageShadows)
+    this.dynShadow.enabled = dyn
+    this.monsters.rig.castShadow = q.objectShadows && !dyn
+    this.bike.castShadow = q.objectShadows && !dyn
+    this.car.castShadow = q.objectShadows && !dyn
+    for (const root of [this.monsters.rig.root, this.bike.root, this.car.root, this.character.root]) dynamicCaster(root, dyn)
+  }
+
   private applyOverrides(): void {
     const q = this.quality
     const st = this.settings
@@ -604,8 +669,9 @@ export class Game {
     const dpr = st.pixelRatio === 'auto' ? Math.min(native, q.maxDpr) : st.pixelRatio === 'native' ? native : Math.min(native, st.pixelRatio)
     this.setDpr?.(dpr)
     // Real dynamic shadow for the character where the sun map re-renders every frame; blob otherwise.
-    const realShadow = q.shadows && q.objectShadows && q.sunShadowEvery === 1 && ART.style !== 'storybook'
-    this.character.castShadow = realShadow
+    const dyn = q.objectShadows && (q.shadows ? q.shadowCache : q.imageShadows) // (it casts into the dynamic map — applyCasters)
+    const realShadow = (dyn || (q.shadows && q.objectShadows && q.sunShadowEvery === 1)) && ART.style !== 'storybook'
+    this.character.castShadow = realShadow && !dyn
     this.blobShadow.userData.enabled = !realShadow
   }
 
@@ -821,6 +887,7 @@ export class Game {
           this.cameraCtl.ignoreBody = this.car.occupied ? this.car.sim.body : null
           // Simulation handling: the chassis-attached first person / weighted chase view (arcade keeps its chase below).
           this.cameraCtl.car = this.car.driving && !this.car.sim.arcade ? this.car : null
+          this.cameraCtl.zoomBy(this.input.consumeZoom())
           this.cameraCtl.update(dt, this.camera, p, this.lighting.flashlightOn)
           // BOOST feedback: the field of view widens (speed rush) while the boost is pushing the truck.
           const cam = this.camera
@@ -838,8 +905,10 @@ export class Game {
             const travel = sp > 4 ? Math.atan2(-v.x, -v.z) : this.car.heading
             const want = sim.speed < -1 ? this.car.heading : travel + Math.atan2(Math.sin(this.car.heading - travel), Math.cos(this.car.heading - travel)) * 0.35
             const d = Math.atan2(Math.sin(want - p.yaw), Math.cos(want - p.yaw))
-            p.yaw += d * Math.min(1, dt * (sp > 4 ? 3.5 : 1.5))
-            p.pitch += (-0.12 - p.pitch) * Math.min(1, dt * 2)
+            // Crawling (rocks, tight spots): no swing back — look around freely.
+            const gate = recentreGate(sim.speed)
+            p.yaw += d * Math.min(1, dt * 3.5) * gate
+            p.pitch += (-0.12 - p.pitch) * Math.min(1, dt * 2) * gate
           }
           if (Math.abs(fov - cam.fov) > 0.01) {
             cam.fov = fov
@@ -851,7 +920,11 @@ export class Game {
       .add({
         name: 'car',
         update: (dt) => {
+          // The car's exact body meets the terrain as a trimesh copy of the chunks around it (rebuilt on a chunk change).
+          if (this.car.sim.enabled) this.physics.vehicleGround(this.car.pos.x, this.car.pos.z)
           this.car.showDriver = this.cameraCtl.mode === 'tpp'
+          this.car.wipers = Math.min(1, this.weather.rain * 1.6) // (wipers sweep with the rain)
+          if (this.wreckClock > 0 && (this.wreckClock -= dt) <= 0) this.respawnCar()
           this.car.update(dt, this.physics.alpha, this.cameraCtl.flashOrigin, this.cameraCtl.flashTarget)
           if (this.camera) {
             // Exhaust + tyre smoke/dust, lit by the sky fill and a share of the sun, sized in RT pixels.
@@ -904,12 +977,24 @@ export class Game {
           // the torch works at full strength; fog / exposure / haze below.
           this.caves.update(dt, time, p.renderPosition, this.lighting.keyStrength * (1 - this.tod.nightmare) * THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.0, 0.25))
           this.lighting.cave = this.caves.inside
+          // Cached sun map: re-render it when chunks were built / dropped round the player, and every 2 s anyway
+          // (LOD switches change the casters) — one shadow pass per ~120 frames instead of every frame.
+          this.shadowRefreshT += dt
+          if (this.world.chunks.size !== this.lastChunkN || this.shadowRefreshT > 2) {
+            this.lastChunkN = this.world.chunks.size
+            this.shadowRefreshT = 0
+            this.lighting.invalidateShadow()
+          }
           this.lighting.update(dt, p.renderPosition, c.flashOrigin, c.flashTarget)
+          // Image tree shadows follow the key light and take away its direct light like the real shadow would (its
+          // shadow.intensity), less as it fades (dusk, overcast), none in a cave.
+          this.treeShadows.update(this.renderer, this.world, p.renderPosition, this.lighting.keyDir, THREE.MathUtils.clamp(this.lighting.sun.intensity / 1.2, 0, 1) * this.lighting.sun.shadow.intensity * (1 - this.caves.inside))
           this.ash.update(time, cam.position, THREE.MathUtils.smoothstep(this.tod.nightmare, 0.2, 0.9), this.renderer?.domElement.height ?? 800)
           const darkness = (this.darkness = 1 - THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.05, 0.45) * (1 - this.tod.nightmare))
           // One spot light: the torch on foot, the headlights in the truck (its own switch).
           const lit = this.car.driving ? this.car.lights : this.lighting.flashlightOn
           this.lighting.spotOn = lit
+          this.lighting.spotIsHeadlights = this.car.driving
           this.beam.update(c.flashOrigin, c.flashTarget, lit, darkness, c.mode === 'fpp' && !this.car.driving)
           this.car.updateLamps(darkness)
           // Street lamps: on from dusk; `lampT` = seconds since they switched on (each post flickers to life in its own time).
@@ -1036,6 +1121,16 @@ export class Game {
     return Math.min(built, 1) * 0.8 + ground * 0.1 + horizon * 0.1
   }
 
+  /**
+   * Enough world to hand over control (0..1; 1 = go): the 5 × 5 chunks round the player (~160 m) and colliders under
+   * them. The rest of the ring (and the horizon) streams in while you play — waiting for all 81 chunks of an ULTRA
+   * ring was most of the old load. PLAY shows the "Entering the world" screen until this reaches 1.
+   */
+  playReadiness(): number {
+    const p = this.player.curr
+    return this.world.builtNear(p.x, p.z, 2) * 0.9 + (this.world.isReadyAt(p.x, p.z) ? 0.1 : 0)
+  }
+
   // ---------------------------------------------------------------- garage
 
   /** The player's setup for a vehicle (stock + saved overrides). */
@@ -1069,19 +1164,7 @@ export class Game {
     this.store.set({ vehicleLoading: 0 })
     this.selecting = loadVehicle(id, (f) => this.store.set({ vehicleLoading: f }))
       .then((model) => {
-        const pos = this.car.pos.clone(), heading = this.car.heading
-        this.car.dispose() // (forceOut: an occupant is put beside it, no animation)
-        this.car = new Car(this.materials.character, model, this.physics, this.world.fields, this.player, this.character, this.input, this.tuning(id))
-        this.car.park(pos.x, pos.z, heading, pos.y)
-        this.car.sim.arcade = this.settings.handling === 'arcade'
-        this.car.driveSettings(this.settings.gearbox, this.settings.aids, this.input.touch, this.settings.offroadAssist)
-        this.car.autoAccel = this.settings.autoAccelerate
-        this.wireCar()
-        this.envRoot.add(this.car.root)
-        this.car.castShadow = this.quality.objectShadows
-        this.car.tyreShear = this.quality.name === 'high' || this.quality.name === 'ultra'
-        this.car.gloss = this.quality.name !== 'low'
-        this.car.setMap(this.quality.name === 'low' && model.map ? downscaleTexture(model.map, 512) : model.map)
+        this.swapCar(model, this.car.pos.x, this.car.pos.z, this.car.heading, this.car.pos.y)
         this.settings = { ...this.settings, garage: { ...this.settings.garage, vehicle: id } }
         saveSettings(this.settings)
         this.store.set({ settings: this.settings, vehicle: id, vehicleLoading: null, driving: false, flying: false, boat: false })
@@ -1094,6 +1177,39 @@ export class Game {
     return this.selecting
   }
 
+  /** Put `model` in the world parked at (x, z) facing `heading` (the old car goes). */
+  private swapCar(model: TruckModel, x: number, z: number, heading: number, nearY?: number): void {
+    // The new car first: if building it throws, the old one is still whole and in the world (disposing it first
+    // left a freed physics body that every frame then read — "null pointer passed to rust" each step).
+    const next = new Car(this.materials.character, model, this.physics, this.world.fields, this.player, this.character, this.input, this.tuning(model.id))
+    this.car.dispose() // (forceOut: an occupant is put beside it, no animation)
+    this.car = next
+    this.car.park(x, z, heading, nearY)
+    this.car.sim.arcade = this.settings.handling === 'arcade'
+    this.car.driveSettings(this.settings.gearbox, this.settings.aids, this.input.touch, this.settings.offroadAssist)
+    this.car.autoAccel = this.settings.autoAccelerate
+    this.wireCar()
+    this.envRoot.add(this.car.root)
+    this.applyCasters()
+    this.car.tyreShear = this.quality.name === 'high' || this.quality.name === 'ultra'
+    this.car.gloss = this.quality.name !== 'low'
+    this.car.setMap(this.quality.name === 'low' && model.map ? downscaleTexture(model.map, 512) : model.map)
+    this.store.set({ carDamage: 0 })
+  }
+
+  /** After a car blew up: a fresh one of the same model waits on the road ahead of the player (GTA's "get a new
+   *  ride"), the wreck is cleared. */
+  private respawnCar(): void {
+    const id = this.car.modelId
+    void loadVehicle(id, () => {}).then((model) => {
+      const f = this.world.fields, p = this.player.curr
+      const z = p.z + 12, x = f.roadCenterX(z) + 1.4
+      this.swapCar(model, x, z, Math.atan2(-(f.roadCenterX(z + 1) - f.roadCenterX(z)), -1))
+      this.notify(`A new ${vehicleDef(id).name} is waiting on the road`, 4000)
+    })
+  }
+  private wreckClock = -1
+
   /** Front-end navigation: PLAY hands over control; GARAGE / BACK switch screens; the pause menu returns to it. */
   play(): void {
     this.store.set({ landing: false, screen: 'menu' })
@@ -1101,6 +1217,90 @@ export class Game {
   showScreen(screen: 'menu' | 'garage'): void {
     if (document.pointerLockElement) document.exitPointerLock()
     this.store.set({ landing: true, screen, settingsOpen: false })
+  }
+
+  private photo: { rt: THREE.WebGLRenderTarget; scene: THREE.Scene; cam: THREE.PerspectiveCamera; key: THREE.DirectionalLight; fill: THREE.DirectionalLight } | null = null
+  /**
+   * GARAGE PHOTO: the current car alone — studio lights, transparent background, clean (no dirt coat), 3/4 front
+   * view — rendered ONCE into a small target and returned as an image URL. The garage shows it over the key art and
+   * re-shoots it when the car, its paint or its tyres change: no 3D frame runs behind the front end. One render of the
+   * car's ~15 draws + a pixel read (~2–6 ms per shot, only on a change); the first shot compiles the studio variant of
+   * the truck program (no fog, studio lights). null = not yet: no renderer, or the car is not placed / posed yet
+   * (before the spawn chunk arrives its wheels and struts are in their unposed rest state).
+   */
+  carPhoto(width: number, height: number): string | null {
+    const r = this.renderer
+    if (!r || this.pendingSpawn) return null
+    const p = (this.photo ??= (() => {
+      const rt = new THREE.WebGLRenderTarget(width, height, { samples: 4, colorSpace: THREE.SRGBColorSpace })
+      const scene = new THREE.Scene()
+      const key = new THREE.DirectionalLight(0xfff0dc, 2.6), fill = new THREE.DirectionalLight(0xc8d4ff, 0.9)
+      scene.add(new THREE.HemisphereLight(0xfff4e6, 0x4a4050, 1.25), key, key.target, fill, fill.target)
+      return { rt, scene, cam: new THREE.PerspectiveCamera(26, width / height, 0.1, 100), key, fill }
+    })())
+    if (p.rt.width !== width || p.rt.height !== height) p.rt.setSize(width, height)
+    const car = this.car.root, parent = car.parent
+    car.updateMatrixWorld(true)
+    const box = new THREE.Box3()
+    car.traverseVisible((o) => {
+      const m = o as THREE.Mesh
+      if (!m.isMesh || (m.material as THREE.Material).transparent) return
+      m.geometry.computeBoundingBox()
+      box.union(_pb.copy(m.geometry.boundingBox!).applyMatrix4(m.matrixWorld))
+    })
+    if (box.isEmpty()) return null
+    const c = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3())
+    // 3/4 front view from a little above (the car faces its local −Z), framed to the box's bounding sphere.
+    const q = car.getWorldQuaternion(new THREE.Quaternion())
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q), right = new THREE.Vector3(1, 0, 0).applyQuaternion(q)
+    const dir = fwd.clone().multiplyScalar(0.82).addScaledVector(right, -0.62).add(new THREE.Vector3(0, 0.3, 0)).normalize()
+    const cam = p.cam
+    cam.aspect = width / height
+    const rad = size.length() * 0.5, fit = rad / Math.sin(THREE.MathUtils.degToRad(cam.fov * 0.5)) * Math.max(1, 1.15 / cam.aspect)
+    cam.position.copy(c).addScaledVector(dir, fit * 0.7)
+    cam.lookAt(c.x, c.y - size.y * 0.06, c.z)
+    cam.updateProjectionMatrix()
+    cam.updateMatrixWorld()
+    p.key.position.copy(c).addScaledVector(fwd, 4).addScaledVector(right, -3).add(_up.set(0, 6, 0))
+    p.key.target.position.copy(c)
+    p.fill.position.copy(c).addScaledVector(fwd, 2).addScaledVector(right, 5).add(_up.set(0, 2, 0))
+    p.fill.target.position.copy(c)
+    // The stylized shading reads the game's key light (rim / terminator): the studio key's for this shot.
+    const u = globalUniforms
+    const keep = { dir: u.uKeyDirView.value.clone(), col: u.uKeyColor.value.clone(), toon: u.uToon.value, ts: u.uTreeShadeOn.value, ds: u.uDynShadowOn.value, wet: u.uWet.value }
+    u.uKeyDirView.value.copy(p.key.position).sub(c).normalize().transformDirection(cam.matrixWorldInverse)
+    u.uKeyColor.value.set(0xfff0dc).multiplyScalar(1.6)
+    u.uToon.value = 1
+    u.uTreeShadeOn.value = u.uDynShadowOn.value = u.uWet.value = 0
+    const prevRT = r.getRenderTarget(), prevClear = r.getClearColor(new THREE.Color()), prevAlpha = r.getClearAlpha()
+    const px = new Uint8Array(width * height * 4)
+    try {
+      p.scene.add(car)
+      r.setRenderTarget(p.rt)
+      r.setClearColor(0x000000, 0)
+      r.clear()
+      this.car.clean(() => r.render(p.scene, cam))
+      r.readRenderTargetPixels(p.rt, 0, 0, width, height, px)
+    } finally {
+      parent?.add(car)
+      r.setRenderTarget(prevRT)
+      r.setClearColor(prevClear, prevAlpha)
+      u.uKeyDirView.value.copy(keep.dir)
+      u.uKeyColor.value.copy(keep.col)
+      u.uToon.value = keep.toon
+      u.uTreeShadeOn.value = keep.ts
+      u.uDynShadowOn.value = keep.ds
+      u.uWet.value = keep.wet
+    }
+    // (rows bottom-up in GL → flip into the canvas)
+    const cv = document.createElement('canvas')
+    cv.width = width
+    cv.height = height
+    const ctx = cv.getContext('2d')!
+    const img = ctx.createImageData(width, height), row = width * 4
+    for (let y = 0; y < height; y++) img.data.set(px.subarray((height - 1 - y) * row, (height - y) * row), y * row)
+    ctx.putImageData(img, 0, 0)
+    return cv.toDataURL('image/png')
   }
 
   /** Back on the road near where you fell, full health; nearby monsters retreat. */
@@ -1216,9 +1416,28 @@ export class Game {
         /* simulated slow device */
       }
     }
+    if (this.pendingSpawn && !this.spawnNow()) return
     this.loop.tick(dt)
     // All of this frame's own CPU work (systems + anything before them) — what a cap probe must rule out.
     if (this.capProbe > 0) this.capTickMs = Math.max(this.capTickMs, performance.now() - frameT0)
+  }
+
+  /**
+   * DEFERRED SPAWN: the exact placement of the player, bike and truck (and every system's frame) waits until the
+   * chunks under the spawn and the truck exist — their worker built the road network there and the main thread
+   * imported it, so the `surface` queries are cache hits instead of seconds of A* in a frame. Until then only the
+   * world streams (behind the menu's key art / "Entering the world"). True = spawned, run the frame.
+   */
+  private pendingSpawn: { x: number; z: number; place: () => void } | null = null
+  private spawnNow(): boolean {
+    const s = this.pendingSpawn!, p = this.player.renderPosition
+    if (this.world.isReadyAt(p.x, p.z) && this.world.isReadyAt(s.x, s.z)) {
+      this.pendingSpawn = null
+      s.place()
+      return true
+    }
+    if (this.camera) this.world.update(p, this.camera, p)
+    return false
   }
 
   private warmed = false
@@ -1267,7 +1486,14 @@ export class Game {
   render(): void {
     const { renderer, scene, camera, perf } = this
     if (!renderer || !scene || !camera) return
-    if (!this.warmed && this.worldReadiness() >= 1) this.warmShaders(renderer, scene, camera)
+    if (!this.warmed && this.playReadiness() >= 1) {
+      this.warmShaders(renderer, scene, camera)
+      this.store.set({ worldReady: true })
+    }
+    // The FRONT END (main menu, garage) is a still KEY-ART image over the canvas (ui/KeyArt): no 3D frame behind it —
+    // the GPU idles while the world streams in, the shaders above compile under cover. The garage shows the car as a
+    // studio photo shot on demand (carPhoto), not the live world.
+    if (this.store.get().landing) return
     if (this.capProbe > 0) return // cap probe: draw nothing for a few frames (the last image stays on screen)
     perf?.gpu.begin()
     if (this.quality.fx.trails) {
@@ -1280,6 +1506,7 @@ export class Game {
     this.reflection.render(renderer, scene, camera)
     this.sky.prepare(renderer, camera, this.post.target.width, this.post.target.height, this.quality.skyScale)
     this.water.setReflection(this.reflection.target.texture, this.reflection.textureMatrix, this.reflection.valid)
+    this.dynShadow.render(renderer, scene, this.player.renderPosition, this.lighting.keyDir, THREE.MathUtils.clamp(this.lighting.sun.intensity / 1.2, 0, 1) * this.lighting.sun.shadow.intensity * (1 - this.caves.inside))
     this.post.render(renderer, scene, camera)
     perf?.gpu.end()
     if (perf) {
@@ -1309,6 +1536,8 @@ export class Game {
   dispose(): void {
     window.removeEventListener('touchstart', this.onFirstTouch)
     this.world.dispose()
+    this.treeShadows.dispose()
+    this.dynShadow.dispose()
     this.physicsDebug.dispose()
     this.post.dispose()
     this.sky.dispose()
@@ -1330,7 +1559,10 @@ export class Game {
     this.reflection.dispose()
     this.biomeMap.dispose()
     this.character.dispose()
+    this.photo?.rt.dispose()
     this.materials.dispose()
     this.physics.dispose()
   }
 }
+
+const _pb = new THREE.Box3(), _up = new THREE.Vector3()

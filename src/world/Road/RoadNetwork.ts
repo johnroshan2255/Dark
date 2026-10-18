@@ -1,5 +1,5 @@
 import { hashFloat } from '../noise/rng'
-import type { PoiField } from '../POI/pois'
+import { PoiType, type PoiField } from '../POI/pois'
 
 /**
  * Secondary road network (deterministic, global, evaluated per point like every other field):
@@ -26,6 +26,12 @@ const MAX_SAMPLES = 64
 const MAX_GRADE = 0.22
 /** The road stays within this height of the ground it crosses (m): cuts/fills are banks, never walls or ramps. */
 const MAX_OFFSET = 3
+/**
+ * …a summit TRAIL may cut this deep into the hillside (m): a SHELF ROAD — the smoothed switchbacks cross ground up to
+ * ~45–120 % steep between the A*'s 12 m cells, and a 3 m band left 40–66 % pitches on them. The cut's uphill face is
+ * steep enough for the crags (Formations/crags.ts) to clad it in rock.
+ */
+const CLIMB_OFFSET = 5.5
 /**
  * DRIVABLE grade (rise per metre, ≈ 17°): a straight node link steeper than this anywhere is re-routed over the
  * terrain (A*, contour-following, switchbacks) when that gives a flatter road. Before: straight Béziers between
@@ -137,6 +143,22 @@ export interface NetworkHost {
 
 /** Roads only exist within this distance (m) of the main road — keeps the graph finite (every query terminates). */
 export const NET_BAND = 2400
+/** Roads built in one RoadNetwork for another (RoadNetwork.exportNew / importRoads): region (`ci,cj`) road lists and
+ *  bridge roads as road ids, each road sent once. */
+export interface RoadExport {
+  cells: [string, string[]][]
+  bridges: [number, string[] | null][]
+  roads: NetRoad[]
+}
+
+/** A road's identity across instances (its build key alone may be reused by a later pass of the same build). */
+const roadId = (r: NetRoad) => `${r.key}|${r.n}|${r.xs[0]},${r.zs[0]}|${r.xs[r.n - 1]},${r.zs[r.n - 1]}`
+
+/** How many places deep a driveway's crossing check reaches back in the (z, x) order (RoadNetwork.driveway0). */
+const DRIVE_DEPTH = 2
+
+const isLookout = (p: { x: number; z: number }) => (p as { type?: number }).type === PoiType.Lookout
+
 /** Bridge z-cells (Road/bridges.ts CELL). */
 const BRIDGE_CELL = 500
 const NB8 = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]] as const
@@ -153,6 +175,56 @@ export class RoadNetwork {
   private readonly bridgeRoads = new Map<number, NetRoad[] | null>()
 
   constructor(private readonly host: NetworkHost) {}
+
+  /** Ground samples of every search on the world's HSTEP lattice (see HeightSamples). */
+  private readonly hs = new HeightSamples((x, z) => this.host.baseHeight(x, z))
+
+  // SHARING (chunk workers → main thread): the main thread's fields answer height / road / bridge queries near the
+  // player (grass, car, camera, formations) through the same per-region road lists and bridge roads — building one
+  // runs A* driveways (0.3–2 s for a new area), which froze the game. The chunk workers already built them for the
+  // chunks around the player: they `exportNew` with each chunk, the main thread `importRoads` (the same
+  // deterministic roads), and its queries become cache hits.
+  private readonly exportedCells = new Set<string>()
+  private readonly exportedBridges = new Set<number>()
+  /** Imported roads by identity (one object per road, so `exclude` / `includes` compare as before). */
+  private readonly shared = new Map<string, NetRoad>()
+
+  /** Region road lists and bridge roads built since the last export (null: none). Structured-clonable. */
+  exportNew(): RoadExport | null {
+    const roads = new Map<string, NetRoad>()
+    const ids = (list: NetRoad[]) => list.map((r) => { const id = roadId(r); roads.set(id, r); return id })
+    const cells: [string, string[]][] = []
+    const bridges: [number, string[] | null][] = []
+    if (this.exportedCells.size > 20000) this.exportedCells.clear()
+    if (this.exportedBridges.size > 20000) this.exportedBridges.clear()
+    for (const [k, list] of this.cellRoads) if (!this.exportedCells.has(k)) (this.exportedCells.add(k), cells.push([k, ids(list)]))
+    for (const [k, list] of this.bridgeRoads) if (!this.exportedBridges.has(k)) (this.exportedBridges.add(k), bridges.push([k, list && ids(list)]))
+    return cells.length || bridges.length ? { cells, bridges, roads: [...roads.values()] } : null
+  }
+
+  /** Adopt another instance's region road lists / bridge roads (regions already known here keep their own). */
+  importRoads(e: RoadExport): void {
+    if (this.shared.size > 8000) this.shared.clear()
+    const byId = new Map<string, NetRoad>()
+    for (const r of e.roads) {
+      const id = roadId(r)
+      let s = this.shared.get(id)
+      if (!s) this.shared.set(id, (s = r))
+      byId.set(id, s)
+    }
+    for (const [k, list] of e.cells) {
+      if (this.cellRoads.has(k)) continue
+      if (this.cellRoads.size > 2000) this.cellRoads.clear()
+      this.cellRoads.set(k, list.map((id) => byId.get(id)!))
+      this.exportedCells.add(k) // (not sent back: worker ↔ worker sharing would echo)
+    }
+    for (const [k, list] of e.bridges) {
+      if (this.bridgeRoads.has(k)) continue
+      if (this.bridgeRoads.size > 1000) this.bridgeRoads.clear()
+      this.bridgeRoads.set(k, list && list.map((id) => byId.get(id)!))
+      this.exportedBridges.add(k)
+    }
+  }
 
   private node(ci: number, cj: number): [number, number] | null {
     const key = `${ci},${cj}`
@@ -488,20 +560,34 @@ export class RoadNetwork {
    * graded height). The cell path is simplified (Ramer–Douglas–Peucker 4 m), rounded (Chaikin ×2), resampled every
    * ~10 m and graded like every road (`finishRoad`). Deterministic (fixed grid, stable tie order). ~2–8 ms, cached.
    */
-  private route(key: string, a: [number, number], ah: number | undefined, goals: NetRoad[], type: number, R = 900, sideOf = 0): NetRoad | null {
+  private route(key: string, a: [number, number], ah: number | undefined, goals: NetRoad[], type: number, R = 900, sideOf = 0, climb = false): NetRoad | null {
     const hit = this.built.get(key)
     if (hit !== undefined) return hit
     // Stricter and stricter slope limits until the graded road passes (a path along 40° ground can't be graded).
     // A pass that reaches NO road at all (it flooded the whole grid) ends it: a stricter one reaches less.
+    // CLIMB (a summit lookout's trail): the other way round — strictest first, so the A* has to wind up the peak in
+    // SWITCHBACKS (a drivable ≤ 30 % track) and only a peak with no such way gets a steeper one.
     let r: NetRoad | null = null
-    for (const maxG of [0.93, 0.5, 0.32]) {
+    for (const maxG of climb ? [0.3, 0.42, 0.55] : [0.93, 0.5, 0.32]) {
       this.built.delete(key)
-      r = this.search(key, a, ah, goals, type, R, sideOf, maxG)
-      if (r || !this.reached) break
+      // (a climb searches as a LINK: grade over two steps, ≤ 90° turns, hairpins ≥ ~15 m, graded at MAX_GRADE)
+      r = this.search(key, a, ah, goals, type, R, sideOf, maxG, undefined, [], Infinity, climb, climb ? CLIMB_OFFSET : MAX_OFFSET)
+      // (a summit trail must stay DRIVABLE: a graded pitch over 45 % anywhere — a 4×4 in low range stalls near 50 % —
+      // fails the pass; a peak with no such trail keeps none: you hike the last part)
+      if (climb && r && maxGrade(r) > 0.45) r = null
+      if (r || (!climb && !this.reached)) break
     }
     this.built.set(key, r)
+    this.grid = null
     return r
   }
+
+  /**
+   * The last search's HEIGHT GRID (half-cell ground samples) and main-road centre per grid row, kept for the next
+   * search over the same grid — the stricter / laxer slope passes of one route (route, routeTo) flood the same cells
+   * and sampled every height again (half the search time). Same samples → identical roads. Dropped after a route.
+   */
+  private grid: { ax: number; az: number; R: number; HH: Float32Array; rc: Float64Array } | null = null
 
   /**
    * A drivable ROUTE between two nodes (or a node and the main road when `b` is null) for a link whose straight
@@ -514,8 +600,9 @@ export class RoadNetwork {
     const cap = DETOUR_MAX * Math.max(len, 60) * 4
     for (const maxG of [0.32, 0.45, 0.6]) {
       const r = this.search(key, a, undefined, [], type, R, 0, maxG, b ?? undefined, walls, cap, true)
-      if (r) return r
+      if (r) return (this.grid = null), r
     }
+    this.grid = null
     return null
   }
 
@@ -528,16 +615,27 @@ export class RoadNetwork {
    * judged per 12 m step and over two steps (no sawtooth), the path rounded only where that keeps it drivable.
    * Otherwise the original connector search (driveways, camps, bridge ends) — unchanged.
    */
-  private search(key: string, a: [number, number], ah: number | undefined, goals: NetRoad[], type: number, R: number, sideOf: number, maxG: number, to?: [number, number], walls: NetRoad[] = [], maxCost = Infinity, link = false): NetRoad | null {
+  private search(key: string, a: [number, number], ah: number | undefined, goals: NetRoad[], type: number, R: number, sideOf: number, maxG: number, to?: [number, number], walls: NetRoad[] = [], maxCost = Infinity, link = false, band = MAX_OFFSET): NetRoad | null {
     const C = R > 1500 ? 24 : 12, N = Math.ceil(R / C) * 2 + 1, half = (N - 1) / 2
-    const ox = a[0] - half * C, oz = a[1] - half * C
+    // (the grid snapped to the world's HSTEP lattice: every search's height samples land on the same points — the
+    // shared cache `hs`; the start point itself stays exact, pts[0] = a)
+    const ox = Math.round((a[0] - half * C) / HSTEP) * HSTEP, oz = Math.round((a[1] - half * C) / HSTEP) * HSTEP
     // Heights on a HALF-cell grid (cell centres at even indices, step midpoints at odd ones), each sampled once.
     const M = N * 2 - 1
-    const HH = new Float32Array(M * M).fill(NaN)
+    // (shared with the previous pass of the same route over the same grid — see `grid`)
+    let G = this.grid
+    if (!G || G.ax !== a[0] || G.az !== a[1] || G.R !== R) {
+      const rc = new Float64Array(N)
+      for (let j = 0; j < N; j++) rc[j] = this.host.roadCenterX(oz + j * C)
+      G = this.grid = { ax: a[0], az: a[1], R, HH: new Float32Array(M * M).fill(NaN), rc }
+    }
+    const HH = G.HH
+    // Main-road centre per grid row (it depends on z only): the expansion asked it 2–4 × per neighbour.
+    const rc = G.rc
     const hHalf = (hx: number, hz: number) => {
       const k = hz * M + hx
       let h = HH[k]
-      if (h !== h) { h = this.host.baseHeight(ox + hx * C * 0.5, oz + hz * C * 0.5); HH[k] = h }
+      if (h !== h) { h = this.hs.at(ox + hx * C * 0.5, oz + hz * C * 0.5); HH[k] = h }
       return h
     }
     const hAt = (i: number) => hHalf((i % N) * 2, Math.floor(i / N) * 2)
@@ -567,12 +665,12 @@ export class RoadNetwork {
       }
     }
     const main = (i: number) => {
-      const x = ox + (i % N) * C, z = oz + Math.floor(i / N) * C
-      return Math.abs(x - this.host.roadCenterX(z)) < C * 0.75
+      const x = ox + (i % N) * C
+      return Math.abs(x - rc[Math.floor(i / N)]) < C * 0.75
     }
     const inCorr = (i: number) => {
-      const x = ox + (i % N) * C, z = oz + Math.floor(i / N) * C
-      return Math.abs(x - this.host.roadCenterX(z)) < 2.7 + 9
+      const x = ox + (i % N) * C
+      return Math.abs(x - rc[Math.floor(i / N)]) < 2.7 + 9
     }
     const start = half * N + half
     const toCell = to ? Math.round((to[1] - oz) / C) * N + Math.round((to[0] - ox) / C) : -1
@@ -580,9 +678,16 @@ export class RoadNetwork {
     const dist = new Float32Array(N * N).fill(Infinity), prev = new Int32Array(N * N).fill(-1)
     // binary heap of (cost, cell)
     const hc: number[] = [], hi: number[] = []
+    // (swaps through temporaries: destructuring swaps allocated in the hottest loop of world generation)
     const push = (c: number, i: number) => {
       let k = hc.length; hc.push(c); hi.push(i)
-      while (k > 0) { const p = (k - 1) >> 1; if (hc[p] < hc[k] || (hc[p] === hc[k] && hi[p] < hi[k])) break; [hc[p], hc[k]] = [hc[k], hc[p]]; [hi[p], hi[k]] = [hi[k], hi[p]]; k = p }
+      while (k > 0) {
+        const p = (k - 1) >> 1
+        if (hc[p] < hc[k] || (hc[p] === hc[k] && hi[p] < hi[k])) break
+        const tc = hc[p]; hc[p] = hc[k]; hc[k] = tc
+        const ti = hi[p]; hi[p] = hi[k]; hi[k] = ti
+        k = p
+      }
     }
     const pop = (): number => {
       const top = hi[0], lc = hc.pop()!, li = hi.pop()!
@@ -595,7 +700,9 @@ export class RoadNetwork {
           if (l < hc.length && (hc[l] < hc[m] || (hc[l] === hc[m] && hi[l] < hi[m]))) m = l
           if (r < hc.length && (hc[r] < hc[m] || (hc[r] === hc[m] && hi[r] < hi[m]))) m = r
           if (m === k) break
-          ;[hc[m], hc[k]] = [hc[k], hc[m]]; [hi[m], hi[k]] = [hi[k], hi[m]]; k = m
+          const tc = hc[m]; hc[m] = hc[k]; hc[k] = tc
+          const ti = hi[m]; hi[m] = hi[k]; hi[k] = ti
+          k = m
         }
       }
       return top
@@ -644,18 +751,22 @@ export class RoadNetwork {
         const hm = hHalf(ix + jx, iz + jz)
         const gh = Math.max(Math.abs(hm - h0), Math.abs(h1 - hm)) / (len * 0.5)
         const g = link ? Math.abs(h1 - h0) / len : gh
-        if (g > maxG || gh > 0.93) continue // (> 43°: a cliff; 31–43°: a steep ramp, heavily penalised)
+        // (a summit trail's first two rings of cells (24 m) are the lookout's flattened terrace, its blend and the shelf cut: no slope test there —
+        // the peak's cone failed every strict pass at the first step and the whole trail fell back to a 55 % one)
+        const top = band > MAX_OFFSET && Math.abs(jx - half) <= 2 && Math.abs(jz - half) <= 2
+        if (!top && (g > maxG || gh > 0.93)) continue // (> 43°: a cliff; 31–43°: a steep ramp, heavily penalised)
         // …and over TWO steps (from the previous cell): a 12 m sawtooth (down-diagonal, back, down-diagonal) keeps
         // every step under the limit while running straight down the slope — smoothing then makes it a straight
         // plunge. Real contour legs and hairpins pass.
         const pi = prev[i]
-        if (link && pi >= 0 && maxG < 0.9) {
+        if (link && pi >= 0 && maxG < 0.9 && !top) {
           const d2 = C * Math.hypot((pi % N) - jx, ((pi / N) | 0) - jz)
           if (d2 > 0 && Math.abs(h1 - hAt(pi)) / d2 > maxG + 0.04) continue
         }
-        // A link turns ≤ 90° per step AND over two steps: a hairpin spans ≥ 4–5 cells (≥ ~15 m radius, a mountain
-        // road's) — one turning round a cell or two (5–6 m) ran the truck (11.8 m turning circle) off a causeway.
-        if (link && pi >= 0) {
+        // Every road turns ≤ 90° per step AND over two steps: a hairpin spans ≥ 4–5 cells (≥ ~15 m radius, a mountain
+        // road's) — one turning round a cell or two (5–6 m) ran the truck (11.8 m turning circle) off a causeway, and a
+        // driveway's 7 m S-bend put its two legs' embankments side by side (a 7 m step between them).
+        if (pi >= 0) {
           const ax = ix - (pi % N), az = iz - ((pi / N) | 0)
           if (ax * dx + az * dz < 0) continue
           const ppi = prev[pi]
@@ -668,11 +779,11 @@ export class RoadNetwork {
           const k = Math.min(gj[0].n - 2, Math.floor(gj[1])), t = gj[1] - k
           if (Math.abs(h1 - roadHeightAt(gj[0], k, t)) >= 3) continue
         }
-        if (sideOf && Math.sign(ox + jx * C - this.host.roadCenterX(oz + jz * C)) !== sideOf) continue
+        if (sideOf && Math.sign(ox + jx * C - rc[jz]) !== sideOf) continue
         const wet = h1 < water + 0.6 ? 6 : 0
         // Beside the main road (≤ 30 m, not ending on it): heavily penalised — a route may come down onto it, not run
         // along it on the hillside above (that left a 12 m wall at the main road's shoulder).
-        const along = link && !main(j) && Math.abs(ox + jx * C - this.host.roadCenterX(oz + jz * C)) < 30 ? 12 : 0
+        const along = link && !main(j) && Math.abs(ox + jx * C - rc[jz]) < 30 ? 12 : 0
         const c = d0 + len * (1 + 14 * g * g + (g > 0.6 ? 40 : 0) + wet + along)
         if (c < dist[j]) { dist[j] = c; prev[j] = i; push(c + heur(j), j) }
       }
@@ -776,7 +887,7 @@ export class RoadNetwork {
         // A link is graded like every road (rise-limited to MAX_GRADE within ±MAX_OFFSET of the ground): its 12 m steps
         // are drivable, the ground's 2 m bumps between them are cut / filled (a 0.45 limit left 40–70 % pitches).
         // (A connector already hugs the ground; on the strictest pass it may be a steep 4×4 track: grade 0.45.)
-        road = this.finishRoad(key, type, pick.xs, pick.zs, pick.raw, link || maxG >= 0.4 ? MAX_GRADE : 0.45)
+        road = this.finishRoad(key, type, pick.xs, pick.zs, pick.raw, link || maxG >= 0.4 ? MAX_GRADE : 0.45, band)
       }
     }
     return road
@@ -788,38 +899,54 @@ export class RoadNetwork {
     const hit = this.drives.get(key)
     if (hit !== undefined) return hit
     const ci = Math.floor(p.x / REGION), cj = Math.floor(p.z / REGION)
-    // Fine search within 1.3 km; a remote place falls back to a coarse (24 m) search over 2.6 km.
-    const r = this.route(key, [p.x, p.z], undefined, this.netLinks(ci - 5, cj - 5, ci + 5, cj + 5, []), RoadType.Gravel, 1300) ??
-      this.route(key + '~', [p.x, p.z], undefined, this.netLinks(ci - 8, cj - 8, ci + 8, cj + 8, []), RoadType.Gravel, 2600)
+    const r = this.fineOrCoarse(key, [p.x, p.z], this.netLinks(ci - 5, cj - 5, ci + 5, cj + 5, []), this.netLinks(ci - 8, cj - 8, ci + 8, cj + 8, []))
     if (this.drives.size > 4000) this.drives.clear()
     this.drives.set(key, r)
     return r
   }
 
+  /**
+   * A place's gravel connector: the COARSE search (24 m cells, 2.6 km) first — no road reachable → none (before, the
+   * fine 1.3 km search ran first and a remote place flooded its whole grid in vain: ~half the driveway searches of a
+   * fresh world, the bulk of its first chunk) — then the FINE one (12 m) only as far out as that road reaches (+120 m),
+   * kept when it finds one. `fine` / `coarse`: the goal roads of each.
+   */
+  private fineOrCoarse(key: string, a: [number, number], fine: NetRoad[], coarse: NetRoad[]): NetRoad | null {
+    const c = this.route(key + '~', a, undefined, coarse, RoadType.Gravel, 2600)
+    if (!c) return null
+    const ext = Math.max(a[0] - c.minX, c.maxX - a[0], a[1] - c.minZ, c.maxZ - a[1])
+    if (ext + 120 > 1300) return c // (beyond the fine grid: the fine search could only flood it in vain)
+    return this.route(key, a, undefined, fine, RoadType.Gravel, Math.ceil((ext + 120) / 12) * 12) ?? c
+  }
+
   /** DRIVEWAY of a place: its tentative connector unless it crosses the tentative one of a place EARLIER in (z, x)
    *  order within 800 m (pairwise, non-recursive); then the next candidates are not tried (rare). */
-  private driveway(p: { x: number; z: number }): NetRoad | null {
-    const fk = `${Math.floor(p.x)},${Math.floor(p.z)}`
+  private driveway(p: { x: number; z: number }, depth = DRIVE_DEPTH): NetRoad | null {
+    const fk = `${Math.floor(p.x)},${Math.floor(p.z)}/${depth}`
     const done = this.finalDrives.get(fk)
     if (done !== undefined) return done
-    const out = this.driveway0(p)
+    const out = isLookout(p) ? this.summitTrail(p) : this.driveway0(p, depth)
     if (this.finalDrives.size > 4000) this.finalDrives.clear()
     this.finalDrives.set(fk, out)
     return out
   }
   private readonly finalDrives = new Map<string, NetRoad | null>()
-  private driveway0(p: { x: number; z: number }): NetRoad | null {
+  private driveway0(p: { x: number; z: number }, depth: number): NetRoad | null {
     const r = this.tentDrive(p)
-    if (!r) return null
-    // Earlier places' BUILT drives (strict (z, x) order → the recursion is finite): only those exist to cross or join
-    // (a dropped tentative one is not a road — ending on one was a dead end, avoiding one lost the place its road).
+    if (!r || depth === 0) return r
+    // Earlier places' BUILT drives (strict (z, x) order): only those exist to cross or join (a dropped tentative one
+    // is not a road — ending on one was a dead end, avoiding one lost the place its road). DEPTH-LIMITED: an earlier
+    // place's drive is taken at depth − 1 (its own earlier ones at depth − 2 … tentative at 0) — unlimited, the chain
+    // walked the (z, x) order 10–15 km across the map for one chunk (~50 driveway searches: most of a fresh world's
+    // first-chunk time). Still a pure function of the place: the same roads whichever chunk asks first.
     const earlier: NetRoad[] = []
     let clash = false
     const box = Math.max(800, r.maxX - r.minX + 400, r.maxZ - r.minZ + 400)
     for (const q of this.host.pois?.inBox(p.x - box, p.z - box, p.x + box, p.z + box) ?? []) {
       if (q.z > p.z || (q.z === p.z && q.x >= p.x)) continue
+      if (isLookout(q)) continue // (a summit trail ends ON the drives it meets — summitTrail — it never crosses one)
       if (!this.tentDrive(q)) continue
-      const o = this.driveway(q)
+      const o = this.driveway(q, depth - 1)
       if (!o) continue
       earlier.push(o)
       if (RoadNetwork.crosses(r, o)) clash = true
@@ -830,8 +957,60 @@ export class RoadNetwork {
     const ci = Math.floor(p.x / REGION), cj = Math.floor(p.z / REGION)
     const goals = [...this.netLinks(ci - 8, cj - 8, ci + 8, cj + 8, []), ...earlier]
     const key = `poi:${Math.floor(p.x)},${Math.floor(p.z)}`
-    const r2 = this.route(key + '+', [p.x, p.z], undefined, goals, RoadType.Gravel, 1300) ?? this.route(key + '+~', [p.x, p.z], undefined, goals, RoadType.Gravel, 2600)
+    const r2 = this.fineOrCoarse(key + (depth === DRIVE_DEPTH ? '+' : `+${depth}`), [p.x, p.z], goals, goals)
     return r2 && !earlier.some((o) => RoadNetwork.crosses(r2, o)) ? r2 : null
+  }
+
+  /**
+   * SUMMIT TRAIL of a lookout (pois.ts): a narrow dirt track from the peak down to the first network road it meets,
+   * searched as a LINK with the strictest slope limit first, so it winds up the peak in SWITCHBACKS (route's climb
+   * passes). It never crosses a place's driveway or an earlier lookout's trail: if its draft crosses one, the trail is routed again with them as goals — it then ENDS on the first one
+   * it meets (a junction). Not part of the places' crossing order (driveway0 skips lookouts): a lookout's 1–3 km trail
+   * in that order chained the checks across the whole map (198 s for one area); using every drive within 2.6 km as
+   * a goal up front cost 6–20 s per area. A peak with no drivable way down within 2.6 km keeps no trail.
+   */
+  private summitTrail(p: { x: number; z: number }): NetRoad | null {
+    const r = this.baseTrail(p)
+    if (!r) return null
+    // …and the trails of the lookouts before it in (z, x) order (their BASE trails: non-recursive — no chain across the map).
+    // (a trail reaches ~0.3–1 km from its peak: earlier peaks within 700 m of this one's box)
+    const earlier = (this.host.pois?.inBox(r.minX - 700, r.minZ - 700, r.maxX + 700, r.maxZ + 700) ?? [])
+      .filter((q) => isLookout(q) && (q.z < p.z || (q.z === p.z && q.x < p.x))).map((q) => this.baseTrail(q)).filter((d): d is NetRoad => !!d && d.maxX >= r.minX && d.minX <= r.maxX && d.maxZ >= r.minZ && d.minZ <= r.maxZ)
+    if (!earlier.some((d) => RoadNetwork.crosses(r, d))) return r
+    return this.trailAround(p, '*', [...this.placeDrives(r), ...earlier])
+  }
+
+  /** A lookout's trail avoiding the places' drives only (a drive reaches ~1.3 km: places within 800 m of its box). */
+  private baseTrail(p: { x: number; z: number }): NetRoad | null {
+    const k = `${Math.floor(p.x)},${Math.floor(p.z)}`
+    const hit = this.baseTrails.get(k)
+    if (hit !== undefined) return hit
+    let r = this.trailAround(p, '', [])
+    if (r) {
+      const drives = this.placeDrives(r)
+      if (drives.some((d) => RoadNetwork.crosses(r!, d))) r = this.trailAround(p, '+', drives)
+    }
+    if (this.baseTrails.size > 2000) this.baseTrails.clear()
+    this.baseTrails.set(k, r)
+    return r
+  }
+  private readonly baseTrails = new Map<string, NetRoad | null>()
+
+  private placeDrives(r: NetRoad): NetRoad[] {
+    return (this.host.pois?.inBox(r.minX - 800, r.minZ - 800, r.maxX + 800, r.maxZ + 800) ?? [])
+      .filter((q) => !isLookout(q)).map((q) => this.driveway(q)).filter((d): d is NetRoad => !!d)
+  }
+
+  /** The switchback route from a lookout to the first network road — or to one of `avoid` (it ENDS on it: a junction);
+   *  null if it would still cross one of them. */
+  private trailAround(p: { x: number; z: number }, tag: string, avoid: NetRoad[]): NetRoad | null {
+    const key = `peak:${Math.floor(p.x)},${Math.floor(p.z)}${tag}`
+    const ci = Math.floor(p.x / REGION), cj = Math.floor(p.z / REGION)
+    // (it starts at the terrace's height: the place's base, not the raw peak)
+    const ah = (p as { baseH?: number }).baseH
+    const r = this.route(key, [p.x, p.z], ah, [...this.netLinks(ci - 5, cj - 5, ci + 5, cj + 5, []), ...avoid], RoadType.Trail, 1300, 0, true) ??
+      this.route(key + '~', [p.x, p.z], ah, [...this.netLinks(ci - 8, cj - 8, ci + 8, cj + 8, []), ...avoid], RoadType.Trail, 2600, 0, true)
+    return r && !avoid.some((d) => RoadNetwork.crosses(r, d)) ? r : null
   }
 
   /** The road from a place (its driveway; null if none). */
@@ -998,7 +1177,7 @@ export class RoadNetwork {
    * Grade a polyline (raw = the ground under each sample; its first / last entries may already be set to the exact
    * end heights) and package it as a road; null (cached) if it would climb a cliff.
    */
-  private finishRoad(key: string, type: number, xs: Float32Array, zs: Float32Array, raw: Float32Array, grade = MAX_GRADE): NetRoad | null {
+  private finishRoad(key: string, type: number, xs: Float32Array, zs: Float32Array, raw: Float32Array, grade = MAX_GRADE, offset = MAX_OFFSET): NetRoad | null {
     let r: NetRoad | null
     const SAMPLES = xs.length
     let len = 0
@@ -1022,11 +1201,11 @@ export class RoadNetwork {
     }
     // The BAND the road may sit in around the ground: ±MAX_OFFSET, widened next to a fixed height that is off the
     // ground (a junction, a farmyard) by exactly what a MAX_GRADE ramp from it needs — so it meets them on a ramp.
-    const band = new Float32Array(SAMPLES).fill(MAX_OFFSET)
+    const band = new Float32Array(SAMPLES).fill(offset)
     for (let f = 0; f < SAMPLES; f++) {
       if (!fixed[f]) continue
       const off = Math.abs(hs[f] - raw[f])
-      if (off <= MAX_OFFSET) continue
+      if (off <= offset) continue
       for (let i = 0; i < SAMPLES; i++) band[i] = Math.max(band[i], off - maxRise * Math.abs(i - f))
     }
     const clampBand = (i: number, v: number) => Math.min(raw[i] + band[i], Math.max(raw[i] - band[i], v))
@@ -1184,5 +1363,35 @@ export class RoadNetwork {
     // Target = the roads' weighted mean height; strength = the strongest single pull (roads sharing a node
     // must not add up to a triple embankment). Continuous as any road's weight fades in or out.
     return h + (sumWH / sumW - h) * maxW * scale
+  }
+}
+
+/** Lattice of the searches' ground samples (m): half of the fine 12 m cell. */
+const HSTEP = 6
+const TILE = 128
+
+/**
+ * SHARED GROUND SAMPLES of the road searches: `baseHeight` on the world's HSTEP lattice, kept in 128² tiles (768 m,
+ * 64 KB each, at most 160 — 10 MB). A place's driveway, a lookout's trail passes and re-routes, and the next lookout's
+ * search flood overlapping 1.3–2.6 km grids: each sampled every height again (~190 k samples × ~50 µs per search —
+ * 9–13 s of a fresh world's first chunk, in every worker).
+ */
+class HeightSamples {
+  private readonly tiles = new Map<number, Float32Array>()
+  constructor(private readonly height: (x: number, z: number) => number) {}
+
+  at(x: number, z: number): number {
+    const i = Math.round(x / HSTEP), j = Math.round(z / HSTEP)
+    const ti = Math.floor(i / TILE), tj = Math.floor(j / TILE)
+    const key = (ti + 32768) * 65536 + (tj + 32768)
+    let t = this.tiles.get(key)
+    if (!t) {
+      if (this.tiles.size >= 160) this.tiles.delete(this.tiles.keys().next().value!) // oldest first
+      this.tiles.set(key, (t = new Float32Array(TILE * TILE).fill(NaN)))
+    }
+    const k = (j - tj * TILE) * TILE + (i - ti * TILE)
+    let h = t[k]
+    if (h !== h) h = t[k] = this.height(i * HSTEP, j * HSTEP)
+    return h
   }
 }

@@ -5,6 +5,7 @@ import { WorldFields } from '../WorldFields'
 import type { FarRequest } from '../Streaming/chunk.worker'
 import { groundPalette } from '../../rendering/artStyle'
 import { farOffset, type FarTerrainData } from './horizonGen'
+import { LAYER_REFLECT_SKYLINE } from '../../rendering/water/PlanarReflection'
 
 /**
  * Low-detail HORIZON terrain out to 2.4–4.4 km (tier), on a warped grid (dense near the player, coarse at the
@@ -75,6 +76,7 @@ export class HorizonTerrain {
     this.material = stylize(m, { key: 'far', rim: 0.2, toon: 0.45 })
     this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), this.material)
     this.mesh.name = 'far-terrain'
+    this.mesh.layers.enable(LAYER_REFLECT_SKYLINE)
     this.mesh.frustumCulled = false
     this.mesh.receiveShadow = false
     this.mesh.visible = false

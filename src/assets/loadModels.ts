@@ -4,6 +4,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import heroUrl from './models/characters/hero.lod0.glb?url'
 import hullUrl from './models/vehicles/boat_hull.lod0.glb?url'
 import { vehicleDef, type VehicleDef } from '../gameplay/vehicle/catalogue'
+import { bodyHulls, triangles } from '../gameplay/vehicle/hulls'
 import { loadTreeModels } from './treeModels'
 
 /**
@@ -42,6 +43,14 @@ export interface TruckModel {
   /** Body z extent (m): the nose (−Z) and the tail (+Z) — the body is not symmetric about the wheelbase. */
   front: number
   rear: number
+  /** Underside height (m) of the body ahead of the front / behind the rear tyres: the bumper colliders start there. */
+  overhang: { front: number; rear: number }
+  /** Half the tyre width (m), from the wheel mesh: the tyre envelope samples its tread edges too. */
+  tyreHalfWidth: number
+  /** Body + glass + closed doors as one triangle soup (xyz… per corner): the car's exact collider. */
+  readonly mesh: Float32Array
+  /** Convex pieces cut from `mesh` (gameplay/vehicle/hulls): the body against terrain and formations. */
+  readonly hulls: Float32Array[]
   /** Body texture, or null for flat-coloured models (colour is in the vertices). */
   map: THREE.Texture | null
   /** Per-pixel paint mask for textured models (R = 1 on the body paint, 0 on rims, glass, trim, lights, rust),
@@ -66,6 +75,21 @@ export interface TruckModel {
   /** Rim radius / tyre radius of the wheel (glTF extra `rim` on `wheel_*`; scripts/blender/vehicle_realism.py) —
    *  where the rubber starts for the tyre-deformation shader (`tyreW` attribute on the wheel, 0 everywhere else). */
   rim: number
+  /** The COCKPIT (scripts/blender/vehicle_cabin.py): the static cabin (`cab_*`: dash panels, seats, console, column…)
+   *  drawn with the body but not part of its collider; the gauge faces (`dial_*`, UV-mapped onto the canvas the car
+   *  draws its instruments on); and the moving parts — pedals, gear lever, wipers — in pivot space. */
+  cabin: THREE.BufferGeometry | null
+  dials: THREE.BufferGeometry | null
+  controls: CockpitPart[]
+}
+
+/** A moving cockpit part (Blender `pedal_gas|brake|clutch`, `gear_lever`, `wiper_L|R` with `pivot` + `axis` extras):
+ *  geometry with its pivot at the origin; it turns about `axis` (unit, truck space) at `pivot` (m, truck space). */
+export interface CockpitPart {
+  kind: string
+  geo: THREE.BufferGeometry
+  pivot: [number, number, number]
+  axis: [number, number, number]
 }
 
 /** Boat hull parts in normalised hull space (scripts/blender/boat_hull.py): geometry + hinge pivot (glTF space). */
@@ -172,6 +196,21 @@ function buildPaintMap(tex: THREE.Texture): THREE.Texture | null {
  * threshold fails; a local cluster doesn't). Tail lights: the reddest rear-facing face and its red neighbours.
  * Both sides are folded onto +x; the area-weighted centre and extent give one lamp per side.
  */
+/** Lowest body point (m) ahead of the front tyres and behind the rear ones, within the frame's width (the same
+ *  1.05 r gap the frame boxes leave around the wheels — the arches dip lower there). Missing = the frame height. */
+function overhangs(body: THREE.BufferGeometry, wheelPos: [number, number, number][], r: number, halfX: number): { front: number; rear: number } {
+  const p = body.getAttribute('position')
+  const zf = Math.min(wheelPos[0][2], wheelPos[1][2]) - 1.05 * r, zr = Math.max(wheelPos[2][2], wheelPos[3][2]) + 1.05 * r
+  let front = Infinity, rear = Infinity
+  for (let i = 0; i < p.count; i++) {
+    if (Math.abs(p.getX(i)) > halfX * 0.9) continue
+    const y = p.getY(i), z = p.getZ(i)
+    if (z < zf) front = Math.min(front, y)
+    else if (z > zr) rear = Math.min(rear, y)
+  }
+  return { front: Number.isFinite(front) ? front : 0.34, rear: Number.isFinite(rear) ? rear : 0.34 }
+}
+
 function findLamps(body: THREE.BufferGeometry, tex: THREE.Texture, front: number, rear: number): { head: Lamp | null; tail: Lamp | null } {
   const px = readPixels(tex, 1024)
   const uv = body.getAttribute('uv')
@@ -512,6 +551,9 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   // Doors (FL / FR: skin, trim and their window) and the steering wheel, split out by node name (Blender prep).
   const doorParts = new Map<string, { body: THREE.BufferGeometry[]; glass: THREE.BufferGeometry[]; hinge: number[] }>()
   const steerParts: THREE.BufferGeometry[] = []
+  // Cockpit (vehicle_cabin.py): static cabin parts, gauge faces, moving controls (pivot / axis extras, glTF space).
+  const cabParts: THREE.BufferGeometry[] = [], dialParts: THREE.BufferGeometry[] = []
+  const controlParts: { kind: string; geo: THREE.BufferGeometry; pivot: THREE.Vector3; axis: THREE.Vector3 }[] = []
   // Brake hardware (`caliper_<FL|FR|RL|RR>`, scripts/blender/vehicle_brakes.py): kept out of the body and of the
   // wheel search (a drum is round and near the ground); the left corners become the per-axle geometry.
   const brakeParts = new Map<string, THREE.BufferGeometry[]>()
@@ -526,8 +568,18 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
     const doorKey = /door_(FL|FR)/i.exec(m.name)?.[1].toUpperCase()
     let door = doorKey ? doorParts.get(doorKey) : undefined
     if (doorKey && !door) doorParts.set(doorKey, (door = { body: [], glass: [], hinge: (m.extras.hinge as number[]) ?? [0, 0, 0] }))
+    if (/^dial_/i.test(m.name)) {
+      // (UVs kept: they map onto the instrument canvas; position + uv only)
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', m.geo.getAttribute('position'))
+      g.setAttribute('uv', m.geo.getAttribute('uv'))
+      if (m.geo.index) g.setIndex(m.geo.index)
+      dialParts.push(g)
+      continue
+    }
     if (glass) {
-      const g = paintGeometry(m.geo, new THREE.Color().setHex(0x1b2430, THREE.SRGBColorSpace), false, 0)
+      // (the car's glass material carries the tint: plain white here)
+      const g = paintGeometry(m.geo, new THREE.Color(1, 1, 1), false, 0)
       ;(door ? door.glass : glasses).push(g)
       continue
     }
@@ -543,10 +595,13 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
     const textured = !!mm
     // Door insides / cabin interior: dark trim, never painted (textured: the texture darkened).
     const inner = /inner|interior/i.test(m.mat.name)
-    const paint = inner || /^(wheel_|caliper_|acc_)/i.test(m.name) ? 0 : def.paintRegex ? (def.paintRegex.test(m.mat.name) ? 1 : 0) : 1
+    const paint = inner || /^(wheel_|caliper_|acc_|cab_|pedal_|gear_|wiper_)/i.test(m.name) ? 0 : def.paintRegex ? (def.paintRegex.test(m.mat.name) ? 1 : 0) : 1
     const g = paintGeometry(m.geo, textured ? new THREE.Color(inner ? 0.3 : 1, inner ? 0.3 : 1, inner ? 0.3 : 1) : inner ? color.clone().multiplyScalar(0.35) : color, textured, paint, (vertexAo && !inner) || /^wheel_/i.test(m.name)) // (a big-triangle cabin liner would draw AO gradients as X shapes)
     if (!textured) flat.push(g)
+    const control = /^(pedal_(?:gas|brake|clutch)|gear_lever|wiper_[LR])/i.exec(m.name)?.[1].toLowerCase()
     if (def.wheelRegex && def.wheelRegex.test(m.name)) wheelParts.push({ geo: g, name: m.name })
+    else if (control && Array.isArray(m.extras.pivot)) controlParts.push({ kind: control, geo: g, pivot: new THREE.Vector3(...(m.extras.pivot as number[])), axis: new THREE.Vector3(...((m.extras.axis as number[]) ?? [1, 0, 0])) })
+    else if (/^cab_/i.test(m.name)) cabParts.push(g)
     else if (door) door.body.push(g)
     else if (/steering_wheel/i.test(m.name)) steerParts.push(g)
     else bodies.push(g)
@@ -647,6 +702,10 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   }
   body.applyMatrix4(norm)
   glass.applyMatrix4(norm)
+  const cabin = cabParts.length ? mergeGeometries(cabParts, false)!.applyMatrix4(norm) : null
+  const dials = dialParts.length ? mergeGeometries(dialParts, false)!.applyMatrix4(norm) : null
+  const turn = new THREE.Matrix4().makeRotationY(rot)
+  for (const c of controlParts) (c.geo.applyMatrix4(norm), c.pivot.applyMatrix4(norm), c.axis.applyMatrix4(turn).normalize())
   for (const l of lampParts) l.geo.applyMatrix4(norm)
   for (const w of wheels) (w.c.applyMatrix4(norm), (w.r *= k), w.geo.applyMatrix4(norm))
   for (const d of doorGeo) (d.body.applyMatrix4(norm), d.glass?.applyMatrix4(norm), d.hinge.applyMatrix4(norm))
@@ -657,6 +716,18 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   const shift = new THREE.Matrix4().makeTranslation(-cx, -groundY, -cz)
   body.applyMatrix4(shift)
   glass.applyMatrix4(shift)
+  cabin?.applyMatrix4(shift)
+  dials?.applyMatrix4(shift)
+  const controls: CockpitPart[] = controlParts.map((c) => {
+    c.geo.applyMatrix4(shift)
+    c.pivot.applyMatrix4(shift)
+    c.geo.translate(-c.pivot.x, -c.pivot.y, -c.pivot.z)
+    c.geo.computeBoundingSphere()
+    zeroTyre(c.geo)
+    return { kind: c.kind, geo: c.geo, pivot: c.pivot.toArray() as [number, number, number], axis: c.axis.toArray() as [number, number, number] }
+  })
+  if (cabin) (zeroTyre(cabin), cabin.computeBoundingSphere())
+  dials?.computeBoundingSphere()
   for (const l of lampParts) l.geo.applyMatrix4(shift)
   for (const w of wheels) (w.c.applyMatrix4(shift), w.geo.applyMatrix4(shift))
   for (const g of brakeGeo.values()) g.applyMatrix4(shift)
@@ -708,6 +779,8 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   for (const g of [body, steeringWheel, brakes.front, brakes.rear, ...doors.map((d) => d.body)]) if (g) zeroTyre(g)
   for (const g of [body, wheel, glass, steeringWheel]) if (g) (g.computeBoundingBox(), g.computeBoundingSphere())
   const bb = body.boundingBox!.clone()
+  const tyreHalfWidth = (wheel.boundingBox!.max.x - wheel.boundingBox!.min.x) / 2
+  let mesh: Float32Array | undefined, hulls: Float32Array[] | undefined
   if (doors.length) bb.union(outline)
   if (map) map.colorSpace = THREE.SRGBColorSpace
   const paintMap = map ? buildPaintMap(map) : null
@@ -730,6 +803,20 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
     bottom: bb.min.y,
     front: bb.min.z,
     rear: bb.max.z,
+    overhang: overhangs(body, wheelPos, fl.r, (bb.max.x - bb.min.x) / 2),
+    tyreHalfWidth,
+    // Built on first use (the car you drive), then kept with the model.
+    get mesh() {
+      return (mesh ??= triangles([
+        { g: body, at: undefined }, { g: glass, at: undefined },
+        // door parts are in hinge space: back to the closed position
+        ...doors.flatMap((d) => [{ g: d.body, at: d.hinge }, { g: d.glass, at: d.hinge }]),
+        // (a part may be an empty placeholder — the Żuk's door glass has no vertices: switching to it threw here)
+      ].filter((p) => p.g?.getAttribute('position')).map((p) => ({ position: p.g!.getAttribute('position').array, index: p.g!.index?.array ?? null, offset: p.at }))))
+    },
+    get hulls() {
+      return (hulls ??= bodyHulls(this.mesh, wheelPos.map((hub) => ({ hub, radius: fl.r, halfWidth: tyreHalfWidth })), 0.3))
+    },
     map,
     paintMap,
     lamps,
@@ -739,6 +826,9 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
     neutralColor: neutral.color,
     brakes,
     rim,
+    cabin,
+    dials,
+    controls,
   }
 }
 

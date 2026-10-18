@@ -3,7 +3,7 @@ import type { MaterialLibrary } from '../rendering/materials/MaterialLibrary'
 import { buildInstanceAttributes, createInstancedMesh, type InstanceAttributes } from '../optimization/instancing/InstanceBuilder'
 import type { Cullable } from '../optimization/culling/ChunkVisibility'
 import { CELL_SIZE, CHUNK_RES, CHUNK_SIZE, LOD_COUNT } from './constants'
-import type { PropGeometries } from './Forest/propGeometries'
+import { rockPick, type PropGeometries } from './Forest/propGeometries'
 import type { SpeciesDef } from './Forest/treeFactory'
 import { impostorQuad } from '../rendering/impostors/Impostors'
 import { buildRoadDetailGeometry, buildTerrainGeometry } from './Terrain/TerrainGeometry'
@@ -18,7 +18,7 @@ import type { BiomeWeights } from './Biomes'
 import { isGenshin, isOverland } from '../rendering/artStyle'
 import { Biome, BIOME_COUNT, type RegionWeights } from './Biomes'
 import { BIOMES, Plant, pickRegion, pickWeighted, regionRoll } from './biomes/BiomeDefs'
-import { LAYER_NO_REFLECT, LAYER_REFLECT_ONLY } from '../rendering/water/PlanarReflection'
+import { LAYER_NO_REFLECT, LAYER_REFLECT_ONLY, LAYER_REFLECT_SKYLINE } from '../rendering/water/PlanarReflection'
 
 const _bw: BiomeWeights = [0, 0]
 /**
@@ -352,7 +352,7 @@ export class WorldChunk implements Cullable {
     }
     // Distant trees: one octahedral-impostor card per tree, all species, one draw (shown under the per-tree LOD).
     this.impostors = createImpostorMesh(perSpecies, geos.trees, mats.impostor)
-    if (this.impostors) this.add(this.impostors)
+    if (this.impostors) this.add(this.impostors).layers.enable(LAYER_REFLECT_SKYLINE)
     const t = data.trees
     const spruce = geos.trees.find((x) => x.id === TreeSpecies.Spruce)!
     const birch = geos.trees.find((x) => x.id === TreeSpecies.Birch)!
@@ -374,8 +374,16 @@ export class WorldChunk implements Cullable {
     }
     const rockAttrs = buildInstanceAttributes(data.rocks, PROP_STRIDE, undefined, 0.12, 0, undefined, this.origin, rockTint)
     if (rockAttrs) {
-      this.rocks = this.add(createInstancedMesh(geos.rock, mats.rock, rockAttrs, 'rocks'))
-      this.rocksFar = this.add(createInstancedMesh(geos.rockFar, mats.rock, rockAttrs, 'rocks.far'))
+      // Each boulder is one of six shapes (propGeometries ROCK_VARIANTS, the physics hull agrees): a per-chunk
+      // geometry SHARING the merged shape buffers + this chunk's per-instance pick; the shadow pass needs the same
+      // pick (mats.rockDepth), or every stone would cast all six shapes.
+      const picks = new Float32Array(rockAttrs.count)
+      for (let k = 0; k < picks.length; k++) picks[k] = rockPick(k)
+      const pick = new THREE.InstancedBufferAttribute(picks, 1)
+      this.rocks = this.add(createInstancedMesh(withRockPick(geos.rock, pick), mats.rock, rockAttrs, 'rocks'))
+      this.rocksFar = this.add(createInstancedMesh(withRockPick(geos.rockFar, pick), mats.rock, rockAttrs, 'rocks.far'))
+      this.rocksFar.layers.enable(LAYER_REFLECT_SKYLINE) // (canyon pillars and boulder fields: the shape of a lake's mirror)
+      this.rocks.customDepthMaterial = this.rocksFar.customDepthMaterial = mats.rockDepth
       this.instanceCount += rockAttrs.count
     }
     // Undergrowth by REGION (BiomeDefs.plants): each plant picks a region in proportion to the weights at it, then a
@@ -522,6 +530,7 @@ export class WorldChunk implements Cullable {
       mesh.receiveShadow = true // constant: receiveShadow is part of the program key
       mesh.frustumCulled = true // bounding sphere set by buildTerrainGeometry; lets shadow passes cull
       this.terrain[tl] = this.add(mesh)
+      mesh.layers.enable(LAYER_REFLECT_SKYLINE)
     }
     this.terrain.forEach((m, i) => m && (m.visible = i === tl))
     // Road ribbon: with the LOD0 grid only (that grid is the one sunk under it; LOD1/2 use the plain ground).
@@ -561,6 +570,7 @@ export class WorldChunk implements Cullable {
       // mirror only from the near ring, or each costs up to 3 draws per chunk (measured +48 draws on MEDIUM).
       this.formation.castShadow = near
       this.formation.layers.set(near ? 0 : LAYER_NO_REFLECT)
+      if (near) this.formation.layers.enable(LAYER_REFLECT_SKYLINE)
     }
     for (const { mesh, small } of this.places) {
       mesh.visible = small ? lod <= 1 : lod <= 1 || !detail.lean // buildings are far landmarks (not on LOW: draw budget)
@@ -637,11 +647,28 @@ export class WorldChunk implements Cullable {
     for (const { m } of this.species) m.levels.forEach((x) => x.dispose())
     for (const f of this.far) (f.lod1.dispose(), f.lod2.dispose())
     if (this.impostors) (this.impostors.geometry.dispose(), this.impostors.dispose())
+    for (const m of [this.rocks, this.rocksFar]) if (m) disposeRockGeometry(m.geometry)
     for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.agaves, this.shrubs, this.leafPiles, this.glowShrooms, this.poles, this.lamps, this.fences]) m?.dispose()
     for (const { mesh } of this.places) mesh.geometry.dispose()
     this.formation?.geometry.dispose()
     this.wires?.geometry.dispose()
   }
+}
+
+/** A chunk's boulder geometry: the shared merged-shape buffers (owned by the prop library) + its own shape picks. */
+function withRockPick(shared: THREE.BufferGeometry, pick: THREE.InstancedBufferAttribute): THREE.BufferGeometry {
+  const g = new THREE.BufferGeometry()
+  for (const [name, a] of Object.entries(shared.attributes)) g.setAttribute(name, a)
+  g.setAttribute('rockPick', pick)
+  g.boundingSphere = shared.boundingSphere
+  g.boundingBox = shared.boundingBox
+  return g
+}
+
+/** Free a withRockPick geometry without freeing the shared buffers (detached first: dispose frees attached ones). */
+function disposeRockGeometry(g: THREE.BufferGeometry): void {
+  for (const name of Object.keys(g.attributes)) if (name !== 'rockPick') g.deleteAttribute(name)
+  g.dispose()
 }
 
 const _bm = new THREE.Matrix4()

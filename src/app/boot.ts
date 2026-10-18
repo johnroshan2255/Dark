@@ -19,7 +19,14 @@ const TIPS = [
 let shown = 0
 let tipTimer = 0
 
+/** Dev: stage timestamps (s since navigation) for load profiling — `window.__bootLog`. */
+const bootLog: string[] = import.meta.env.DEV ? ((window as unknown as { __bootLog: string[] }).__bootLog = []) : []
+const mark = (s: string) => {
+  if (import.meta.env.DEV && !bootLog[bootLog.length - 1]?.endsWith(s)) bootLog.push(`${(performance.now() / 1000).toFixed(2)} ${s}`)
+}
+
 export function bootProgress(fraction: number, status?: string): void {
+  if (status) mark(status)
   // Never goes backwards (stages overlap); leaves room for the final fade.
   shown = Math.max(shown, Math.min(0.99, fraction))
   el('boot')?.classList.add('live')
@@ -50,6 +57,7 @@ export function bootError(message: string): void {
 export function bootFinish(): void {
   const boot = el('boot')
   if (!boot || boot.classList.contains('done')) return
+  mark('finish')
   const fill = el('boot-fill'), pct = el('boot-pct'), st = el('boot-status')
   if (fill) fill.style.width = '100%'
   if (pct) pct.textContent = '100%'

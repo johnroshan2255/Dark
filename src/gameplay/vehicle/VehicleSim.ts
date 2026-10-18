@@ -22,6 +22,9 @@ import { Surf, TYRE_KINDS, gripFor, roughness, surfaceMix, type SurfaceMix } fro
  */
 const GRAVITY = 20 // world gravity (PhysicsWorld): 2× real for snappy jumps — forces below are tuned for it
 const RAY_GROUPS = group(0xffff, Groups.Terrain | Groups.Static)
+/** The GROUND alone (terrain, road ribbon, formation floors): what the wheel rays see in the drivetrain mode — stones,
+ *  props and kerbs reach the wheel only through the tyre envelope, measured against this same ground (once). */
+const GROUND_GROUPS = group(0xffff, Groups.Terrain | Groups.StaticMesh)
 /** Real gravity: the realistic drivetrain runs the car at 9.81 (body gravity scale) so real numbers work unchanged. */
 const G_REAL = 9.81
 /** The steepest slope the climb assist lets the tyres feel (rad, ≈ 26°). */
@@ -56,6 +59,14 @@ export interface WheelState {
   contact: boolean
 }
 
+/** A massless collision piece: a convex hull of points (xyz…), a capsule a → b of radius r, a box, or the exact body
+ *  as a triangle soup (xyz… per corner; Groups.VehicleMesh — the hulls then only meet terrain and formations). */
+export type Shape =
+  | { hull: Float32Array }
+  | { trimesh: Float32Array }
+  | { capsule: [[number, number, number], [number, number, number], number] }
+  | { box: [number, number, number]; at: [number, number, number] }
+
 interface WheelSpec {
   /** Hub position in chassis space at the design ride height. */
   hub: [number, number, number]
@@ -67,6 +78,8 @@ interface SimSpec {
   mass: number
   /** Colliders in chassis space: half extents, centre, mass share (COM falls where the mass is). */
   boxes: { half: [number, number, number]; at: [number, number, number]; mass: number }[]
+  /** Collision shapes from the model (chassis space). Given: they collide and the boxes only carry the mass. */
+  shapes?: Shape[]
   wheels: WheelSpec[]
   suspension: { rest: number; travel: number; stiffness: number; compression: number; relaxation: number }
   frictionSlip: number
@@ -101,12 +114,30 @@ abstract class VehicleBase {
     this.body = physics.world.createRigidBody(
       R.RigidBodyDesc.dynamic().setCanSleep(true).setAngularDamping(0.4).setLinearDamping(0.02).setCcdEnabled(true),
     )
-    for (const b of spec.boxes) {
-      physics.world.createCollider(
-        R.ColliderDesc.cuboid(...b.half).setTranslation(...b.at).setMass(b.mass).setFriction(0.35).setRestitution(0.05)
-          .setCollisionGroups(group(Groups.Vehicle, 0xffff & ~Groups.Player)),
-        this.body,
-      )
+    const groups = group(Groups.Vehicle, 0xffff & ~Groups.Player)
+    if (spec.shapes) {
+      // With the exact mesh: it meets EVERYTHING — rocks, trunks, props, debris, monsters, the bike, the formation and
+      // road-ribbon trimeshes, and the terrain as PhysicsWorld.vehicleGround's trimesh copy (Rapier has no trimesh ⇄
+      // heightfield contact). The hulls are then an inset BACKSTOP against the heightfield and formations: strictly
+      // inside the body, they touch only if the thin mesh were ever pushed through the ground (a hard landing).
+      const exact = spec.shapes.some((s) => 'trimesh' in s)
+      for (const s of spec.shapes) {
+        const d = shapeDesc(R, s)
+        const g = 'trimesh' in s ? group(Groups.VehicleMesh, 0xffff & ~Groups.Player & ~Groups.Terrain)
+          : exact ? group(Groups.Vehicle, Groups.Terrain | Groups.StaticMesh) : groups
+        if (d) {
+          const col = physics.world.createCollider(d.setDensity(0).setFriction(0.35).setRestitution(0.05).setCollisionGroups(g), this.body)
+          if ('trimesh' in s) (this.meshCollider = col), (this.meshGroups = g)
+        }
+      }
+      this.boxMass(spec.mass)
+    } else {
+      for (const b of spec.boxes) {
+        physics.world.createCollider(
+          R.ColliderDesc.cuboid(...b.half).setTranslation(...b.at).setMass(b.mass).setFriction(0.35).setRestitution(0.05).setCollisionGroups(groups),
+          this.body,
+        )
+      }
     }
     const vc = (this.vc = physics.world.createVehicleController(this.body))
     vc.indexUpAxis = 1
@@ -128,6 +159,23 @@ abstract class VehicleBase {
       vc.setWheelSideFrictionStiffness(i, spec.sideStiffness)
     })
     this.wheels = spec.wheels.map(() => ({ lift: 0, spin: 0, steer: 0, contact: false }))
+  }
+
+  /** Mass, centre of mass and inertia of the spec's boxes scaled to `total` kg, on the body (the shape colliders
+   *  are massless). Products of inertia are dropped (the boxes sit on the centre line). */
+  protected boxMass(total: number): void {
+    const bs = this.spec.boxes, sum = bs.reduce((s, b) => s + b.mass, 0)
+    let cx = 0, cy = 0, cz = 0
+    for (const b of bs) (cx += b.mass * b.at[0]), (cy += b.mass * b.at[1]), (cz += b.mass * b.at[2])
+    cx /= sum; cy /= sum; cz /= sum
+    let ix = 0, iy = 0, iz = 0
+    for (const b of bs) {
+      const m = (b.mass / sum) * total, [hx, hy, hz] = b.half, dx = b.at[0] - cx, dy = b.at[1] - cy, dz = b.at[2] - cz
+      ix += (m / 3) * (hy * hy + hz * hz) + m * (dy * dy + dz * dz)
+      iy += (m / 3) * (hx * hx + hz * hz) + m * (dx * dx + dz * dz)
+      iz += (m / 3) * (hx * hx + hy * hy) + m * (dx * dx + dy * dy)
+    }
+    this.body.setAdditionalMassProperties(total, { x: cx, y: cy, z: cz }, { x: ix, y: iy, z: iz }, { x: 0, y: 0, z: 0, w: 1 }, true)
   }
 
   /** Place at rest (ground point at y), facing `heading` (0 = −Z; + turns left, game yaw), nose-up `pitch`. */
@@ -165,6 +213,10 @@ abstract class VehicleBase {
     return Math.atan2(-f[0], -f[2])
   }
 
+  /** What the wheel rays see (collision groups). */
+  protected wheelRayGroups(): number {
+    return RAY_GROUPS
+  }
   /** Drive forces for this step (engine per wheel, brakes, steering, extra body forces). */
   protected abstract drive(dt: number, v: number): void
   /** After the tyre impulses of this step (velocity-level corrections, e.g. the bike's balance). */
@@ -173,6 +225,23 @@ abstract class VehicleBase {
   protected hoverStep(_dt: number): boolean {
     return false
   }
+
+  /** The exact body collider (trimesh) when the car has one — swapped for the dented shape (Damage). */
+  private meshCollider: RAPIER.Collider | null = null
+  private meshGroups = 0
+  /** Replace the exact body collider with a deformed copy of the mesh (xyz… per corner; Damage after a crash). */
+  replaceMesh(tris: Float32Array): void {
+    if (!this.meshCollider) return
+    const d = shapeDesc(this.R, { trimesh: tris })
+    if (!d) return
+    const w = this.physics.world
+    const old = this.meshCollider
+    this.meshCollider = w.createCollider(d.setDensity(0).setFriction(0.35).setRestitution(0.05).setCollisionGroups(this.meshGroups), this.body)
+    this.colliderSwapped(old, this.meshCollider)
+    w.removeCollider(old, false)
+  }
+  /** A body collider was replaced (subclasses keeping collider lists update them). */
+  protected colliderSwapped(_old: RAPIER.Collider, _now: RAPIER.Collider): void {}
 
   /** One fixed step: controls → wheel forces → raycast vehicle update. Call before world.step(). */
   step(dt: number): void {
@@ -192,7 +261,7 @@ abstract class VehicleBase {
       return
     }
     this.drive(dt, this.speed)
-    this.vc.updateVehicle(dt, undefined, RAY_GROUPS, (c) => c.parent()?.handle !== this.body.handle)
+    this.vc.updateVehicle(dt, undefined, this.wheelRayGroups(), (c) => c.parent()?.handle !== this.body.handle)
     this.afterWheels(dt, this.speed)
     // Hill hold, AFTER the tyre impulses (they re-add a little drift every step): the horizontal velocity and
     // the yaw spin are cancelled, the suspension keeps settling vertically.
@@ -261,6 +330,15 @@ export interface TruckDims {
   wheelPos: [number, number, number][]
   wheelRadius: number
   half: { x: number; y: number; z: number }
+  /** Height (m, truck space) of the body's underside ahead of the front / behind the rear wheels — the bumper
+   *  collision boxes start there. Absent: the frame height (0.34 m). */
+  overhang?: { front: number; rear: number }
+  /** Body collision hulls cut from the mesh (gameplay/vehicle/hulls); absent: the frame + cab boxes collide. */
+  hulls?: Float32Array[]
+  /** The body's render triangles (xyz… per corner, closed doors): the exact collider for everything but terrain. */
+  mesh?: Float32Array
+  /** Half the tyre width (m): the tyre envelope also samples the tread edges. Absent: the centre line only. */
+  tyreHalfWidth?: number
 }
 
 /** The tunable part of a truck's setup (gameplay/vehicle/catalogue.ts `VehicleTuning`, minus paint). */
@@ -284,7 +362,12 @@ export class TruckSim extends VehicleBase {
   /** Live setup (retune() changes it in place). */
   readonly tune: TruckTune
   private readonly colliders: RAPIER.Collider[] = []
-  private readonly massShare = [0.85, 0.1, 0.05]
+  protected colliderSwapped(old: RAPIER.Collider, now: RAPIER.Collider): void {
+    const i = this.colliders.indexOf(old)
+    if (i >= 0) this.colliders[i] = now
+  }
+  /** Each collider's share of the mass (legacy model), in creation order. */
+  private readonly massShare: number[]
   private readonly baseRadius: number
   private readonly dims: TruckDims
   /** Drift state. `lateral`: sideways speed of the chassis (m/s, + = sliding to the right); `drift`: smoothed
@@ -322,8 +405,11 @@ export class TruckSim extends VehicleBase {
       mass: t.mass,
       // Heavy low frame (engine, axles, fuel) + light cab/bed → centre of mass ≈ 0.62 m: rollover ≈ 1.2 g sideways,
       // back-flip tip-over ≈ 68° on a climb.
+      // The low frame leaves the WHEELS free (a spine between them + bumpers + sills): the tyres meet stones and
+      // kerbs through their rays (tyreEnvelope) and ride up them; a frame box over the wheel corners caught the
+      // stone first and stopped the car dead.
       boxes: [
-        { half: [h.x * 0.9, 0.2, h.z * 0.93], at: [0, 0.54, 0], mass: t.mass * 0.85 },
+        ...frameBoxes(d, t.mass * 0.85),
         { half: [h.x * 0.86, 0.42, h.z * 0.36], at: [0, 1.28, -h.z * 0.1], mass: t.mass * 0.1 },
         { half: [h.x * 0.88, 0.2, h.z * 0.42], at: [0, 1.05, h.z * 0.55], mass: t.mass * 0.05 },
       ],
@@ -332,8 +418,10 @@ export class TruckSim extends VehicleBase {
       suspension: { rest: 0.32, travel: 0.24, stiffness: t.suspension, compression: 2.6, relaxation: 3.8 },
       frictionSlip: t.grip,
       sideStiffness: 0.55,
+      shapes: d.hulls && [...d.hulls.map((hull): Shape => ({ hull })), ...(d.mesh ? [{ trimesh: d.mesh }] : [])],
     })
     this.tune = t
+    this.massShare = this.spec.boxes.map((b) => b.mass / t.mass)
     this.baseRadius = d.wheelRadius
     this.dims = d
     this.mode = 'legacy'
@@ -481,7 +569,10 @@ export class TruckSim extends VehicleBase {
     Object.assign(this.tune, t)
     if (this.mode === 'drivetrain') return this.configure('drivetrain')
     if (this.mode !== 'legacy') return
-    if (t.mass !== undefined) this.colliders.forEach((c, i) => c.setMass(this.tune.mass * (this.massShare[i] ?? 0)))
+    if (t.mass !== undefined) {
+      if (this.spec.shapes) this.boxMass(this.tune.mass)
+      else this.colliders.forEach((c, i) => c.setMass(this.tune.mass * (this.massShare[i] ?? 0)))
+    }
     for (let i = 0; i < 4; i++) {
       if (t.suspension !== undefined) this.vc.setWheelSuspensionStiffness(i, this.tune.suspension)
       if (t.grip !== undefined) this.vc.setWheelFrictionSlip(i, this.tune.grip)
@@ -516,6 +607,11 @@ export class TruckSim extends VehicleBase {
   private readonly arb: number[] = []
   private readonly travelW: number[] = []
   private readonly kBump: number[] = []
+  /** Per wheel: where the bump stop starts (compression, m) and the hard stop's rate past `travelW` (N/m). */
+  private readonly bumpAt: number[] = []
+  private readonly kHard: number[] = []
+  /** Per wheel: the corner's static weight (N). */
+  private readonly cornerW: number[] = []
   private readonly fc = [0, 0, 0]
   private readonly lc = [0, 0, 0]
 
@@ -550,8 +646,9 @@ export class TruckSim extends VehicleBase {
     for (let i = 0; i < 4; i++) {
       if (!this.wIn[i].contact) continue
       n++
-      t.slide = Math.max(t.slide, Math.min(1, Math.abs(D.alpha[i]) / 0.5))
-      t.spin = Math.max(t.spin, Math.min(1, Math.abs(D.kappa[i]) / 0.6))
+      // (only a tyre really sliding over the ground: past its grip peak at a real sliding speed — Drivetrain slideVis)
+      t.slide = Math.max(t.slide, D.slideVis[i])
+      t.spin = Math.max(t.spin, D.skidVis[i])
       const w = this.mixes[i].w
       t.hard += w[0] + w[5]
       t.gravel += w[1]
@@ -596,8 +693,11 @@ export class TruckSim extends VehicleBase {
       body.setGravityScale(1, true)
       body.setLinearDamping(0.02)
       body.setAngularDamping(0.4)
-      body.setAdditionalMassProperties(0, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0, w: 1 }, true)
-      this.colliders.forEach((c, i) => c.setMass(this.tune.mass * (this.massShare[i] ?? 0)))
+      if (this.spec.shapes) this.boxMass(this.tune.mass)
+      else {
+        body.setAdditionalMassProperties(0, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0, w: 1 }, true)
+        this.colliders.forEach((c, i) => c.setMass(this.tune.mass * (this.massShare[i] ?? 0)))
+      }
       const s = this.spec.suspension
       const r = this.baseRadius * this.tune.tyre
       for (let i = 0; i < 4; i++) {
@@ -646,17 +746,26 @@ export class TruckSim extends VehicleBase {
       const w = 2 * Math.PI * ax.freq * fScale
       const k = sw * w * w
       const sag = G_REAL / (w * w)
-      const travel = sag + 0.55 * ax.travel
-      const rest = travel + 0.1
+      // COMPRESSION ROOM: 70 % of the axle's travel above the static sag, a progressive rubber bump stop over the
+      // last 25 % of it (2 × the corner's weight at full bump), then a HARD stop (the axle on its stops: the wheel
+      // lifts the body like a rigid strut). Rapier's own travel limit sits well past it — when Rapier clamped at
+      // 55 % of the travel the spring went soft at its limit and a wheel on a 25 cm rock sank into it, bounced the
+      // car off its wheels and stopped it, instead of climbing it with its shock squeezed.
+      const T = ax.travel
+      const travel = sag + 0.7 * T
+      const rest = sag + 1.3 * T + 0.1
       this.sagW[i] = sag
       this.restW[i] = rest
       this.travelW[i] = travel
+      this.bumpAt[i] = sag + 0.45 * T
       this.arb[i] = ax.arb * fScale * fScale
-      this.kBump[i] = (64 * sw * M * G_REAL) / (ax.travel * ax.travel)
+      this.kBump[i] = (32 * sw * M * G_REAL) / (T * T)
+      this.kHard[i] = (12 * sw * M * G_REAL) / T
+      this.cornerW[i] = sw * M * G_REAL
       const hub = this.spec.wheels[i].hub
       vc.setWheelRadius(i, r)
       vc.setWheelSuspensionRestLength(i, rest + this.ride)
-      vc.setWheelMaxSuspensionTravel(i, travel)
+      vc.setWheelMaxSuspensionTravel(i, sag + 1.3 * T)
       vc.setWheelSuspensionStiffness(i, k)
       // Damping is ours (afterReal: on the real compression rate, digressive); per kg of chassis, like Rapier's.
       this.dampB[i] = 2 * ax.zeta[0] * Math.sqrt(k * sw)
@@ -680,8 +789,16 @@ export class TruckSim extends VehicleBase {
     }
   }
 
+  /** Drivetrain mode: the wheel rays see the ground only — a stone is in the tyre envelope, counted once. (Both saw
+   *  it: the envelope, cast before the step, and Rapier's ray during it, 4–5 cm further on — for one step the stone
+   *  counted twice, the shock leapt 13 cm in 1/60 s onto its hard stop: ~20 × the corner's weight, the car thrown
+   *  15 cm up off a 25 cm stone at 10 km/h, wheels in the air for half a second.) */
+  protected override wheelRayGroups(): number {
+    return this.mode === 'drivetrain' ? GROUND_GROUPS : RAY_GROUPS
+  }
+
   /** Drivetrain mode, before the raycast update: the wheels' steering (for their axles); Rapier drives nothing. */
-  private driveReal(_dt: number): void {
+  private driveReal(dt: number): void {
     const D = this.drivetrain!, vc = this.vc
     const { f, u, r: rt } = this.axes()
     for (let i = 0; i < 4; i++) {
@@ -694,7 +811,9 @@ export class TruckSim extends VehicleBase {
       const p = vc.wheelHardPoint(i)
       const d = D.steer[i], cd = Math.cos(d), sd = Math.sin(d)
       _hd[0] = f[0] * cd + rt[0] * sd; _hd[1] = f[1] * cd + rt[1] * sd; _hd[2] = f[2] * cd + rt[2] * sd
-      const h = p ? this.tyreEnvelope(i, p, _hd, u) : this.bumpW[i] * 0.8
+      // (rising at most 3 m/s: the tyre's sidewall takes the first instant of a sharp hit — a stone met at speed squeezes
+      // the tyre, then the wheel climbs; without it the hub leapt 25 cm in two steps and the hit threw the car)
+      const h = Math.min(p ? this.tyreEnvelope(i, p, _hd, u) : this.bumpW[i] * 0.8, this.bumpW[i] + 3 * dt)
       this.bumpW[i] = h
       vc.setWheelSuspensionRestLength(i, this.restW[i] + this.ride + h)
     }
@@ -702,11 +821,15 @@ export class TruckSim extends VehicleBase {
   }
   /**
    * TYRE ENVELOPE (m): how much higher than under its hub the ground effectively is for wheel i. A rigid circle of
-   * the tyre's radius rests on the highest point of the ground along its footprint arc: sampled at 0, ± 0.35 r and
-   * ± 0.7 r along the wheel's heading, each sample counts its height (terrain and obstacle colliders by ray, plus
+   * the tyre's radius rests on the highest point of the ground along its footprint arc: sampled at 0, ± 0.35 r, ± 0.7 r and ± 0.93 r
+   * along the wheel's heading, each sample counts its height (terrain and obstacle colliders by ray, plus
    * the surface roughness) minus the circle's drop there, r − √(r² − d²). Before: the one ray met a 30 cm stone in
    * a single 60 Hz step at speed — 4–10 × load spikes and wheel hop; a real tyre swallows it over its footprint.
-   * Cost: 5 rays per wheel per fixed step (20 per step, ≈ 20–40 µs on a phone), same on every tier.
+   * ACROSS THE TREAD: with the tyre's width known (TruckDims.tyreHalfWidth) the five middle samples are also cast at
+   * both tread edges (± 0.85 of the half width) — a stone under the edge of the tyre lifts it too (the centre line
+   * alone drove the tyre straight through a rock beside it).
+   * Cost: 8 rays per wheel per fixed step (the ground under the hub + 7 samples), 18 with the tread edges (72 per
+   * step, ≈ 75–140 µs on a phone), every tier.
    */
   private tyreEnvelope(i: number, hp: { x: number; y: number; z: number }, hd: number[], u: number[]): number {
     const vc = this.vc
@@ -715,22 +838,34 @@ export class TruckSim extends VehicleBase {
     const mix = this.mixes[i]
     const ray = (this.envRay ??= new this.R.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }))
     ray.dir.x = -u[0]; ray.dir.y = -u[1]; ray.dir.z = -u[2]
-    let g0 = 0, best = -Infinity
-    for (let k = 0; k < 5; k++) {
+    // The axle direction (heading × up) and the tread-edge offset.
+    const e = (this.dims?.tyreHalfWidth ?? 0) * 0.85 * this.tune.tyre
+    const ax = hd[1] * u[2] - hd[2] * u[1], ay = hd[2] * u[0] - hd[0] * u[2], az = hd[0] * u[1] - hd[1] * u[0]
+    // The ground under the hub as the wheel ray sees it (GROUND_GROUPS): everything else is lift above it.
+    ray.origin.x = hp.x; ray.origin.y = hp.y; ray.origin.z = hp.z
+    const h0 = this.physics.world.castRay(ray, L, true, undefined, GROUND_GROUPS, undefined, this.body)
+    const g0 = h0 ? L - h0.timeOfImpact : 0
+    let hub = -Infinity, best = -Infinity
+    for (let k = 0; k < ENV_D.length; k++) {
       const s = ENV_D[k] * r
-      const ox = hp.x + hd[0] * s, oy = hp.y + hd[1] * s, oz = hp.z + hd[2] * s
-      ray.origin.x = ox; ray.origin.y = oy; ray.origin.z = oz
-      const hit = this.physics.world.castRay(ray, L, true, undefined, RAY_GROUPS, undefined, this.body)
-      // Ground height above the ray's end, along the body's up axis (no hit = at the end: nothing to climb).
-      const g = hit ? L - hit.timeOfImpact : 0
-      const gx = ox - u[0] * (L - g), gz = oz - u[2] * (L - g)
-      const hk = g + roughness(gx, gz, mix)
-      if (k === 0) g0 = g
-      const lift = hk - (r - Math.sqrt(r * r - s * s))
-      if (lift > best) best = lift
+      for (let side = 0; side < (e > 0 && k < 5 ? 3 : 1); side++) {
+        const w = side === 0 ? 0 : side === 1 ? e : -e
+        const ox = hp.x + hd[0] * s + ax * w, oy = hp.y + hd[1] * s + ay * w, oz = hp.z + hd[2] * s + az * w
+        ray.origin.x = ox; ray.origin.y = oy; ray.origin.z = oz
+        const hit = this.physics.world.castRay(ray, L, true, undefined, RAY_GROUPS, undefined, this.body)
+        // Ground height above the ray's end, along the body's up axis (no hit = at the end: nothing to climb).
+        const g = hit ? L - hit.timeOfImpact : 0
+        const gx = ox - u[0] * (L - g), gz = oz - u[2] * (L - g)
+        const hk = g + roughness(gx, gz, mix)
+        const lift = hk - (r - Math.sqrt(r * r - s * s))
+        if (k < 3 && lift > hub) hub = lift
+        else if (lift > best) best = lift
+      }
     }
+    // Under the hub (± 0.35 r) the tyre stands on what is there, however tall (a boulder: up onto it); ahead / behind
+    // a wall lifts it at most 0.8 r — taller than that it's a face the tyre is pushed against, not a step it climbs.
     // (negative = a dip the tyre sinks into: the roughness's troughs, never more than they are deep)
-    return Math.min(0.8 * r, best - g0)
+    return Math.max(hub - g0, Math.min(0.8 * r, best - g0))
   }
   private envRay: RAPIER.Ray | null = null
   /** Damper rates per wheel at low shaft speed, bump and rebound (N·s/m per kg of chassis, Rapier's units). */
@@ -755,7 +890,14 @@ export class TruckSim extends VehicleBase {
     {
       const p = vc.wheelHardPoint(si) ?? t
       this.surface(p.x, p.z, this.mixes[si])
-      gripFor(TYRE_KINDS[R.axles[si >> 1].tyreKind], this.mixes[si], D.gripScale, D.grips[si])
+      const gp = gripFor(TYRE_KINDS[R.axles[si >> 1].tyreKind], this.mixes[si], D.gripScale, D.grips[si])
+      // SNOW / MUD / SAND GRIP (off-road assist — like fitting chains or winter tyres): the soft-ground share of the
+      // tyre's grip is raised to at least μ 0.55. Real summer tyres on snow (μ ≈ 0.3) left a rear-drive van stuck on
+      // any snowy slope; the assist keeps snow slippery (it slides, it needs care) but drivable.
+      if (this.offroadAssist) {
+        const mw = this.mixes[si].w, soft = mw[Surf.Snow] + mw[Surf.Mud] + mw[Surf.Sand]
+        if (soft > 0) gp.mu += Math.max(0, 0.55 * D.gripScale - gp.mu) * soft
+      }
       // The air the tyre cools in, from the ground it stands on (desert sand hot, snow / ice cold), and the wet.
       const mw = this.mixes[si].w
       D.airT[si] = 20 + 15 * mw[Surf.Sand] - 24 * mw[Surf.Snow] - 28 * mw[Surf.Ice]
@@ -776,8 +918,8 @@ export class TruckSim extends VehicleBase {
       contacts++
       const pair = i ^ 1
       const arbF = this.arb[i] * (x[i] - x[pair])
-      const bz = x[i] - (this.sagW[i] + 0.75 * (this.travelW[i] - this.sagW[i]))
-      const bump = bz > 0 ? this.kBump[i] * bz * bz : 0
+      const bz = Math.min(x[i], this.travelW[i]) - this.bumpAt[i], hard = x[i] - this.travelW[i]
+      let bump = (bz > 0 ? this.kBump[i] * bz * bz : 0) + (hard > 0 ? this.kHard[i] * hard : 0)
       // DAMPER (ours — Rapier's is off in this mode, it only saw the body's motion, never the wheel's): on the real
       // compression rate, body AND ground (a stone, a kerb, a rut under the tyre), bump / rebound rates from the
       // spec, DIGRESSIVE like a valved damper — linear to 0.25 m/s of shaft speed, then 0.35 × the slope (the
@@ -794,6 +936,10 @@ export class TruckSim extends VehicleBase {
         sv = -((lv.x + w.y * rz - w.z * ry) * u[0] + (lv.y + w.z * rx - w.x * rz) * u[1] + (lv.z + w.x * ry - w.y * rx) * u[2])
       }
       this.xPrev[i] = Math.max(1e-6, x[i])
+      // HARD STOP, inelastic (the axle on its rubber stops): past full bump the corner's closing speed is taken out
+      // over ~2 steps — the wheel carries the body up the stone, it doesn't spring it into the air (a stiff spring
+      // alone stored the hit and threw the car a metre up off a 25 cm rock).
+      if (hard > 0 && sv > 0) bump += Math.min(8 * this.cornerW[i], ((0.6 * this.cornerW[i]) / G_REAL) * (sv / dt))
       const av = Math.abs(sv)
       let damp = Math.sign(sv) * ((sv > 0 ? this.dampB[i] : this.dampR[i]) ?? 0) * M * (av < DAMP_KNEE ? av : DAMP_KNEE + DAMP_HIGH * (av - DAMP_KNEE))
       // A tyre only pushes: rebound damping can't pull the wheel down onto the ground.
@@ -1320,11 +1466,61 @@ function rotate(q: { x: number; y: number; z: number; w: number }, x: number, y:
   out[2] = iz * q.w + iw * -q.z + ix * -q.y - iy * -q.x
 }
 const _rv = [0, 0, 0]
-/** Damper knee (m/s of shaft speed) and the slope past it (× the low-speed rate): a digressive valve. */
-const DAMP_KNEE = 0.25
-const DAMP_HIGH = 0.35
+/**
+ * The truck's low frame (y 0.34–0.74 m) as boxes that leave the four wheel corners open: a spine between the tyres
+ * the whole length, and full-width pieces ahead of the front wheels (bumper), between the axles (sills) and behind
+ * the rear wheels. `mass` is shared by volume.
+ * The bumpers start at the model's own overhang underside (`d.overhang`, less 2 cm), not the frame's 0.34 m: a
+ * box hanging 25–30 cm below the visible bumper stopped the truck dead on a 45 cm stone that visibly fit under it,
+ * before the tyre could climb it (approach angle ≈ 22° instead of the model's ≈ 35°).
+ */
+function frameBoxes(d: TruckDims, mass: number): SimSpec['boxes'] {
+  const h = d.half, r = d.wheelRadius
+  const zf = Math.min(d.wheelPos[0][2], d.wheelPos[1][2]), zr = Math.max(d.wheelPos[2][2], d.wheelPos[3][2])
+  const inner = Math.max(0.2, Math.min(...d.wheelPos.map((p) => Math.abs(p[0]))) - 0.75 * r)
+  const z0 = -h.z * 0.93, z1 = h.z * 0.93, gap = 1.05 * r
+  // [half width, z from, z to, bottom y]
+  const bumper = (y: number | undefined) => Math.min(FRAME_HI - 0.1, Math.max(FRAME_LO, (y ?? FRAME_LO) - 0.02))
+  const parts: [number, number, number, number][] = [[inner, z0, z1, FRAME_LO]]
+  for (const [a, b, lo] of [[z0, zf - gap, bumper(d.overhang?.front)], [zf + gap, zr - gap, FRAME_LO], [zr + gap, z1, bumper(d.overhang?.rear)]]) {
+    if (b - a > 0.1) parts.push([h.x * 0.9, a, b, lo])
+  }
+  const vol = parts.reduce((s, [x, a, b, lo]) => s + x * (b - a) * (FRAME_HI - lo), 0)
+  return parts.map(([x, a, b, lo]) => ({
+    half: [x, (FRAME_HI - lo) / 2, (b - a) / 2] as [number, number, number],
+    at: [0, (FRAME_HI + lo) / 2, (a + b) / 2] as [number, number, number],
+    mass: (mass * x * (b - a) * (FRAME_HI - lo)) / vol,
+  }))
+}
+/** Rapier collider for one shape (null: a degenerate hull — coplanar points). */
+function shapeDesc(R: typeof RAPIER, s: Shape): RAPIER.ColliderDesc | null {
+  if ('hull' in s) return R.ColliderDesc.convexHull(s.hull)
+  if ('trimesh' in s) {
+    const idx = new Uint32Array(s.trimesh.length / 3)
+    for (let i = 0; i < idx.length; i++) idx[i] = i
+    return R.ColliderDesc.trimesh(s.trimesh, idx)
+  }
+  if ('box' in s) return R.ColliderDesc.cuboid(...s.box).setTranslation(...s.at)
+  // Capsule along a → b: Rapier's runs along +Y, turned onto the segment (shortest arc from +Y).
+  const [a, b, r] = s.capsule
+  const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], len = Math.hypot(dx, dy, dz)
+  const ux = dx / len, uy = dy / len, uz = dz / len
+  const w = 1 + uy, qn = w < 1e-6 ? null : Math.hypot(uz, ux, w)
+  const q = qn ? { x: uz / qn, y: 0, z: -ux / qn, w: w / qn } : { x: 1, y: 0, z: 0, w: 0 }
+  return R.ColliderDesc.capsule(len / 2, r).setTranslation((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2).setRotation(q)
+}
+/** The low frame's underside and top (m, truck space). */
+const FRAME_LO = 0.34
+const FRAME_HI = 0.74
+
+/** Damper knee (m/s of shaft speed) and the slope past it (× the low-speed rate): a digressive valve. (0.25 / 0.35
+ *  bled off most of the damping in an ordinary hit — the shaft ran into the bump stop: a 25 cm stone at 25 km/h
+ *  peaked at 28 m/s² vs 9 m/s² now; a pothole's 2 m/s still meets ~60 % of the linear force.) */
+const DAMP_KNEE = 0.5
+const DAMP_HIGH = 0.5
 /** Tyre-envelope sample offsets along the wheel's heading (× the tyre radius); the hub first. */
-const ENV_D = [0, 0.35, -0.35, 0.7, -0.7]
+// (± 0.93 r: a tyre meets a stone as tall as half its radius ~0.9 r ahead of the hub — it starts climbing there)
+const ENV_D = [0, 0.35, -0.35, 0.7, -0.7, 0.93, -0.93]
 const _hd = [0, 0, 0]
 const _x = [0, 0, 0, 0]
 /** Per wheel: contact frame (forward xyz, right xyz) and contact point, reused every step (no allocations). */
@@ -1344,6 +1540,8 @@ export interface BikeDims {
   front: [number, number, number]
   rear: [number, number, number]
   wheelRadius: number
+  /** Collision shapes from the bike's parts (Bike.ts); absent: the frame + rider boxes collide. */
+  shapes?: Shape[]
 }
 
 export class BikeSim extends VehicleBase {
@@ -1376,6 +1574,7 @@ export class BikeSim extends VehicleBase {
       suspension: { rest: 0.14, travel: 0.12, stiffness: 320, compression: 12, relaxation: 16 },
       frictionSlip: 1.6,
       sideStiffness: 1.1,
+      shapes: d.shapes,
     })
     this.wheelbase = Math.abs(d.front[2] - d.rear[2])
   }

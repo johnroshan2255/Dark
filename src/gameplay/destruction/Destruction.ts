@@ -189,7 +189,7 @@ export class Destruction {
         )
         this.physics.world.createCollider(
           R.ColliderDesc.cuboid(hx, hy, hz).setDensity(spec.half[1] > 1 ? 120 : 350).setFriction(0.8).setRestitution(0.15)
-            .setCollisionGroups(group(Groups.Debris, Groups.Terrain | Groups.Static | Groups.Vehicle | Groups.Player | Groups.Debris)),
+            .setCollisionGroups(group(Groups.Debris, Groups.Terrain | Groups.Static | Groups.Vehicle | Groups.VehicleMesh | Groups.Player | Groups.Debris)),
           body,
         )
         // Thrown along with the truck (a share of its speed), up a little, tumbling.

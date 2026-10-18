@@ -292,7 +292,7 @@ export class WorldFields {
   }
 
   /**
-   * GORGES: on ~a quarter of the main road, steep rock walls (10–20 m, layered-stone cliffs in the shader) rise
+   * GORGES: on ~40 % of the main road, steep rock walls (14–30 m, clad by the crags) rise
    * 12–22 m off each side — the road runs through a canyon instead of an open valley (Genshin's passes; red rock
    * in the desert, icy in the snow). Added AFTER the valley's slope limit (so they can be walls), but only beyond
    * 10 m past the road's edge: the verge stays gentle (the shoulder-step test), and they fall away by ~60 m.
@@ -305,7 +305,8 @@ export class WorldFields {
     if (far <= 0) return h
     const d = this.roadDistance(x, z) - WorldFields.ROAD_HALF_WIDTH
     if (d < 10 || d > 110) return h
-    let m = sstep(0.56, 0.68, this.roadN(z * 0.0011, 50.5) * 0.5 + 0.5)
+    // (≈ 40 % of the road — the CANYON DRIVES: user 2026-10-18 "we only have a straight road")
+    let m = sstep(0.47, 0.59, this.roadN(z * 0.0011, 50.5) * 0.5 + 0.5)
     // BRIGHT DESERT CANYONS (over the hill): most of the desert road runs through a CANYON — taller walls (16–34 m)
     // that stay up farther out (to ~60–110 m), clad in the stacked slab rocks (crags on every slope ≥ 43°).
     let canyon = 0
@@ -319,7 +320,8 @@ export class WorldFields {
     const out0 = 38 + 22 * canyon, out1 = 70 + 40 * canyon
     const wall = sstep(10, 19, d) * (1 - sstep(out0, out1, d)) * sstep(0, 30, r)
     const n = this.detail(z * 0.01, x > this.roadCenterX(z) ? 3.3 : 7.7) * 0.5 + 0.5
-    const height = (10 + 10 * n) * (1 - canyon) + (16 + 18 * n) * canyon
+    // Walls 14–30 m in the green lands / snow (were 10–20: a ditch, not a canyon), 16–34 m in the desert canyons.
+    const height = (14 + 16 * n) * (1 - canyon) + (16 + 18 * n) * canyon
     return h + wall * height * m * far
   }
   private readonly cbw: BiomeWeights = [0, 0]
@@ -445,7 +447,14 @@ export class WorldFields {
     // GROVES, not a forest wall: only the top third of the noise grows trees (dense at the heart, thinning at the
     // edge), leaving open meadows between them — Genshin's lands are mostly open grass and flowers.
     const n = fbm(this.forestN, x * 0.006, z * 0.006, 3) * 0.5 + 0.5
-    let d = Math.min(1, Math.max(0, (n - 0.5) * 3.2))
+    // (2026-10-18, user: "make a lot of places with no tree and reduce tree count a bit") groves start higher on
+    // the noise (smaller), ~12 % thinner, wide OPEN MEADOWS (~150–300 m, a third of the land) where a coarse noise
+    // is high, and small sunny GLADES (~20–40 m) inside the groves.
+    let d = Math.min(1, Math.max(0, (n - 0.54) * 3.3)) * 0.88
+    const open = this.forestN(x * 0.0025 + 41.7, z * 0.0025 - 13.9) * 0.5 + 0.5
+    d *= 1 - sstep(0.56, 0.66, open)
+    const glade = this.forestN(x * 0.022 - 7.3, z * 0.022 + 5.1) * 0.5 + 0.5
+    d *= 1 - sstep(0.7, 0.78, glade)
     const wn = this.biomes.weightsN(x, z, this.wn, h)
     d *= 1 - wn[Biome.Desert] * 0.94 - wn[Biome.Snow] * 0.7
     // Region character: autumn valleys open up, the mystic woods close in (BiomeDefs.treeDensity).

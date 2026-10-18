@@ -1,7 +1,8 @@
 import { useEffect, useRef, type CSSProperties } from 'react'
 import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
-import { poiIcon, poiName } from '../world/POI/pois'
+import { LOOKOUT_REGION, PoiType, poiIcon, poiName } from '../world/POI/pois'
+import { LOOKOUT_SEEN, PLACE_SEEN, REVEAL } from '../gameplay/explore/Discovery'
 import { LANDMARK_ICONS, landmarkName } from '../world/Landmarks/landmarks'
 import { BIOME_NAMES } from '../world/Biomes'
 import { isBright } from '../rendering/artStyle'
@@ -13,7 +14,7 @@ const STRIP_HALF = (100 * Math.PI) / 180
 const STRIP_DIRS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const
 const wrapPi = (a: number) => a - Math.PI * 2 * Math.floor((a + Math.PI) / (Math.PI * 2))
 /** A compass entry: a place (farm, camp…) or a landmark (giant tree, ruins, tower…). */
-interface Mark { x: number; z: number; radius: number; icon: string; name: string }
+interface Mark { x: number; z: number; radius: number; icon: string; name: string; look?: boolean }
 
 /**
  * In-game HUD in the reference's style (refer/ui): party list with colour-coded health bars (top-left)
@@ -73,9 +74,22 @@ export function GameHud({ game }: { game: Game }) {
       if (now - lastQuery > 500) {
         lastQuery = now
         const f = game.world.fields
+        const disc = game.discovery
         const box = [pp.x - 1500, pp.z - 1500, pp.x + 1500, pp.z + 1500] as const
+        const far = (x: number, z: number) => Math.hypot(x - pp.x, z - pp.z)
+        // EXPLORATION (gameplay/explore/Discovery): summit lookouts show from LOOKOUT_SEEN (a flag on a peak — always
+        // a goal); other places only near you or where a discovered lookout has mapped the land.
+        const looks: Mark[] = []
+        const L0 = Math.floor((pp.x - LOOKOUT_SEEN) / LOOKOUT_REGION), L1 = Math.floor((pp.x + LOOKOUT_SEEN) / LOOKOUT_REGION)
+        const M0 = Math.floor((pp.z - LOOKOUT_SEEN) / LOOKOUT_REGION), M1 = Math.floor((pp.z + LOOKOUT_SEEN) / LOOKOUT_REGION)
+        for (let j = M0; j <= M1; j++) for (let i = L0; i <= L1; i++) {
+          const p = f.pois.lookout(i, j)
+          if (p && far(p.x, p.z) < LOOKOUT_SEEN) looks.push({ x: p.x, z: p.z, radius: p.radius, icon: disc.has(p.x, p.z) ? '🚩' : poiIcon(p), name: poiName(p), look: true })
+        }
         places = [
-          ...f.pois.inBox(...box).map((p) => ({ x: p.x, z: p.z, radius: p.radius, icon: poiIcon(p), name: poiName(p) })),
+          ...looks,
+          ...f.pois.inBox(...box).filter((p) => p.type !== PoiType.Lookout && (far(p.x, p.z) < PLACE_SEEN || disc.revealed(p.x, p.z)))
+            .map((p) => ({ x: p.x, z: p.z, radius: p.radius, icon: poiIcon(p), name: poiName(p) })),
           ...f.landmarks.inBox(...box).map((l) => ({ x: l.x, z: l.z, radius: l.radius + 12, icon: LANDMARK_ICONS[l.kind], name: landmarkName(l) })),
         ]
           .sort((a, b) => Math.hypot(a.x - pp.x, a.z - pp.z) - Math.hypot(b.x - pp.x, b.z - pp.z))
@@ -92,6 +106,13 @@ export function GameHud({ game }: { game: Game }) {
           seen.add(id)
           banner.current.textContent = inside.name
           bannerUntil = now + 3500
+        }
+        // A summit LOOKOUT reached for the first time: it maps the land round it (places within REVEAL m).
+        if (inside?.look && disc.add(inside.x, inside.z) && toast.current) {
+          const n = f.pois.inBox(inside.x - REVEAL, inside.z - REVEAL, inside.x + REVEAL, inside.z + REVEAL)
+            .filter((p) => p.type !== PoiType.Lookout && Math.hypot(p.x - inside.x, p.z - inside.z) < REVEAL).length
+          toast.current.textContent = `⛰ Viewpoint discovered  ·  ${n} place${n === 1 ? '' : 's'} revealed  ·  ${disc.count} found`
+          toastUntil.current = now + 4500
         }
       }
       if (banner.current) banner.current.style.opacity = now < bannerUntil ? '1' : '0'
@@ -247,6 +268,7 @@ export function GameHud({ game }: { game: Game }) {
         <div><span ref={gearEl} style={gearStyle} /><span ref={speedNum} style={speedNumStyle}>0</span><span style={speedUnit}>km/h</span></div>
         <div style={nitroTrack}><div ref={nitroBar} style={nitroFill} /></div>
         <div ref={aidsEl} style={aidsStyle} />
+        <DamageBar game={game} />
       </div>
       {fpsCap && <div style={capStyle} data-testid="fps-cap">⚠ Your browser is limiting the game to 30 fps — turn off Low Power Mode / battery saver for 60 fps.</div>}
     </>
@@ -287,3 +309,19 @@ const stripLetter: CSSProperties = { position: 'absolute', left: '50%', top: 0, 
 const stripLetterSmall: CSSProperties = { ...stripLetter, font: '700 10px system-ui, sans-serif', opacity: 0.85 }
 const stripMark: CSSProperties = { position: 'absolute', left: '50%', top: 3, width: 22, height: 22, marginLeft: -11, lineHeight: '22px', textAlign: 'center', fontSize: 13, display: 'none', filter: 'drop-shadow(0 1px 1px #000)' }
 const stripNearest: CSSProperties = { position: 'absolute', top: '100%', left: '50%', transform: 'translateX(-50%)', marginTop: 4, whiteSpace: 'nowrap', font: '600 12px system-ui, sans-serif', color: '#fff', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }
+
+/** The car's damage (Car / Damage): a small bar under the speed — amber from 50 % (smoke), red from 90 % (fire). */
+function DamageBar({ game }: { game: Game }) {
+  const d = useStore(game.store, (s) => s.carDamage ?? 0)
+  if (d <= 0) return null
+  const col = d >= 90 ? '#ff4a2a' : d >= 50 ? '#ffb84a' : '#e8e2d2'
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, letterSpacing: 1 }} data-testid="car-damage">
+      <span style={{ opacity: 0.85 }}>DAMAGE</span>
+      <span style={{ width: 120, height: 6, borderRadius: 3, background: 'rgba(0,0,0,0.45)', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.3)' }}>
+        <span style={{ display: 'block', width: `${d}%`, height: '100%', background: col }} />
+      </span>
+      <span style={{ color: col, fontVariantNumeric: 'tabular-nums' }}>{d}%</span>
+    </div>
+  )
+}

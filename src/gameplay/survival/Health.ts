@@ -4,7 +4,7 @@
  */
 export interface DamageEvent {
   amount: number
-  source: 'monster' | 'lightning' | 'fall'
+  source: 'monster' | 'lightning' | 'fall' | 'explosion'
 }
 
 export class Health {

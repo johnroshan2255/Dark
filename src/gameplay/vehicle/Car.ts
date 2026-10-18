@@ -4,6 +4,7 @@ import type { Input } from '../../input/Input'
 import type { WorldFields } from '../../world/WorldFields'
 import type { CharacterModel } from '../player/CharacterModel'
 import { EYE_HEIGHT, type PlayerController } from '../player/PlayerController'
+import { recentreGate } from '../player/CameraController'
 import type { TruckModel } from '../../assets/loadModels'
 import { stylize } from '../../rendering/shaders/stylize'
 import { CHUNK_SIZE } from '../../world/constants'
@@ -13,6 +14,9 @@ import { vehicleDef, type VehicleTuning } from './catalogue'
 import { CarEntry, type EntryPhase } from './CarEntry'
 import { BoatHull, DRAFT, KEEL } from './BoatHull'
 import { resolveSpec } from './drivetrain/spec'
+import { Cockpit } from './Cockpit'
+import { Damage, type DentPart } from './Damage'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { zeroTyre } from '../../assets/loadModels'
 import { sampleSurface } from './drivetrain/surface'
 import { surfaceMix } from './drivetrain/tyre'
@@ -60,7 +64,7 @@ interface Door {
   latched: boolean
 }
 
-export type CarEvent = 'doorOpen' | 'doorSlam' | 'drive' | 'out' | 'fly' | 'boat' | 'clunk' | 'hint'
+export type CarEvent = 'doorOpen' | 'doorSlam' | 'drive' | 'out' | 'fly' | 'boat' | 'clunk' | 'hint' | 'explode'
 
 /** Boat transformation time (s, each way) and the points where a hull part locks home (a clunk). */
 const BOAT_TIME = 2.2
@@ -82,7 +86,6 @@ export class Car {
   private readonly exhaustTips: { at: THREE.Vector3; dir: THREE.Vector3 }[]
   private readonly wheelRadius: number
   private readonly bodyMat: THREE.MeshLambertMaterial
-  private readonly glassMesh: THREE.Mesh
   private readonly steering: THREE.InstancedMesh | null
   private readonly steeringPivot: THREE.Vector3
   private readonly steeringAxis: THREE.Vector3
@@ -215,7 +218,7 @@ if (tyreW > 0.0) {
   float d = dot(transformed, ty.xyz);
   transformed -= ty.xyz * max(d - plane, 0.0) * tyreW;                     // flat contact patch
   float band = smoothstep(plane - 0.45 * uTyreR, plane, d);
-  transformed.x += sign(transformed.x) * ty.w * 0.7 * band * tyreW;        // sidewall bulge
+  transformed.x += sign(transformed.x) * ty.w * 0.45 * band * tyreW;       // sidewall bulge
   transformed.x += uTyreShear[wi] * band * tyreW;                          // cornering shear (0 below HIGH)
 }`)
         .replace('#include <worldpos_vertex>', `#include <worldpos_vertex>
@@ -229,7 +232,7 @@ if (tyreW > 0.0) {
       // not black; white = the model's own colours (stock look).
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
-uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss; uniform float uSnowCoat; uniform float uSandCoat; uniform float uMudCoat;
+uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss; uniform float uSnowCoat; uniform float uSandCoat; uniform float uMudCoat; uniform float uBurn;
 float carCoat = 0.0;
 float dirtHash(vec3 p) { return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
 float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -292,6 +295,13 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
             float snow = clamp(max(max(cap, spray), vTyre * 0.55 * uSnowCoat), 0.0, 0.95);
             diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86, 0.9, 0.97) * (0.9 + 0.12 * nS) * mix(0.85, 1.0, up * 0.5 + 0.5), snow);
             carCoat = max(carCoat, max(snow, sand * 0.8));
+          }
+          // BURNT (Damage: the wreck after the explosion): charred black paint, soot streaks, bare rusty metal.
+          if (uBurn > 0.003) {
+            float nb = dirtNoise(vDirtP * 6.0) * 0.6 + dirtNoise(vDirtP * 19.0) * 0.4;
+            vec3 burnt = mix(vec3(0.03, 0.028, 0.026), vec3(0.16, 0.08, 0.04), smoothstep(0.62, 0.8, nb));
+            diffuseColor.rgb = mix(diffuseColor.rgb, burnt, uBurn * (0.85 + 0.15 * nb));
+            carCoat = max(carCoat, uBurn);
           } }`)
         // GLOSS (MEDIUM+): painted metal catches the sun as a highlight and the sky at grazing angles (Fresnel);
         // rubber and the dirt coat stay matte. Fog applies after it, like the rest of the colour.
@@ -316,11 +326,20 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.bodyMat = stylize(mat, { key: 'truck', rim: 0.14, toon: 0.3 })
     this.bodyMat.name = 'lib/truck'
     // Body as a 1-instance InstancedMesh: it then shares the wheels' (instanced) program → 1 truck program, not 2.
-    const bodyMesh = new THREE.InstancedMesh(truck.body, this.bodyMat, 1)
+    // The CABIN (vehicle_cabin.py: dash, seats, console…) draws with it (not part of the collider: loadModels).
+    // Both faces: from inside, the shell's panels are its inner walls (the Żuk's painted-metal cab).
+    this.bodyMat.side = THREE.DoubleSide
+    this.bodyGeo = truck.cabin ? mergeGeometries([truck.body, truck.cabin], false) ?? truck.body : truck.body
+    this.ownBodyGeo = this.bodyGeo !== truck.body
+    const bodyMesh = new THREE.InstancedMesh(this.bodyGeo, this.bodyMat, 1)
     bodyMesh.setMatrixAt(0, new THREE.Matrix4())
     bodyMesh.frustumCulled = false
-    const glassMesh = (this.glassMesh = new THREE.Mesh(truck.glass, glassMaterial))
-    for (const m of [bodyMesh, glassMesh]) (m.castShadow = true), this.body.add(m)
+    void glassMaterial
+    const glassMesh = new THREE.Mesh(truck.glass.clone(), carGlass()) // (own copy: it dents)
+    this.glassGeo = glassMesh.geometry
+    bodyMesh.castShadow = true
+    glassMesh.renderOrder = 2 // (transparent: after the cabin)
+    for (const m of [bodyMesh, glassMesh]) this.body.add(m)
     this.wheelPos = truck.wheelPos
     this.half = truck.half
     this.wheelRadius = truck.wheelRadius
@@ -351,18 +370,39 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     for (const d of truck.doors) {
       const pivot = new THREE.Group()
       pivot.position.set(...d.hinge)
-      const skin = new THREE.InstancedMesh(d.body, this.bodyMat, 1)
+      // (own copies of the door geometry: the dents of this car are not the next car's)
+      const skin = new THREE.InstancedMesh(d.body.clone(), this.bodyMat, 1)
       skin.setMatrixAt(0, new THREE.Matrix4())
       skin.frustumCulled = false
       skin.castShadow = true
       pivot.add(skin)
-      const glass = d.glass ? new THREE.Mesh(d.glass, glassMaterial) : null
-      if (glass) pivot.add(glass)
+      const glass = d.glass?.getAttribute('position') ? new THREE.Mesh(d.glass.clone(), carGlass()) : null
+      if (glass) (glass.renderOrder = 2), pivot.add(glass)
       this.body.add(pivot)
       this.doorMeshes.push(skin)
       this.doors.push({ side: d.side, length: d.length, pivot, glass, angle: 0, vel: 0, latched: true })
     }
     const def = vehicleDef(truck.id)
+    // COCKPIT (first person): gauges drawn like the real dash, pedals, gear lever and wipers that move.
+    this.cockpit = new Cockpit(truck, this.bodyMat, def.spec.published?.topSpeed ? Math.ceil((def.spec.published.topSpeed * 1.25) / 20) * 20 : 160,
+      Math.ceil((def.spec.power.redline ?? def.spec.power.powerRpm * 1.08) / 1000 + 0.5) * 1000, def.spec.transmission.kind !== 'manual')
+    this.body.add(this.cockpit.root)
+    this.manualBox = def.spec.transmission.kind === 'manual'
+    // DAMAGE (gameplay/vehicle/Damage): dents on the shell, the doors and the glass; the dented shape is the collider.
+    const parts: DentPart[] = [
+      { geo: this.bodyGeo, toLocal: new THREE.Matrix4(), collider: true, count: truck.body.getAttribute('position').count },
+      { geo: this.glassGeo, toLocal: new THREE.Matrix4(), collider: true },
+    ]
+    for (const d of this.doors) {
+      const toLocal = new THREE.Matrix4().makeTranslation(-d.pivot.position.x, -d.pivot.position.y, -d.pivot.position.z)
+      const skin = d.pivot.children[0] as THREE.Mesh
+      parts.push({ geo: skin.geometry, toLocal, collider: true })
+      if (d.glass?.geometry.getAttribute('position')) parts.push({ geo: d.glass.geometry, toLocal, collider: true })
+    }
+    this.damage = new Damage(parts, new THREE.Vector3(0, truck.bottom + truck.half.y, (truck.front + truck.rear) / 2), new THREE.Vector3(truck.half.x, truck.half.y, truck.half.z))
+    this.damage.onCollider = (tris) => this.sim.replaceMesh(tris)
+    this.damage.onHit = (amount, at, sev) => this.onDamage?.(amount, at.clone().applyMatrix4(this.root.matrixWorld), sev)
+    this.engineAt.set(0, truck.bottom + truck.half.y * 1.05, truck.front * 0.78) // (bonnet height, ahead of the cab)
     this.exhaustTips = def.exhaust?.length
       ? def.exhaust.map((e) => ({ at: new THREE.Vector3(...e.at), dir: new THREE.Vector3(...e.dir).normalize() }))
       : [{ at: new THREE.Vector3(-0.42, 0.3, truck.half.z * 0.96), dir: new THREE.Vector3(0, 0, 1) }]
@@ -613,6 +653,7 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
   /** E: get in (walk to the door…) / get out (…or bail at speed). Returns whether anything started. */
   toggle(): boolean {
     const p = this.player
+    if (this.damage.wrecked && !this.driving) return this.say('It’s a burnt-out wreck')
     if (this.driving) {
       if (this.sim.afloat) return this.say("You can't get out on the water — reach the shore first")
       const v = this.sim.body.linvel()
@@ -728,7 +769,19 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     uSnowCoat: { value: 0 },
     uSandCoat: { value: 0 },
     uMudCoat: { value: 0 },
+    uBurn: { value: 0 },
   }
+  /** Run `fn` with the dirt / mud / sand / snow coats off (the garage's photo shows the paint as it is). */
+  clean<T>(fn: () => T): T {
+    const u = this.tyreU, keep = [u.uDirt.value, u.uMudCoat.value, u.uSandCoat.value, u.uSnowCoat.value]
+    u.uDirt.value = u.uMudCoat.value = u.uSandCoat.value = u.uSnowCoat.value = 0
+    try {
+      return fn()
+    } finally {
+      ;[u.uDirt.value, u.uMudCoat.value, u.uSandCoat.value, u.uSnowCoat.value] = keep
+    }
+  }
+
   /** Wet mud under the wheels 0..1 (mud tracks' wet stretches, wet off-road ground) — VehicleFx flings clumps. */
   get mudLevel(): number {
     const w = this.dirtMix.w
@@ -869,7 +922,12 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
   /** Fixed step (60 Hz), called inside physics.advance before world.step(). */
   fixedUpdate(dt: number): void {
     const i = this.input
-    const drive = this.driving && !this.player.dead
+    {
+      const lv = this.sim.body.linvel(), r = this.sim.body.rotation()
+      this.damage.step(dt, _dvel.set(lv.x, lv.y, lv.z), _dq.set(r.x, r.y, r.z, r.w), -this.physics.world.gravity.y, !this.flyOn && !this.boatOn && this.sim.enabled)
+      if (this.damage.level >= 100 && !this.damage.wrecked) this.explode()
+    }
+    const drive = this.driving && !this.player.dead && !this.damage.wrecked
     const c = this.sim.controls
     // BOTH PEDALS (Simulation): W + S = the gas AND the foot brake — left-foot braking, or at a standstill a
     // brake-stand BURNOUT (Drivetrain: the front-biased brakes hold the fronts, the engine spins the driven rears).
@@ -1066,12 +1124,15 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
       _e.set(rightSide ? -spin : spin, (rightSide ? Math.PI : 0) - w[k].steer * (1 - flat / (Math.PI / 2)), 0, 'YXZ')
       // Bigger tyres: scaled about the hub, hub raised so the tread stays on the ground (as in the sim).
       const hx = x - Math.sign(x) * tuck * 0.8 * this.inboard
-      // TYRE SQUASH from the wheel's real load (skills/realistic-vehicle-system §8.9): s0 = 12 % of the sidewall at
-      // the static load, up to 2.5 s0 (load transfer, landings, stones); the hub drops by it so the flattened
-      // patch stays on the ground. Eased over ~40 ms (the shader shows it, the physics radius is unchanged).
-      const s0 = 0.12 * (1 - this.rimRatio) * this.wheelRadius
+      // TYRE SQUASH from the wheel's real load (skills/realistic-vehicle-system §8.9): s0 = 6 % of the sidewall at
+      // the static load; a stiff (pumped-up, 2–2.4 bar) tyre: only 40 % of it follows the load, up to 1.5 s0 — the
+      // softer suspension's load swings made a 12 %, fully load-following squash pump like a balloon. The hub drops
+      // by it so the flattened patch stays on the ground. Eased over ~80 ms (the shader shows it, the physics radius
+      // is unchanged).
+      const s0 = 0.06 * (1 - this.rimRatio) * this.wheelRadius
       const load = w[k].contact ? this.sim.wheelLoad(k) / Math.max(1, this.sim.wheelLoadStatic(k)) : 0
-      this.squash[k] += (Math.min(2.5 * s0, s0 * load) * (1 - fold) - this.squash[k]) * Math.min(1, dt * 25)
+      const sq = w[k].contact ? s0 * Math.min(1.5, 0.6 + 0.4 * load) : 0
+      this.squash[k] += (sq * (1 - fold) - this.squash[k]) * Math.min(1, dt * 12)
       const hy = y + w[k].lift + (this.tyre - 1) * this.wheelRadius + tuck * this.wheelRadius * 0.55 - this.squash[k] * this.tyre
       this.hubs[k].set(hx + (x * 0.42 - hx) * slide, hy + (this.hull.discY - hy) * slide, z)
       _q.setFromEuler(_e).premultiply(_q2.setFromAxisAngle(_z, rightSide ? -flat : flat))
@@ -1116,16 +1177,15 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.lastSpeed = sp
     this.updateEntry(dt)
     this.updateDoors(dt)
-    const hideGlass = this.driving && !this.showDriver
-    this.glassMesh.visible = !hideGlass
-    for (const d of this.doors) if (d.glass) d.glass.visible = !hideGlass
+    // (real glass now: seen from inside too — it no longer hides in first person)
+    this.updateCockpit(dt)
     if (this.driving) {
       // Arcade: back to the heading when not looking around (+ Game's arcade chase). Simulation: CameraController
       // recentres (chase yaw in third person, the look carried with the chassis in first).
       if (this.sim.arcade && p.lookIdle > 0.6) {
         let d = this.heading - p.yaw
         d = Math.atan2(Math.sin(d), Math.cos(d))
-        p.yaw += d * Math.min(1, dt * 3)
+        p.yaw += d * Math.min(1, dt * 3) * recentreGate(this.sim.speed)
       }
       // The spot light becomes the headlights (Game gates it by `lights`).
       this.headlamp(flashOrigin, flashTarget)
@@ -1284,7 +1344,73 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     a.instanceMatrix.needsUpdate = true
   }
 
+  /** Damage 0 … 1 (0.5: the engine smokes, 0.9: it burns, 1: it blew up — VehicleFx, Game). */
+  get damageLevel(): number {
+    return this.damage.level / 100
+  }
+  get wrecked(): boolean {
+    return this.damage.wrecked
+  }
+  /** Seconds since the explosion (the wreck burns, then smoulders). */
+  wreckTime = 0
+  /** The engine bay (car space): where the smoke and the fire come from. */
+  readonly engineAt = new THREE.Vector3()
+  /** The engine bay in world space. */
+  engineWorld(out: THREE.Vector3): THREE.Vector3 {
+    return out.copy(this.engineAt).applyMatrix4(this.root.matrixWorld)
+  }
+  /** A crash hit the car: damage added (%), world contact point, severity (m/s over the threshold). */
+  onDamage: ((amount: number, at: THREE.Vector3, severity: number) => void) | null = null
+  private readonly damage: Damage
+  private readonly glassGeo: THREE.BufferGeometry
+
+  /** 100 %: the fuel goes up — anyone inside is thrown out, the car is thrown up, it burns, then smoulders black. */
+  private explode(): void {
+    this.damage.wrecked = true
+    this.wreckTime = 0
+    this.forceOut()
+    this.tyreU.uBurn.value = 1
+    this.lights = false
+    const m = this.tune.mass
+    this.sim.body.applyImpulse({ x: (Math.random() - 0.5) * m * 2, y: m * 6.5, z: (Math.random() - 0.5) * m * 2 }, true)
+    this.sim.body.applyTorqueImpulse({ x: (Math.random() - 0.5) * m * 3, y: (Math.random() - 0.5) * m * 1.5, z: (Math.random() - 0.5) * m * 3 }, true)
+    this.onEvent?.('explode')
+  }
+
+  /** Crash damage from outside (e.g. tests): car-space direction centre → contact, severity m/s over the threshold. */
+  crash(dir: THREE.Vector3, severity: number): void {
+    this.damage.hit(dir.clone().normalize(), severity)
+    if (this.damage.level >= 100 && !this.damage.wrecked) this.explode()
+  }
+
+  /** Wiper speed 0 … 1 (Game: from the rain while you drive). */
+  wipers = 0
+  private readonly cockpit: Cockpit
+  private readonly bodyGeo: THREE.BufferGeometry
+  private readonly ownBodyGeo: boolean
+  private readonly manualBox: boolean
+
+  private updateCockpit(dt: number): void {
+    if (this.damage.wrecked) this.wreckTime += dt
+    const D = this.sim.drivetrain, c = this.sim.controls
+    const manual = this.manualBox
+    this.cockpit.update(dt, {
+      kmh: Math.abs(this.sim.speed) * 3.6,
+      rpm: D ? D.rpm : this.driving ? 900 + Math.abs(this.sim.speed) * 90 : 0,
+      gear: D ? D.gearLabel : this.driving ? 'D' : 'P',
+      throttle: Math.max(0, c.throttle),
+      brake: c.brake || (c.footBrake ?? 0) > 0 || c.throttle < -0.05 ? 1 : 0,
+      clutch: manual && D ? 1 - D.clutch : 0,
+      lights: this.lights,
+      wipers: this.driving ? this.wipers : 0,
+      visible: this.driving && !this.showDriver,
+    })
+  }
+
   dispose(): void {
+    this.cockpit.dispose()
+    if (this.ownBodyGeo) this.bodyGeo.dispose()
+    this.glassGeo.dispose()
     this.forceOut()
     this.root.removeFromParent()
     this.lamps.geometry.dispose()
@@ -1293,7 +1419,8 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.wheels.dispose()
     for (const b of this.brakes) b?.dispose()
     this.steering?.dispose()
-    for (const m of this.doorMeshes) m.dispose()
+    for (const m of this.doorMeshes) (m.geometry.dispose(), m.dispose())
+    for (const d of this.doors) d.glass?.geometry.dispose()
     for (const m of [this.axles, this.rods, this.springs, this.jets]) (m.geometry.dispose(), m.dispose())
     this.hull.dispose()
     this.jetMat.dispose()
@@ -1354,3 +1481,33 @@ const _q2 = new THREE.Quaternion()
 const _h = new THREE.Vector3()
 const _one = new THREE.Vector3(1, 1, 1)
 const _s = new THREE.Vector3(1, 1, 1)
+
+/**
+ * CAR GLASS (all cars, shared): see-through tinted glass — the cabin shows through it, the world through it from
+ * inside — and no reflections (the art direction's "just real"). UNLIT: real tinted glass darkens what is behind it
+ * (a lit pane read as a milky, dirty window in the sun); a little more at grazing angles, as glass does. Both sides,
+ * drawn after the cabin without writing depth. One small transparent program.
+ */
+let _glass: THREE.MeshBasicMaterial | null = null
+function carGlass(): THREE.MeshBasicMaterial {
+  if (_glass) return _glass
+  const m = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.035, 0.05, 0.06), transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide })
+  m.onBeforeCompile = (sh) => {
+    // (MeshBasic has no normals of its own: the attribute, into view space, for the grazing-angle term)
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', `#include <common>
+varying vec3 vGlassN; varying vec3 vGlassV;`)
+      .replace('#include <project_vertex>', `#include <project_vertex>
+vGlassN = normalize(normalMatrix * normal); vGlassV = -mvPosition.xyz;`)
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', `#include <common>
+varying vec3 vGlassN; varying vec3 vGlassV;`)
+      .replace('#include <opaque_fragment>', `{ float g = 1.0 - abs(dot(normalize(vGlassN), normalize(vGlassV)));
+  diffuseColor.a = clamp(diffuseColor.a + 0.45 * g * g * g, 0.0, 0.8); }
+#include <opaque_fragment>`)
+  }
+  m.customProgramCacheKey = () => 'car-glass2'
+  m.name = 'lib/carGlass'
+  return (_glass = m)
+}
+const _dvel = new THREE.Vector3(), _dq = new THREE.Quaternion()

@@ -638,8 +638,9 @@ f = √(k/s_w)/2π    ζ = c/(2√(k·s_w))    sag = s_w·g/k      →  k = s_w(
 Tie-rods follow the steer angle. Anti-roll bars are drawn on HIGH.
 
 **Tyre deformation** (visual only; implemented — `Car.ts` shader + `tyreW` from the loader, `rim` extra):
-- Per wheel: `squash = clamp(s0·Fz/Fz_static, 0, 2.5·s0)`, s0 = 12 % of the sidewall height ((1 − rim ratio)·r:
-  ≈ 2.3 cm on the trucks' 31–36″ tyres), eased over ~40 ms, and `shear = −clamp(Fy/max(Fz, 1), −1, 1)·0.03` (HIGH;
+- Per wheel: `squash = s0·min(1.5, 0.6 + 0.4·Fz/Fz_static)` (0 off the ground), s0 = 6 % of the sidewall height
+  ((1 − rim ratio)·r: ≈ 1.2 cm on the trucks' 31–36″ tyres), eased over ~80 ms — a pumped-up tyre barely changes
+  with load (12 % fully load-following looked like a balloon), sidewall bulge 0.45·squash, and `shear = −clamp(Fy/max(Fz, 1), −1, 1)·0.03` (HIGH;
   the patch trails opposite the cornering force; negated on the right wheels).
 - Lower the rendered hub by `squash`.
 - Shader inputs: `uTyre[k] = vec4(wheel-local down, squash/scale)`, `uTyreR` = tread radius, per-vertex
@@ -682,7 +683,7 @@ a low hiss on grass / sand / snow) — `TruckSim.tyreNoise()` → `AudioSystem` 
 **Paint grade** (catalogue `grade`): toy-bright model textures are graded toward weathered real paint at load
 (saturation × 0.5–0.55, brightness × 0.88–0.9), rust and grime kept.
 
-**Working-vehicle details** (`scripts/blender/vehicle_details.py`, after the wheels): kit per car in metres from the
+**Working-vehicle details** (`scripts/blender/vehicle_details.py`, after the wheels — its kit is REMOVED again by the cabin step below: the player asked for the vehicles only): kit per car in metres from the
 wheels and the body (heights / widths measured locally: a central strip for the roof, the sill band for sliders,
 so antennas and mirrors don't throw it): pickup — LED light bar on the cage, spotlights + winch on the bull bar,
 spare + jerrycans + toolbox in the bed, rock sliders, snorkel, tow hitch; G500 — the rear spare in a
@@ -704,6 +705,23 @@ made the cars read as toys), a DIRT coat by height above the ground (thick on ty
 by noise, thickening off-road, washed by rain, tinted by the ground under the car — mud, desert dust, snow slush)
 and paint GLOSS on MEDIUM+ (sun highlight + sky Fresnel; none under dirt or on rubber). Coil springs are black,
 not toy-blue.
+
+**Cabin, glass and cockpit** (`scripts/blender/vehicle_cabin.py`, MODE=BUILD, after the details; SRC = the
+pre-cabin GLBs, never the game folder it writes — a re-run would stack a second cockpit). The `acc_*` kit is
+REMOVED (the cars carry only their own parts). Every window face goes on ONE material `glass` (the Żuk's painted
+windows — dark low-saturation texels in the window band — become real glass). Built from the measured frame and
+rays cast from the game's eye (`Car.eyeLocal`): `steering_wheel` rebuilt (Hilux 4-spoke grey, G-Class 3-spoke
+leather + star, Żuk thin 2-spoke bus wheel), `cab_<car>` static cabin (Żuk: dash up to the screen, engine hump,
+seats, benches, floor, visors, mirror; G500: vents, grab handle, console + wood, diff-lock buttons), `dial_<car>`
+gauge faces UV-mapped onto a canvas (material `dial`), and moving parts with `pivot` / `axis` extras:
+`pedal_gas|brake|clutch`, `gear_lever`, `wiper_L|R`. Totals: pickup 18.1 k, Żuk 24.5 k, G500 39.0 k (its hidden
+underbody decimated to fit), ≤ 12 materials. In game: `loadModels` keeps the cabin out of the collider and puts the
+controls in pivot space; `Cockpit.ts` draws the instruments like the real dash (Hilux round speedo + tacho, Żuk
+cream speedo + lamp strip, G-Class wide twin screen) only when they change and only in first person (≤ 15 Hz), and
+moves the pedals (throttle / brake / clutch), the lever (H gate / P R N D) and the wipers (with the rain). The body
+draws both faces (from inside the shell is the cab's walls); `carGlass` is UNLIT tinted glass (a lit pane read as a
+milky window), visible from inside — first person no longer hides it. Cost: +1 draw (dials) + ≤ 6 small control
+draws, 1 transparent program.
 
 **Openings:** each door/hood/trunk swings on its hinge (or slides) from the extras. It is held by the entry
 animation, latched shut, or swinging free from the car's acceleration and the wind, and slams.
@@ -751,9 +769,17 @@ animation, latched shut, or swinging free from the car's acceleration and the wi
   returns, each wheel's ω set to the ground speed and the box back in gear. The handoff is the same for every car;
   the only per-car boat data is the fitted hull. Tested: keel crawl ≤ 16 km/h with the hull out, drives off after.
 
-- **Damage:** contact impulses → dent amount per zone (front/rear/left/right), drawn as a vertex offset weighted by
-  a baked `zone` attribute (+0 draws). A lamp goes dark when its zone passes a threshold. Mechanical effects only
-  with a gameplay reason.
+- **Damage (GTA-style, `gameplay/vehicle/Damage.ts`):** an impact = the chassis' velocity change over the last 4
+  fixed steps (67 ms) with gravity added back, above 6 m/s (tyres, brakes and suspension never change it that fast;
+  walls, trees, rocks and hard landings do) → damage ≈ 4 % per m/s over (≤ 45 % a hit, 0.3 s cooldown; a 12 m drop ≈
+  24 %). The hit DENTS the car where the push came from: shell, door and glass vertices within 0.35–0.95 m of the
+  contact (body box exit along −Δv) move inward up to 24 cm with crumple noise, flat normals on the crumpled faces
+  (each car has its own geometry copies). 0.4 s after the last hit the exact trimesh collider is rebuilt from the
+  dented shape (`VehicleSim.replaceMesh`). 50 %: the engine bay smokes (VehicleFx `engine`), 90 %: it burns (+ HUD
+  warnings, the DAMAGE bar under the speedometer), 100 %: it EXPLODES — fireball / smoke / debris burst, a boom,
+  anyone within 9 m hurt (the driver, thrown out, ~90), the car thrown up and burnt black (`uBurn` in the car
+  shader), undrivable; 12 s later a fresh car of the same model waits on the road (`Game.respawnCar`). Cost: a
+  velocity ring per step; a dent ≈ 1–3 ms CPU; a collider rebuild ≈ 5–20 ms (only after hits).
 - **Co-op** (host-authoritative, `skills/multiplayer`):
   - The host simulates; drivers send inputs.
   - Per car at 20 Hz: position, smallest-three rotation, velocity, per wheel {lift i8, steer i8, ω i16},

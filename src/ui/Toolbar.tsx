@@ -22,7 +22,9 @@ export function Toolbar({ game }: { game: Game }) {
 }
 
 const bar: CSSProperties = { position: 'fixed', bottom: 36, right: 8, display: 'flex', gap: 6, zIndex: 11 }
+// (the front end's dusk glass — ui/theme.ts — small)
 const btn: CSSProperties = {
-  padding: '6px 10px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(0,0,0,0.45)',
-  color: '#dfe3e6', font: '600 11px ui-monospace, Menlo, monospace', cursor: 'pointer',
+  padding: '7px 12px', borderRadius: 999, border: '1px solid rgba(255,214,170,0.24)', background: 'rgba(28,24,52,0.62)',
+  color: '#fff4e3', font: '700 11px system-ui, -apple-system, "Segoe UI", sans-serif', letterSpacing: 0.6, cursor: 'pointer',
+  backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', boxShadow: '0 4px 14px rgba(10,6,24,0.3)',
 }

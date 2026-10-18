@@ -68,10 +68,34 @@ export function landmarkName(l: Landmark): string {
   return n[Math.floor(l.variant * n.length) % n.length]
 }
 
+const NONE: Landmark[] = []
+
 export class LandmarkField {
-  private readonly cache = new Map<string, Landmark[]>()
+  private readonly cache = new Map<number, Landmark[]>()
   private homeMark: Landmark | null | undefined
+  /**
+   * REMOTE (the main thread's field): never PLACES landmarks itself — placing one asks for the rock formations and
+   * the road network around it (A* driveways, 0.3–2 s per new area), which froze the game for seconds while flying
+   * and at load. A worker places them (LandmarkSystem) and `prime`s this cache; a region not primed yet reads as
+   * empty (not cached) and `home()` as null until it arrives.
+   */
+  remote = false
   constructor(private readonly host: LandmarkHost) {}
+
+  /** Is region (ci, cj) known (placed here or primed)? */
+  has(ci: number, cj: number): boolean {
+    return this.cache.has(ci * 131072 + cj)
+  }
+
+  /** Store a region's landmarks placed elsewhere (the worker's) — the same deterministic list. */
+  prime(ci: number, cj: number, list: Landmark[]): void {
+    if (this.cache.size > 2000) this.cache.clear()
+    this.cache.set(ci * 131072 + cj, list)
+  }
+
+  primeHome(l: Landmark | null): void {
+    this.homeMark = l
+  }
 
   /** Footprint check: dry, clear of road / river / places / formations; returns the base height or null. */
   private fit(x: number, z: number, r: number): number | null {
@@ -107,6 +131,7 @@ export class LandmarkField {
    */
   home(): Landmark | null {
     if (this.homeMark !== undefined) return this.homeMark
+    if (this.remote) return null
     const h = this.host, s = h.seed
     this.homeMark = null
     // Visible from the spawn wins over merely high; with no visible spot, the best hidden one.
@@ -142,9 +167,10 @@ export class LandmarkField {
   }
 
   region(ci: number, cj: number): Landmark[] {
-    const key = `${ci},${cj}`
+    const key = ci * 131072 + cj
     let list = this.cache.get(key)
     if (list) return list
+    if (this.remote) return NONE
     list = []
     const h = this.host, s = h.seed
     const hm = this.home()

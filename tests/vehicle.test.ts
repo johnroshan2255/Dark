@@ -7,6 +7,7 @@
 import { group, Groups, PhysicsWorld } from '../src/physics/PhysicsWorld'
 import { BikeSim, TruckSim, type Controls } from '../src/gameplay/vehicle/VehicleSim'
 import { CarEntry, DOOR_OPEN } from '../src/gameplay/vehicle/CarEntry'
+import { bodyHulls, triangles } from '../src/gameplay/vehicle/hulls'
 import * as THREE from 'three'
 
 let failures = 0
@@ -76,6 +77,61 @@ function turned(s: TruckSim | BikeSim): { step: () => void; total: () => number 
   let stop = NaN, tStop = NaN
   run(p, t, 8, { throttle: -1 }, (s) => { if (Number.isNaN(stop) && t.speed < 0.5) (stop = Math.abs(pos(t).z - z0)), (tStop = s) })
   check('truck brakes from top speed', stop > 15 && stop < 70, `${v0.toFixed(1)} m/s → stop in ${stop.toFixed(1)} m / ${tStop.toFixed(1)} s, then reverses (${t.speed.toFixed(1)} m/s)`)
+  p.dispose()
+}
+{
+  // Bumper boxes start at the model's overhang underside (a frame-height box under a high bumper caught stones the
+  // tyre should climb); no overhang given → the frame height.
+  const p = world()
+  const low = (t: TruckSim, front: boolean) => {
+    let best = { z: 0, y: 0 }
+    for (let i = 0; i < t.body.numColliders(); i++) {
+      const c = t.body.collider(i), at = c.translationWrtParent()!, he = c.halfExtents()
+      if (front ? at.z < best.z : at.z > best.z) best = { z: at.z, y: at.y - he.y }
+    }
+    return best.y
+  }
+  const a = new TruckSim(p, { ...TRUCK, overhang: { front: 0.62, rear: 0.52 } })
+  const b = new TruckSim(p, TRUCK)
+  check('bumper colliders follow the body overhang', Math.abs(low(a, true) - 0.6) < 0.01 && Math.abs(low(a, false) - 0.5) < 0.01 && Math.abs(low(b, true) - 0.34) < 0.01,
+    `front ${low(a, true).toFixed(2)} rear ${low(a, false).toFixed(2)} default ${low(b, true).toFixed(2)} m`)
+  p.dispose()
+}
+{
+  // EXACT BODY: the car's collider is its mesh as a trimesh — a ray meets it where it meets the mesh (to float
+  // precision); the BACKSTOP hulls (gameplay/vehicle/hulls) sit strictly inside the body, clear of the wheel arches.
+  const g = new THREE.BoxGeometry(1.9, 1.4, 4.6, 5, 4, 11).translate(0, 1.05, 0)
+  const mesh = triangles([{ position: g.getAttribute('position').array, index: g.index!.array }])
+  const wheels = [[-0.85, 0.44, -1.4], [0.85, 0.44, -1.4], [-0.85, 0.44, 1.4], [0.85, 0.44, 1.4]] as [number, number, number][]
+  const hulls = bodyHulls(mesh, wheels.map((hub) => ({ hub, radius: 0.44, halfWidth: 0.15 })), 0.3)
+  const p = world()
+  const t = new TruckSim(p, { ...TRUCK, wheelPos: wheels, wheelRadius: 0.44, mesh, hulls })
+  t.place(0, 0, 0, 0)
+  run(p, t, 1.5, {})
+  // rays in the body's own frame (it settles with a trace of pitch)
+  const bt = t.body.translation(), br = t.body.rotation()
+  const q = new THREE.Quaternion(br.x, br.y, br.z, br.w), o = new THREE.Vector3(bt.x, bt.y, bt.z)
+  const cast = (from: [number, number, number], dir: [number, number, number]) =>
+    p.world.castRay(new R.Ray(new THREE.Vector3(...from).applyQuaternion(q).add(o), new THREE.Vector3(...dir).applyQuaternion(q)), 10, true,
+      undefined, undefined, undefined, undefined, (c) => c.parent() === t.body && c.shape.type === R.ShapeType.TriMesh)
+  let worst = 0, rays = 0
+  for (let i = 0; i <= 10; i++) for (let j = 0; j <= 10; j++) {
+    // straight down onto the roof (y 1.75) and in from the side (x 0.95), over the body
+    const x = -0.9 + 0.18 * i, z = -2.2 + 0.44 * j, y = 0.45 + 0.12 * i
+    const down = cast([x, 5, z], [0, -1, 0])
+    const side = cast([5, y + 0.3, z], [-1, 0, 0])
+    if (down) (worst = Math.max(worst, Math.abs(5 - down.timeOfImpact - 1.75))), rays++
+    if (side) (worst = Math.max(worst, Math.abs(5 - side.timeOfImpact - 0.95))), rays++
+  }
+  check('car collider IS its mesh (rays meet it at the mesh surface)', rays > 200 && worst < 1e-4, `${rays} rays, worst ${(worst * 1000).toFixed(3)} mm`)
+  let outside = 0, inArch = 0, pts = 0
+  for (const h of hulls) for (let s = 0; s < h.length; s += 3) {
+    const [x, y, z] = [h[s], h[s + 1], h[s + 2]]
+    pts++
+    if (Math.abs(x) > 0.95 - 0.015 || y < 0.35 + 0.015 || y > 1.75 - 0.015 || Math.abs(z) > 2.3 - 0.015) outside++
+    if (Math.abs(x) > 0.85 - 0.15 - 0.04 && y < 1.18 && wheels.some((w) => Math.abs(z - w[2]) < 0.5)) inArch++
+  }
+  check('backstop hulls sit inside the body (≥ 1.5 cm), clear of the wheel arches', hulls.length > 0 && outside === 0 && inArch === 0, `${hulls.length} hulls, ${pts} points: ${outside} within 1.5 cm of the surface, ${inArch} in arches`)
   p.dispose()
 }
 {

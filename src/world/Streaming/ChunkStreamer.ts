@@ -1,6 +1,7 @@
 import type { ChunkData } from '../types'
 import { chunkKey } from '../types'
 import type { ChunkRequest } from './chunk.worker'
+import type { RoadExport } from '../Road/RoadNetwork'
 import { groundPalette } from '../../rendering/artStyle'
 
 interface Job {
@@ -24,6 +25,8 @@ export class ChunkStreamer {
   private nextId = 1
   private dirty = false
   genMsAvg = 0
+  /** Road lists a worker built with its chunk (RoadNetwork.exportNew) — the main thread's fields import them. */
+  onRoads: ((roads: RoadExport) => void) | null = null
 
   constructor(
     private readonly seed: number,
@@ -32,7 +35,16 @@ export class ChunkStreamer {
   ) {
     for (let i = 0; i < workerCount; i++) {
       const w = new Worker(new URL('./chunk.worker.ts', import.meta.url), { type: 'module' })
-      w.onmessage = (e: MessageEvent<{ id: number; data: ChunkData }>) => this.receive(w, e.data.id, e.data.data)
+      w.onmessage = (e: MessageEvent<{ id: number; data: ChunkData; roads: RoadExport | null }>) => {
+        if (e.data.roads) {
+          this.onRoads?.(e.data.roads)
+          // …and to the OTHER workers: each built the same deterministic roads on its own (a fresh world's first
+          // chunks ran the whole network's A* round the spawn three times over, side by side — 3× the CPU, ~3× slower).
+          for (const o of this.workers) if (o !== w) o.postMessage({ type: 'roads', roads: e.data.roads })
+        }
+        this.warm = true
+        this.receive(w, e.data.id, e.data.data)
+      }
       w.onerror = (e) => console.error('[ChunkStreamer] worker error', e.message)
       this.workers.push(w)
       this.idle.push(w)
@@ -66,12 +78,16 @@ export class ChunkStreamer {
     if (this.queue.length !== before) this.dirty = true
   }
 
+  /** A first chunk has arrived (its roads went to every worker). Until then ONE job runs at a time: the others would
+   *  only build the same road network again in parallel. */
+  private warm = false
+
   pump(): void {
     if (this.dirty) {
       this.queue.sort((a, b) => b.priority - a.priority) // pop() takes highest priority = nearest
       this.dirty = false
     }
-    while (this.idle.length && this.queue.length) {
+    while (this.idle.length && this.queue.length && (this.warm || this.inFlight.size === 0)) {
       const job = this.queue.pop()!
       const w = this.idle.pop()!
       const id = this.nextId++

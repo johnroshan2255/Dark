@@ -95,9 +95,11 @@ export const CLASS_DEFAULTS: Record<VehicleClass, ClassDefaults> = {
   supercar: { layout: 'MR', com: 0.44, cdA: 0.6, rideHz: 2.0, zeta: [0.4, 0.65], steerRatio: 12, g1: 3.1, gTop: 0.75, tyre: 'performance', susp: ['double-wishbone', 'double-wishbone'], aids: 'std', roll: 1.5 * deg, wheelMass: 22 },
   muscle: { layout: 'FR', com: 0.52, cdA: 0.7, rideHz: 1.4, zeta: [0.3, 0.55], steerRatio: 16, g1: 3.0, gTop: 0.7, tyre: 'performance', susp: ['double-wishbone', 'solid-coil'], aids: 'std', roll: 3 * deg, wheelMass: 22 },
   suv: { layout: 'AWD-on-demand', com: 0.65, cdA: 0.95, rideHz: 1.4, zeta: [0.3, 0.5], steerRatio: 16, g1: 4.2, gTop: 0.7, tyre: 'road', susp: ['macpherson', 'multi-link'], aids: 'full', roll: 3.5 * deg, wheelMass: 24 },
-  pickup: { layout: 'part-time-4WD', com: 0.68, cdA: 1.2, rideHz: 1.6, zeta: [0.3, 0.55], steerRatio: 18, g1: 4.0, gTop: 0.8, tyre: 'at', susp: ['double-wishbone', 'solid-leaf'], aids: 'full', roll: 5.5 * deg, wheelMass: 28 },
-  offroader: { layout: 'AWD-permanent', com: 0.75, cdA: 1.5, rideHz: 1.5, zeta: [0.3, 0.5], steerRatio: 18, g1: 4.4, gTop: 0.75, tyre: 'mt', susp: ['solid-coil', 'solid-coil'], aids: 'full', roll: 6 * deg, wheelMass: 40 },
-  van: { layout: 'FR', com: 0.75, cdA: 1.3, rideHz: 1.6, zeta: [0.3, 0.55], steerRatio: 20, g1: 4.0, gTop: 0.8, tyre: 'road', susp: ['macpherson', 'solid-leaf'], aids: 'full', roll: 6 * deg, wheelMass: 22 },
+  // (pickup / offroader / van: ζ 0.3 / 0.5 like the SUV — at 0.25 / 0.42 a kick overshot 45 % and a bump left the body
+  // pitching for 4–5 swings: springy)
+  pickup: { layout: 'part-time-4WD', com: 0.68, cdA: 1.2, rideHz: 1.3, zeta: [0.3, 0.5], steerRatio: 18, g1: 4.0, gTop: 0.8, tyre: 'at', susp: ['double-wishbone', 'solid-leaf'], aids: 'full', roll: 5.5 * deg, wheelMass: 28 },
+  offroader: { layout: 'AWD-permanent', com: 0.75, cdA: 1.5, rideHz: 1.3, zeta: [0.3, 0.5], steerRatio: 18, g1: 4.4, gTop: 0.75, tyre: 'mt', susp: ['solid-coil', 'solid-coil'], aids: 'full', roll: 6 * deg, wheelMass: 40 },
+  van: { layout: 'FR', com: 0.75, cdA: 1.3, rideHz: 1.35, zeta: [0.3, 0.5], steerRatio: 20, g1: 4.0, gTop: 0.8, tyre: 'road', susp: ['macpherson', 'solid-leaf'], aids: 'full', roll: 6 * deg, wheelMass: 22 },
   ev: { layout: 'FR', com: 0.48, cdA: 0.58, rideHz: 1.4, zeta: [0.3, 0.55], steerRatio: 14, g1: 9, gTop: 9, tyre: 'road', susp: ['double-wishbone', 'multi-link'], aids: 'std', roll: 2.5 * deg, wheelMass: 22 },
   rally: { layout: 'AWD-permanent', com: 0.48, cdA: 0.7, rideHz: 1.8, zeta: [0.35, 0.6], steerRatio: 11, g1: 3.2, gTop: 0.95, tyre: 'at', susp: ['macpherson', 'macpherson'], aids: 'off', roll: 2.5 * deg, wheelMass: 18 },
 }

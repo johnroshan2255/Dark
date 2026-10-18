@@ -10,6 +10,7 @@ import { SettingsPanel } from '../ui/SettingsPanel'
 import { MainMenu } from '../ui/MainMenu'
 import { Garage } from '../ui/Garage'
 import { Toolbar } from '../ui/Toolbar'
+import { KeyArt } from '../ui/KeyArt'
 import { GameCanvas } from './Canvas'
 import { bootError, bootFinish, bootProgress } from './boot'
 import { ART_STYLES } from '../rendering/artStyle'
@@ -64,22 +65,15 @@ export function App() {
     }
   }, [])
 
-  // World streaming behind the loading screen: fade it out once the ring around the player is built, the
-  // ground has colliders, and a few frames have rendered (first-frame shader compiles happen under cover).
+  // The loading screen goes as soon as the game exists (code, physics, the truck and the stranger: ~1–2 s): the
+  // MAIN MENU opens over the same key art while the world streams in behind it (not drawn — Game.render). PLAY
+  // before the ground is built shows "Entering the world" (EnteringWorld) for the rest. (The menu used to wait for
+  // the whole ULTRA ring + horizon: 20–30 s on a fast laptop.)
   useEffect(() => {
     if (!game) return
-    const t0 = performance.now()
-    let readyAt = 0
-    const id = window.setInterval(() => {
-      const r = game.worldReadiness()
-      bootProgress(0.45 + 0.52 * r, r < 0.8 ? 'Growing a new world…' : r < 1 ? 'Raising the hills…' : 'Almost there…')
-      if (r >= 1 && !readyAt) readyAt = performance.now()
-      if ((readyAt && performance.now() - readyAt > 400) || performance.now() - t0 > 25_000) {
-        window.clearInterval(id)
-        bootFinish()
-      }
-    }, 100)
-    return () => window.clearInterval(id)
+    bootProgress(1, 'Ready')
+    const id = requestAnimationFrame(() => bootFinish())
+    return () => cancelAnimationFrame(id)
   }, [game])
 
   if (error) return <Overlay>Failed to start: {error}</Overlay>
@@ -98,7 +92,9 @@ export function App() {
 /** HUD, debug overlay and controls: only once the player has pressed PLAY (the landing page owns the screen before). */
 function InGame({ game }: { game: Game }) {
   const landing = useStore(game.store, (s) => s.landing)
+  const worldReady = useStore(game.store, (s) => s.worldReady)
   if (landing) return null
+  if (!worldReady) return <EnteringWorld game={game} />
   return (
     <>
       <GameHud game={game} />
@@ -120,6 +116,30 @@ function Controls({ game }: { game: Game }) {
       <Toolbar game={game} />
       <LockHint game={game} />
     </>
+  )
+}
+
+/** PLAY pressed before the ground round the player is built: the key art with a progress bar (polled at 10 Hz). */
+function EnteringWorld({ game }: { game: Game }) {
+  const [r, setR] = useState(() => game.playReadiness())
+  useEffect(() => {
+    const id = window.setInterval(() => setR(game.playReadiness()), 100)
+    return () => window.clearInterval(id)
+  }, [game])
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 40, color: '#fff', fontFamily: 'system-ui, sans-serif' }} data-testid="entering">
+      <KeyArt />
+      <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(7,8,10,.5) 0%, rgba(7,8,10,0) 30%, rgba(7,8,10,0) 55%, rgba(7,8,10,.85) 100%)' }} />
+      <div style={{ position: 'absolute', left: 'max(24px, 6vw)', right: 'max(24px, 6vw)', bottom: 'max(22px, 6vh)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, letterSpacing: '.08em', marginBottom: 10 }}>
+          <span>Entering the world…</span>
+          <span style={{ opacity: 0.75 }}>{Math.round(r * 100)}%</span>
+        </div>
+        <div style={{ height: 4, borderRadius: 4, background: 'rgba(255,255,255,.18)', overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: `${Math.max(4, r * 100)}%`, borderRadius: 4, background: 'linear-gradient(90deg, #ffb86b, #ffe2a8)', transition: 'width .3s ease' }} />
+        </div>
+      </div>
+    </div>
   )
 }
 

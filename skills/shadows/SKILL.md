@@ -32,6 +32,39 @@ Caster assignment is part of chunk LOD: when a chunk's LOD changes, its instance
 material (the shadow depth material is separate), but toggling `receiveShadow` does change the material
 program — so `receiveShadow` stays fixed per material family (terrain always receives).
 
+### SHADOW STRATEGY PER LEVEL (2026-10-18 — "high graphics on low-end devices and iGPU laptops; use images for shadows")
+
+| Level | Trees | Car / player / bike / monsters | Sun shadow map |
+|---|---|---|---|
+| off | — | blob | none |
+| low | IMAGE shadows (TreeShadows) | blob | none |
+| medium, high | IMAGE shadows (1024² shade map) | REAL, per frame (DynamicShadow) | none |
+| ultra | real map | REAL, per frame (DynamicShadow) | CACHED (re-render on 1/4-map move, ~0.35° sun turn, chunk change, every 2 s) |
+
+`rendering/shadows/DynamicShadow.ts`: a 1024² depth map ±14 m round the player from the key light, rendered every
+frame with only the meshes on `DYN_LAYER` (6) — `dynamicCaster(root)` puts a vehicle's / character's opaque meshes
+there and their `castShadow` off; receivers (stylize `treeShade`) take 4 PCF taps (`dynShadowAt`) and fold it into
+`stTreeShade`. Measured ULTRA, dense forest: shadows every frame 4.01 ms → cached + dynamic 3.44 ms (off 2.76); the
+dynamic map 0.15 ms. HIGH image + dynamic ≈ shadows off (4.4–5.0 vs 4.8 ms, within noise). Not shadowed with image
+shadows: rocks, crags, buildings and terrain self-shadowing (only ULTRA's map has them).
+
+### IMAGE TREE SHADOWS — the LOW / MEDIUM / HIGH levels, 2026-10-18
+
+LOW renders **no shadow map**. `rendering/shadows/TreeShadows.ts`: every tree within 72 m gets a quad carrying a
+dappled crown image + its trunk, cast away from the sun in the vertex shader (crown shade crown-height / tan(elev)
+off the trunk, stretched 1 / sin(elev), clamped for a low sun); the quads are drawn top-down into a 512² SHADE MAP
+(144 m round the player, texel-snapped, MAX-blended so overlapping crowns never go black) — only after the player
+moved 4 m or the sun turned ~0.6°. Receivers (`stylize` `treeShade`: terrain, road detail, grass, rocks, cliffs,
+the player) read it at their world xz and scale `dotNL` of the direct lights by `1 − shade × strength` (strength =
+`sun.shadow.intensity` × the sun's brightness, × (1 − cave)) — the sky fill stays, like a real shadow. Grass
+samples per VERTEX (`treeShade: 'vertex'`): per pixel the fetch over the blades' overdraw was most of the cost.
+Not shaded: trees themselves, the car (blob shadows as before).
+Measured (RTX 4050 laptop, true LOW preset, dense forest 1151×521): image shadows 86 draws / 187 k tris / 1.2 ms CPU
+submit = the same as shadows OFF; the real map on the frames it renders 134 draws (+56 %), 317 k tris (+70 %),
+1.8 ms CPU (+50 %). Shade-map redraw 0.05 ms, instance rebuild 0.01 ms CPU, 1 MB.
+Also fixed: `configureSunShadow` sets `castShadow = true`, and `LightingSystem.setQuality` called it AFTER switching the
+light off — the OFF level (its map size differs) silently re-enabled a 512² map. Size first, then on/off.
+
 ## 3. When to use
 
 - Real shadow: things near the player whose contact with the ground matters (player, trees within 35 m, monsters,

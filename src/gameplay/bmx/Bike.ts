@@ -5,7 +5,7 @@ import type { CharacterModel, RideRig } from '../player/CharacterModel'
 import type { PlayerController } from '../player/PlayerController'
 import type { PhysicsWorld } from '../../physics/PhysicsWorld'
 import type { Input } from '../../input/Input'
-import { BikeSim } from '../vehicle/VehicleSim'
+import { BikeSim, type Shape } from '../vehicle/VehicleSim'
 
 /**
  * BMX (refer/bmx): parked on the verge at spawn; E (or the BIKE touch button) mounts / dismounts within 2.5 m.
@@ -68,6 +68,44 @@ function wheel(): THREE.BufferGeometry {
 const v = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
 const _w = new THREE.Vector3()
 
+/** Frame tubes (bike space, unscaled): end, end, radius. The mesh draws them and the collider is the same capsules. */
+const FRAME_TUBES: [THREE.Vector3, THREE.Vector3, number][] = [
+  [v(0, WHEEL_R, 0.52), v(0, 0.72, -0.05), 0.03], // down/seat tube area
+  [v(0, 0.36, 0.1), v(0, 0.78, -0.42), 0.032], // down tube
+  [v(0, 0.8, 0.12), v(0, 0.8, -0.42), 0.03], // top tube
+  [v(0, 0.36, 0.1), v(0, 0.86, 0.14), 0.03], // seat tube
+  [v(0, 0.36, 0.1), v(0.06, WHEEL_R, 0.52), 0.02], // chain stays
+  [v(0, 0.86, 0.14), v(0.06, WHEEL_R, 0.52), 0.018],
+]
+const SEAT = { size: [0.12, 0.05, 0.26] as [number, number, number], at: [0, 0.9, 0.16] as [number, number, number] }
+/** Fork group origin (the head tube) and its parts in fork space: fork, handlebar, stem (+ colour). */
+const FORK_AT = v(0, 0.8, -0.46)
+const FORK_TUBES: [THREE.Vector3, THREE.Vector3, number, number][] = [
+  [v(0, 0.2 - 0.88, 0), v(0, 0.2, 0), 0.028, 0xb3262a],
+  [v(-0.3, 0.3, 0.05), v(0.3, 0.3, 0.05), 0.02, 0x2a2a2a], // handlebar
+  [v(0, 0.2, 0), v(0, 0.3, 0.05), 0.02, 0x2a2a2a],
+]
+const LAMP = { size: [0.1, 0.07, 0.07] as [number, number, number], at: [0, 0.22, -0.08] as [number, number, number] }
+
+/**
+ * The bike's collision shape, scaled like the mesh: each frame / fork tube as the capsule it is, the seat, crank
+ * disc and headlamp as boxes, and the seated rider's body as a capsule (hips on the saddle → shoulders over the bars,
+ * the rider's torso radius). The fork parts sit at straight-ahead (steering turns the handlebar ≤ a few cm off).
+ * The wheels are the sim's raycasts at their mesh radius. The mass stays BikeSim's (frame low, rider high).
+ */
+function bikeShapes(): Shape[] {
+  const s = (p: THREE.Vector3, o = v(0, 0, 0)): [number, number, number] => [(p.x + o.x) * SCALE, (p.y + o.y) * SCALE, (p.z + o.z) * SCALE]
+  const half = (h: [number, number, number]): [number, number, number] => [h[0] * SCALE * 0.5, h[1] * SCALE * 0.5, h[2] * SCALE * 0.5]
+  return [
+    ...FRAME_TUBES.map(([a, b, r]): Shape => ({ capsule: [s(a), s(b), r * SCALE] })),
+    ...FORK_TUBES.map(([a, b, r]): Shape => ({ capsule: [s(a, FORK_AT), s(b, FORK_AT), r * SCALE] })),
+    { box: half(SEAT.size), at: s(v(...SEAT.at)) },
+    { box: half([0.03, 0.14, 0.14]), at: s(v(0, 0.36, 0.1)) }, // crank disc
+    { box: half(LAMP.size), at: s(v(...LAMP.at), FORK_AT) },
+    { capsule: [s(v(0, 1.05, 0.14)), s(v(0, 1.55, -0.12)), 0.17 * SCALE] }, // rider
+  ]
+}
+
 export class Bike {
   /** Bike + (when riding) placement root. Faces −Z. */
   readonly root = new THREE.Group()
@@ -107,22 +145,15 @@ export class Bike {
     this.lean.scale.setScalar(SCALE)
     const RED = 0xb3262a
     const frame = mergeGeometries([
-      tube(v(0, WHEEL_R, 0.52), v(0, 0.72, -0.05), 0.03, RED), // down/seat tube area
-      tube(v(0, 0.36, 0.1), v(0, 0.78, -0.42), 0.032, RED), // down tube
-      tube(v(0, 0.8, 0.12), v(0, 0.8, -0.42), 0.03, RED), // top tube
-      tube(v(0, 0.36, 0.1), v(0, 0.86, 0.14), 0.03, RED), // seat tube
-      tube(v(0, 0.36, 0.1), v(0.06, WHEEL_R, 0.52), 0.02, RED), // chain stays
-      tube(v(0, 0.86, 0.14), v(0.06, WHEEL_R, 0.52), 0.018, RED),
-      coloured(new THREE.BoxGeometry(0.12, 0.05, 0.26).translate(0, 0.9, 0.16), 0x202022), // seat
+      ...FRAME_TUBES.map(([a, b, r]) => tube(a, b, r, RED)),
+      coloured(new THREE.BoxGeometry(...SEAT.size).translate(...SEAT.at), 0x202022), // seat
       coloured(new THREE.CylinderGeometry(0.07, 0.07, 0.03, 12).rotateZ(Math.PI / 2).translate(0, 0.36, 0.1), 0x555555), // crank
     ])!
     this.geos.push(frame)
     const frameMesh = new THREE.Mesh(frame, material)
     const forkG = mergeGeometries([
-      tube(v(0, 0.2 - 0.88, 0), v(0, 0.2, 0), 0.028, RED),
-      tube(v(-0.3, 0.3, 0.05), v(0.3, 0.3, 0.05), 0.02, 0x2a2a2a), // handlebar
-      tube(v(0, 0.2, 0), v(0, 0.3, 0.05), 0.02, 0x2a2a2a),
-      coloured(new THREE.BoxGeometry(0.1, 0.07, 0.07).translate(0, 0.22, -0.08), 0xf2eecc), // headlamp
+      ...FORK_TUBES.map(([a, b, r, hex]) => tube(a, b, r, hex)),
+      coloured(new THREE.BoxGeometry(...LAMP.size).translate(...LAMP.at), 0xf2eecc), // headlamp
     ])!
     this.geos.push(forkG)
     this.fork.add(new THREE.Mesh(forkG, material))
@@ -148,7 +179,7 @@ export class Bike {
     for (const m of [frameMesh, this.front, this.rear, crankMesh, this.fork.children[0] as THREE.Mesh]) (m as THREE.Mesh).castShadow = true
     // Wheel hubs in (scaled) bike space: front = fork pivot + wheel offset, rear = rear axle.
     const f = new THREE.Vector3(0, 0.8 + WHEEL_R - 0.8, -0.46 - 0.1).multiplyScalar(SCALE)
-    this.sim = new BikeSim(physics, { front: [0, f.y, f.z], rear: [0, WHEEL_R * SCALE, 0.52 * SCALE], wheelRadius: WHEEL_R * SCALE })
+    this.sim = new BikeSim(physics, { front: [0, f.y, f.z], rear: [0, WHEEL_R * SCALE, 0.52 * SCALE], wheelRadius: WHEEL_R * SCALE, shapes: bikeShapes() })
     this.sim.enabled = false
   }
 

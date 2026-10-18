@@ -27,6 +27,9 @@ export function TouchControls({ game }: { game: Game }) {
   const origin = useRef({ x: 0, y: 0 })
   const lookId = useRef<number | null>(null)
   const last = useRef({ x: 0, y: 0 })
+  const pinchId = useRef<number | null>(null)
+  const pinchAt = useRef({ x: 0, y: 0 })
+  const pinchDist = useRef(0)
 
   useEffect(() => {
     input.touch = true // touch controls on screen: arcade driving auto-accelerates (Settings → Auto accelerate)
@@ -73,19 +76,39 @@ export function TouchControls({ game }: { game: Game }) {
     showStick(origin.current.x, origin.current.y, false)
   }
 
+  // A second finger in the look zone pinches: spread = zoom in, squeeze = zoom out (no look while pinching).
   const onLookDown = (e: RPointerEvent) => {
-    if (lookId.current !== null) return
-    lookId.current = e.pointerId
-    e.currentTarget.setPointerCapture(e.pointerId)
-    last.current = { x: e.clientX, y: e.clientY }
+    if (lookId.current === null) {
+      lookId.current = e.pointerId
+      e.currentTarget.setPointerCapture(e.pointerId)
+      last.current = { x: e.clientX, y: e.clientY }
+    } else if (pinchId.current === null) {
+      pinchId.current = e.pointerId
+      e.currentTarget.setPointerCapture(e.pointerId)
+      pinchAt.current = { x: e.clientX, y: e.clientY }
+      pinchDist.current = Math.hypot(e.clientX - last.current.x, e.clientY - last.current.y)
+    }
   }
   const onLookMove = (e: RPointerEvent) => {
-    if (e.pointerId !== lookId.current) return
-    input.addLook(e.clientX - last.current.x, e.clientY - last.current.y)
-    last.current = { x: e.clientX, y: e.clientY }
+    if (e.pointerId === pinchId.current) pinchAt.current = { x: e.clientX, y: e.clientY }
+    else if (e.pointerId === lookId.current) {
+      if (pinchId.current === null) input.addLook(e.clientX - last.current.x, e.clientY - last.current.y)
+      last.current = { x: e.clientX, y: e.clientY }
+    } else return
+    if (pinchId.current !== null) {
+      const d = Math.hypot(pinchAt.current.x - last.current.x, pinchAt.current.y - last.current.y)
+      input.addZoom((pinchDist.current - d) / 60)
+      pinchDist.current = d
+    }
   }
   const onLookUp = (e: RPointerEvent) => {
-    if (e.pointerId === lookId.current) lookId.current = null
+    if (e.pointerId === pinchId.current) pinchId.current = null
+    else if (e.pointerId === lookId.current) {
+      // The pinching finger (if any) takes over the look.
+      lookId.current = pinchId.current
+      if (pinchId.current !== null) last.current = { ...pinchAt.current }
+      pinchId.current = null
+    }
   }
 
   const tap = (code: string) => (e: RPointerEvent) => {
@@ -158,7 +181,7 @@ export function TouchControls({ game }: { game: Game }) {
           </div>
         )}
         {driving && (
-          <button style={{ ...btn, background: 'rgba(232,162,58,0.35)' }} data-testid="btn-boost" {...hold('ShiftLeft')}>
+          <button style={{ ...btn, background: 'linear-gradient(135deg, rgba(255,210,122,0.55), rgba(242,107,58,0.5))', color: '#2a1405' }} data-testid="btn-boost" {...hold('ShiftLeft')}>
             NITRO
           </button>
         )}
@@ -219,8 +242,8 @@ const stickBase: CSSProperties = {
   width: STICK_RADIUS * 2,
   height: STICK_RADIUS * 2,
   borderRadius: '50%',
-  border: '2px solid rgba(255,255,255,0.25)',
-  background: 'rgba(0,0,0,0.18)',
+  border: '2px solid rgba(255,214,170,0.28)',
+  background: 'rgba(28,24,52,0.22)',
   opacity: 0,
   pointerEvents: 'none',
   transition: 'opacity 120ms',
@@ -232,7 +255,7 @@ const stickKnob: CSSProperties = {
   width: 48,
   height: 48,
   borderRadius: '50%',
-  background: 'rgba(255,255,255,0.35)',
+  background: 'rgba(255,214,170,0.45)',
 }
 const buttons: CSSProperties = {
   position: 'absolute',
@@ -242,18 +265,21 @@ const buttons: CSSProperties = {
   gap: 14,
   alignItems: 'flex-end',
 }
+// (the front end's dusk glass — ui/theme.ts: violet glass, amber edge, cream label)
 const btn: CSSProperties = {
   width: 64,
   height: 64,
   borderRadius: '50%',
-  border: '2px solid rgba(255,255,255,0.3)',
-  background: 'rgba(0,0,0,0.35)',
-  color: '#e8e8e8',
-  font: '600 11px ui-monospace, Menlo, monospace',
+  border: '2px solid rgba(255,214,170,0.32)',
+  background: 'rgba(28,24,52,0.5)',
+  color: '#fff4e3',
+  font: '800 11px system-ui, -apple-system, "Segoe UI", sans-serif',
+  letterSpacing: 0.5,
+  boxShadow: '0 4px 16px rgba(10,6,24,0.3)',
   touchAction: 'none',
 }
 const liftCol: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center' }
-const liftBtn: CSSProperties = { ...btn, width: 56, height: 48, borderRadius: 14, font: '600 16px ui-monospace, Menlo, monospace' }
+const liftBtn: CSSProperties = { ...btn, width: 56, height: 48, borderRadius: 14, font: '800 16px system-ui, sans-serif' }
 const topRight: CSSProperties = {
   position: 'absolute',
   top: 'max(8px, env(safe-area-inset-top))',

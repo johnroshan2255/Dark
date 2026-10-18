@@ -13,6 +13,8 @@ export const PropType = {
   // Cozy details (bright homesteads, cabins, camps; signposts at the roads into places):
   Chair: 14, Lantern: 15, Barrel: 16, Crate: 17, Picket: 18, Mailbox: 19, Stones: 20, FlowerBed: 21, Laundry: 22,
   Stump: 23, Bench: 24, Signpost: 25, LampPost: 26, LogSeat: 27,
+  // Summit lookouts:
+  Viewpoint: 28,
 } as const
 
 export function layoutPois(pois: Poi[], cx: number, cz: number, heights: Float32Array, seed: number, out: number[], cozy = false): void {
@@ -74,6 +76,15 @@ export function layoutPois(pois: Poi[], cx: number, cz: number, heights: Float32
           emit(p, Math.cos(a) * 8, Math.sin(a) * 8, a + Math.PI / 2, 0.7 + h(60 + i) * 0.6, PropType.RuinWall)
         }
         for (let i = 0; i < 5; i++) emit(p, (h(70 + i) - 0.5) * 12, (h(80 + i) - 0.5) * 12, h(90 + i) * 6, 0.6 + h(95 + i) * 0.8, PropType.RuinPillar)
+        break
+      case PoiType.Lookout:
+        // The terrace faces the view (+z = down the peak's lowest side); a bench and a log seat behind it, a lantern
+        // for the walk down at dusk, a signpost naming the peak.
+        emit(p, 0, 0, 0, 1, PropType.Viewpoint)
+        emit(p, 0, -5.6, Math.PI, 1, PropType.Bench)
+        emit(p, -3.4, -4.8, 0.9 + h(1) * 0.4, 1, PropType.LogSeat)
+        emit(p, 3.6, -4.2, 0, 1, PropType.Lantern)
+        emit(p, 5.2, -1.5, -Math.PI / 2 + h(2) * 0.6, 1, PropType.Signpost)
         break
       case PoiType.Camp:
         emit(p, -3, 0, 0.4, 1, PropType.Tent)

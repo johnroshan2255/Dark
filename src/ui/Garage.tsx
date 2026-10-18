@@ -1,13 +1,15 @@
-import { useState, type CSSProperties } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
 import { PAINTS, TUNE_RANGES, VEHICLES, vehicleClass, vehicleRating, vehicleStats } from '../gameplay/vehicle/catalogue'
 import { CAR_IMAGES } from './carImages'
-import { ACCENT, ACCENT_GRAD, bigButton, FONT, fullscreen, glass, heading, label, smallButton, statFill, statRow, statTrack, vignette } from './theme'
+import { KeyArt } from './KeyArt'
+import { ACCENT, ACCENT_GRAD, FONT, fullscreen, glass, heading, label, LIME, smallButton, statFill, statRow, statTrack, vignette } from './theme'
 
 /**
- * THE GARAGE — a racing-game car screen: a strip of car cards along the top (tap one → it is swapped into the
- * world live, on the turntable behind), the chosen car's name / class / rating, and a tabbed panel:
+ * THE GARAGE — a racing-game car screen over the dimmed key art: the chosen car as a studio PHOTO (Game.carPhoto,
+ * re-shot on every change of car / paint / tyres), a strip of car cards (tap one → it is swapped in), the chosen
+ * car's name / class / rating, and a tabbed panel:
  * PERFORMANCE (sliders with live stat bars) · PAINT (named swatches + custom colour). Every change applies at once
  * and is saved per car. `embedded` = inside Settings (no back / select buttons, tighter layout).
  */
@@ -31,17 +33,17 @@ export function Garage({ game, embedded = false }: { game: Game; embedded?: bool
         const active = v.id === current
         const t = game.tuning(v.id)
         return (
-          <button key={v.id} style={{ ...carCard, ...(active ? carCardActive : {}), ...(compact ? { width: touch && !embedded ? 118 : 150, padding: 6 } : {}) }} onClick={() => void game.selectVehicle(v.id)} disabled={loading !== null} data-testid={`car-${v.id}`}>
-            {!(touch && !embedded) && <img src={CAR_IMAGES[v.id]} alt="" style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover', borderRadius: 8, display: 'block', filter: active ? 'none' : 'saturate(0.7) brightness(0.85)' }} />}
+          <button key={v.id} className="fe-car-card" style={{ ...carCard, ...(active ? carCardActive : {}), ...(compact ? { width: touch && !embedded ? 118 : 150, padding: 6 } : {}) }} onClick={() => void game.selectVehicle(v.id)} disabled={loading !== null} data-testid={`car-${v.id}`}>
+            {!(touch && !embedded) && <img className="fe-car-img" src={CAR_IMAGES[v.id]} alt="" style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover', borderRadius: 8, display: 'block', filter: active ? 'none' : 'saturate(0.7) brightness(0.85)' }} />}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 7 }}>
               <div>
                 <div style={{ font: `800 ${compact ? 13 : 15}px ${FONT}`, color: '#fff' }}>{v.name}</div>
                 <div style={{ ...label, fontSize: 10, marginTop: 2 }}>{vehicleClass(t)}</div>
               </div>
-              <div style={{ font: `900 ${compact ? 20 : 24}px ${FONT}`, color: active ? ACCENT : 'rgba(255,255,255,0.6)' }}>{vehicleRating(t)}</div>
+              <div style={{ font: `900 ${compact ? 20 : 24}px ${FONT}`, color: active ? LIME : 'rgba(255,236,214,0.6)' }}>{vehicleRating(t)}</div>
             </div>
             {active && loading !== null && <div style={loadBar}><div style={{ width: `${Math.round(loading * 100)}%`, height: '100%', background: ACCENT_GRAD }} /></div>}
-            {active && !(touch && !embedded) && <div style={selectedTag}>{loading !== null ? `Loading ${Math.round(loading * 100)}%` : 'Selected'}</div>}
+            {active && !(touch && !embedded) && <div className="fe-selected" style={selectedTag}>{loading !== null ? `Loading ${Math.round(loading * 100)}%` : 'Selected'}</div>}
           </button>
         )
       })}
@@ -49,7 +51,7 @@ export function Garage({ game, embedded = false }: { game: Game; embedded?: bool
   )
 
   const performance = (
-    <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1.35fr 1fr', gap: compact ? 12 : 26 }}>
+    <div className="fe-perf" style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1.35fr 1fr', gap: compact ? 12 : 26 }}>
       <div style={{ display: 'grid', gap: compact ? 6 : 9 }}>
         {TUNE_RANGES.map((r) => {
           const v = tune[r.key] as number
@@ -68,9 +70,9 @@ export function Garage({ game, embedded = false }: { game: Game; embedded?: bool
           )
         })}
       </div>
-      <div style={{ ...(compact ? {} : { borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: 26 }) }}>
+      <div className="fe-perf-side" style={{ ...(compact ? {} : { borderLeft: '1px solid rgba(255,214,170,0.14)', paddingLeft: 26 }) }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 10 }}>
-          <span style={{ font: `900 ${compact ? 34 : 46}px ${FONT}`, color: ACCENT, letterSpacing: -1 }}>{vehicleRating(tune)}</span>
+          <span style={{ font: `900 ${compact ? 34 : 46}px ${FONT}`, color: LIME, letterSpacing: -1, textShadow: '0 0 22px rgba(205,232,74,0.3)' }}>{vehicleRating(tune)}</span>
           <span style={label}>{vehicleClass(tune)} · overall</span>
         </div>
         <div style={{ display: 'grid', gap: 8 }}>
@@ -138,18 +140,21 @@ export function Garage({ game, embedded = false }: { game: Game; embedded?: bool
 
   return (
     <div style={fullscreen} data-testid="garage">
+      {/* (the key art, dimmed, and the car as a studio photo — no live world behind the front end) */}
+      <KeyArt dim />
       <div style={vignette} />
-      <div style={{ position: 'absolute', left: compact ? 14 : 40, right: compact ? 14 : 40, top: compact ? 10 : 30, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-        <div>
+      <CarPhoto game={game} id={current} tune={JSON.stringify(tune)} busy={loading !== null} />
+      <div className="fe-garage-top">
+        <div style={{ minWidth: 0 }}>
           <div style={heading(compact ? 22 : 40)}>Garage</div>
           <div style={{ ...label, marginTop: 6 }}>{def.maker} · {def.year} · {def.name}</div>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button style={{ ...bigButton(false, compact ? 110 : 170), height: compact ? 40 : 52, fontSize: compact ? 13 : 17, letterSpacing: compact ? 2 : 4, justifyContent: 'center' }} onClick={() => game.showScreen('menu')} data-testid="garage-back"><span>‹ Back</span></button>
-          <button style={{ ...bigButton(true, compact ? 130 : 200), height: compact ? 40 : 52, fontSize: compact ? 13 : 17, letterSpacing: compact ? 2 : 4, opacity: loading !== null ? 0.5 : 1 }} onClick={() => game.play()} disabled={loading !== null} data-testid="garage-drive"><span>Drive</span><span>▶</span></button>
+          <button className="fe-btn fe-btn--compact" style={{ justifyContent: 'center' }} onClick={() => game.showScreen('menu')} data-testid="garage-back"><span>‹ Back</span></button>
+          <button className="fe-btn fe-btn--primary fe-btn--compact" onClick={() => game.play()} disabled={loading !== null} data-testid="garage-drive"><span>Drive</span><span className="fe-chev">▶</span></button>
         </div>
       </div>
-      <div style={{ position: 'absolute', left: compact ? 14 : 40, right: compact ? 14 : 40, bottom: compact ? 8 : 34, display: 'grid', gap: compact ? 6 : 12, maxHeight: compact ? '74vh' : '62vh', gridTemplateRows: 'auto 1fr' }}>
+      <div className="fe-garage-bottom">
         {strip}
         <div style={{ overflowY: 'auto', minHeight: 0 }}>{panel}</div>
       </div>
@@ -163,3 +168,26 @@ const selectedTag: CSSProperties = { position: 'absolute', top: 14, left: 14, pa
 const loadBar: CSSProperties = { position: 'absolute', left: 8, right: 8, bottom: 6, height: 3, background: 'rgba(255,255,255,0.15)', borderRadius: 2, overflow: 'hidden' }
 const slider: CSSProperties = { position: 'relative', width: '100%', margin: 0, accentColor: ACCENT, background: 'transparent', height: 26, opacity: 0.9 }
 const swatch = (active: boolean): CSSProperties => ({ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: 6, borderRadius: 10, border: `1px solid ${active ? ACCENT : 'transparent'}`, background: active ? 'rgba(240,160,58,0.12)' : 'transparent', cursor: 'pointer' })
+
+/**
+ * The car's studio photo (Game.carPhoto) — shot once per change of car / setup (debounced: a colour-picker drag is
+ * one shot when it pauses), never per frame. Sized for the screen: ~1.2 MP on a desktop, half that on a phone.
+ */
+function CarPhoto({ game, id, tune, busy }: { game: Game; id: string; tune: string; busy: boolean }) {
+  const [url, setUrl] = useState<string | null>(null)
+  // (the first shot waits for the car to be placed in the world — Game.carPhoto returns null until then)
+  const ready = useStore(game.store, (s) => s.worldReady)
+  useEffect(() => {
+    if (busy || !ready) return
+    const t = window.setTimeout(() => {
+      const small = Math.min(window.innerWidth, window.innerHeight) < 600
+      setUrl(game.carPhoto(small ? 800 : 1280, small ? 450 : 720))
+    }, url ? 90 : 0)
+    return () => window.clearTimeout(t)
+  }, [game, id, tune, busy, ready]) // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <div className="fe-garage-photo" data-testid="garage-photo">
+      {url ? <img src={url} alt="" /> : <div style={{ ...label, position: 'relative' }}>Preparing your car…</div>}
+    </div>
+  )
+}

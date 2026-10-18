@@ -24,6 +24,13 @@ const CHASE_SLIP = 0.3
 /** Recentre rate (1/s) after LOOK_IDLE s without mouse / touch look (the same delay and rate as before). */
 const RECENTRE = 3
 const LOOK_IDLE = 0.6
+/** Driving: no recentre below RECENTRE_SLOW m/s (crawling over rocks you can look around freely), full by RECENTRE_FAST. */
+const RECENTRE_SLOW = 3
+const RECENTRE_FAST = 8
+/** Third-person zoom (mouse wheel / pinch): distance multiplier range and per-notch factor. */
+const ZOOM_MIN = 0.4
+const ZOOM_MAX = 2.6
+const ZOOM_STEP = 1.12
 /** Share of the chassis pitch (slope) the chase view follows, and its smoothing rate (1/s). */
 const SLOPE_FOLLOW = 0.5
 const SLOPE_RATE = 3
@@ -40,6 +47,11 @@ const HEAD_MAX_Y = 0.03
 const DV_TELEPORT = 40
 
 const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a))
+
+/** 0..1: how strongly a driving camera swings back behind the vehicle at this speed (m/s, signed). */
+export function recentreGate(speed: number): number {
+  return THREE.MathUtils.smoothstep(Math.abs(speed), RECENTRE_SLOW, RECENTRE_FAST)
+}
 
 /** Exact critically-damped settle of (x, v) toward 0 over dt — frame-rate independent. Velocity changes of the thing
  *  followed are added to v as impulses by the caller (the lagging point keeps its velocity), so in steady
@@ -70,6 +82,9 @@ export class CameraController {
   readonly flashOrigin = new THREE.Vector3()
   readonly flashTarget = new THREE.Vector3()
   private dist = TPP_DISTANCE
+  /** Third-person distance multiplier (wheel / pinch), and its smoothed value. */
+  private zoom = 1
+  private zoomS = 1
   private bob = 0
   /** 0..1 screen shake, set by hits and lightning. */
   shake = 0
@@ -108,7 +123,13 @@ export class CameraController {
     this.ray = new physics.R.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 })
   }
 
+  /** Zoom the third-person view by wheel notches / pinch steps (+ = out). */
+  zoomBy(steps: number): void {
+    if (steps) this.zoom = THREE.MathUtils.clamp(this.zoom * Math.pow(ZOOM_STEP, steps), ZOOM_MIN, ZOOM_MAX)
+  }
+
   update(dt: number, cam: THREE.PerspectiveCamera, p: PlayerController, flashlightOn: boolean): void {
+    this.zoomS += (this.zoom - this.zoomS) * (1 - Math.exp(-10 * dt))
     if (this.garage) {
       // Turntable: 7 m out, 2.2 m up, a slow lap every ~40 s, looking at the car's roofline.
       this.orbit += dt * 0.16
@@ -154,7 +175,7 @@ export class CameraController {
     } else {
       const vd = this.vehicle
       this.pivot.set(pos.x, pos.y + (vd ? vd.pivot : TPP_PIVOT), pos.z).addScaledVector(this.right, vd ? 0 : TPP_SHOULDER * 0.35)
-      this.desired.copy(this.pivot).addScaledVector(this.fwd, -(vd ? vd.distance : TPP_DISTANCE)).addScaledVector(this.right, vd ? 0 : TPP_SHOULDER * 0.65)
+      this.desired.copy(this.pivot).addScaledVector(this.fwd, -(vd ? vd.distance : TPP_DISTANCE) * this.zoomS).addScaledVector(this.right, vd ? 0 : TPP_SHOULDER * 0.65)
       this.placeOrbit(dt, cam, p)
       cam.rotation.set(p.pitch + shy, p.yaw + shx, k * 0.15, 'YXZ')
       cam.updateMatrixWorld()
@@ -230,7 +251,7 @@ export class CameraController {
     const dv = this.dv.subVectors(this.vel, this.lastVel)
     this.lastVel.copy(this.vel)
     if (dv.lengthSq() > DV_TELEPORT * DV_TELEPORT) dv.set(0, 0, 0)
-    const centre = p.lookIdle > LOOK_IDLE ? 1 - Math.exp(-RECENTRE * dt) : 0
+    const centre = p.lookIdle > LOOK_IDLE ? (1 - Math.exp(-RECENTRE * dt)) * recentreGate(car.speed) : 0
 
     if (!tpp) {
       // The look turns with the car, then (idle) eases back to straight ahead.
@@ -289,7 +310,7 @@ export class CameraController {
       // Pivot above the driver's seat (as on foot: feet + pivot height) from the rendered pose.
       this.pivot.copy(car.eyeLocal).applyQuaternion(this.carQ).add(this.carPos)
       this.pivot.y += (vd ? vd.pivot : TPP_PIVOT) - EYE_HEIGHT
-      const dist = (vd ? vd.distance : 8) + Math.min(SPEED_DIST_MAX, Math.max(0, sp - 5) * SPEED_DIST)
+      const dist = ((vd ? vd.distance : 8) + Math.min(SPEED_DIST_MAX, Math.max(0, sp - 5) * SPEED_DIST)) * this.zoomS
       this.desired.copy(this.pivot).addScaledVector(this.fwd, -dist).sub(this.lag)
       this.placeOrbit(dt, cam, p)
       cam.rotation.set(pitch + shy, p.yaw + shx, k * 0.15, 'YXZ')

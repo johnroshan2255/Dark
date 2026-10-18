@@ -69,6 +69,9 @@ export class BoatHull {
 
   constructor(truck: TruckModel, material: THREE.Material) {
     this.root.name = 'boatHull'
+    // Stowed until the first pose() that deploys it: a parked truck never poses it, and the folded hull's 9 meshes
+    // (6 panels + 3 LED strips) were drawn inside the body every frame — 9 of a forest frame's ~84 draws.
+    this.root.visible = false
     truck.wheel.computeBoundingBox()
     const wb = truck.wheel.boundingBox!
     const tyreOuter = Math.max(...truck.wheelPos.map((p) => Math.abs(p[0]))) + (wb.max.x - wb.min.x) / 2

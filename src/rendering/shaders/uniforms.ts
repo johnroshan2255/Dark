@@ -63,6 +63,16 @@ export const globalUniforms = {
   /** 1 = some snow or desert lies inside the biome map (else the biome-cover lookups are skipped entirely). */
   uBiomeActive: { value: 0 },
   uTrailRect: { value: new THREE.Vector4(-1e5, -1e5, 1e-6, 1e-6) },
+  /** IMAGE TREE SHADOWS (rendering/shadows/TreeShadows): top-down shade image round the player (R = 0..1 shade), its
+   *  rect (minX, minZ, 1/size, strength) and the switch (LOW shadow level; else 0 → the lookup is skipped). */
+  uTreeShade: { value: null as THREE.Texture | null },
+  uTreeShadeRect: { value: new THREE.Vector4(-1e5, -1e5, 1e-6, 0) },
+  uTreeShadeOn: { value: 0 },
+  /** DYNAMIC SHADOWS (rendering/shadows/DynamicShadow): the moving things' depth from the sun round the player, its
+   *  world → uv/depth matrix, and the strength (0 = off: the sun map is not cached, or night / cave). */
+  uDynShadow: { value: null as THREE.Texture | null },
+  uDynShadowMat: { value: new THREE.Matrix4() },
+  uDynShadowOn: { value: 0 },
 }
 
 /**

@@ -20,6 +20,7 @@ import { TYRE_KINDS, combinedSlip, type Grip } from './tyre'
  */
 
 export const SUBSTEPS = 8
+const clamp01 = (x: number): number => (x <= 0 ? 0 : x >= 1 ? 1 : x)
 const SIGMA = 0.4 // tyre relaxation length (m)
 
 export interface DriverInput {
@@ -131,8 +132,13 @@ export class Drivetrain {
   readonly steer: Float64Array
   readonly Fx: Float64Array
   readonly Fy: Float64Array
-  /** 0..1 visible slip per wheel (smoke, dust, squeal). */
+  /** 0..1 visible slip per wheel (smoke, dust, squeal): the larger of `slideVis` / `skidVis`. */
   readonly slip: Float64Array
+  /** 0..1 per wheel: the tyre SLIDING sideways / spinning or locked along — only past its grip peak AND at a real
+   *  sliding speed (a tyre squeals and smokes when it slides over the ground, never while it grips: pulling away, a
+   *  slow turn, a gentle stop are silent). Squeal, smoke and tyre marks read these. */
+  readonly slideVis: Float64Array
+  readonly skidVis: Float64Array
   readonly grips: Grip[] = []
   // ---- tyre temperature (TYRE above) ----
   /** Tread surface temperature (°C) per wheel — what smokes, grips and burns. */
@@ -187,6 +193,14 @@ export class Drivetrain {
   powerScale = 1
   gripScale = 1
   boostFactor = 1.6
+  /** Automatic idle creep with no pedals (a real torque converter's); off = brake hold: it waits for the gas. */
+  idleCreep = false
+  /** Part-time 4WD engages 4H by itself on low-grip ground (snow, mud, sand) and drops back to 2H on grip
+   *  (aids Std / Full: what its driver would do). Set by the drivetrain only; a manual L press takes over. */
+  auto4H = true
+  private autoLocked = false
+  /** Smoothed tyre grip under the car (μ, without the garage grip slider) — the auto 4H's input. */
+  private muSeen = 1
   /** Rejected manual shift this step (over-rev): the audio clicks. */
   refused = false
 
@@ -218,7 +232,7 @@ export class Drivetrain {
     const n = (this.n = R.axles.length * 2)
     const f = () => new Float64Array(n)
     this.omega = f(); this.spin = f(); this.kappa = f(); this.alpha = f(); this.steer = f()
-    this.Fx = f(); this.Fy = f(); this.slip = f(); this.I = f(); this.Ieff = f(); this.a = f()
+    this.Fx = f(); this.Fy = f(); this.slip = f(); this.slideVis = f(); this.skidVis = f(); this.I = f(); this.Ieff = f(); this.a = f()
     this.brakeMax = f(); this.FzStatic = f(); this.escBrake = f(); this.accFx = f(); this.accFy = f()
     this.treadT = f(); this.coreT = f(); this.airT = f(); this.wetT = f(); this.fire = f(); this.fuel = f()
     this.slideP = f(); this.heatGrip = f(); this.accP = f()
@@ -329,6 +343,9 @@ export class Drivetrain {
     const has = this.R.drive.lockers
     const order: Locker[] = (['centre', 'rear', 'front'] as Locker[]).filter((l) => has.includes(l))
     if (!order.length) return
+    // The driver's own choice from here on: the auto 4H stands back.
+    this.auto4H = false
+    this.autoLocked = false
     const next = order.find((l) => !this.locks.has(l))
     if (next) this.locks.add(next)
     else {
@@ -353,6 +370,16 @@ export class Drivetrain {
     if (hbStop) (this.brake = Math.max(this.brake, 0.9)), (this.gas = 0)
     // ---- steering (§8.7): speed-sensitive lock, rack rate, counter-steer help, exact Ackermann ----
     this.steering(dt, input, ch)
+    // ---- AUTO 4H (part-time 4WD, aids on): low-grip ground (snow, mud, sand, grass) under the tyres engages the
+    // front axle; back on grip (asphalt, packed dirt) it drops to 2H. In 2H a rear-drive pickup on snow can't
+    // climb an 8° slope (rear share × μ 0.37 < the slope's pull + rolling resistance). ----
+    if (this.auto4H && this.aids !== 'off' && R.drive.layout === 'part-time-4WD') {
+      let mu = 0, nc = 0
+      for (let i = 0; i < n; i++) if (w[i].contact) (mu += this.grips[i].mu / Math.max(0.3, this.gripScale)), nc++
+      if (nc) this.muSeen += (mu / nc - this.muSeen) * Math.min(1, dt * 2)
+      if (!this.locks.has('centre') && this.muSeen < 0.7) (this.locks.add('centre'), (this.autoLocked = true))
+      else if (this.autoLocked && this.muSeen > 0.8 && !this.lowRange) (this.locks.delete('centre'), (this.autoLocked = false))
+    }
     // ---- driveline layout this step ----
     this.weights()
     const G = this.ratioNow()
@@ -479,7 +506,9 @@ export class Drivetrain {
     // IDLE CREEP: an automatic (torque converter / CVT) in gear with no pedals pulls at idle — it creeps at walking
     // pace, as a real one does — so nothing holds it on level ground; on a slope (> ~4°) the hold stays (the car's
     // auto-hold: it doesn't roll back off its creep).
-    const creep = (gb.kind === 'auto' || gb.kind === 'cvt') && (this.selector === 'D' || this.selector === 'R') && Math.abs(ch.pitch) < 0.07
+    // (Off by default: a car that rolled off by itself when the brake or handbrake was let go felt broken — it waits
+    // for the gas, like a modern automatic's brake hold.)
+    const creep = this.idleCreep && (gb.kind === 'auto' || gb.kind === 'cvt') && (this.selector === 'D' || this.selector === 'R') && Math.abs(ch.pitch) < 0.07
     const hold = this.selector === 'P' || this.brake > 0.05 || input.handbrake || (this.gas < 0.05 && this.selector !== 'N' && !creep)
     // Hill-start assist: pulling away (≤ 1.5 s after the hold, still slow) the tyres won't let the car roll BACK —
     // the static force only ever pushes the way it's driving, until the drive takes over.
@@ -543,8 +572,20 @@ export class Drivetrain {
       }
       this.Fx[i] = Fx
       this.Fy[i] = Fy
-      const vis = wi.contact ? Math.max(Math.abs(this.kappa[i]) / 0.35, Math.abs(this.alpha[i]) / 0.3) : 0
-      this.slip[i] += (Math.min(1, Math.max(0, vis - 0.25)) - this.slip[i]) * Math.min(1, dt * 10)
+      // VISIBLE SLIP: past the tyre's peak (κ / α normalised by it) AND sliding fast over the ground (m/s) — the slip
+      // RATIO alone is huge at a crawl (1 m/s of slip at walking pace) and squealed / smoked on every pull-away.
+      let lat = 0, lon = 0
+      if (wi.contact && wi.Fz > 0) {
+        const gp = this.grips[i], r = R.axles[i >> 1].radius
+        const sx = Math.abs(this.omega[i] * r - wi.vx), sy = Math.abs(wi.vy)
+        lon = clamp01((Math.abs(this.kappa[i]) / gp.kp - 1.25) / 1.5) * clamp01((sx - 1) / 2)
+        lat = clamp01((Math.abs(Math.tan(this.alpha[i])) / Math.tan(gp.ap) - 1.15) / 1.2) * clamp01((sy - 0.8) / 1.7)
+        // ABS pumping in a hard stop at speed: the tyres chirp at their limit (a panic stop is heard, a gentle one not).
+        if (this.absRel[i] && this.brake > 0.5 && Math.abs(speed) > 8) lon = Math.max(lon, 0.45)
+      }
+      this.slideVis[i] += (lat - this.slideVis[i]) * Math.min(1, dt * 12)
+      this.skidVis[i] += (lon - this.skidVis[i]) * Math.min(1, dt * 12)
+      this.slip[i] = Math.max(this.slideVis[i], this.skidVis[i])
     }
     this.traction(dt, speed, w)
     this.thermal(dt, w)
@@ -742,7 +783,9 @@ export class Drivetrain {
     // GRIP-LIMITED steering (aids std / full — GTA-smooth keys): a full key at speed asks for about the cornering the
     // front tyres can give on this surface (δ ≈ L·μg / v², a touch of understeer), never 3× it — beyond the limit the
     // rear stepped out and a 0.5 s lane change at 60 km/h spun the truck 135°. Counter-steer keeps the full lock.
-    if (this.aids !== 'off' && v > 4 && slideK < 0.5) lock = Math.min(lock, Math.max(0.03, Math.atan((R.wheelbase * 1.05 * this.grips[0].mu * ch.g) / (v * v))))
+    // (+ a fifth of the front tyre's peak slip angle: the wheels visibly turn into a fast bend; more only scrubs the
+    // fronts past their peak — no more grip, hot tyres)
+    if (this.aids !== 'off' && v > 4 && slideK < 0.5) lock = Math.min(lock, Math.max(0.03, Math.atan((R.wheelbase * 1.05 * this.grips[0].mu * ch.g) / (v * v)) + 0.2 * this.grips[0].ap))
     let target = c.steer * lock
     // Counter-steer help (aids std / full): steer into a rear slide.
     if (this.aids !== 'off' && v > 3 && Math.abs(aRear) > 0.14) target += 0.4 * aRear

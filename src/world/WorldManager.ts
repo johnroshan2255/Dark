@@ -41,6 +41,7 @@ export class WorldManager {
   private readonly streamer: ChunkStreamer
   private readonly geos: PropGeometries
   private centerX = Number.NaN
+  private nearDone = false
   private centerZ = Number.NaN
   private q: WorldQuality = {
     name: 'low', renderRadius: 2, lodRings: [1.5, 2.2], plants: false, buildPerFrame: 1,
@@ -78,6 +79,7 @@ export class WorldManager {
       this.cache.set(key, d)
       if (this.inRing(d.cx, d.cz, this.q.renderRadius)) this.buildQueue.set(key, d)
     })
+    this.streamer.onRoads = (r) => this.fields.network.importRoads(r)
   }
 
   /** Apply tier settings. A radius change re-evaluates the ring on the next update. */
@@ -177,6 +179,14 @@ export class WorldManager {
     return n
   }
 
+  /** Fraction (0..1) of the chunks within `r` rings of (x, z) that are built — "enough world to start playing". */
+  builtNear(x: number, z: number, r: number): number {
+    const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE)
+    let n = 0
+    for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) if (this.chunks.has(chunkKey(cx + dx, cz + dz))) n++
+    return n / (2 * r + 1) ** 2
+  }
+
   /** True once the chunk under (x, z) has both a mesh and colliders. */
   isReadyAt(x: number, z: number): boolean {
     const key = chunkKey(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE))
@@ -274,7 +284,10 @@ export class WorldManager {
       b.imp = inRing && dMax > im
       c.setTreeBands(b)
     }
-    this.farForest.update(this.centerX, this.centerZ, (key) => {
+    // (the far forest's worker builds the road network out there too: it waits until the 5 × 5 chunks round the
+    // player exist — at a fresh start it competed with the chunk workers for the CPU)
+    this.nearDone ||= this.builtNear(this.centerX * CHUNK_SIZE, this.centerZ * CHUNK_SIZE, 2) >= 1
+    if (this.nearDone) this.farForest.update(this.centerX, this.centerZ, (key) => {
       const c = this.chunks.get(key)
       return !!c && c.ring <= this.q.renderRadius
     })

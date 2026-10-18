@@ -4,10 +4,12 @@ import { hashFloat } from '../noise/rng'
  * Procedural PLACES (deterministic, global, per 300 m region — like the road network):
  *  - FARM (p ≈ 0.5 per region the main road crosses): 45–110 m to one side of the main road, on gentle ground.
  *  - CABIN / RUINS / CAMP (p ≈ 0.55 per region): anywhere suitable, away from road, river and steep slopes.
+ *  - LOOKOUT (one per LOOKOUT_REGION where the land has a real SUMMIT): a viewpoint on the peak, reached by a
+ *    switchback trail (RoadNetwork driveway with a strict slope limit) — the reason to leave the valley road.
  * Each place flattens its ground to a base height measured on the valley-shaped ground (WorldFields), clears
  * trees (scatter), and gets a gravel road to the main road (RoadNetwork). Contents are laid out in `poiLayout.ts`.
  */
-export const PoiType = { Farm: 0, Cabin: 1, Ruins: 2, Camp: 3 } as const
+export const PoiType = { Farm: 0, Cabin: 1, Ruins: 2, Camp: 3, Lookout: 4 } as const
 export const POI_REGION = 300
 
 export interface Poi {
@@ -37,13 +39,25 @@ export interface PoiHost {
   homestead?(): boolean
 }
 
-const RADIUS = [48, 16, 18, 14]
+const RADIUS = [48, 16, 18, 14, 11]
+/**
+ * LOOKOUTS: ≤ 1 SUMMIT per LOOKOUT_REGION (600 m = 2 × 2 place regions): the 4 highest of a 6 × 6 sample grid, each
+ * climbed to its local top (8 directions, 40 → 20 → 10 m steps); the first that is a real peak — PROMINENCE ≥ 16 m over
+ * the ring 150 m round it, flanks ≤ 50 % on average over the top 48 m (a trail can wind up it) — dry, ≥ 140 m off the main road, ≥ 80 m off the river, and its top fits the place's blend
+ * ring. Any biome (a desert butte, a snowy peak). ≤ ~250 height samples per 600 m cell, once (cached).
+ */
+export const LOOKOUT_REGION = 600
+/** Place regions per lookout cell edge. */
+const LOOK_PER = LOOKOUT_REGION / POI_REGION
+const LOOKOUT_PROMINENCE = 16
+const DIR8 = [[1, 0], [0.7071, 0.7071], [0, 1], [-0.7071, 0.7071], [-1, 0], [-0.7071, -0.7071], [0, -1], [0.7071, -0.7071]] as const
 /** Homestead yard radius (bright's farm). */
 const HOME_RADIUS = 26
 const farmR = (h: PoiHost) => (h.homestead?.() ? HOME_RADIUS : RADIUS[0])
 
 export class PoiField {
-  private readonly cache = new Map<string, Poi[]>()
+  private readonly cache = new Map<number, Poi[]>()
+  private readonly lookouts = new Map<number, Poi | null>()
   private homeFarm: Poi | null | undefined
   constructor(private readonly host: PoiHost) {}
 
@@ -69,6 +83,70 @@ export class PoiField {
     return this.homeFarm
   }
 
+  /** The LOOKOUT of LOOKOUT_REGION cell (li, lj), or null (no drivable summit there). */
+  lookout(li: number, lj: number): Poi | null {
+    const key = li * 131072 + lj
+    const hit = this.lookouts.get(key)
+    if (hit !== undefined) return hit
+    const h = this.host, s = h.seed
+    let out: Poi | null = null
+    // The 4 highest of a 6 × 6 sample grid, each climbed to its local top; the first that passes (highest first) wins.
+    const cand: [number, number, number][] = []
+    for (let j = 0; j < 6; j++) {
+      for (let i = 0; i < 6; i++) {
+        const x = (li + (i + 0.2 + 0.6 * hashFloat(s, li * 6 + i, lj * 6 + j, 1301)) / 6) * LOOKOUT_REGION
+        const z = (lj + (j + 0.2 + 0.6 * hashFloat(s, li * 6 + i, lj * 6 + j, 1302)) / 6) * LOOKOUT_REGION
+        cand.push([h.baseHeight(x, z), x, z])
+      }
+    }
+    cand.sort((p, q) => q[0] - p[0] || p[1] - q[1])
+    const tried: [number, number][] = []
+    for (const [h0, x0, z0] of cand.slice(0, 4)) {
+      let bx = x0, bz = z0, bh = h0
+      for (const step of [40, 20, 10]) {
+        for (let it = 0; it < 4; it++) {
+          let moved = false
+          for (const [dx, dz] of DIR8) {
+            const y = h.baseHeight(bx + dx * step, bz + dz * step)
+            if (y > bh) (bh = y), (bx += dx * step), (bz += dz * step), (moved = true)
+          }
+          if (!moved) break
+        }
+      }
+      if (tried.some(([x, z]) => Math.hypot(x - bx, z - bz) < 30)) continue // (the same top again)
+      tried.push([bx, bz])
+      // (the climb may leave the cell: the summit belongs to the cell it ends in — a neighbour finds the same peak)
+      if (Math.floor(bx / LOOKOUT_REGION) !== li || Math.floor(bz / LOOKOUT_REGION) !== lj) continue
+      if (bh <= h.water + 8 || Math.abs(bx - h.roadCenterX(bz)) <= 140 || h.riverDistance(bx, bz) <= 80) continue
+      // (a NEEDLE — flanks averaging > 50 % over the top 48 m — has no drivable way up: not a lookout)
+      let cone = 0
+      for (let k = 0; k < 8; k++) cone += (bh - h.baseHeight(bx + DIR8[k][0] * 48, bz + DIR8[k][1] * 48)) / 8
+      if (cone > 24) continue
+      let ring = 0, low = Infinity, lowA = 0
+      for (let k = 0; k < 8; k++) {
+        const y = h.baseHeight(bx + DIR8[k][0] * 150, bz + DIR8[k][1] * 150)
+        ring += y / 8
+        if (y < low) (low = y), (lowA = k)
+      }
+      if (bh - ring < LOOKOUT_PROMINENCE) continue
+      const r = RADIUS[PoiType.Lookout]
+      let lo = bh, sum = bh
+      for (let k = 0; k < 8; k++) {
+        const y = h.baseHeight(bx + DIR8[k][0] * r * 0.7, bz + DIR8[k][1] * r * 0.7)
+        lo = Math.min(lo, y); sum += y
+      }
+      // The top is flattened to just under the peak (a terrace on the summit, not a crater): it must fit the blend.
+      if (bh - lo > r * 0.45) continue
+      // rot: the terrace faces the BEST VIEW — down the lowest side of the peak.
+      const rot = Math.atan2(DIR8[lowA][0], DIR8[lowA][1])
+      out = { type: PoiType.Lookout, x: bx, z: bz, rot, radius: r, baseH: (sum / 9 + bh) / 2, variant: hashFloat(s, li, lj, 1303) }
+      break
+    }
+    if (this.lookouts.size > 2000) this.lookouts.clear()
+    this.lookouts.set(key, out)
+    return out
+  }
+
   private flatEnough(x: number, z: number, r: number): number | null {
     const h = this.host
     // No farms, cabins, camps or ruins in the desert or on the snowfields (their own places come later).
@@ -86,7 +164,7 @@ export class PoiField {
   }
 
   region(ci: number, cj: number): Poi[] {
-    const key = `${ci},${cj}`
+    const key = ci * 131072 + cj // (a number: this runs ~9 × per ground height sample — string keys were 19 % of world generation)
     let list = this.cache.get(key)
     if (list) return list
     list = []
@@ -95,7 +173,11 @@ export class PoiField {
     const x0 = ci * POI_REGION, z0 = cj * POI_REGION
     const hf = this.home()
     if (hf && Math.floor(hf.x / POI_REGION) === ci && Math.floor(hf.z / POI_REGION) === cj) list.push(hf)
-    const clear = (x: number, z: number, d: number) => !hf || Math.hypot(hf.x - x, hf.z - z) > d
+    // This region's share of the 900 m cell's lookout (the summit decides the region it stands in).
+    const lk = this.lookout(Math.floor(ci / LOOK_PER), Math.floor(cj / LOOK_PER))
+    if (lk && Math.floor(lk.x / POI_REGION) === ci && Math.floor(lk.z / POI_REGION) === cj && (!hf || Math.hypot(hf.x - lk.x, hf.z - lk.z) > 200)) list.push(lk)
+    const look = list.find((q) => q.type === PoiType.Lookout)
+    const clear = (x: number, z: number, d: number) => (!hf || Math.hypot(hf.x - x, hf.z - z) > d) && (!look || Math.hypot(look.x - x, look.z - z) > 90)
     // Farm beside the main road.
     if (hashFloat(s, ci, cj, 1201) < 0.5) {
       const z = z0 + (0.2 + 0.6 * hashFloat(s, ci, cj, 1202)) * POI_REGION
@@ -182,8 +264,9 @@ const NAMES: string[][] = [
   ['Lakeside Cabin', "Hunter's Cabin", 'Pinewood Cabin', "Woodcutter's Hut"],
   ['Old Ruins', 'Mossy Ruins', 'Forgotten Keep', 'Broken Chapel'],
   ["Traveller's Camp", 'Scout Camp', 'Ember Camp', 'Starlight Camp'],
+  ['Eagle Point', 'Sunset Lookout', 'High Cairn', 'Windy Summit', 'Crown Rock', 'Skyview Point', 'Hawk Ridge', 'Cloudrest Peak'],
 ]
-export const POI_ICONS = ['🌾', '🏠', '🏛️', '⛺']
+export const POI_ICONS = ['🌾', '🏠', '🏛️', '⛺', '⛰️']
 const HOME_NAMES = ['Willow Cottage', 'Hearthstone House', 'Birch Hollow', 'Lantern House', 'Old Miller\'s House', 'Meadow Cottage']
 /** HUD icon of a place (bright homesteads: a house). */
 export function poiIcon(p: Poi): string {

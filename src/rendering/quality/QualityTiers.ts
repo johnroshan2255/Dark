@@ -83,6 +83,12 @@ export interface QualitySettings {
   impostors: { start: number; far: number; atlas: number; blend: boolean }
   /** Sun/moon shadow map on/off (off = no shadow pass at all; characters keep their blob shadow). */
   shadows: boolean
+  /** IMAGE tree shadows instead of a shadow map (rendering/shadows/TreeShadows: a shade image under each near tree, cast
+   *  away from the sun — 1 draw). The LOW level: phones get tree shade without the shadow pass. */
+  imageShadows: boolean
+  /** CACHED sun shadows: the world's casters re-render only when the player moved a quarter of the map or the sun
+   *  turned (LightingSystem); the moving things cast into a small per-frame map (rendering/shadows/DynamicShadow). */
+  shadowCache: boolean
   /** Vehicles, monsters and the character cast real shadows (else blob shadows). */
   objectShadows: boolean
   sunShadowSize: number
@@ -122,6 +128,9 @@ export interface QualitySettings {
   skyScale: number
   /** Re-render the reflection every N frames (the texture is reused in between). */
   reflectionEvery: number
+  /** SKYLINE mirror (PlanarReflection.LAYER_REFLECT_SKYLINE): sky, far hills, landmarks, near ground, cliffs and tree
+   *  images only — ~34 draws instead of ~77 at a lake. ULTRA mirrors everything. */
+  reflectionSkyline: boolean
   /** Screen-space ambient occlusion (soft contact shadows): RT scale (0 = off), samples, world radius (m). */
   ao: { scale: number; samples: number; radius: number }
   /**
@@ -133,8 +142,8 @@ export interface QualitySettings {
 }
 
 type FeatureFields = {
-  shadows: Pick<QualitySettings, 'shadows' | 'objectShadows' | 'sunShadowSize' | 'sunShadowEvery' | 'sunShadowExtent' | 'flashlightShadow'>
-  reflections: Pick<QualitySettings, 'reflections' | 'reflectionEvery'>
+  shadows: Pick<QualitySettings, 'shadows' | 'imageShadows' | 'shadowCache' | 'objectShadows' | 'sunShadowSize' | 'sunShadowEvery' | 'sunShadowExtent' | 'flashlightShadow'>
+  reflections: Pick<QualitySettings, 'reflections' | 'reflectionEvery' | 'reflectionSkyline'>
   ao: Pick<QualitySettings, 'ao'>
   volumetrics: Pick<QualitySettings, 'godRays' | 'fog'>
   view: Pick<QualitySettings, 'renderRadius' | 'lodRings' | 'viewDistance' | 'horizon' | 'landmarkRange' | 'impostors'>
@@ -149,19 +158,23 @@ type FeatureFields = {
  */
 export const FEATURE_TABLE: { [F in Feature]: Partial<Record<Level, FeatureFields[F]>> } = {
   shadows: {
-    off: { shadows: false, objectShadows: false, sunShadowSize: 512, sunShadowEvery: 4, sunShadowExtent: 34, flashlightShadow: false },
-    low: { shadows: true, objectShadows: false, sunShadowSize: 1024, sunShadowEvery: 3, sunShadowExtent: 34, flashlightShadow: false },
-    medium: { shadows: true, objectShadows: true, sunShadowSize: 1024, sunShadowEvery: 2, sunShadowExtent: 40, flashlightShadow: false },
-    high: { shadows: true, objectShadows: true, sunShadowSize: 2048, sunShadowEvery: 1, sunShadowExtent: 50, flashlightShadow: true },
+    off: { shadows: false, imageShadows: false, shadowCache: false, objectShadows: false, sunShadowSize: 512, sunShadowEvery: 4, sunShadowExtent: 34, flashlightShadow: false },
+    // LOW (phones): NO shadow map — image tree shadows (1 draw; the map cost ~12 % of a LOW frame: 0.2 ms of shading
+    // + 0.15 ms per update, measured 2026-10-18 on an RTX 4050 laptop in a dense forest).
+    low: { shadows: false, imageShadows: true, shadowCache: false, objectShadows: false, sunShadowSize: 512, sunShadowEvery: 4, sunShadowExtent: 34, flashlightShadow: false },
+    // MEDIUM / HIGH (iGPU laptops, phones on full graphics): IMAGE tree shadows + REAL per-frame shadows of the car /
+    // player / bike (DynamicShadow) — no sun shadow pass at all (user, 2026-10-18: "use images for shadows").
+    medium: { shadows: false, imageShadows: true, shadowCache: false, objectShadows: true, sunShadowSize: 512, sunShadowEvery: 4, sunShadowExtent: 34, flashlightShadow: false },
+    high: { shadows: false, imageShadows: true, shadowCache: false, objectShadows: true, sunShadowSize: 512, sunShadowEvery: 4, sunShadowExtent: 34, flashlightShadow: true },
     // 4096² over a 140 m box: sharper AND farther (≈ 29 texels/m vs 20 on HIGH). +48 MB shadow memory.
-    ultra: { shadows: true, objectShadows: true, sunShadowSize: 4096, sunShadowEvery: 1, sunShadowExtent: 70, flashlightShadow: true },
+    ultra: { shadows: true, imageShadows: false, shadowCache: true, objectShadows: true, sunShadowSize: 4096, sunShadowEvery: 1, sunShadowExtent: 70, flashlightShadow: true },
   },
   reflections: {
-    off: { reflections: 0, reflectionEvery: 1 },
-    low: { reflections: 0.25, reflectionEvery: 2 },
-    medium: { reflections: 0.35, reflectionEvery: 1 },
-    high: { reflections: 0.5, reflectionEvery: 1 },
-    ultra: { reflections: 0.75, reflectionEvery: 1 },
+    off: { reflections: 0, reflectionEvery: 1, reflectionSkyline: true },
+    low: { reflections: 0.25, reflectionEvery: 2, reflectionSkyline: true },
+    medium: { reflections: 0.35, reflectionEvery: 1, reflectionSkyline: true },
+    high: { reflections: 0.5, reflectionEvery: 1, reflectionSkyline: true },
+    ultra: { reflections: 0.75, reflectionEvery: 1, reflectionSkyline: false },
   },
   ao: {
     off: { ao: { scale: 0, samples: 0, radius: 0 } },
@@ -180,7 +193,7 @@ export const FEATURE_TABLE: { [F in Feature]: Partial<Record<Level, FeatureField
   view: {
     low: { renderRadius: 2, lodRings: [0.8, 1.4], viewDistance: 200, horizon: { size: 2400, res: 40 }, landmarkRange: 700, impostors: { start: 50, far: 260, atlas: 1024, blend: false } },
     medium: { renderRadius: 3, lodRings: [0.9, 1.8], viewDistance: 300, horizon: { size: 3200, res: 52 }, landmarkRange: 1000, impostors: { start: 70, far: 400, atlas: 2048, blend: true } },
-    high: { renderRadius: 3, lodRings: [1.2, 2.3], viewDistance: 420, horizon: { size: 4400, res: 72 }, landmarkRange: 1500, impostors: { start: 100, far: 700, atlas: 2048, blend: true } },
+    high: { renderRadius: 3, lodRings: [1.2, 2.3], viewDistance: 420, horizon: { size: 4400, res: 72 }, landmarkRange: 1500, impostors: { start: 60, far: 700, atlas: 2048, blend: true } }, // (trees are images from 60 m: was 100 — fewer per-species tree draws per chunk)
     ultra: { renderRadius: 4, lodRings: [1.5, 2.8], viewDistance: 540, horizon: { size: 5600, res: 96 }, landmarkRange: 2200, impostors: { start: 130, far: 900, atlas: 2048, blend: true } },
   },
   // Grass field around the player (GrassField: near + far layers). OFF = the painted meadow on the terrain only.
@@ -243,11 +256,13 @@ export const PRESETS: Record<TierName, Preset> = {
     },
     features: { shadows: 'medium', reflections: 'off', ao: 'off', volumetrics: 'medium', grass: 'medium', effects: 'medium', vegetation: 'medium', view: 'medium' },
   },
-  // Discrete GPUs, Apple M-series.
+  // Discrete GPUs, Apple M-series — and the target look for Snapdragon 6xx / Intel UHD: the scene at 80 % (≤ 1.4 MP,
+  // DPR ≤ 1.25), upscaled by the grading pass with a little more sharpening — ~35 % fewer shaded pixels than 100 %
+  // at 1080p for a barely softer image (adaptive / Hold 60 climbs back toward 100 % where there is headroom).
   high: {
     base: {
-      maxDpr: 1.5, renderScale: { min: 0.7, max: 1, start: 1 }, aa: 'fxaa', sharpen: 0.25, paint: { stride: 1.8, bloom: 0.45 },
-      buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 320, rain: 1 }, tyreMarks: { segments: 4096, life: 120, range: 90 }, pixelBudget: 2.4e6, skyScale: 0.5,
+      maxDpr: 1.25, renderScale: { min: 0.65, max: 1, start: 0.8 }, aa: 'fxaa', sharpen: 0.3, paint: { stride: 1.8, bloom: 0.45 },
+      buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 320, rain: 1 }, tyreMarks: { segments: 4096, life: 120, range: 90 }, pixelBudget: 1.4e6, skyScale: 0.5,
     },
     features: { shadows: 'high', reflections: 'high', ao: 'medium', volumetrics: 'high', grass: 'high', effects: 'high', vegetation: 'high', view: 'high' },
   },

@@ -3,7 +3,9 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import type RAPIER from '@dimforge/rapier3d-compat'
 import { group, Groups, type PhysicsWorld } from '../../physics/PhysicsWorld'
 import { createLandmarkGeometries, type LandmarkGeometries } from './landmarkGeometry'
-import { LandmarkKind, type Landmark, type LandmarkField } from './landmarks'
+import { LANDMARK_REGION, LandmarkKind, type Landmark, type LandmarkField } from './landmarks'
+import type { LandmarksRequest, LandmarksResponse } from '../Streaming/chunk.worker'
+import { LAYER_REFLECT_SKYLINE } from '../../rendering/water/PlanarReflection'
 
 /**
  * Renders the LANDMARKS (landmarks.ts) independently of the chunk ring, out to the tier's landmark distance
@@ -14,7 +16,9 @@ import { LandmarkKind, type Landmark, type LandmarkField } from './landmarks'
  * merged mesh that casts shadows, those to 350 m into a full-detail one, the rest into one of the FAR LOD
  * (≈ half the triangles) — all on `materials.landmark`. Range per tier: `QualitySettings.landmarkRange`. The merge is redone only when the visible set changes (crossing ~100 m, a few ms on a worker-
  * free main thread, measured below 3 ms for 20 landmarks). Physics: fixed cylinder colliders for landmarks within
- * 160 m (created / removed as you move). Memory: ~1–2 MB of merged vertex data on HIGH.
+ * 160 m (created / removed as you move). Memory: ~1–2 MB of merged vertex data on HIGH. PLACEMENT runs in its own
+ * worker (one more worker on every tier; it idles once the regions around you are known): measured flying at
+ * 59 m/s for 4.6 km, worst frame 29 ms — it froze for 1–3.6 s at a time when placement ran here.
  */
 const COLLIDE_IN = 160
 const COLLIDE_OUT = 220
@@ -37,13 +41,56 @@ export class LandmarkSystem {
   private readonly q = new THREE.Quaternion()
   private readonly up = new THREE.Vector3(0, 1, 0)
 
+  /** PLACEMENT WORKER (chunk.worker.ts 'landmarks'): placing a landmark checks the rock formations and road network
+   *  around it (A* driveways, 0.3–2 s per new area on a phone-class core) — on the main thread that froze the game
+   *  for seconds while flying, and for ~5–30 s at load (home + the first ring). The main thread's field is `remote`:
+   *  it only reads regions this worker primed. */
+  private readonly worker: Worker
+  private nextId = 1
+  private inflight = 0
+  /** A response arrived: re-evaluate the visible set even without moving. */
+  private fresh = false
+  /** The home landmark arrived (Game turns the opening view to it). */
+  onHome: ((home: Landmark | null) => void) | null = null
+  private homeKnown = false
+
   constructor(
     private readonly field: LandmarkField,
     private readonly material: THREE.Material,
     private readonly physics: PhysicsWorld,
+    private readonly seed: number,
+    private readonly palette: number,
   ) {
     this.geos = createLandmarkGeometries()
     this.group.name = 'landmarks'
+    field.remote = true
+    this.worker = new Worker(new URL('../Streaming/chunk.worker.ts', import.meta.url), { type: 'module' })
+    this.worker.onmessage = (e: MessageEvent<LandmarksResponse>) => {
+      this.inflight--
+      // (only regions not known yet: a known region keeps its objects — the colliders are keyed by them)
+      for (const [i, j, list] of e.data.regions) if (!field.has(i, j)) field.prime(i, j, list)
+      if (!this.homeKnown) {
+        this.homeKnown = true
+        field.primeHome(e.data.home)
+        this.onHome?.(e.data.home)
+      }
+      this.fresh = true
+    }
+  }
+
+  /** Ask the worker for every landmark region within `reach` of (x, z) not known yet (one request at a time). */
+  private request(x: number, z: number, reach: number): boolean {
+    const R = LANDMARK_REGION
+    const i0 = Math.floor((x - reach) / R), i1 = Math.floor((x + reach) / R)
+    const j0 = Math.floor((z - reach) / R), j1 = Math.floor((z + reach) / R)
+    let missing = !this.homeKnown
+    for (let j = j0; j <= j1 && !missing; j++) for (let i = i0; i <= i1 && !missing; i++) missing = !this.field.has(i, j)
+    if (!missing) return false
+    if (this.inflight === 0) {
+      this.inflight++
+      this.worker.postMessage({ type: 'landmarks', id: this.nextId++, seed: this.seed, palette: this.palette, i0, j0, i1, j1 } satisfies LandmarksRequest)
+    }
+    return true
   }
 
   /**
@@ -52,7 +99,10 @@ export class LandmarkSystem {
    */
   update(dt: number, x: number, z: number, range: number, shadowRange: number, shadows: boolean): void {
     for (const r of this.rotors) r.rotateZ(-dt * 0.9)
-    if (Math.hypot(x - this.lastX, z - this.lastZ) < 60 && range === this.range) return
+    // Prefetch a region beyond the draw range (a flying car covers 700 m in ~10 s; a request takes ~0.1–2 s).
+    if (this.inflight === 0) this.request(x, z, range + LANDMARK_REGION)
+    if (Math.hypot(x - this.lastX, z - this.lastZ) < 60 && range === this.range && !this.fresh) return
+    this.fresh = false
     this.lastX = x
     this.lastZ = z
     this.range = range
@@ -123,6 +173,7 @@ export class LandmarkSystem {
       mesh.name = ['landmarks.near', 'landmarks.mid', 'landmarks.far'][b]
       mesh.castShadow = shadows && b === 0
       mesh.receiveShadow = b === 0
+      mesh.layers.enable(LAYER_REFLECT_SKYLINE)
       this.meshes.push(mesh)
       this.group.add(mesh)
     })
@@ -155,6 +206,7 @@ export class LandmarkSystem {
   }
 
   dispose(): void {
+    this.worker.terminate()
     for (const b of this.bodies.values()) this.physics.world.removeRigidBody(b)
     this.bodies.clear()
     this.rebuild([[], [], []], false)

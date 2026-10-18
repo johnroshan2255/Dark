@@ -19,6 +19,14 @@ import * as THREE from 'three'
 export const LAYER_NO_REFLECT = 2
 /** Layer drawn ONLY in the reflection: near chunks show their merged far-LOD trees there (WorldChunk.setLod). */
 export const LAYER_REFLECT_ONLY = 3
+/**
+ * SKYLINE REFLECTION (QualitySettings.reflectionSkyline, HIGH): the mirror draws ONLY this layer — the sky, the far
+ * hills, landmarks, the near chunks' ground, cliffs and tree images (the shape of a lake's reflection). Not the
+ * truck, the player, rocks, tree meshes or the far forest: a full mirror was +76 draws (+39 %) and ~1 ms CPU at a
+ * HIGH lake; this one ~34 draws. Members enable it on top of their normal layers (sky, HorizonTerrain,
+ * LandmarkSystem, WorldChunk).
+ */
+export const LAYER_REFLECT_SKYLINE = 7
 
 export class PlanarReflection {
   readonly target: THREE.WebGLRenderTarget
@@ -36,6 +44,9 @@ export class PlanarReflection {
   /** Objects hidden while rendering the reflection. */
   readonly hide: THREE.Object3D[] = []
   scale = 0
+  /** Draw only LAYER_REFLECT_SKYLINE (see there). */
+  skyline = false
+  private litCount = -1
   /** Re-render every N frames (QualitySettings.reflectionEvery); the last texture + matrix are reused between. */
   every = 1
   private frame = 0
@@ -60,6 +71,12 @@ export class PlanarReflection {
     this.valid = false
     // Under (or right at) the surface the mirror is meaningless.
     if (camera.position.y <= this.level + 0.05) return
+    // three only applies lights that share a layer with the camera: the skyline mirror needs them on its layer
+    // (unlit, the mirrored cliffs washed out to the water's colour). New lights (flashlight…) join on the next pass.
+    if (this.skyline && scene.children.length !== this.litCount) {
+      this.litCount = scene.children.length
+      scene.traverse((o) => (o as THREE.Light).isLight && o.layers.enable(LAYER_REFLECT_SKYLINE))
+    }
     renderer.getDrawingBufferSize(this.size)
     const w = Math.max(16, Math.round(this.size.x * this.scale)), h = Math.max(16, Math.round(this.size.y * this.scale))
     if (this.target.width !== w || this.target.height !== h) this.target.setSize(w, h)
@@ -77,7 +94,7 @@ export class PlanarReflection {
     cam.far = camera.far
     cam.updateMatrixWorld()
     cam.projectionMatrix.copy(camera.projectionMatrix)
-    cam.layers.mask = (camera.layers.mask & ~(1 << LAYER_NO_REFLECT)) | (1 << LAYER_REFLECT_ONLY)
+    cam.layers.mask = this.skyline ? 1 << LAYER_REFLECT_SKYLINE : (camera.layers.mask & ~(1 << LAYER_NO_REFLECT)) | (1 << LAYER_REFLECT_ONLY)
 
     this.textureMatrix.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1)
     this.textureMatrix.multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse)

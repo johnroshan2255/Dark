@@ -52,7 +52,43 @@ export interface StylizeOptions {
   biomeCover?: 'foliage' | 'rock'
   /** World-scale STONE painting (cliff rock: formations + crags) instead of the unit-boulder brush scale. */
   cliffStone?: boolean
+  /** Rock EROSION detail (runnels, weathering, stains, lichen: ROCK_EROSION_GLSL) — needs `biomeCover` (noise). */
+  erosion?: boolean
+  /** Receives the IMAGE TREE SHADOWS (uTreeShade: the direct light is dimmed where a tree's shade image lies) — the
+   *  ground, grass, rocks and the player; not the trees themselves. 1 texture fetch per fragment while it is on;
+   *  'vertex' = per vertex instead (grass: thousands of small, overlapping blades — the fetch per pixel was most of
+   *  the cost). */
+  treeShade?: boolean | 'vertex'
 }
+
+/** Rock erosion, colour part (after the albedo patches, before the snow cover). Sets eroW / eroG / eroTan. */
+const ROCK_EROSION_GLSL = /* glsl */ `
+{ // ROCK EROSION (world space): RUNNELS fluting the walls (wavering vertical noise ~1.2 m apart; the across-face
+  // slope tilts the normal in the normal block, the flute floors are darker), blotchy WEATHERING (2–5 m patches),
+  // rain STAINS streaking down from the lips, LICHEN blotches. Side faces only for the runnels / stains (tops keep
+  // their cover); the fine part fades out past ~90 m (no shimmer) and is skipped on LOW. ≤ 7 noise lookups.
+  vec3 wnE = normalize(normalize(vNormal) * mat3(viewMatrix));
+  float nearE = (1.0 - smoothstep(35.0, 90.0, length(vWPos - cameraPosition))) * step(0.5, uSurfaceDetail);
+  float sideE = 1.0 - smoothstep(0.45, 0.8, wnE.y);
+  bool xFaceE = abs(wnE.x) > abs(wnE.z);
+  float uE = xFaceE ? vWPos.z : vWPos.x, yE = vWPos.y;
+  eroTan = xFaceE ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+  float blot = st_noise(vWPos.xz * 0.3 + vec2(yE * 0.21, -yE * 0.13));
+  float stainE = st_noise(vec2(uE * 1.6, yE * 0.06));
+  float k = (0.88 + 0.24 * blot) * (1.0 - 0.18 * smoothstep(0.5, 0.85, stainE) * sideE);
+  if (nearE > 0.0) {
+    float wv = st_noise(vec2(uE * 0.2, yE * 0.1)) * 1.8;
+    float r0 = st_noise(vec2(uE * 0.8 + wv, yE * 0.15));
+    float r1 = st_noise(vec2((uE + 0.1) * 0.8 + wv, yE * 0.15));
+    eroW = sideE * nearE;
+    eroG = (r1 - r0) / 0.1;
+    float rib = smoothstep(0.25, 0.75, r0); // 0 = flute floor, 1 = rib
+    float lich = smoothstep(0.64, 0.72, st_noise(vWPos.xz * 0.9 + vec2(yE * 0.6)));
+    k *= mix(1.0, 0.72 + 0.36 * rib, eroW);
+    diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(1.18, 1.14, 0.92) + vec3(0.025, 0.025, 0.0), lich * 0.45 * nearE);
+  }
+  diffuseColor.rgb *= k;
+}`
 
 /**
  * STORYBOOK palette (forest-house study): our Genshin albedos → its pale pastel sage painting. Hue kept,
@@ -136,6 +172,21 @@ float st_noise(vec2 p) {
 }
 `
 
+/**
+ * DYNAMIC SHADOW lookup (rendering/shadows/DynamicShadow): the car / player / bike / monsters' depth from the sun
+ * round the player, 4-tap PCF → 0..1 in shadow. Used while the sun's world shadow map is cached.
+ */
+const DYN_SHADOW_GLSL = /* glsl */ `
+uniform sampler2D uDynShadow; uniform mat4 uDynShadowMat; uniform float uDynShadowOn;
+float dynShadowAt(vec3 wp) {
+  vec3 c = (uDynShadowMat * vec4(wp, 1.0)).xyz;
+  if (c.x <= 0.0 || c.y <= 0.0 || c.x >= 1.0 || c.y >= 1.0 || c.z >= 1.0) return 0.0;
+  float z = c.z - 0.0008, t = 0.75 / 1024.0;
+  return (step(textureLod(uDynShadow, c.xy + vec2(-t, -t), 0.0).r, z) + step(textureLod(uDynShadow, c.xy + vec2(t, -t), 0.0).r, z)
+    + step(textureLod(uDynShadow, c.xy + vec2(-t, t), 0.0).r, z) + step(textureLod(uDynShadow, c.xy + vec2(t, t), 0.0).r, z)) * 0.25;
+}
+`
+
 export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions): T {
   const prev = material.onBeforeCompile.bind(material)
   const rim = o.rim ?? 0.5
@@ -173,6 +224,12 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       uTrailOn: u.uTrailOn,
       uSurfaceDetail: u.uSurfaceDetail,
       uBiomeActive: u.uBiomeActive,
+      uTreeShade: u.uTreeShade,
+      uTreeShadeRect: u.uTreeShadeRect,
+      uTreeShadeOn: u.uTreeShadeOn,
+      uDynShadow: u.uDynShadow,
+      uDynShadowMat: u.uDynShadowMat,
+      uDynShadowOn: u.uDynShadowOn,
       ...skyUniforms,
     })
     let vs = shader.vertexShader
@@ -191,6 +248,17 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
           vWPos = (modelMatrix * wp4).xyz; }
         ${o.cheapFog ? 'vFogSky = vec3(-1.0);' : 'vFogSky = skyColor(normalize((vec4(normalize(mvPosition.xyz), 0.0) * viewMatrix).xyz), false);'}`,
       )
+    if (o.treeShade === 'vertex') {
+      vs = vs
+        .replace('#include <common>', '#include <common>\nuniform sampler2D uTreeShade; uniform vec4 uTreeShadeRect; uniform float uTreeShadeOn; varying float vTreeShade;\n' + DYN_SHADOW_GLSL)
+        .replace('vWPos = (modelMatrix * wp4).xyz; }', `vWPos = (modelMatrix * wp4).xyz; }
+  vTreeShade = 0.0;
+  if (uTreeShadeOn > 0.5) {
+    vec2 tuv = (vWPos.xz - uTreeShadeRect.xy) * uTreeShadeRect.z;
+    if (tuv.x > 0.0 && tuv.y > 0.0 && tuv.x < 1.0 && tuv.y < 1.0) vTreeShade = textureLod(uTreeShade, tuv, 0.0).r * uTreeShadeRect.w;
+  }
+  if (uDynShadowOn > 0.0) vTreeShade = max(vTreeShade, dynShadowAt(vWPos) * uDynShadowOn);`)
+    }
     if (o.biomeCover) {
       vs = vs
         .replace('#include <common>', `#include <common>\n${BIOME_GLSL}\nvarying vec2 vBiomeW; varying float vSnowUp;${o.key === 'landmark' ? '\nattribute float aBaseY;' : ''}`)
@@ -261,10 +329,24 @@ float skyHaze(float d) { return uSkyHaze.x * (1.0 - exp(-max(d - 12.0, 0.0) / uS
 varying vec3 vFogSky; varying vec3 vWPos;
 ${fs.includes('uSkyMist') ? '' : MIST_GLSL}
 ${o.terrain || o.surface !== undefined ? 'uniform sampler2D uBrush;\n' : ''}${o.surface !== undefined ? paintFragPars(o.cliffStone ? STONE_CLIFF_UV : undefined).replace('uniform sampler2D uBrush;', '') : ''}${o.surface === 'atlas' ? '\nvarying float vGlow;' : ''}
-${o.biomeCover ? 'varying vec2 vBiomeW; varying float vSnowUp;\n' + (o.terrain ? '' : NOISE) : ''}
+${o.biomeCover ? 'varying vec2 vBiomeW; varying float vSnowUp;\n' + (o.terrain ? '' : NOISE) : ''}${o.erosion ? (o.terrain ? '' : 'uniform float uSurfaceDetail;\n') + 'float eroW = 0.0; float eroG = 0.0; vec3 eroTan = vec3(1.0, 0.0, 0.0); // rock erosion: runnel weight, slope, face tangent\n' : ''}
 ${o.terrain ? 'varying float vRoadLat; varying vec2 vRoadNet; varying vec2 vBiome; varying float vMud; varying vec3 vWorldPos; varying float vUpN; varying vec2 vNxz;\nfloat wetPuddle = 0.0; // set in the terrain colour block, read after lighting (puddle mirror)\nfloat cliffW = 0.0; vec3 cliffTilt = vec3(0.0); // cliff weight + per-block normal tilt: set in the colour block, read in the normal block\nfloat roadDirt = 0.0; // bare dirt road weight (bright: clumpy relief in the normal block)\n' + NOISE + GUST_GLSL + TRAIL_GLSL : ''}
-${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
+${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}
+${o.treeShade === 'vertex' ? 'varying float vTreeShade;\n' : ''}${o.treeShade ? 'uniform sampler2D uTreeShade; uniform vec4 uTreeShadeRect; uniform float uTreeShadeOn;\nfloat stTreeShade = 0.0; // image tree shadow / dynamic shadow here (0..1): dims the direct light (lights_lambert_pars)' : ''}
+${o.treeShade === true ? DYN_SHADOW_GLSL : ''}`,
     )
+    if (o.treeShade === 'vertex') fs = fs.replace('#include <lights_fragment_begin>', 'stTreeShade = vTreeShade;\n#include <lights_fragment_begin>')
+    else if (o.treeShade) {
+      fs = fs.replace(
+        '#include <lights_fragment_begin>',
+        `if (uTreeShadeOn > 0.5) {
+  vec2 tuv = (vWPos.xz - uTreeShadeRect.xy) * uTreeShadeRect.z;
+  if (tuv.x > 0.0 && tuv.y > 0.0 && tuv.x < 1.0 && tuv.y < 1.0) stTreeShade = texture2D(uTreeShade, tuv).r * uTreeShadeRect.w;
+}
+if (uDynShadowOn > 0.0) stTreeShade = max(stTreeShade, dynShadowAt(vWPos) * uDynShadowOn);
+#include <lights_fragment_begin>`,
+      )
+    }
     // Genshin CEL SHADING: N·L through a narrow ramp → lit / shadow sides with a crisp soft-edged terminator
     // (a little linear falloff kept so volumes still read). Shadows stay light because the sky fill is bright.
     fs = fs.replace(
@@ -275,7 +357,7 @@ ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
   ${o.surface === 'atlas' ? `// LEAF CARDS (vSurf < 0): softly WRAPPED light — a long gentle gradient across the crown (Genshin's soft
   // volume), the far side still ~40 % lit (dark gaps between puffs read as holes); no cel step on leaves.
   if (vSurf < -0.5) dotNL = mix(0.4, 1.0, smoothstep(-0.5, 0.95, dot(geometryNormal, directLight.direction))); else` : ''}
-  dotNL = mix(dotNL, ${gen ? 'smoothstep(-0.05, 0.5, dotNL) * 0.6 + dotNL * 0.4' : 'smoothstep(0.0, 0.16, dotNL) * 0.82 + dotNL * 0.18'}, uToon * ${(o.toon ?? 1).toFixed(2)});`, // Genshin scenery: a SOFT terminator (the hard cel step is for characters)
+  dotNL = mix(dotNL, ${gen ? 'smoothstep(-0.05, 0.5, dotNL) * 0.6 + dotNL * 0.4' : 'smoothstep(0.0, 0.16, dotNL) * 0.82 + dotNL * 0.18'}, uToon * ${(o.toon ?? 1).toFixed(2)});${o.treeShade ? '\n  dotNL *= 1.0 - stTreeShade; // image tree shadow (LOW) / dynamic shadow (cached sun map)' : ''}`, // Genshin scenery: a SOFT terminator (the hard cel step is for characters)
       ),
     )
     if (o.cullFade) {
@@ -288,6 +370,11 @@ ${story ? STORY_GLSL : ''}${over ? OVERLAND_GLSL : ''}`,
 #endif
 #include <alphatest_fragment>`,
       )
+    }
+    if (o.erosion) {
+      fs = fs.replace('#include <alphamap_fragment>', `${ROCK_EROSION_GLSL}\n#include <alphamap_fragment>`)
+      // runnels: the flute's across-face slope tilts the normal → the ribs catch the light, the flutes fall into shade
+      fs = fs.replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\n  if (eroW > 0.01) normal = normalize(normal + mat3(viewMatrix) * eroTan * clamp(eroG * 0.22, -0.7, 0.7) * eroW);')
     }
     if (o.terrain) {
       fs = fs.replace(
@@ -696,6 +783,6 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     shader.fragmentShader = fs
   }
   const prevKey = material.customProgramCacheKey.bind(material)
-  material.customProgramCacheKey = () => `${prevKey()}|stylize2-${o.key}${o.biomeCover ? '-bc' : ''}${story ? '-story' : ''}${over ? '-over' : ''}${gen ? '-gen' : ''}`
+  material.customProgramCacheKey = () => `${prevKey()}|stylize2-${o.key}${o.biomeCover ? '-bc' : ''}${o.erosion ? '-ero' : ''}${o.treeShade ? (o.treeShade === 'vertex' ? '-tsv' : '-ts') : ''}${story ? '-story' : ''}${over ? '-over' : ''}${gen ? '-gen' : ''}`
   return material
 }

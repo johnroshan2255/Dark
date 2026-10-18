@@ -16,12 +16,13 @@ import { Rng } from '../src/world/noise/rng'
 import { sampleHeight } from '../src/world/Terrain/generateTerrain'
 import { WorldGenerator } from '../src/world/WorldGenerator'
 import { formationSdf, FormationKind } from '../src/world/Formations/formations'
-import { createPropGeometries } from '../src/world/Forest/propGeometries'
+import { createPropGeometries, rockPick } from '../src/world/Forest/propGeometries'
 import { buildInstanceAttributes } from '../src/optimization/instancing/InstanceBuilder'
 import { Biome, BIOME_COUNT } from '../src/world/Biomes'
 import { RoadNetwork, roadHeightAt, type NetRoad as RoadNetworkRoad } from '../src/world/Road/RoadNetwork'
 import { builtBridge } from '../src/world/Road/bridges'
 import { campsIn } from '../src/world/Road/camps'
+import { PoiType } from '../src/world/POI/pois'
 
 let failures = 0
 const check = (name: string, ok: boolean, detail = '') => {
@@ -93,13 +94,17 @@ check('heightfield collider matches render mesh (200 raycasts)', maxErr < 0.01, 
 {
   const geos = createPropGeometries()
   const attrs = buildInstanceAttributes(chunk.rocks, PROP_STRIDE, undefined, 0.12)!
-  const pos = geos.rock.getAttribute('position')
+  const pos = geos.rock.getAttribute('position'), rv = geos.rock.getAttribute('rockVar')
   const m = new THREE.Matrix4(), v = new THREE.Vector3(), c = new THREE.Vector3()
   let outside = 0, tested = 0, worst = 0
+  const shapes = new Set<number>()
   for (let k = 0; k < attrs.count; k++) {
     m.fromArray(attrs.matrix.array as Float32Array, k * 16)
     c.set(0, 0.2, 0).applyMatrix4(m)
+    const pick = rockPick(k) // (the mesh holds six shapes; the instance shows only its own)
+    shapes.add(pick)
     for (let i = 0; i < pos.count; i++) {
+      if (rv.getX(i) !== pick) continue
       v.fromBufferAttribute(pos, i).applyMatrix4(m).lerp(c, 0.03) // 3 % inside the surface (hull tolerance)
       v.x += chunk.cx * CHUNK_SIZE
       v.z += chunk.cz * CHUNK_SIZE
@@ -111,7 +116,7 @@ check('heightfield collider matches render mesh (200 raycasts)', maxErr < 0.01, 
       }
     }
   }
-  check(`rock hulls contain the rendered boulders (${tested} vertices)`, tested > 0 && outside === 0, `${outside} outside, worst ${worst.toFixed(2)} m`)
+  check(`rock hulls contain the rendered boulders (${tested} vertices, ${shapes.size} shapes)`, tested > 0 && outside === 0, `${outside} outside, worst ${worst.toFixed(2)} m`)
   geos.dispose()
 }
 phys.dispose()
@@ -138,14 +143,18 @@ for (const seed of [7, 1337, 42]) {
     disc = Math.max(disc, hi - lo); n++
   }
   check(`seed ${seed}: places are flat (${n} places, relief across 55 % of the radius ≤ 0.5 m)`, n > 0 && disc <= 0.5, `${disc.toFixed(2)} m`)
-  let slope = 0
+  let slope = 0, shelf = 0
+  const ref = { road: null, dist: 0, s: 0, side: 0, height: 0 }
   for (let z = -300; z < 1200; z += 6) {
     for (let x = -600; x < 600; x += 6) {
       if (!f.netRoad(x, z, 3)) continue
-      slope = Math.max(slope, Math.abs(f.height(x + 3, z) - f.height(x + 5, z)) / 2, Math.abs(f.height(x, z + 3) - f.height(x, z + 5)) / 2)
+      const sl = Math.max(Math.abs(f.height(x + 3, z) - f.height(x + 5, z)) / 2, Math.abs(f.height(x, z + 3) - f.height(x, z + 5)) / 2)
+      // (a summit trail is a SHELF ROAD: cut up to 5.5 m into the hillside — its uphill face is steeper, rock-clad)
+      if (sl > 2.2 && f.network.nearestRoad(x, z, 6, ref)?.road?.key.startsWith('peak:')) shelf = Math.max(shelf, sl)
+      else slope = Math.max(slope, sl)
     }
   }
-  check(`seed ${seed}: ground beside secondary roads ≤ 2.2 m/m`, slope <= 2.2, `${slope.toFixed(2)} m/m`)
+  check(`seed ${seed}: ground beside secondary roads ≤ 2.2 m/m (summit trails' shelf cuts ≤ 2.8)`, slope <= 2.2 && shelf <= 2.8, `${slope.toFixed(2)} m/m, shelf ${shelf.toFixed(2)}`)
   // Biomes.
   const w0 = f.biome(f.roadCenterX(8), 8, [0, 0], f.height(f.roadCenterX(8), 8))
   check(`seed ${seed}: spawn is forest`, w0[0] + w0[1] < 0.02, `desert ${w0[0].toFixed(2)} snow ${w0[1].toFixed(2)}`)
@@ -205,7 +214,8 @@ for (const seed of [7, 1337, 42]) {
   // Places (farms, cabins, camps, ruins) only in the green lands.
   let badPlaces = 0
   const allPlaces = f.pois.inBox(-3000, -4000, 3000, 4000)
-  for (const q of allPlaces) { const w = f.biomes.weights(q.x, q.z, [0, 0]); if (w[0] > 0.25 || w[1] > 0.25) badPlaces++ }
+  // (summit LOOKOUTS stand on any peak: a desert butte, a snowy summit)
+  for (const q of allPlaces) { if (q.type === PoiType.Lookout) continue; const w = f.biomes.weights(q.x, q.z, [0, 0]); if (w[0] > 0.25 || w[1] > 0.25) badPlaces++ }
   check(`seed ${seed}: no places in the desert or the snow (${allPlaces.length} places)`, badPlaces === 0, `${badPlaces} misplaced`)
   check(`seed ${seed}: (almost) no undergrowth on the snowfields`, snowChunks.length > 0 && snowPlants <= 3 * snowChunks.length, `${snowPlants} plants in ${snowChunks.length} chunks`)
 }
@@ -244,6 +254,7 @@ for (const seed of [7, 1337, 42]) {
 // built only when both its ends lead to roads. Junction-aware union–find over 4 seeds (window edges excluded).
 {
   let cut = 0, dead = 0, checked = 0, noRoad = 0, places = 0, campsNo = 0, bridgesBad = 0, bridges = 0
+  let looks = 0, trails = 0, trailMax = 0
   for (const seed of [7, 1337, 42, 6]) {
     const f = new WorldGenerator(seed).fields
     const set = new Set<RoadNetworkRoad>()
@@ -283,6 +294,17 @@ for (const seed of [7, 1337, 42]) {
     }
     for (const p of f.pois.inBox(-1500, -1900, 1900, 2600)) {
       if (Math.abs(p.x - f.roadCenterX(p.z)) > 2400 || Math.abs(p.x - f.roadCenterX(p.z)) < p.radius + 15) continue
+      // SUMMIT LOOKOUTS: a peak with no drivable trail keeps none (you hike up) — but most get one, and every trail
+      // stays drivable (graded pitches ≤ 45 %; RoadNetwork.summitTrail).
+      if (p.type === PoiType.Lookout) {
+        looks++
+        const t = f.network.placeRoad(p)
+        if (t) {
+          trails++
+          for (let i = 1; i < t.n; i++) trailMax = Math.max(trailMax, Math.abs(t.hs[i] - t.hs[i - 1]) / Math.max(0.5, t.cum[i] - t.cum[i - 1]))
+        }
+        continue
+      }
       places++
       if (!f.network.nearest(p.x, p.z, p.radius + 25)) { noRoad++; console.log(`  place without a road: seed ${seed} ${p.x | 0},${p.z | 0}`) }
     }
@@ -293,6 +315,7 @@ for (const seed of [7, 1337, 42]) {
   check('no road ends in the middle of nowhere (junction / main road / place / camp / bridge at every end)', dead === 0, `${dead} dead ends`)
   check(`every place and camp has a road (${places} places)`, places > 20 && noRoad === 0 && campsNo === 0, `${noRoad} places, ${campsNo} camps without`)
   check(`every built bridge leads to roads at both ends (${bridges} bridges)`, bridgesBad === 0, `${bridgesBad} bad`)
+  check(`summit lookouts: most have a switchback trail, every trail drivable (${looks} lookouts)`, looks >= 12 && trails >= looks * 0.6 && trailMax <= 0.45, `${trails} trails, steepest pitch ${(trailMax * 100).toFixed(0)} %`)
 }
 
 // Landmarks (giant trees, windmills, ruins, towers…): deterministic, dry, off the road; the home one in view.

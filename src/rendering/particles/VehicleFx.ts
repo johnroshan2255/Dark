@@ -68,6 +68,8 @@ export class VehicleFx {
   private wakeAcc = 0
   private cursor = 0
   private exhaustAcc = 0
+  private engSmoke = 0
+  private engFlame = 0
   /** Which exhaust tip the last puff left from (multi-tip cars alternate). */
   private exhaustTip = 0
   private readonly wheelAcc = [0, 0, 0, 0]
@@ -196,6 +198,7 @@ export class VehicleFx {
       }
       if (sim.boat > 0.5 && sim.wet > 0.05) this.water(dt, car)
       this.tyreHeat(dt, car, wx, wz)
+      this.engine(dt, car, wx, wz)
       for (let k = 0; k < 4; k++) {
         const w = sim.wheels[k]
         if (!w.contact) {
@@ -389,6 +392,81 @@ export class VehicleFx {
         // (a fresh one every frame, living ~2.5 frames: the overlap flickers with the random sizes and alphas)
         life: dt * 2.5, size0: 2.0 + Math.random() * 0.5, size1: 2.0, alpha: 0.22 + Math.random() * 0.2,
         r: 1.6, g: 0.55, b: 0.14, grav: 0, add: 1,
+      })
+    }
+  }
+
+  /**
+   * DAMAGE (gameplay/vehicle/Damage): from 50 % the engine bay SMOKES — grey, thickening and darkening toward 90 %;
+   * from 90 % it BURNS (flames licking out of the bonnet + black smoke + glow). A wreck burns hard for ~10 s, then
+   * smoulders. Rates scale with the tier's particle budget.
+   */
+  private engine(dt: number, car: Car, wx: number, wz: number): void {
+    const d = car.damageLevel
+    if (d < 0.5) {
+      this.engSmoke = this.engFlame = 0
+      return
+    }
+    const kb = Math.min(this.budget, MAX) / MAX
+    const wreck = car.wrecked ? Math.max(0, 1 - car.wreckTime / 14) : 0
+    const burning = d >= 0.9 && (!car.wrecked || car.wreckTime < 22)
+    car.engineWorld(_c)
+    const t = Math.min(1, (d - 0.5) / 0.4)
+    this.engSmoke += dt * (4 + 10 * t + 8 * wreck) * kb
+    while (this.engSmoke >= 1) {
+      this.engSmoke -= 1
+      const g = 0.62 - 0.5 * Math.max(t, burning ? 1 : 0)
+      this.spawn({
+        x: _c.x + (Math.random() - 0.5) * 0.6, y: _c.y + Math.random() * 0.2, z: _c.z + (Math.random() - 0.5) * 0.6,
+        vx: (Math.random() - 0.5) * 0.6 + wx * 2, vy: 1.0 + Math.random() * 0.8 + t, vz: (Math.random() - 0.5) * 0.6 + wz * 2,
+        life: 2.2 + Math.random() + t, size0: 0.4, size1: 1.8 + t * 1.8 + wreck * 1.5, alpha: 0.28 + 0.3 * t,
+        r: g, g: g, b: g + 0.02, grav: 0.8,
+      })
+    }
+    if (!burning) {
+      this.engFlame = 0
+      return
+    }
+    this.engFlame += dt * (40 + 70 * wreck) * (0.4 + 0.6 * kb)
+    while (this.engFlame >= 1) {
+      this.engFlame -= 1
+      const hot = Math.random(), spread = 0.4 + 0.5 * wreck
+      this.spawn({
+        x: _c.x + (Math.random() - 0.5) * spread * 2, y: _c.y + Math.random() * 0.15, z: _c.z + (Math.random() - 0.5) * spread * 2,
+        vx: (Math.random() - 0.5) * 0.5 + wx * 1.5, vy: 1.6 + Math.random() * 1.8 + wreck, vz: (Math.random() - 0.5) * 0.5 + wz * 1.5,
+        life: 0.3 + Math.random() * 0.35, size0: 0.45 + Math.random() * 0.35 + wreck * 0.5, size1: 0.1, alpha: 0.85,
+        r: 2.6, g: 0.75 + 1.0 * hot, b: 0.1 + 0.3 * hot, grav: 3, add: 1,
+      })
+    }
+    this.spawn({ x: _c.x, y: _c.y + 0.2, z: _c.z, vx: 0, vy: 0, vz: 0, life: dt * 2.5, size0: 2.4 + wreck * 2 + Math.random() * 0.6, size1: 2.4, alpha: 0.25 + Math.random() * 0.2, r: 1.6, g: 0.5, b: 0.12, grav: 0, add: 1 })
+  }
+
+  /** The EXPLOSION at 100 % damage: a fireball, a ring of flames, black smoke rolling up, burning debris. */
+  explode(at: THREE.Vector3): void {
+    const n = Math.min(this.budget, MAX)
+    for (let i = 0; i < n * 0.35; i++) {
+      const a = Math.random() * Math.PI * 2, e = Math.random() * 1.2, sp = 2 + Math.random() * 7
+      this.spawn({
+        x: at.x, y: at.y + 0.8, z: at.z,
+        vx: Math.cos(a) * Math.cos(e) * sp, vy: Math.sin(e) * sp + 2, vz: Math.sin(a) * Math.cos(e) * sp,
+        life: 0.5 + Math.random() * 0.6, size0: 1.4 + Math.random() * 1.6, size1: 0.3, alpha: 0.95,
+        r: 3, g: 1.1 + Math.random() * 0.9, b: 0.25, grav: -2, add: 1,
+      })
+    }
+    for (let i = 0; i < n * 0.25; i++) {
+      const a = Math.random() * Math.PI * 2, sp = 1 + Math.random() * 3
+      this.spawn({
+        x: at.x + Math.cos(a) * 0.8, y: at.y + 1 + Math.random(), z: at.z + Math.sin(a) * 0.8,
+        vx: Math.cos(a) * sp, vy: 2 + Math.random() * 3, vz: Math.sin(a) * sp,
+        life: 3 + Math.random() * 2, size0: 1.2, size1: 5 + Math.random() * 3, alpha: 0.65,
+        r: 0.08, g: 0.075, b: 0.07, grav: 1.5,
+      })
+    }
+    for (let i = 0; i < n * 0.1; i++) {
+      const a = Math.random() * Math.PI * 2, sp = 6 + Math.random() * 9
+      this.spawn({
+        x: at.x, y: at.y + 1, z: at.z, vx: Math.cos(a) * sp, vy: 5 + Math.random() * 8, vz: Math.sin(a) * sp,
+        life: 1 + Math.random(), size0: 0.18, size1: 0.12, alpha: 1, r: 2.2, g: 0.9, b: 0.3, grav: -9.8, add: 1,
       })
     }
   }

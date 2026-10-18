@@ -1,5 +1,5 @@
 import { CELL_SIZE, CHUNK_RES, CHUNK_SIZE, CHUNK_VERTS } from '../constants'
-import { hashFloat, Layer } from '../noise/rng'
+import { hash4, hashFloat, Layer } from '../noise/rng'
 import { sampleHeight } from '../Terrain/generateTerrain'
 import { WorldFields } from '../WorldFields'
 import type { BiomeWeights } from '../Biomes'
@@ -66,6 +66,35 @@ export interface CragMesh {
   col: number[]
 }
 
+/** Smooth 3D value noise in [0, 1] at world (x, y, z) / cell (hash per lattice corner, smoothstep blend). */
+function vnoise3(seed: number, x: number, y: number, z: number): number {
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z)
+  let fx = x - ix, fy = y - iy, fz = z - iz
+  fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy); fz = fz * fz * (3 - 2 * fz)
+  const c = (a: number, b: number, d: number) => hash4(seed, ix + a, iy + b, iz + d) / 4294967296
+  const x00 = c(0, 0, 0) + (c(1, 0, 0) - c(0, 0, 0)) * fx, x10 = c(0, 1, 0) + (c(1, 1, 0) - c(0, 1, 0)) * fx
+  const x01 = c(0, 0, 1) + (c(1, 0, 1) - c(0, 0, 1)) * fx, x11 = c(0, 1, 1) + (c(1, 1, 1) - c(0, 1, 1)) * fx
+  const y0 = x00 + (x10 - x00) * fy, y1 = x01 + (x11 - x01) * fy
+  return y0 + (y1 - y0) * fz
+}
+
+/**
+ * EROSION over the crags (user, 2026-10-18: "the rocks and hills were good but repeating — add natural erosion and
+ * noise over them"): a radial scale for a rock vertex at WORLD (x, y, z), so the same placement recipe never gives
+ * the same rock twice and neighbouring stones share the weathering of the place they stand in:
+ *   - lumps (3.2 m and 1.2 m noise, ±16 % / ±7 %): bulges and hollows in the outline;
+ *   - RUNNELS: noise stretched 5× vertically (1.5 m across, 7 m tall) cuts flutes into the walls — rain runs down
+ *     them, so they are stronger high on the rock and fade toward the buried foot (`up` 0..1);
+ *   - spalling: the rim of the top weathers back (smaller near the crown).
+ * The fine detail (runnels, cracks, stains, lichen) is painted in the rock shader (stylize `erosion`).
+ */
+function erode(seed: number, x: number, y: number, z: number, up: number): number {
+  const lump = (vnoise3(seed, x / 3.2, y / 3.2, z / 3.2) - 0.5) * 0.32 + (vnoise3(seed + 1, x / 1.2, y / 1.2, z / 1.2) - 0.5) * 0.14
+  const run = vnoise3(seed + 2, x / 1.5, y / 7, z / 1.5)
+  const flute = -Math.max(0, 0.55 - run) * 0.35 * (0.3 + 0.7 * up)
+  return 1 + lump + flute - 0.06 * up * up
+}
+
 const _g: [number, number] = [0, 0]
 const _bw: BiomeWeights = [0, 0]
 
@@ -93,11 +122,11 @@ export function buildCrags(fields: WorldFields, cx: number, cz: number, heights:
       const r = hashFloat(seed, gx, gz, L + 3)
       const ws = P.ws + P.wsVar * r // half-width across the slope
       const wd = P.wd + P.wdVar * hashFloat(seed, gx, gz, L + 4) // half-depth down the slope
-      // Clear of every road. Bright slabs need only their DOWNHILL depth clear (they face the road): the canyon
+      // Clear of every road (bright tors: their spread across the slope and the rubble below them). The canyon
       // walls 10 m off the road get rock too (with the old across-slope margin they stayed bare sand slopes).
-      if (fields.anyRoadEdge(wx, wz) < (fields.palette === 0 ? 2 + wd * 1.15 : 4 + ws)) continue
+      if (fields.anyRoadEdge(wx, wz) < (fields.palette === 0 ? 3 + Math.max(wd * 1.7 + 1.5, ws * 1.3) : 4 + ws)) continue
       if (fields.pois.near(wx, wz, 6) || fields.formations.near(wx, wz, 2) || fields.landmarks.near(wx, wz, 8) || nearBridge(fields, wx, wz, Math.max(ws, wd) * 1.4 + 4)) continue
-      if (fields.palette === 0) addSlabs(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L, P.salt > 0)
+      if (fields.palette === 0) addTor(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L, P.salt > 0)
       else addCrag(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L)
       count++
     }
@@ -122,16 +151,19 @@ function canyonWalls(fields: WorldFields, cx: number, cz: number, out: CragMesh)
       const z = k * STEP + (hashFloat(seed, k, side, L) - 0.5) * 3
       const rx = fields.roadCenterX(z)
       const rh = fields.roadHeight(z)
-      const dOut = WorldFields.ROAD_HALF_WIDTH + 12.5 + hashFloat(seed, k, side, L + 1) * 3
+      // (NOT a fence of equal stacks every 7 m: ~1/4 of the steps are gaps, the set-back varies 15–20 m, the width
+      // 3–8 m and the top ±3 m about the wall's crest — a ragged natural wall)
+      if (hashFloat(seed, k, side, L + 9) < 0.25) continue
+      const dOut = WorldFields.ROAD_HALF_WIDTH + 12.5 + hashFloat(seed, k, side, L + 1) * 5
       const x = rx + side * dOut
       if (x < x0 || x >= x0 + CHUNK_SIZE || z < z0 || z >= z0 + CHUNK_SIZE) continue
       const top = fields.height(rx + side * (WorldFields.ROAD_HALF_WIDTH + 24), z)
       if (top - rh < 8) continue // no wall here
       if (fields.netRoad(x, z, 12) || fields.pois.near(x, z, 8) || nearBridge(fields, x, z, 8) || fields.landmarks.near(x, z, 8)) continue
-      const ws = 4.5 + 2.5 * hashFloat(seed, k, side, L + 2), wd = 3.5 + 1.5 * hashFloat(seed, k, side, L + 3)
+      const ws = 3 + 5 * hashFloat(seed, k, side, L + 2) ** 1.5, wd = 3 + 2.5 * hashFloat(seed, k, side, L + 3)
       const h0 = fields.height(x, z)
-      addSlabs(fields, out, x - x0, z - z0, x, z, h0, side, 0, (top - rh) / 12, ws, wd, seed, k, side, L + 10, false,
-        [rh - 1.5, top + 0.5 + 2 * hashFloat(seed, k, side, L + 4)])
+      addTor(fields, out, x - x0, z - z0, x, z, h0, side, 0, (top - rh) / 12, ws, wd, seed, k, side, L + 10, false,
+        [rh - 1.5, top - 3 + 6 * hashFloat(seed, k, side, L + 4)])
       n++
       // BOULDER FIELD (their canyon floors): big angular boulders between the road and the wall, 1.5–4 m tall,
       // 1–2 per step and side, never closer than 2.5 m to the road's edge.
@@ -146,7 +178,7 @@ function canyonWalls(fields: WorldFields, cx: number, cz: number, out: CragMesh)
         if (xb < x0 || xb >= x0 + CHUNK_SIZE || zb < z0 || zb >= z0 + CHUNK_SIZE) continue
         if (fields.netRoad(xb, zb, 8 + bs) || nearBridge(fields, xb, zb, 4 + bs)) continue
         const hb0 = fields.height(xb, zb)
-        addSlabs(fields, out, xb - x0, zb - z0, xb, zb, hb0, side, 0, 0.4, bs, bs * 0.9, seed, k * 7 + b, side, L + 80, true,
+        addTor(fields, out, xb - x0, zb - z0, xb, zb, hb0, side, 0, 0.4, bs, bs * 0.9, seed, k * 7 + b, side, L + 80, true,
           [hb0 - 0.5, hb0 + bs * (0.55 + 0.4 * hashFloat(seed, k, side * 3 + b, L + 24))]) // squat: wider than tall
         n++
       }
@@ -154,7 +186,7 @@ function canyonWalls(fields: WorldFields, cx: number, cz: number, out: CragMesh)
       if (k % 2 === 0 && hashFloat(seed, k, side, L + 5) < 0.5) {
         const xs = rx + side * (dOut - 5.2), sw = 3 + 2.5 * hashFloat(seed, k, side, L + 6), sd = 2 + 1.2 * hashFloat(seed, k, side, L + 7)
         if (xs >= x0 && xs < x0 + CHUNK_SIZE && Math.abs(xs - rx) > WorldFields.ROAD_HALF_WIDTH + 3 + sd)
-          addSlabs(fields, out, xs - x0, z - z0, xs, z, fields.height(xs, z), side, 0, 0.5, sw, sd, seed, k, side, L + 60, true,
+          addTor(fields, out, xs - x0, z - z0, xs, z, fields.height(xs, z), side, 0, 0.5, sw, sd, seed, k, side, L + 60, true,
             [rh - 1, rh + 1.2 + 1.8 * hashFloat(seed, k, side, L + 8)])
       }
     }
@@ -204,7 +236,8 @@ function addCrag(
       const a = ca * wd * tierS * jit, b = cb * ws * tierS * jit
       const ox = dx * a + sx * b, oz = dz * a + sz * b
       const y = yb + yspan * fy + (t === T - 1 ? (hf(40 + k) - 0.5) * 2 * jag : t > 0 ? (hf(30 + t * N + k) - 0.5) * (gen ? 0.04 : 0.12) * yspan : 0)
-      P.push(cx[t] + ox, y, cz[t] + oz)
+      const e = t === 0 ? 1 : erode(seed, wx - lx + cx[t] + ox, y, wz - lz + cz[t] + oz, fy)
+      P.push(cx[t] + ox * e, y, cz[t] + oz * e)
       const ol = Math.sqrt(ox * ox + oz * oz) || 1
       RN.push(ox / ol, oz / ol)
     }
@@ -287,113 +320,169 @@ function addCrag(
 }
 
 /**
- * BRIGHT (palette 0) — "over the hill" canyon rock (their canyon / boulder close-ups): each crag is a STACK of 2–6
- * thick SLABS, each its own size, rotation and offset (piled blocks, overhanging lips, dark undersides). A slab is
- * REAL ROCK, not a pillow: an irregular 7–11-sided outline (12-gon directions, some dropped, strong radius jitter),
- * near-vertical sides with a small chamfer at the top rim, a FLAT top; FLAT-SHADED planes (face
- * normals), each plane its own tone (±7 %), lit flat tops, darker foot. Arithmetic + sqrt only (no trig).
- * Cost: ≈ 9 sides × (2 bands × 2 + 1 cap) ≈ 45 tris per slab (+9 under an overhang); ~180 tris per crag.
+ * BRIGHT (palette 0) — ROCK OUTCROPS as GRANITE TORS (the user's reference, 2026-10-16: a mossy mound of upright
+ * weathered boulders): each crag is a CLUSTER of upright, rounded-angular boulders packed into a mound — the tallest
+ * in the middle / uphill, shorter ones around them, small rubble spilling down the slope at the foot. Every boulder
+ * is its own shape (a jittered 6-sided body, a shoulder and a domed top, leaning its own way), buried in the ground at
+ * its own spot; the tops carry MOSS / grass in the green lands (most boulders, varying amounts), snow in the snow,
+ * bare sandstone in the desert; a darker foot (painted AO). Shading: face normals bent ~45 % toward the boulder's
+ * centre → readable planes with soft, rounded edges.
+ * (Replaced the layered slab stacks: they read as one repeated pattern — "every cliff looks the same".)
+ * Arithmetic + sqrt only (no trig: angles from a fixed 6-direction table, jittered). Cost: 35 tris per boulder,
+ * ~8–12 boulders per mass crag (~300 tris), 1–3 per small one; same draw / collider as before (formation mesh).
  */
-/** Ring layout: height fraction, radius scale — foot chamfer, body, top chamfer, top rim. */
-const SLAB_RINGS = [[0, 1], [0.86, 0.98], [1, 0.9]] as const // (no foot chamfer: it sat under the slab below / the sand)
-// 12-gon directions (exact constants).
-const C30 = 0.8660254, S30 = 0.5
-const DIR12 = [1, 0, C30, S30, S30, C30, 0, 1, -S30, C30, -C30, S30, -1, 0, -C30, -S30, -S30, -C30, 0, -1, S30, -C30, C30, -S30]
+// 7 directions (exact constants), jittered per boulder.
+const SIDES = 7
+const DIR7 = [1, 0, 0.6234898, 0.7818315, -0.2225209, 0.9749279, -0.9009689, 0.4338837, -0.9009689, -0.4338837, -0.2225209, -0.9749279, 0.6234898, -0.7818315]
 
-function addSlabs(
+function addTor(
   fields: WorldFields, out: CragMesh, lx: number, lz: number, wx: number, wz: number, h0: number,
   ux: number, uz: number, g: number, ws: number, wd: number, seed: number, gx: number, gz: number, L: number, small: boolean,
   range?: [number, number],
 ): void {
   const hf = (k: number) => hashFloat(seed, gx, gz, L + 5 + k)
+  // Frame: d = downhill (the face looks out of the hill), s = across the slope.
   const dx = -ux, dz = -uz, sx = -dz, sz = dx
-  const reach = Math.max(ws, wd)
-  const yb = range ? range[0] : h0 - g * reach * 1.2 - 1.5
-  const yt = range ? range[1] : h0 + (0.3 + 0.8 * hf(2)) * g * wd + hf(3) * 3
-  const yspan = yt - yb
+  // Mound height above the ground at its centre.
+  const T = range ? Math.max(1.5, range[1] - h0) : Math.max(small ? 1.2 : 3, (0.35 + 0.7 * hf(2)) * g * wd + 1.5 + hf(3) * 3)
   const w = fields.biome(wx, wz, _bw, h0)
   const sand = w[0], snow = w[1]
-  // Base rock colour (linear): warm sandstone in the desert, cool blue-grey stone in the green lands, grey-blue in
-  // the snow; ±10 % per crag.
-  const v0 = 0.9 + 0.2 * hf(41)
-  let br = 0.3 + 0.04 * hf(42), bg = 0.3 + 0.02 * hf(43), bb = 0.32 + 0.03 * hf(44)
-  br += (0.62 - br) * sand; bg += (0.31 - bg) * sand; bb += (0.19 - bb) * sand
-  br += (0.42 - br) * snow; bg += (0.46 - bg) * snow; bb += (0.54 - bb) * snow
-  const cover = [0.13 + (0.7 - 0.13) * sand + (0.86 - 0.13) * snow, 0.27 + (0.42 - 0.27) * sand + (0.89 - 0.27) * snow, 0.05 + (0.24 - 0.05) * sand + (0.95 - 0.05) * snow]
-  const nMax = small ? 2 : 6
-  const n = Math.max(1, Math.min(nMax, Math.round(yspan / (3.2 + 2.2 * hf(4)))))
-  const slabH = yspan / n
-  let ox0 = lx, oz0 = lz
+  // Granite light grey (linear ≈ sRGB 150,150,144), warm sandstone in the desert, cold grey-blue in the snow.
+  let br = 0.58, bg = 0.57, bb = 0.52
+  br += (0.6 - br) * sand; bg += (0.3 - bg) * sand; bb += (0.18 - bb) * sand
+  br += (0.36 - br) * snow; bg += (0.39 - bg) * snow; bb += (0.45 - bb) * snow
+  const green = (1 - sand) * (1 - snow)
+  const MOSS = [0.2, 0.42, 0.03], SNOW = [0.82, 0.86, 0.94]
   let face = 0
-  // One flat-shaded triangle; winding / normal faces away from (rx, rz) (sides) or up / down (caps).
-  const tri = (A: number[], B: number[], C: number[], col: number[], rx: number, rz: number, up: number): void => {
-    let bx = B[0], by = B[1], bz = B[2], cx2 = C[0], cy = C[1], cz2 = C[2]
+  const tri = (A: number[], B: number[], C: number[], col: number[], cx: number, cy: number, cz: number, soft: number) => {
+    let bx = B[0], by = B[1], bz = B[2], ex = C[0], ey = C[1], ez = C[2]
     const ax = A[0], ay = A[1], az = A[2]
-    let nx = (by - ay) * (cz2 - az) - (bz - az) * (cy - ay)
-    let ny = (bz - az) * (cx2 - ax) - (bx - ax) * (cz2 - az)
-    let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx2 - ax)
-    const flip = up !== 0 ? ny * up < 0 : nx * ((ax + bx + cx2) / 3 - rx) + nz * ((az + bz + cz2) / 3 - rz) < 0
-    if (flip) {
+    let nx = (by - ay) * (ez - az) - (bz - az) * (ey - ay)
+    let ny = (bz - az) * (ex - ax) - (bx - ax) * (ez - az)
+    let nz = (bx - ax) * (ey - ay) - (by - ay) * (ex - ax)
+    // outward = away from the boulder's centre
+    const mx = (ax + bx + ex) / 3 - cx, my = (ay + by + ey) / 3 - cy, mz = (az + bz + ez) / 3 - cz
+    if (nx * mx + ny * my + nz * mz < 0) {
       nx = -nx; ny = -ny; nz = -nz
-      const tx = bx, ty = by, tz = bz; bx = cx2; by = cy; bz = cz2; cx2 = tx; cy = ty; cz2 = tz
+      const tx = bx, ty = by, tz = bz; bx = ex; by = ey; bz = ez; ex = tx; ey = ty; ez = tz
     }
     const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
     nx /= nl; ny /= nl; nz /= nl
-    out.pos.push(ax, ay, az, bx, by, bz, cx2, cy, cz2)
-    out.nor.push(nx, ny, nz, nx, ny, nz, nx, ny, nz)
-    out.col.push(col[0], col[1], col[2], col[0], col[1], col[2], col[0], col[1], col[2])
+    const pts = [ax, ay, az, bx, by, bz, ex, ey, ez]
+    for (let q = 0; q < 3; q++) {
+      const px = pts[q * 3], py = pts[q * 3 + 1], pz = pts[q * 3 + 2]
+      // bent toward the radial direction from the centre: rounded edges, still readable planes
+      let rx = px - cx, ry = py - cy, rz = pz - cz
+      const rl = Math.sqrt(rx * rx + ry * ry + rz * rz) || 1
+      rx = nx * (1 - soft) + (rx / rl) * soft; ry = ny * (1 - soft) + (ry / rl) * soft; rz = nz * (1 - soft) + (rz / rl) * soft
+      const ql = Math.sqrt(rx * rx + ry * ry + rz * rz) || 1
+      out.pos.push(px, py, pz)
+      out.nor.push(rx / ql, ry / ql, rz / ql)
+      out.col.push(col[0], col[1], col[2])
+    }
+    return ny
   }
-  for (let si = 0; si < n; si++) {
-    const hs = (k: number) => hf(200 + si * 31 + k)
-    const y0 = yb + si * slabH - (si > 0 ? 0.2 : 0), y1 = yb + (si + 1) * slabH
-    const sc = (1 - 0.3 * (si / Math.max(1, n))) * (0.8 + 0.32 * hs(0))
-    const lean = (hs(1) - 0.35) * 0.18 * wd, side = (hs(2) - 0.5) * 0.3 * ws
-    const cxs = ox0 + dx * lean + sx * side, czs = oz0 + dz * lean + sz * side
-    ox0 = lx + (cxs - lx) * 0.5; oz0 = lz + (czs - lz) * 0.5
-    let rc = hs(3) - 0.5, rs = hs(4) - 0.5
+  /**
+   * One BOULDER standing at (bx, bz) (chunk-local), ground height gy: footprint half-sizes (a along d, b along s),
+   * height H above the ground (its foot buried `bury` m), leaning (lx2, lz2) m at the top, hash salt k0.
+   */
+  const boulder = (bx: number, bz: number, gy: number, a: number, b: number, H: number, bury: number, lean: number, k0: number) => {
+    const hb = (k: number) => hashFloat(seed, gx, gz, L + 2000 + k0 * 61 + k)
+    // own turn (a unit vector from two hashes, no trig)
+    let rc = hb(0) - 0.5, rs = hb(1) - 0.5
     const rl = Math.sqrt(rc * rc + rs * rs) || 1
     rc /= rl; rs /= rl
-    // Irregular outline: the 12-gon with ~1/4 of its corners dropped (never two in a row), radius jitter 0.7–1.12.
-    const ca: number[] = [], cb: number[] = [], rad: number[] = []
-    for (let k = 0; k < 12; k++) {
-      if (k % 2 === 1 && hs(10 + k) < 0.55) continue
-      const hx = DIR12[k * 2], hz = DIR12[k * 2 + 1]
-      ca.push(hx * rc - hz * rs); cb.push(hx * rs + hz * rc); rad.push(0.7 + 0.42 * hs(30 + k))
-    }
-    const N2 = ca.length
+    const lnx = (hb(2) - 0.5) * 2 * lean, lnz = (hb(3) - 0.5) * 2 * lean
+    // crown slope (rise per m of the footprint along a / b): ±0.35
+    const tpa = (hb(7) - 0.5) * 0.7 * (H / Math.max(a, b)) * 0.25, tpb = (hb(8) - 0.5) * 0.7 * (H / Math.max(a, b)) * 0.25
+    // rings: foot (buried), belly, shoulder; then the domed top centre
+    const RINGS = [[-bury, 0.95], [H * (0.42 + 0.18 * hb(4)), 1.03], [H * (0.7 + 0.12 * hb(5)), 0.62 + 0.18 * hb(6)]]
     const R: number[][] = []
-    for (let r = 0; r < SLAB_RINGS.length; r++) {
-      const [fy, rs2] = SLAB_RINGS[r]
-      const y = y0 + (y1 - y0) * fy
-      for (let k = 0; k < N2; k++) {
-        // sides lean a little in or out per ring (slightly slanted planes, not a perfect prism)
-        const lj = r <= 1 ? 0.96 + 0.08 * hs(50 + r * 12 + k) : 1
-        const a = ca[k] * wd * sc * rs2 * rad[k] * lj, b = cb[k] * ws * sc * rs2 * rad[k] * lj
-        R.push([cxs + dx * a + sx * b, y, czs + dz * a + sz * b])
+    for (let r = 0; r < RINGS.length; r++) {
+      const [y, sc] = RINGS[r]
+      const t = Math.max(0, y) / H
+      for (let k = 0; k < SIDES; k++) {
+        // jittered direction + radius → an irregular 7-gon, every boulder its own outline
+        const jx = DIR7[k * 2] + (hb(10 + k) - 0.5) * 0.5, jz = DIR7[k * 2 + 1] + (hb(17 + k) - 0.5) * 0.5
+        const ca = jx * rc - jz * rs, cb = jx * rs + jz * rc
+        const rad = sc * (0.75 + 0.4 * hb(24 + r * 7 + k))
+        const pa = ca * a * rad, pb = cb * b * rad
+        // (the shoulder ring tilts with the boulder's top: a sloped, not flat, crown)
+        const vy = gy + y + (hb(45 + r * 7 + k) - 0.5) * 0.14 * H + (r === 2 ? (pa * tpa + pb * tpb) : 0)
+        const ex = dx * pa + sx * pb, ez = dz * pa + sz * pb
+        const e = r === 0 ? 1 : erode(seed, wx - lx + bx + ex, vy, wz - lz + bz + ez, t)
+        R.push([bx + ex * e + lnx * t, vy, bz + ez * e + lnz * t])
       }
     }
-    // Colours: the slab's tone, a per-PLANE variation, a darker foot, lit flat top.
-    const tone = v0 * (0.9 + 0.2 * hs(5)) * (0.74 + 0.26 * Math.min(1, (si + 0.5) / n))
-    const base = [br * tone, bg * tone, bb * tone]
-    const top3 = [base[0] * 1.12, base[1] * 1.1, base[2] * 1.08]
-    if (si === n - 1) { const k = 0.5 + 0.3 * hs(6); top3[0] += (cover[0] - top3[0]) * k; top3[1] += (cover[1] - top3[1]) * k; top3[2] += (cover[2] - top3[2]) * k }
-    const plane = () => { const t = 0.93 + 0.14 * hashFloat(seed, gx, gz, L + 900 + face++); return [base[0] * t, base[1] * t, base[2] * t] }
-    const V = (r: number, k: number) => R[r * N2 + (k % N2)]
-    for (let r = 0; r < SLAB_RINGS.length - 1; r++) {
-      const dk = r === 1 ? 1.04 : 0.94 // body a touch darker, the top chamfer catching light
-      for (let k = 0; k < N2; k++) {
-        const c = plane()
-        const cc = [c[0] * dk, c[1] * dk, c[2] * dk]
-        tri(V(r, k), V(r, k + 1), V(r + 1, k + 1), cc, cxs, czs, 0)
-        tri(V(r, k), V(r + 1, k + 1), V(r + 1, k), cc, cxs, czs, 0)
+    const top = [bx + lnx + (hb(70) - 0.5) * 0.3 * a, gy + H * (0.9 + 0.2 * vnoise3(seed + 3, (wx - lx + bx) / 4, gy / 4, (wz - lz + bz) / 4)), bz + lnz + (hb(71) - 0.5) * 0.3 * b]
+    const cx = bx + lnx * 0.5, cy = gy + H * 0.45, cz = bz + lnz * 0.5
+    // colour: the boulder's tone, its moss / snow / bare top
+    const tone = 0.82 + 0.3 * hb(72)
+    const moss = green * (hb(73) < 0.8 ? 0.65 + 0.35 * hb(74) : 0) + snow * 0.9
+    const capC = snow > 0.5 ? SNOW : MOSS
+    const shade = (fy: number, up: number) => {
+      const plane = 0.93 + 0.14 * hashFloat(seed, gx, gz, L + 4000 + face++)
+      const k = tone * plane * (0.7 + 0.3 * Math.min(1, Math.max(0, fy)))
+      const c = [br * k, bg * k, bb * k]
+      // moss / snow on the up-facing planes (more on flatter ones), a little creeping over the shoulder
+      // (patchy: each plane its own share — no hard green lid; a few lower faces carry a little too)
+      const fr = hashFloat(seed, gx, gz, L + 6000 + face)
+      const m = moss * (Math.min(1, Math.max(0, (up - 0.35) / 0.4)) * (0.45 + 0.55 * fr) + (up < 0.3 && fr > 0.8 ? 0.25 : 0))
+      if (m > 0) for (let q = 0; q < 3; q++) c[q] += (capC[q] * (0.85 + 0.3 * hb(75)) - c[q]) * m
+      return c
+    }
+    const V = (r: number, k: number) => R[r * SIDES + (k % SIDES)]
+    for (let r = 0; r < 2; r++) {
+      for (let k = 0; k < SIDES; k++) {
+        const A = V(r, k), B = V(r, k + 1), C = V(r + 1, k + 1), D = V(r + 1, k)
+        // (a side plane's "up" from its corner heights: the shoulder band tilts up, the belly is ~vertical)
+        const up = r === 1 ? 0.62 + 0.25 * hb(76 + k) : 0
+        const fy = ((A[1] + C[1]) / 2 - gy) / H
+        const c = shade(fy, up)
+        tri(A, B, C, c, cx, cy, cz, 0.45)
+        tri(A, C, D, c, cx, cy, cz, 0.45)
       }
     }
-    const T = SLAB_RINGS.length - 1
-    const capC = [cxs, y1 + 0.02, czs]
-    for (let k = 0; k < N2; k++) tri(capC, V(T, k), V(T, k + 1), top3, cxs, czs, 1)
-    if (si > 0) {
-      const botC = [cxs, y0 - 0.02, czs], under = [base[0] * 0.55, base[1] * 0.55, base[2] * 0.6]
-      for (let k = 0; k < N2; k++) tri(botC, V(0, k), V(0, k + 1), under, cxs, czs, -1)
+    for (let k = 0; k < SIDES; k++) tri(top, V(2, k), V(2, k + 1), shade(1, 0.95), cx, cy, cz, 0.35)
+  }
+  const ground = (px: number, pz: number) => fields.height(wx + (px - lx), wz + (pz - lz))
+  if (small) {
+    // A small crag: 1–3 boulders.
+    const n = 1 + Math.floor(hf(4) * 3)
+    for (let i = 0; i < n; i++) {
+      const o = (hf(10 + i) - 0.5) * ws, p = (hf(20 + i) - 0.5) * wd
+      const px = lx + sx * o + dx * p, pz = lz + sz * o + dz * p
+      const s = Math.max(0.8, Math.min(ws, wd) * (0.45 + 0.4 * hf(30 + i)))
+      const H = range ? Math.max(0.8, range[1] - ground(px, pz)) * (0.7 + 0.3 * hf(40 + i)) : s * (0.9 + 0.9 * hf(40 + i))
+      boulder(px, pz, ground(px, pz), s * (0.8 + 0.3 * hf(50 + i)), s * (0.8 + 0.3 * hf(55 + i)), H, 0.4 + g * s * 0.6, s * 0.15, i)
     }
+    return
+  }
+  // A TOR: the core of tall upright boulders, a ring of shorter ones, rubble downhill.
+  const n = 7 + Math.floor(hf(4) * 6)
+  for (let i = 0; i < n; i++) {
+    // position in the footprint ellipse (sqrt → even spread), its distance from the core sets its size
+    let u = hf(100 + i) * 2 - 1, v = hf(120 + i) * 2 - 1
+    const l = Math.sqrt(u * u + v * v)
+    if (l > 1) (u /= l), (v /= l)
+    const r = Math.min(1, Math.sqrt(u * u + v * v))
+    // uphill (v < 0 = toward the hill) a little taller
+    const size = (1.15 - 0.7 * r) * (0.7 + 0.6 * hf(140 + i)) * (1 - 0.15 * v)
+    const px = lx + sx * u * ws * 0.6 + dx * v * wd * 0.6, pz = lz + sz * u * ws * 0.6 + dz * v * wd * 0.6
+    const gy = ground(px, pz)
+    // (height ≤ 2.5 × the footprint: a 30 m canyon wall gets a pile of boulders, not 25 m needles)
+    const H = Math.max(1.2, Math.min(T * size, 2.5 * Math.min(ws, wd) * (0.7 + 0.5 * hf(150 + i))))
+    // upright: width 30–55 % of the height (the core), squatter at the rim; never wider than the footprint
+    const a = Math.min(wd * 0.7, Math.max(0.7, H * (0.3 + 0.25 * hf(160 + i) + 0.25 * r))), b = Math.min(ws * 0.7, Math.max(0.7, H * (0.3 + 0.25 * hf(180 + i) + 0.25 * r)))
+    boulder(px, pz, gy, a, b, H, 0.6 + g * Math.max(a, b) * 0.8, H * 0.08, 10 + i)
+  }
+  // RUBBLE: small boulders spilt down the slope below the tor (not below a canyon wall: that's the road side —
+  // its boulder field is placed by canyonWalls, clear of the road).
+  const nr = range ? 0 : 3 + Math.floor(hf(5) * 4)
+  for (let i = 0; i < nr; i++) {
+    const o = (hf(200 + i) - 0.5) * ws * 1.6, p = wd * (0.8 + 0.7 * hf(220 + i))
+    const px = lx + sx * o + dx * p, pz = lz + sz * o + dz * p
+    const s = 0.5 + 1.2 * hf(240 + i) ** 2
+    boulder(px, pz, ground(px, pz), s * (0.9 + 0.4 * hf(260 + i)), s, s * (0.6 + 0.6 * hf(280 + i)), 0.25 + g * s * 0.5, s * 0.1, 40 + i)
   }
 }

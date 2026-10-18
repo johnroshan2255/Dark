@@ -9,7 +9,10 @@ import { ART } from '../artStyle'
  * Lakes and rivers: ONE flat water plane at WorldFields.WATER that follows the camera; the terrain decides
  * where water shows (carved river channels, low basins). Stylized: sky REFLECTION (the same skyColor as the
  * sky dome, so sunsets and mountains reflect), Fresnel toward a deep teal body colour, scrolling ripple
- * normals, a sharp sun/moon glint, sky-coloured fog. 1 draw call, fragment-only cost.
+ * normals, a sharp sun/moon glint, sky-coloured fog. 1 draw call, fragment-only cost — and only where water SHOWS:
+ * it draws after the opaque terrain, so the depth test rejects every pixel under land before the shader runs.
+ * Measured (ULTRA, 1920×800, desktop GPU, river in view): 0.04–0.06 ms; the same draw with the depth test off
+ * (shading the whole plane) 0.23 ms. Keep the shader free of discard / depth writes in the fragment stage.
  * NONE in the desert (dry basins / river bed). FROZEN in the snow (biome map, 1 fetch): a still, near-perfect mirror of the sky over pale blue-white ice with
  * dark clear-ice windows, white hairline cracks and drifts of snow; opaque (no bed showing through), no ripples.
  */
@@ -86,8 +89,10 @@ export class Water {
           float dry = 0.0; // bright: the desert's river is an OASIS (water, green banks, palms)
           #else
           float dry = smoothstep(0.3, 0.5, bio.x);
-          #endif
+          // (bright has NO discard in this shader: a discard can turn off early depth rejection on phone GPUs,
+          // and the plane under the whole map relies on it — the terrain hides it before it is shaded)
           if (dry > 0.99) discard;
+          #endif
           // SNOW: frozen across the whole snow region (and its fringe), not only deep inside it.
           float ice = smoothstep(0.22, 0.42, bio.y);
           w *= 1.0 - ice * 0.92;

@@ -110,7 +110,7 @@ export const VEHICLES: VehicleDef[] = [
     maker: 'Workhorse',
     year: '1989',
     blurb: 'The farm truck. Tough, simple, climbs anything in low range.',
-    url: pickupUrl, length: 5.23, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, steering: true, axles: true, bytes: 1_754_044,
+    url: pickupUrl, length: 5.23, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, steering: true, axles: true, bytes: 2_840_516,
     grade: { sat: 0.5, gain: 0.88 }, // toy-bright olive → faded, sun-worn paint
     cabin: { hip: 0.84, roof: 1.66, behind: 0.51 },
     engine: { pitch: 1, gears: [0, 5.5, 11, 17.5, 25, 34, 60] },
@@ -126,7 +126,7 @@ export const VEHICLES: VehicleDef[] = [
     maker: 'Mercedes-Benz',
     year: '2015',
     blurb: 'Portal axles, twin-turbo V8, 45 cm of ground clearance. The mountain goat.',
-    url: gwagenUrl, length: 4.68, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, paintRegex: /CarPaint/i, bytes: 1_924_644,
+    url: gwagenUrl, length: 4.68, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, paintRegex: /CarPaint/i, bytes: 2_569_772,
     cabin: { hip: 1.35, roof: 2.2, behind: 0.49 },
     lamps: { head: [0.66, 1.08, -2.44], tail: [0.72, 1.22, 2.43] },
     engine: { pitch: 0.8, gears: [0, 7, 14, 22, 31, 42, 70] },
@@ -136,7 +136,7 @@ export const VEHICLES: VehicleDef[] = [
       { at: [-0.84, 0.55, 0.58], dir: [-0.88, 0, 0.47] }, { at: [0.84, 0.55, 0.58], dir: [0.88, 0, 0.47] },
       { at: [-0.84, 0.56, 0.7], dir: [-0.88, 0, 0.47] }, { at: [0.84, 0.56, 0.7], dir: [0.88, 0, 0.47] },
     ],
-    stock: { power: 310, force: 18, boost: 2.0, grip: 2.8, suspension: 44, tyre: 1, mass: 3000, paint: '#55604a' },
+    stock: { power: 310, force: 18, boost: 2.0, grip: 2.8, suspension: 44, tyre: 1, mass: 3000, paint: '#c8d82a' }, // (its original lime — the key art's truck; was olive #55604a)
     spec: SPECS.gwagen,
   },
   {
@@ -145,7 +145,7 @@ export const VEHICLES: VehicleDef[] = [
     maker: 'FSC Lublin',
     year: '1972',
     blurb: 'A Polish delivery van with a lawnmower engine. Slow, light, oddly capable.',
-    url: zukUrl, length: 4.4, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, axles: true, bytes: 719_432,
+    url: zukUrl, length: 4.4, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, axles: true, bytes: 1_785_832,
     grade: { sat: 0.55, gain: 0.9 }, // candy cyan → the faded blue of a working 1970s van
     cabin: { hip: 0.98, roof: 1.8, behind: 0.42 },
     engine: { pitch: 1.22, gears: [0, 4, 8.5, 14, 20, 27, 45] },

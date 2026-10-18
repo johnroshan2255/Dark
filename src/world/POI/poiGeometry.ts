@@ -270,6 +270,29 @@ const cyl = (r0: number, r1: number, h: number, sides: number, hex: number, x = 
  */
 function cozyProps(m: Map<number, THREE.BufferGeometry>): void {
   const wood = 0x8a6440, dark = 0x5a3e28, weathered = 0xb8ab94, iron = 0x3a3a3e, warm = 0xffb850
+  // SUMMIT VIEWPOINT (PoiType.Lookout): a round stone terrace (r 4.2 m, 0.4 m tall, its foot buried), a timber railing
+  // round the view side (+z), a brass telescope on a post at the rail, a stone CAIRN and a 7.5 m pole with a big
+  // red-orange FLAG — the mark you see on the skyline from the valley. ~600 tris, merged into the place mesh.
+  {
+    const stone = 0x9a948a, flag = 0xe0502a
+    const parts = [cyl(4.0, 4.4, 1.0, 14, stone, 0, -0.6, 0, 'stone'), cyl(3.7, 3.95, 0.04, 14, 0xb2ab9e, 0, 0.4, 0, 'stone')]
+    for (let i = 0; i <= 6; i++) {
+      const a = -1.05 + (i / 6) * 2.1
+      parts.push(box(0.14, 1.0, 0.14, dark, Math.sin(a) * 3.85, 0.4, Math.cos(a) * 3.85, 'wood'))
+      if (i < 6) {
+        const b = a + 0.175, l = 2 * 3.85 * Math.sin(0.175)
+        parts.push(finish(new THREE.BoxGeometry(l + 0.1, 0.09, 0.1).rotateY(b).translate(Math.sin(b) * 3.85 * Math.cos(0.175), 1.36, Math.cos(b) * 3.85 * Math.cos(0.175)), wood, 1, 'wood'))
+      }
+    }
+    // (BoxGeometry along x rotated by b about y: its length runs along (cos b, −sin b) — tangent to the circle at angle b)
+    parts.push(cyl(0.05, 0.06, 1.15, 6, iron, 0, 0.4, 3.0), finish(new THREE.CylinderGeometry(0.07, 0.09, 0.7, 8).rotateX(Math.PI / 2 - 0.25).translate(0, 1.6, 3.0), 0xb08a3c, 0.9))
+    ;[[0.7, 0.32], [0.55, 0.3], [0.42, 0.26], [0.3, 0.24], [0.18, 0.2]].reduce((y, [r, hh], i) => {
+      parts.push(finish(new THREE.IcosahedronGeometry(r, 0).scale(1, hh / r, 1).rotateY(i * 1.1).translate(-2.6 + (i % 2) * 0.06, y + hh * 0.9, -1.8), i % 2 ? 0x8a857c : 0xa49e92, 0.8, 'stone'))
+      return y + hh * 1.6
+    }, 0.4)
+    parts.push(cyl(0.06, 0.08, 7.5, 6, 0xd8d0c0, 2.8, 0.4, -2.2), finish(new THREE.BoxGeometry(1.7, 1.05, 0.05).translate(2.8 + 0.85, 7.25, -2.2), flag, 0.9))
+    m.set(PropType.Viewpoint, merged(parts, 'viewpoint'))
+  }
   // Porch / garden chair: slatted seat, back, legs.
   m.set(PropType.Chair, merged([
     box(0.5, 0.06, 0.5, wood, 0, 0.42, 0, 'wood'), box(0.5, 0.5, 0.06, wood, 0, 0.48, -0.22, 'wood'),
@@ -427,6 +450,7 @@ export const POI_COLLIDERS: Record<number, number[] | null> = {
   [PropType.Bench]: [0.8, 0.35, 0.22],
   [PropType.Stump]: [0.3, 0.25],
   [PropType.FlowerBed]: [1.2, 0.15, 0.45],
+  [PropType.Viewpoint]: [4.2, 0.2], // the terrace (0.4 m: the 0.45 m autostep walks up it)
 }
 
 /** Collider of a prop type for the session's art style (bright's barn has a lean-to: x −5.75…5.75). */

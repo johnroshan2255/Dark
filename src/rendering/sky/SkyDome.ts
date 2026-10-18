@@ -2,6 +2,7 @@ import { isBright, isGenshin, isOverland } from '../artStyle'
 import * as THREE from 'three'
 import type { TimeOfDay } from '../lighting/TimeOfDay'
 import { MIST_GLSL, SKY_GLSL, skyUniforms } from './skyShader'
+import { LAYER_REFLECT_SKYLINE } from '../water/PlanarReflection'
 
 /**
  * Procedural sky: gradient (horizon == fog colour), sun disc + glow, moon disc + halo, stars, and a
@@ -46,6 +47,7 @@ export class SkyDome {
     })
     const geo = new THREE.IcosahedronGeometry(1, 3)
     this.mesh = new THREE.Mesh(geo, this.material)
+    this.mesh.layers.enable(LAYER_REFLECT_SKYLINE)
     this.mesh.name = 'sky'
     this.mesh.frustumCulled = false
     this.mesh.renderOrder = -1000

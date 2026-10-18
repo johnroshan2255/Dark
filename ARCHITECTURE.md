@@ -92,7 +92,15 @@ World (seed)
   bridge is built only if both ends get roads (`bridgeLinks` / `builtBridge`; bridges use `heightNoNet`). Grading
   (`finishRoad`): fixed heights (ends, place discs) with a band that widens just enough for a ramp; roads that would
   float over a valley or climb a cliff are rejected. Tests: every road reaches the main road, 0 dead ends, every place
-  / camp has a road, every bridge connected, 0 crossings (4 seeds). Cost: ~25 ms of worker time per 380 m region.
+  / camp has a road, every bridge connected, 0 crossings (4 seeds). Cost: ~25 ms of worker time per 380 m region,
+  but a driveway A* that floods its grid without reaching a road costs 0.3–2 s (desktop, dev build) — so **the main
+  thread never builds roads**: chunk workers send the region road lists / bridge roads they built with each chunk
+  (`RoadNetwork.exportNew` → `importRoads`, the same deterministic roads, ~10 KB per chunk) and the main thread's
+  height / road / bridge queries near the player (grass, car, camera) are cache hits; LANDMARKS (whose placement
+  checks formations → roads) are placed in their own worker (`LandmarkSystem`, main-thread field `remote`). Before
+  this, flying out froze the game for 1–4 s at a time and the first world took ~45 s (now ~11 s, dev build).
+  Search speed-ups that keep every road identical: one height grid shared by a route's slope passes, the main road's
+  centre per grid row, numeric region-cache keys (POIs / formations / landmarks: string keys were 19 % of generation).
   Heights between the ~14 m samples are PARABOLIC VERTICAL CURVES (`roadHeightAt`, C1 along the road — every reader
   of `hs` goes through it): linear interpolation left a sharp crest / sag at each sample (a −45 % → 0 % break at a
   ford stopped a truck dead).
@@ -108,6 +116,29 @@ World (seed)
   360 / 394 / 1074 m → 208 / 138 / 450 m; road surface off its grade by > 0.5 m 22 / 328 / 1368 → 64 / 246 / 534 m.
   Cost: ~15 ms per routed link, ~1.3 / 2.6 / 8.7 s for the 49 regions (was 0.2 / 0.6 / 5 s; connector searches now
   stop after the first pass that reaches no road at all instead of flooding the grid three times).
+- **Exploration (2026-10-18 — "we only have a straight road; people need places to explore and drive to")**:
+  SUMMIT LOOKOUTS (`POI/pois.ts` `PoiType.Lookout`, `lookout(li, lj)`): ≤ 1 per 600 m cell — the 4 highest of a 6 × 6
+  height grid, each hill-climbed to its top; kept if PROMINENCE ≥ 16 m over the 150 m ring, flanks ≤ 50 % on average
+  over the top 48 m (a needle has no drivable way up), dry, ≥ 140 m off the main road and 80 m off the river, any
+  biome. A place like the others (flattened terrace r 11 m, trees cleared, compass + arrival banner), laid out as a
+  stone VIEWPOINT terrace facing the lowest side of the peak (railing, telescope, cairn, 7.5 m red-orange FLAG — the
+  mark on the skyline), bench, log seat, lantern, signpost (`PropType.Viewpoint`, ~600 tris, merged into the place
+  mesh: 0 draws; collider = the 0.4 m terrace). SWITCHBACK TRAIL (`RoadNetwork.summitTrail`): a Trail-type road from
+  the peak to the first network road, searched as a LINK (two-step grade, ≤ 90° turns, hairpins ≥ ~15 m) with the
+  STRICTEST slope limit first (0.3 → 0.42 → 0.55), the summit's first two cell rings exempt (terrace + blend); graded at
+  22 % in a ±5.5 m band — a SHELF ROAD cut into the hillside (CLIMB_OFFSET; the steep uphill face is rock-clad by
+  the crags); a graded pitch > 45 % anywhere rejects the pass, and a peak with no such trail keeps none (hike up).
+  It stays out of the places' crossing order (driveway0 skips lookouts — in it a 1–3 km trail chained the checks
+  across the map: 198 s for one area) and is re-routed onto a place's drive only if it would cross one. Tests
+  (4 seeds): 67 lookouts, 45 trails, steepest graded pitch 43 %; shelf cut faces ≤ 2.8 m/m. Cost: chunk generation
+  in lookout areas +35 % (300 chunks round 3 lookouts, Windows desktop, node: mean 96 → 129 ms, mostly the one-off trail
+  build), 0 draws, ~600 tris per lookout. DISCOVERY (`gameplay/explore/Discovery.ts`, HUD): lookouts show on the
+  compass from 2.5 km; other places only within 600 m or where a discovered lookout maps the land (1.5 km round it);
+  reaching one → "Viewpoint discovered · N places revealed"; persisted per seed (localStorage, per-player). CANYON
+  DRIVES: the main road's gorges cover ~40 % of it (was ~25 %), walls 14–30 m (were 10–20) — clad by the crags; the
+  verge is unchanged (shoulder-step test). LOW tier, this PC (1536×639, ×1.25): lookout 281–284 draws / 1.36 M tris,
+  canyon 295 / 1.04 M, open road 322 / 0.96 M — no extra draws (GPU timer pinned at the 144 Hz frame here; measure on a
+  phone).
 - **Road tunnels** (`Formations/formations.ts`, Cave on the main road): the 5.6 m bore BENDS and CLIMBS with the road
   (`Formation.bore`: the road's local (z, y) every 4 m, sampled at placement) — a straight bore left rock 0.3 m from
   the centre where the road curved. Test: no rock within 4.2 m of the centre at 0.3–1.8 m height (2 seeds).
@@ -459,8 +490,16 @@ Measured (RTX 4050, 1080p): GPU time within noise on every tier, LOW +8 draws (�
   steering wheel and feet on the floor); a cramped cab tucks the seated body in (≥ 75 %; catalogue `cabin`:
   hip height, roof). ~0.02 ms CPU. tests/vehicle.test.ts covers both doors, the slide-over and the walk path.
 - **Front end** (`src/ui/MainMenu.tsx`, `Garage.tsx`, `SettingsPanel.tsx`, tokens in `ui/theme.ts`): a racing-game
-  style menu over the live world (state `landing` + `screen`; the camera circles the parked car,
-  `CameraController.garage`, the player is frozen). MAIN MENU: Play / Garage / Settings + the current car's card.
+  style menu over a still KEY ART image (`ui/KeyArt.tsx`: `src/assets/ui/key-art.jpg` / `key-art-sm.jpg`, also the loading screen; layouts + phone breakpoints in `ui/frontend.css`, colours in `ui/theme.ts`):
+  `Game.render` draws no 3D frame while the main menu is up — the world streams in behind it. The garage shows the
+  live car (`CameraController.garage`) once `worldReady`. LOADING: the boot screen closes as soon as the code, physics
+  and models are in (~1.5–2 s); the player / truck / bike are placed only when the spawn chunk (and the roads its
+  worker built) arrive (`Game.pendingSpawn` — `surface` on the main thread before that ran the road A* for seconds);
+  PLAY before the 5 × 5 chunks round the player exist shows "Entering the world" (`Game.playReadiness`). The first
+  chunk goes to ONE worker and its roads are forwarded to the others (`ChunkStreamer`); the far forest waits for the
+  near chunks. Road searches share ground samples on a 6 m world lattice (`RoadNetwork` HeightSamples) and a
+  driveway's crossing check reaches 2 places back (`DRIVE_DEPTH`; unlimited it walked 10–15 km for one chunk).
+  MAIN MENU: Play / Garage / Settings + the current car's card.
   GARAGE: car strip (tap → swapped in live), Performance tab (sliders + live rating), Paint tab (named swatches +
   custom), Back / Drive. SETTINGS: full-page tabs Garage / Graphics / Controls / World (`Garage embedded`).
   `Game.showScreen`, `play`, `openSettings`. `?play=1` skips the menu (tests), `?car=<id>` picks a car.

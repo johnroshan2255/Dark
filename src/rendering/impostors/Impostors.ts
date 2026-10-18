@@ -55,7 +55,7 @@ vec2 hemiOct(vec3 d) { d /= (abs(d.x) + abs(d.y) + abs(d.z)); return vec2(d.x + 
 
 /** Bounds of a tree geometry incl. its camera-facing tufts (bbCenter ± |bbOff|): crown centre y, sphere radius
  *  about (0, cy, 0) and horizontal radius about the trunk axis. */
-function treeBox(g: THREE.BufferGeometry): THREE.Vector4 {
+export function treeBox(g: THREE.BufferGeometry): THREE.Vector4 {
   const p = g.getAttribute('position'), c = g.getAttribute('bbCenter'), o = g.getAttribute('bbOff')
   const pts: [number, number, number, number][] = [] // x, y, z, extra radius
   for (let i = 0; i < p.count; i++) {

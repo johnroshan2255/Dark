@@ -23,6 +23,9 @@ export class LightingSystem {
   flashlightOn = false // off by default (daylight); F toggles — in the truck F toggles the headlights instead
   /** What the spot light is doing THIS frame: the torch on foot, the headlights in the truck (set by Game). */
   spotOn = false
+  /** The spot is the car's HEADLIGHTS this frame (Game): a steady beam — the torch's flicker would pulse the whole
+   *  road and bonnet ahead of you (seen inside the car as the light switching off and on). */
+  spotIsHeadlights = false
   flashlightIntensity = 90
   /** Lightning flash 0..1 and its colour (set by Game). */
   flash = 0
@@ -31,6 +34,14 @@ export class LightingSystem {
   private flicker = 0
   private sunShadowEvery = 1
   private frame = 0
+  /** CACHED sun map (QualitySettings.shadowCache): re-rendered only when the focus moved a quarter of the map, the
+   *  sun turned ~0.35°, or `invalidateShadow()` (new chunks) — the world's casters are static. */
+  private cache = false
+  private cacheValid = false
+  private readonly cacheAt = new THREE.Vector3()
+  private readonly cacheDir = new THREE.Vector3()
+  /** Sun-map renders since start (debug / measurement). */
+  shadowRenders = 0
 
   constructor(private readonly tod: TimeOfDay) {
     this.root.name = 'lighting'
@@ -53,9 +64,16 @@ export class LightingSystem {
    * Tier settings. Shadow-map size changes free the old map; flashlight castShadow changes
    * recompile lit programs once (acceptable: only on tier switches, never per frame).
    */
-  setQuality(q: Pick<QualitySettings, 'shadows' | 'sunShadowSize' | 'sunShadowEvery' | 'sunShadowExtent' | 'flashlightShadow'>): void {
+  setQuality(q: Pick<QualitySettings, 'shadows' | 'shadowCache' | 'sunShadowSize' | 'sunShadowEvery' | 'sunShadowExtent' | 'flashlightShadow'>): void {
     const s = this.sun.shadow
+    if (s.mapSize.x !== q.sunShadowSize || s.camera.right !== q.sunShadowExtent) {
+      configureSunShadow(this.sun, q.sunShadowExtent, q.sunShadowSize)
+      s.map?.dispose()
+      s.map = null
+    }
     // Shadows OFF: no sun shadow pass at all (one program recompile when toggled — settings changes only).
+    // (AFTER configureSunShadow, which switches castShadow on: before 2026-10-18 the OFF level — its map size
+    // differs — re-enabled the shadow it had just turned off, so 'Shadows: off' still rendered a 512² map.)
     if (this.sun.castShadow !== q.shadows) {
       this.sun.castShadow = q.shadows
       if (!q.shadows) {
@@ -63,14 +81,11 @@ export class LightingSystem {
         s.map = null
       }
     }
-    if (s.mapSize.x !== q.sunShadowSize || s.camera.right !== q.sunShadowExtent) {
-      configureSunShadow(this.sun, q.sunShadowExtent, q.sunShadowSize)
-      s.map?.dispose()
-      s.map = null
-    }
     // World casters are static → the sun map only needs re-rendering every N frames.
     this.sunShadowEvery = Math.max(1, q.sunShadowEvery)
-    s.autoUpdate = this.sunShadowEvery === 1
+    this.cache = q.shadows && q.shadowCache
+    this.cacheValid = false
+    s.autoUpdate = !this.cache && this.sunShadowEvery === 1
     s.needsUpdate = true
     if (this.flashlight.castShadow !== q.flashlightShadow) {
       this.flashlight.castShadow = q.flashlightShadow
@@ -79,6 +94,11 @@ export class LightingSystem {
         this.flashlight.shadow.map = null
       }
     }
+  }
+
+  /** The cached sun map is stale (chunks built / LOD switched round the player): re-render it next frame. */
+  invalidateShadow(): void {
+    this.cacheValid = false
   }
 
   toggleFlashlight(): boolean {
@@ -112,8 +132,20 @@ export class LightingSystem {
     this.keyStrength = useSun ? sunK : moonK
     // Moonlight is a broad, dim source → softer shadow edges (PCF filter radius, no extra cost per texel).
     this.sun.shadow.radius = useSun ? 2 : 4
-    followShadow(this.sun, focus, this.sunDir, SHADOW_LIGHT_DISTANCE)
-    if (this.sunShadowEvery > 1 && ++this.frame % this.sunShadowEvery === 0) this.sun.shadow.needsUpdate = true
+    if (this.cache) {
+      // (the light's position — its shading direction too — moves only with the map: ≤ 0.35° behind the sun)
+      if (!this.cacheValid || this.cacheAt.distanceToSquared(focus) > (this.sun.shadow.camera.right * 0.25) ** 2 || this.cacheDir.dot(this.sunDir) < 0.99998) {
+        followShadow(this.sun, focus, this.sunDir, SHADOW_LIGHT_DISTANCE)
+        this.sun.shadow.needsUpdate = true
+        this.cacheAt.copy(focus)
+        this.cacheDir.copy(this.sunDir)
+        this.cacheValid = true
+        this.shadowRenders++
+      }
+    } else {
+      followShadow(this.sun, focus, this.sunDir, SHADOW_LIGHT_DISTANCE)
+      if (this.sunShadowEvery > 1 && ++this.frame % this.sunShadowEvery === 0) this.sun.shadow.needsUpdate = true
+    }
 
     globalUniforms.uToon.value = p.toon
     this.hemi.color.copy(p.hemiSky)
@@ -135,7 +167,8 @@ export class LightingSystem {
     // The aim follows the look with a short lag: touch-look jitter otherwise wobbles the pool over the grass.
     f.target.position.lerp(flashTarget, 1 - Math.exp(-dt * 14))
     this.flicker += dt
-    const flick = 1 - 0.04 * Math.max(0, Math.sin(this.flicker * 37) * Math.sin(this.flicker * 11.3))
+    // (a hand torch's faint flicker — never the headlights)
+    const flick = this.spotIsHeadlights ? 1 : 1 - 0.04 * Math.max(0, Math.sin(this.flicker * 37) * Math.sin(this.flicker * 11.3))
     // In daylight a flashlight barely registers — scale it down with the sun so the beam pool doesn't glow on a
     // sunny road; full strength at dusk/night/nightmare.
     const daylight = sunK * (1 - tod.nightmare) * (1 - this.cave)

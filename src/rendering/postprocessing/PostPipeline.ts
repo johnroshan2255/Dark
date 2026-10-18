@@ -294,16 +294,29 @@ export class PostPipeline {
   private readonly bloomTexel = new THREE.Vector2(1, 1)
   /** Fog banks in the shafts pass (tier flag). */
   banks = false
+  private mistT = 0
+  private readonly mistWind = new THREE.Vector2()
+  private readonly mistDrift = new THREE.Vector2()
 
   /**
    * Volumetric mist for the shafts pass: the same height-fog params as the materials (density, base, falloff,
-   * camera height), the mist colour, and the bank drift (time × wind). The pass runs when banks are visible even
+   * camera height), the mist colour, and the bank drift (smoothed wind, accumulated). The pass runs when banks are visible even
    * with no shafts.
    */
   setMist(density: number, base: number, falloff: number, camY: number, color: THREE.Color, time: number, wind: THREE.Vector2): void {
     const u = this.raysMaterial.uniforms
     ;(u.uSkyMist.value as THREE.Vector4).set(density, base, falloff, camY)
-    ;(u.uMistNoise.value as THREE.Vector4).set(0.045, 3.0, time * wind.x * 0.6, time * wind.y * 0.6)
+    // Drift accumulated from a smoothed wind at 0.6 m/s per wind unit in WORLD space (then × the noise scale). It
+    // used to be time × wind added after the scale (~12 m/s): bank features smaller than the march step slid through
+    // the sample points and the fog pulsed on/off — most visible from the cockpit.
+    const dt = Math.min(0.1, Math.max(0, time - this.mistT))
+    this.mistT = time
+    const k = 1 - Math.exp(-dt / 3) // gusts ease in over ~3 s
+    this.mistWind.x += (wind.x - this.mistWind.x) * k
+    this.mistWind.y += (wind.y - this.mistWind.y) * k
+    this.mistDrift.x += this.mistWind.x * 0.6 * dt
+    this.mistDrift.y += this.mistWind.y * 0.6 * dt
+    ;(u.uMistNoise.value as THREE.Vector4).set(0.045, 3.0, this.mistDrift.x * 0.045, this.mistDrift.y * 0.045)
     u.uBanks.value = this.banks && density > 0 ? 1 : 0
     ;(this.material.uniforms.uMistColor.value as THREE.Color).copy(color)
     if (this.banks && density > 0) this.raysActive = true

@@ -469,6 +469,33 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     check(`${id}: boat handoff — keel crawl with the hull out, drives off normally after`, crawl < 4.6 && t.speed > 8 && t.drivetrain!.gear >= 1, `crawl ${crawl.toFixed(1)} m/s, then ${t.speed.toFixed(1)} m/s in ${t.drivetrain!.gearLabel}`)
     p.dispose()
   }
+  // ---------------- a stone under one side ----------------
+  {
+    // A stone 0.55 × the wheel radius tall (the G-class: 26 cm) under the left wheels at 10 km/h: the tyre envelope
+    // climbs it once — the body rises on the springs and rolls, it is not THROWN (the envelope + Rapier's ray both
+    // counted it for a step: ~20 × the corner's weight on the hard stop, the body 13 cm up at 38 m/s², wheels in the
+    // air for half a second). (A 25 cm stone under the Zuk's 34 cm wheels bottoms it out — a real 2.5 g bang.)
+    const p = world()
+    const top = 0.55 * MODELS[id].wheelRadius
+    p.world.createCollider(R.ColliderDesc.ball(0.3).setTranslation(MODELS[id].wheelPos[0][0], top - 0.3, -12).setCollisionGroups(group(Groups.Static, 0xffff)), p.world.createRigidBody(R.RigidBodyDesc.fixed()))
+    const t = car(p, id)
+    run(p, t, 1, {})
+    const v = 10 / 3.6
+    t.body.setLinvel({ x: 0, y: 0, z: -v }, true)
+    for (let w = 0; w < 4; w++) t.drivetrain!.omega[w] = v / MODELS[id].wheelRadius
+    const y0 = t.body.translation().y
+    let lastVy = 0, acc = 0, rise = 0, off = 0
+    run(p, t, 6, {}, () => {
+      t.controls.throttle = t.speed < v ? 0.5 : 0
+      const vy = t.body.linvel().y
+      acc = Math.max(acc, Math.abs(vy - lastVy) * 60)
+      lastVy = vy
+      rise = Math.max(rise, t.body.translation().y - y0)
+      if (t.wheels.some((w) => !w.contact)) off++
+    })
+    check(`${id}: rides over a ${(top * 100).toFixed(0)} cm stone at 10 km/h (not thrown)`, acc < 15 && rise < 0.1 && off < 25 && t.body.translation().z < -14, `peak ${acc.toFixed(1)} m/s², body +${(rise * 100).toFixed(0)} cm, ${off} wheel-off frames`)
+    p.dispose()
+  }
 }
 
 process.exit(failures ? 1 : 0)

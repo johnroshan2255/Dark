@@ -19,6 +19,8 @@ export class Input {
   touch = false
   /** performance.now() of the last look input (mouse / touch drag): the chase camera waits before re-centring. */
   lastLook = -1e9
+  /** Accumulated zoom steps (mouse wheel notches / pinch): + = out, − = in. Consumed by the camera. */
+  private zoom = 0
 
   onPress(code: string, fn: () => void): void {
     this.press.set(code, fn)
@@ -40,6 +42,18 @@ export class Input {
     this.dy += dy * this.touchLookScale
   }
 
+  /** Zoom input in wheel notches (pinch adds fractions): + = farther, − = closer. */
+  addZoom(steps: number): void {
+    this.zoom += steps
+  }
+
+  /** Returns and clears accumulated zoom steps. */
+  consumeZoom(): number {
+    const z = this.zoom
+    this.zoom = 0
+    return z
+  }
+
   down(code: string): boolean {
     return this.keys.has(code)
   }
@@ -57,6 +71,7 @@ export class Input {
     el.addEventListener('pointerdown', this.onClick)
     document.addEventListener('pointerlockchange', this.onLock)
     document.addEventListener('mousemove', this.onMove)
+    el.addEventListener('wheel', this.onWheel, { passive: true })
     window.addEventListener('keydown', this.onDown)
     window.addEventListener('keyup', this.onUp)
     window.addEventListener('blur', this.onBlur)
@@ -66,6 +81,7 @@ export class Input {
     this.target?.removeEventListener('pointerdown', this.onClick)
     document.removeEventListener('pointerlockchange', this.onLock)
     document.removeEventListener('mousemove', this.onMove)
+    this.target?.removeEventListener('wheel', this.onWheel)
     window.removeEventListener('keydown', this.onDown)
     window.removeEventListener('keyup', this.onUp)
     window.removeEventListener('blur', this.onBlur)
@@ -83,6 +99,11 @@ export class Input {
     if (!this.locked) return
     this.dx += e.movementX
     this.dy += e.movementY
+  }
+  private onWheel = (e: WheelEvent) => {
+    // One notch ≈ 100 px (deltaMode 0) or 3 lines; trackpads send many small deltas.
+    const px = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY
+    this.zoom += Math.max(-3, Math.min(3, px / 100))
   }
   private onDown = (e: KeyboardEvent) => {
     if (e.code.startsWith('F') && e.code.length <= 3) e.preventDefault() // F1–F12 debug keys

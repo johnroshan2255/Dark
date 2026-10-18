@@ -18,8 +18,8 @@
       #boot { position: fixed; inset: 0; z-index: 100; background: #07080a; overflow: hidden; transition: opacity .7s ease; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
       #boot.done { opacity: 0; pointer-events: none; }
       /* Instant blurred preview (inline, ~1 KB) under the real image, which fades in when it arrives. */
-      #boot .lqip { position: absolute; inset: -40px; background: #d8a878 url("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAMKADAAQAAAABAAAAGwAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAGwAwAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMACQkJCQkJEAkJEBYQEBAWHhYWFhYeJh4eHh4eJi4mJiYmJiYuLi4uLi4uLjc3Nzc3N0BAQEBASEhISEhISEhISP/bAEMBCwwMEhESHxERH0szKjNLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS//dAAQAA//aAAwDAQACEQMRAD8A5t7adQszKdrciu+8MWN1GTeSYCSpjHcEH0rDWW4HOc59ea0re+ulGwEgemcV5qreR1xirnaxTRSu0an5lJBH0/8A11MygDNcP9sNtd7ShRiR8yuvO71Ga6GS/nkj2rtDZ7d6qNdNXNEmT6hp1tqVuLa5BaPcGIHGcUy7nSxtwIxz91FH+egqGdnuYVjlJTBBIQ8nHYn0qMEDCr2rGeMivhK9mz//0NyPTbWM/MCfqauGG3WMxlF2sMEeoNOX7hfvjrWdI7EZJ5NeX5np2S2FaO0ikLwRjcQBk88L069KtR5A3E8nvVJatrz1rkqzb0GkWN3Gc0nJ9qjyQaepyK5Wiz//2Q==") 60% 50% / cover; filter: blur(22px) saturate(1.1); }
-      #boot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 60% 50%; animation: boot-drift 28s ease-in-out infinite alternate; opacity: 0; transition: opacity .6s ease; }
+      #boot .lqip { position: absolute; inset: -40px; background: #d8a878 url("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAA0JCgsKCA0LCwsPDg0QFCEVFBISFCgdHhghMCoyMS8qLi00O0tANDhHOS0uQllCR05QVFVUMz9dY1xSYktTVFH/2wBDAQ4PDxQRFCcVFSdRNi42UVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVH/wAARCAAbADADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDWW2JHKc+3So5LUAZx+lTR6pb+WxdZMgcVUm1iIZwprijXxDlax6LoUrakTw5+6hJ9xUT26xqXkYBR19KgudcOdsYHv3/Wsa91OS4f97JkDgACu2NSq99DknCittS5dX9tHbPImRICMKw6jP8AhWDOiyTPJGMJk9B/nmlnO7AkJTeu4cEk1MAPIHDbjHt6d80pzbMoxRs2WpW8FvIjrIJGxtZW4H1Gap3moC5wVVCP7wXH/wBasxPmdFPQgZFRt87Nu5+bb+FTom5I055ONiR5GeVSXAB7Zq5psEbybZpI1Qnlm4P0FUdoMhTA2gVWLHcBnjFS25LQlNRdzdvZLiKQwxRxrG8bJvXuAeGyMnPSs6GWe3CxzFjCzbnBzkHGO9V4p5Y3+SRhxng1oRzSOh3Nu+tSocqLUlJn/9k=") 72% 50% / cover; filter: blur(22px) saturate(1.1); }
+      #boot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 72% 50%; animation: boot-drift 28s ease-in-out infinite alternate; opacity: 0; transition: opacity .6s ease; }
       #boot img.loaded { opacity: 1; }
       @keyframes boot-drift { from { transform: scale(1.04) translate(0, 0); } to { transform: scale(1.14) translate(-2%, -1%); } }
       #boot .shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(7,8,10,.55) 0%, rgba(7,8,10,0) 28%, rgba(7,8,10,0) 52%, rgba(7,8,10,.88) 100%); }
@@ -39,14 +39,14 @@
       #boot:not(.live) .pct { visibility: hidden; }
       @keyframes boot-scan { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
       @media (prefers-reduced-motion: reduce) { #boot img { animation: none; } }
-      /* Portrait phones see ~a quarter of the image width: centre on the stranger + the sun. */
-      @media (orientation: portrait) { #boot img { object-position: 51% 50%; } #boot .lqip { background-position: 51% 50%; } }
+      /* Portrait phones see ~a quarter of the image width: centre on the truck. */
+      @media (orientation: portrait) { #boot img { object-position: 80% 50%; } #boot .lqip { background-position: 80% 50%; } }
     </style>
   </head>
   <body>
     <div id="boot" role="status" aria-live="polite">
       <div class="lqip"></div>
-      <img src="/src/assets/ui/loading-hero.jpg" alt="" fetchpriority="high" onload="this.classList.add('loaded')" />
+      <img src="/src/assets/ui/key-art.jpg" srcset="/src/assets/ui/key-art-sm.jpg 960w, /src/assets/ui/key-art.jpg 1672w" sizes="100vw" alt="" fetchpriority="high" onload="this.classList.add('loaded')" />
       <div class="shade"></div>
       <div class="brand"><h1>DARK</h1><div class="tag">A new world every night · pick your 4×4 in the garage</div></div>
       <div class="foot">

@@ -63,11 +63,11 @@ export interface FormationHost {
 const RADIUS = [20, 26, 24, 15]
 
 export class FormationField {
-  private readonly cache = new Map<string, Formation[]>()
+  private readonly cache = new Map<number, Formation[]>()
   constructor(private readonly host: FormationHost) {}
 
   region(ci: number, cj: number): Formation[] {
-    const key = `${ci},${cj}`
+    const key = ci * 131072 + cj
     let list = this.cache.get(key)
     if (list) return list
     list = []

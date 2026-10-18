@@ -91,6 +91,25 @@ function billboardable(m: THREE.MeshLambertMaterial): THREE.MeshLambertMaterial 
 }
 
 /**
+ * BOULDER SHAPES (propGeometries ROCK_VARIANTS): the boulder mesh holds six rock shapes, each vertex tagged with its
+ * shape (`rockVar`); an instance keeps only the shape it picked (`rockPick`, per instance) — the others collapse
+ * to one point (zero-area triangles, never rasterised). Only in the INSTANCED program (the same material draws the
+ * merged cliff meshes in 'bright', which have neither attribute). 2 ALU per vertex.
+ */
+function rockVariants<M extends THREE.Material>(m: M): M {
+  const prev = m.onBeforeCompile.bind(m)
+  m.onBeforeCompile = (shader, renderer) => {
+    prev(shader, renderer)
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\n#ifdef USE_INSTANCING\nattribute float rockVar;\nattribute float rockPick;\n#endif')
+      .replace('#include <project_vertex>', '#ifdef USE_INSTANCING\nif (abs(rockVar - rockPick) > 0.5) transformed = vec3(0.0);\n#endif\n#include <project_vertex>')
+  }
+  const prevKey = m.customProgramCacheKey.bind(m)
+  m.customProgramCacheKey = () => `${prevKey()}|rockvar`
+  return m
+}
+
+/**
  * OVERLAND boulders: about half the rocks carry a warm GOLDEN cap (sun-baked lichen tops, as in over the hill's
  * shots) — the up-facing faces of instances whose hashed id lands in the cap set blend toward ochre. Per-instance
  * hash from the instance translation → no attribute; ~8 ALU on rock fragments only.
@@ -138,8 +157,8 @@ export class MaterialLibrary {
    * it lies on the unsunk grid at its edges. Created BEFORE `terrain`: the opaque sort orders by material id, so the
    * ribbon draws first and the sunk grid under it fails the depth test (early-z) instead of being shaded twice.
    */
-  readonly roadDetail = stylize(new THREE.MeshLambertMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 }), { key: 'terrain', rim: 0.25, terrain: true, toon: 0.45 })
-  readonly terrain = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'terrain', rim: 0.25, terrain: true, toon: 0.45 })
+  readonly roadDetail = stylize(new THREE.MeshLambertMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 }), { key: 'terrain', treeShade: true, rim: 0.25, terrain: true, toon: 0.45 })
+  readonly terrain = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'terrain', treeShade: true, rim: 0.25, terrain: true, toon: 0.45 })
   readonly vegetation = stylize(billboardable(
     new THREE.MeshLambertMaterial({ vertexColors: true, map: this.atlas, alphaTest: 0.42, side: THREE.DoubleSide }),
   ), { key: 'foliage', rim: isOverland() ? 0.5 : isGenshin() ? 0.45 : 1.1, noFlip: true, surface: 'atlas', cullFade: true, nearFade: true, sway: true, wet: true, biomeCover: 'foliage' })
@@ -154,12 +173,14 @@ export class MaterialLibrary {
   /** Distant trees: octahedral impostor cards (rendering/impostors) — one program, atlas baked at load. */
   readonly impostor = createImpostorMaterial()
   /** OVERLAND: soft plain-colour boulders (no stone paint strokes); otherwise smooth painted STONE. */
-  readonly rock = isOverland()
-    ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock' })
+  readonly rock = rockVariants(isOverland()
+    ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', treeShade: true, rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock', erosion: true })
     : isBright()
     // BRIGHT (over the hill): plain flat-colour stone — the facets carry the detail, no paint strokes.
-    ? stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.2, toon: 0.12, cullFade: true, wet: true, biomeCover: 'rock' }) // soft: almost no cel step
-    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', rim: 0.35, surface: SURFACE.stone, cullFade: true, biomeCover: 'rock' })
+    ? stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', treeShade: true, rim: 0.2, toon: 0.12, cullFade: true, wet: true, biomeCover: 'rock', erosion: true }) // soft: almost no cel step
+    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', treeShade: true, rim: 0.35, surface: SURFACE.stone, cullFade: true, biomeCover: 'rock', erosion: true }))
+  /** Boulder shadows: the depth pass with the same shape pick (WorldChunk sets it as the rocks' customDepthMaterial). */
+  readonly rockDepth = rockVariants(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }))
   /**
    * CLIFF ROCK (formations + crags, world-scale merged meshes): the rock look with cliff-sized brush strokes (vertical
    * streaks on walls) and softer shading than the boulders — Genshin shades scenery softly (hard cel ramps on big
@@ -167,17 +188,17 @@ export class MaterialLibrary {
    */
   readonly cliffRock = isOverland() || isBright()
     ? this.rock
-    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', rim: 0.25, surface: SURFACE.stone, cliffStone: true, toon: 0.6, cullFade: true, wet: true, biomeCover: 'rock' })
+    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', treeShade: true, rim: 0.25, surface: SURFACE.stone, cliffStone: true, toon: 0.6, cullFade: true, wet: true, biomeCover: 'rock', erosion: true })
   /** Grass layers (GrassField): near (dense, curved blades) and far (sparse, wide) — same program, own bands. */
   readonly grassNearU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
   readonly grassFarU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
   /** Smooth Lambert + wind/fade/translucency patch. */
-  readonly grass = stylize(createGrassMaterial(this.grassNearU.band, this.grassNearU.thin), { key: 'grass', rim: 0.2, cheapFog: true, wet: true })
-  readonly grassFar = stylize(createGrassMaterial(this.grassFarU.band, this.grassFarU.thin), { key: 'grass', rim: 0.2, cheapFog: true, wet: true })
+  readonly grass = stylize(createGrassMaterial(this.grassNearU.band, this.grassNearU.thin), { key: 'grass', treeShade: 'vertex', rim: 0.2, cheapFog: true, wet: true })
+  readonly grassFar = stylize(createGrassMaterial(this.grassFarU.band, this.grassFarU.thin), { key: 'grass', treeShade: 'vertex', rim: 0.2, cheapFog: true, wet: true })
   /** Vertex-coloured props (BMX, car extras, debris). */
   readonly character = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'character', rim: 0.6 })
   /** The player (hero.lod0.glb): skinned, its albedo as `map` (set by Game once the model has loaded). */
-  readonly hero = stylize(new THREE.MeshLambertMaterial(), { key: 'hero', rim: 0.6 })
+  readonly hero = stylize(new THREE.MeshLambertMaterial(), { key: 'hero', treeShade: true, rim: 0.6 })
   /**
    * Street-lamp glow (propMeshes `createLampGlowGeometry`, instanced with the poles): additive, fades in with the
    * darkness; when the lamps switch on (`uLampT` = seconds since, −1 = off) each post FLICKERS to life in its own

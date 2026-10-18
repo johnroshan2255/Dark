@@ -102,10 +102,6 @@ function tyreWidth(code: string | undefined): number {
   return 0.24
 }
 
-const smooth = (a: number, b: number, x: number): number => {
-  const t = Math.min(1, Math.max(0, (x - a) / (b - a)))
-  return t * t * (3 - 2 * t)
-}
 
 /** One wheel's strip: the START EDGE of the segment being drawn (the previous segment's end edge when shared). */
 interface Track {
@@ -349,11 +345,13 @@ export class TyreMarks {
       let slip: number, spin = 0
       if (D) {
         const kap = D.kappa[k]
-        const slide = smooth(0.1, 0.4, Math.abs(D.alpha[k]))
-        spin = kap > 0 ? smooth(0.15, 0.8, kap) : 0
-        // Braking: a tyre at / past its peak (κ ≈ −0.1: the sim's threshold stop without ABS) lays dark rubber, locked
-        // (κ → −1) a solid black line. ABS keeps releasing at κ ≈ −0.15: faint, broken by its pulses (~1 m apart).
-        let lock = kap < 0 ? smooth(0.03, 0.14, -kap) : 0
+        // Only a tyre really sliding marks the ground (Drivetrain slideVis / skidVis: past its grip peak, at a real
+        // sliding speed) — a slow turn or a gentle stop leaves nothing.
+        const slide = D.slideVis[k]
+        spin = kap > 0 ? D.skidVis[k] : 0
+        // Braking: a locked tyre lays a solid black line. ABS keeps releasing at κ ≈ −0.15: faint, broken by its
+        // pulses (~1 m apart).
+        let lock = kap < 0 ? D.skidVis[k] : 0
         if (D.R.brakes.abs && D.aids !== 'off') lock = Math.min(lock, 0.3) * ((along / 1.1) % 1 < 0.45 ? 1 : 0.12)
         slip = Math.max(slide, spin, lock)
       } else {

@@ -1,7 +1,7 @@
 import RAPIER from '@dimforge/rapier3d-compat'
 import { CHUNK_RES, CHUNK_SIZE, CHUNK_VERTS } from '../world/constants'
 import { PROP_STRIDE, TREE_STRIDE, TRUNK_RADIUS, solidHeight, type ChunkData } from '../world/types'
-import { ROCK_HULL } from '../world/Forest/propGeometries'
+import { ROCK_HULLS, rockPick } from '../world/Forest/propGeometries'
 import { poiCollider } from '../world/POI/poiGeometry'
 import { instanceYScale } from '../optimization/instancing/InstanceBuilder'
 
@@ -16,6 +16,13 @@ export const Groups = {
   Vehicle: 0x0010,
   /** Pieces of broken props (gameplay/destruction): collide with everything but each other's tiny shards. */
   Debris: 0x0020,
+  /** A car's EXACT body (its render mesh as a trimesh): rocks, trees, props, debris, monsters, the bike. Rapier has
+   *  no trimesh ⇄ heightfield / trimesh contact, so terrain and formations meet the car's mesh-cut hulls instead. */
+  VehicleMesh: 0x0040,
+  /** Static trimeshes (rock formations; also members of Static, so queries on Static still find them). */
+  StaticMesh: 0x0080,
+  /** The terrain under the car again as a trimesh (PhysicsWorld.vehicleGround) — met only by VehicleMesh. */
+  TerrainMesh: 0x0100,
 } as const
 export const group = (member: number, filter: number) => ((member & 0xffff) << 16) | (filter & 0xffff)
 
@@ -58,6 +65,11 @@ export class PhysicsWorld {
   alpha = 0
   stepMs = 0
   private chunkBodies = new Map<string, RAPIER.RigidBody>()
+  /** Per chunk: its heightfield heights (Rapier layout, hf[ix · V + iz]) — vehicleGround builds from them. */
+  private readonly chunkHeights = new Map<string, Float32Array>()
+  /** Chunks whose terrain is a vehicle trimesh now, and the chunk the car was last in. */
+  private readonly groundMesh = new Map<string, RAPIER.Collider>()
+  private groundAt = ''
   /** Breakable prop colliders (handle → record) and per chunk their handles. */
   readonly props = new Map<number, PropRef>()
   private readonly chunkProps = new Map<string, number[]>()
@@ -131,10 +143,11 @@ export class PhysicsWorld {
     for (let iz = 0; iz < V; iz++) for (let ix = 0; ix < V; ix++) hf[ix * V + iz] = solidHeight(d, iz * V + ix)
     this.world.createCollider(
       R.ColliderDesc.heightfield(CHUNK_RES, CHUNK_RES, hf, { x: CHUNK_SIZE, y: 1, z: CHUNK_SIZE })
-        .setCollisionGroups(group(Groups.Terrain, 0xffff))
+        .setCollisionGroups(group(Groups.Terrain, 0xffff & ~Groups.VehicleMesh))
         .setFriction(0.9),
       body,
     )
+    this.chunkHeights.set(key, hf)
     // ROAD RIBBON (world/Terrain/roadSurface.ts): gutters, wheel ruts and potholes — the exact rendered triangles as a
     // TERRAIN trimesh over the heightfield, whose vertices under it are sunk (heights0 via solidHeight): a wheel
     // drops into the ditch and tracks in the ruts. ~1–5 k triangles on a road chunk, built in ~0.1–0.3 ms.
@@ -145,7 +158,8 @@ export class PhysicsWorld {
         v[i + 1] = d.rdPos[i + 1]
         v[i + 2] = d.rdPos[i + 2] - half
       }
-      this.world.createCollider(R.ColliderDesc.trimesh(v, d.rdIdx).setCollisionGroups(group(Groups.Terrain, 0xffff)).setFriction(0.9), body)
+      // (a trimesh: the car's exact body meets it directly — TerrainMesh membership)
+      this.world.createCollider(R.ColliderDesc.trimesh(v, d.rdIdx).setCollisionGroups(group(Groups.Terrain | Groups.TerrainMesh, 0xffff)).setFriction(0.9), body)
     }
     // Rock formations (arches, caves, pillars, outcrops): an exact trimesh of their voxel mesh — you can drive
     // through the cave and under the arch.
@@ -156,20 +170,22 @@ export class PhysicsWorld {
         v[i + 1] = d.fmPos[i + 1]
         v[i + 2] = d.fmPos[i + 2] - half
       }
-      this.world.createCollider(R.ColliderDesc.trimesh(v, d.fmIdx).setCollisionGroups(group(Groups.Static, 0xffff)).setFriction(0.8), body)
+      this.world.createCollider(R.ColliderDesc.trimesh(v, d.fmIdx).setCollisionGroups(group(Groups.Static | Groups.StaticMesh, 0xffff)).setFriction(0.8), body)
     }
     // Rocks: a convex hull of the rock's own mesh vertices per boulder, scaled (with the instance's vertical
     // jitter, InstanceBuilder) and rotated like its instance → the collider IS the visible boulder (tested:
     // every mesh vertex lies inside it). The player steps onto small ones (autostep), is blocked by big ones; the truck the same.
+    // (each boulder has one of six shapes — rockPick — and its own hull)
     const rk = d.rocks
-    const hull = new Float32Array(ROCK_HULL.length)
     for (let i = 0; i < rk.length; i += PROP_STRIDE) {
       const sc = rk[i + 4]
       const sy = sc * instanceYScale(i / PROP_STRIDE)
+      const H = ROCK_HULLS[rockPick(i / PROP_STRIDE)]
+      const hull = new Float32Array(H.length)
       for (let k = 0; k < hull.length; k += 3) {
-        hull[k] = ROCK_HULL[k] * sc
-        hull[k + 1] = ROCK_HULL[k + 1] * sy
-        hull[k + 2] = ROCK_HULL[k + 2] * sc
+        hull[k] = H[k] * sc
+        hull[k + 1] = H[k + 1] * sy
+        hull[k + 2] = H[k + 2] * sc
       }
       const desc = R.ColliderDesc.convexHull(hull)
       if (!desc) continue
@@ -230,8 +246,56 @@ export class PhysicsWorld {
     if (!body) return
     this.world.removeRigidBody(body) // also removes its colliders
     this.chunkBodies.delete(key)
+    this.chunkHeights.delete(key)
+    this.groundMesh.delete(key)
+    this.groundAt = ''
     for (const h of this.chunkProps.get(key) ?? []) this.props.delete(h)
     this.chunkProps.delete(key)
+  }
+
+  /**
+   * EXACT GROUND FOR THE CAR BODY: Rapier has no trimesh ⇄ heightfield contact, so the car's exact mesh
+   * (Groups.VehicleMesh) meets the terrain of the 3 × 3 chunks around (x, z) as a trimesh copy of the heightfield —
+   * the same grid and diagonal as the heightfield and the rendered LOD0 mesh ((00, 01, 10), (10, 01, 11);
+   * tests/world.test.ts), membership TerrainMesh, met by nothing else. Rebuilt only when the car changes chunk.
+   * Cost: 2 048 triangles per chunk, ≈ 0.1–0.3 ms to build one; ≤ 9 alive (≈ 18 k triangles, ~1 MB).
+   */
+  vehicleGround(x: number, z: number): void {
+    const cx = Math.floor(x / CHUNK_SIZE), cz = Math.floor(z / CHUNK_SIZE)
+    const at = `${cx},${cz}`
+    // (also retried while a neighbour's collider is still streaming in)
+    if (at === this.groundAt && this.groundMesh.size === 9) return
+    this.groundAt = at
+    const want = new Set<string>()
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) want.add(`${cx + dx},${cz + dz}`)
+    for (const [key, col] of this.groundMesh) {
+      if (want.has(key)) continue
+      if (col.isValid()) this.world.removeCollider(col, false)
+      this.groundMesh.delete(key)
+    }
+    const V = CHUNK_VERTS, half = CHUNK_SIZE / 2, cell = CHUNK_SIZE / CHUNK_RES
+    for (const key of want) {
+      const hf = this.chunkHeights.get(key), body = this.chunkBodies.get(key)
+      if (!hf || !body || this.groundMesh.has(key)) continue
+      const v = new Float32Array(V * V * 3)
+      for (let iz = 0; iz < V; iz++) for (let ix = 0; ix < V; ix++) {
+        const o = (iz * V + ix) * 3
+        v[o] = ix * cell - half
+        v[o + 1] = hf[ix * V + iz]
+        v[o + 2] = iz * cell - half
+      }
+      const idx = new Uint32Array(CHUNK_RES * CHUNK_RES * 6)
+      let n = 0
+      for (let j = 0; j < CHUNK_RES; j++) for (let i = 0; i < CHUNK_RES; i++) {
+        const a = j * V + i, b = a + 1, c = a + V, e = c + 1
+        idx[n++] = a; idx[n++] = c; idx[n++] = b
+        idx[n++] = b; idx[n++] = c; idx[n++] = e
+      }
+      this.groundMesh.set(key, this.world.createCollider(
+        this.R.ColliderDesc.trimesh(v, idx).setCollisionGroups(group(Groups.TerrainMesh, Groups.VehicleMesh)).setFriction(0.9),
+        body,
+      ))
+    }
   }
 
   /** Remove a broken prop's collider (it stays gone until its chunk's colliders are rebuilt without it). */
