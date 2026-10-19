@@ -1,4 +1,8 @@
 /**
+ * BRIGHT IS THE GAME'S ONLY STYLE (2026-10-19: "we will always use bright mode"). The other styles are hidden — not
+ * selectable (no Settings switch, no ?look=) — their code paths stay behind the `is…()` checks, which are now always
+ * false. Every look / performance change is made and verified in 'bright'.
+ *
  * The art style is fixed for a session: chosen from Settings (or ?look=) BEFORE any material, atlas or tree
  * geometry is built, because the styles change shader programs and geometry — switching it reloads the page
  * (Game.updateSettings). That keeps every style at zero per-frame cost: nothing is toggled or branched at runtime.
@@ -19,7 +23,7 @@ export type ArtStyle = 'overland' | 'bright' | 'genshin' | 'storybook'
 
 export const ART_STYLES: readonly ArtStyle[] = ['overland', 'bright', 'genshin', 'storybook']
 
-export const ART = { style: 'genshin' as ArtStyle }
+export const ART = { style: 'bright' as ArtStyle }
 
 export const isStorybook = (): boolean => ART.style === 'storybook'
 export const isOverland = (): boolean => ART.style === 'overland'

@@ -22,7 +22,7 @@ import { isGenshin, isOverland } from '../../rendering/artStyle'
  * @param tuft blades per TUFT (Genshin / fluffy-grass look): blades of a tuft share a root area (r ≈ 7 cm) and fan
  *   OUTWARD from it with varied heights — a soft clump of blades instead of an even bed of separate spikes. 1 = off.
  */
-export function createGrassGeometry(blades: number, segments: number, tall = 1, wide = 1, vary = 1, leanK = 1, tuft = 1): THREE.BufferGeometry {
+export function createGrassGeometry(blades: number, segments: number, tall = 1, wide = 1, vary = 1, leanK = 1, tuft = 1, flowers = true): THREE.BufferGeometry {
   const pos: number[] = []
   const col: number[] = []
   const tip: number[] = []
@@ -81,8 +81,9 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
       index.push(iL, iR, iML, iR, iMR, iML, iML, iMR, iT)
     }
   }
-  // One flower per patch (2 tris), shown on ~10 % of patches.
-  {
+  // One flower per patch, shown on ~10 % of patches (not in the far layer: a 9 cm daisy past ~15 m is a pixel, and its
+  // 10 triangles were a third of every far patch).
+  if (flowers) {
     // A small DAISY just above the blades: a 5-petal star (centre `tip` 0 → yellow eye, petal tips 1 → white; the
     // shader colours it), tilted ~40° so it reads from a low camera. 10 triangles.
     const cx = rnd() * 0.6 - 0.3, cz = rnd() * 0.6 - 0.3, cy = 0.5 * tall, R = 0.045
@@ -246,7 +247,7 @@ float gVN(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f)
   return mix(mix(gHash(i), gHash(i + vec2(1, 0)), f.x), mix(gHash(i + vec2(0, 1)), gHash(i + vec2(1, 1)), f.x), f.y); }
 // Large soft PATCHES over the field (≈ 25 m + 8 m octaves): lighter / darker tip colour and taller / shorter grass.
 float gPatch(vec2 xz) { return gVN(xz * 0.04) * 0.65 + gVN(xz * 0.13 + 17.0) * 0.35; }
-vec4 gBW; float gGust;`,
+vec4 gBW; float gGust, gFade, gDist;`,
       )
       .replace(
         '#include <begin_vertex>',
@@ -255,29 +256,7 @@ vec4 gBW; float gGust;`,
         #ifdef USE_INSTANCING
           vec2 ax = normalize(instanceMatrix[0].xz), az = normalize(instanceMatrix[2].xz);
           vec4 bw = gBW; // this blade's root (computed once in color_vertex)
-          // Distance from the PLAYER (the field is centred on them), not the camera: in third person the camera
-          // orbits ~8 m around the player, so camera-relative thresholds swept through the meadow on every look
-          // and whole tufts popped in and out — the "glitter" when moving the camera.
-          float dist = distance(bw.xz, uPlayerPos.xz);
-          // EVERY BLADE ON ITS OWN: a random threshold per blade AND per patch (the patch origin re-shuffles which
-          // blades go first), so density, distance thinning and the field's edge never repeat patch to patch —
-          // no rows, no rings, no squares. All transitions are a smooth shrink (blades grow in / out, no pop).
-          vec3 patchO = (modelMatrix * vec4(instanceMatrix[3].xyz, 1.0)).xyz;
-          float h = fract(bladeId * 7.31 + gHash(patchO.xz) * 13.7);
-          float h2 = gHash(bw.xz + 5.3);
-          // Local density 0..1 (meadow vs forest floor vs verge, interpolated per patch — GrassField): a soft
-          // threshold, so a patch at 0.4 shows 40 % of its blades instead of all-or-nothing squares.
-          float fade = 1.0 - smoothstep(iDensity - 0.12, iDensity, h);
-          // Band: grow in (far layer) and shrink out (edge), each blade at its own distance (±18 % of the band).
-          float jit = (h2 - 0.5) * 0.36;
-          fade *= smoothstep(uGrassBand.x, uGrassBand.y, dist + jit * (uGrassBand.y - uGrassBand.x));
-          fade *= 1.0 - smoothstep(uGrassBand.z, uGrassBand.w, dist + jit * (uGrassBand.w - uGrassBand.z));
-          // Distance thinning toward the edge (fewer blades rasterised far away), random per blade.
-          float keep = 1.0 - smoothstep(uGrassThin.x, uGrassThin.y, dist) * ${isOverland() ? '0.45' : '0.6'};
-          fade *= 1.0 - smoothstep(keep - 0.15, keep, h);
-          // Flowers: a sprinkle; Genshin meadows have DRIFTS of small white / yellow flowers (low-frequency clusters).
-          float fl = ${isGenshin() ? '0.06 + 0.5 * smoothstep(0.35, 0.8, sin(bw.x * 0.09 + sin(bw.z * 0.07) * 2.0) * sin(bw.z * 0.11 - bw.x * 0.03) * 0.5 + 0.5)' : '0.1'};
-          if (flower > 0.5 && gHash(bw.xz) > fl) fade = 0.0;
+          float dist = gDist, fade = gFade; // (color_vertex: the blade's thresholds, before the early out)
           vec2 rootL = bladeRoot;
           transformed = vec3(rootL.x, 0.0, rootL.y) + (transformed - vec3(rootL.x, 0.0, rootL.y)) * fade;
           // ON THE SLOPE: each blade's root sits on the terrain under it (the patch's local height gradient,
@@ -311,6 +290,44 @@ vec4 gBW; float gGust;`,
         #ifdef USE_INSTANCING
         {
           gBW = modelMatrix * instanceMatrix * vec4(bladeRoot.x, 0.0, bladeRoot.y, 1.0);
+          vec4 bw = gBW;
+          // Distance from the PLAYER (the field is centred on them), not the camera: in third person the camera
+          // orbits ~8 m around the player, so camera-relative thresholds swept through the meadow on every look
+          // and whole tufts popped in and out — the "glitter" when moving the camera.
+          float dist = distance(bw.xz, uPlayerPos.xz);
+          // EVERY BLADE ON ITS OWN: a random threshold per blade AND per patch (the patch origin re-shuffles which
+          // blades go first), so density, distance thinning and the field's edge never repeat patch to patch —
+          // no rows, no rings, no squares. All transitions are a smooth shrink (blades grow in / out, no pop).
+          vec3 patchO = (modelMatrix * vec4(instanceMatrix[3].xyz, 1.0)).xyz;
+          float h = fract(bladeId * 7.31 + gHash(patchO.xz) * 13.7);
+          float h2 = gHash(bw.xz + 5.3);
+          // Local density 0..1 (meadow vs forest floor vs verge, interpolated per patch — GrassField): a soft
+          // threshold, so a patch at 0.4 shows 40 % of its blades instead of all-or-nothing squares.
+          float fade = 1.0 - smoothstep(iDensity - 0.12, iDensity, h);
+          // Band: grow in (far layer) and shrink out (edge), each blade at its own distance (±18 % of the band).
+          float jit = (h2 - 0.5) * 0.36;
+          fade *= smoothstep(uGrassBand.x, uGrassBand.y, dist + jit * (uGrassBand.y - uGrassBand.x));
+          fade *= 1.0 - smoothstep(uGrassBand.z, uGrassBand.w, dist + jit * (uGrassBand.w - uGrassBand.z));
+          // Distance thinning toward the edge (fewer blades rasterised far away), random per blade.
+          float keep = 1.0 - smoothstep(uGrassThin.x, uGrassThin.y, dist) * ${isOverland() ? '0.45' : '0.6'};
+          fade *= 1.0 - smoothstep(keep - 0.15, keep, h);
+          // Flowers: a sprinkle; Genshin meadows have DRIFTS of small white / yellow flowers (low-frequency clusters).
+          float fl = ${isGenshin() ? '0.06 + 0.5 * smoothstep(0.35, 0.8, sin(bw.x * 0.09 + sin(bw.z * 0.07) * 2.0) * sin(bw.z * 0.11 - bw.x * 0.03) * 0.5 + 0.5)' : '0.1'};
+          if (flower > 0.5 && gHash(bw.xz) > fl) fade = 0.0;
+          gFade = fade;
+          gDist = dist;
+          // EARLY OUT (the field surrounds the player: ~⅔ of its patches lie behind / beside the camera, and the
+          // thinned or density-faded blades are most of the rest): a blade that is shrunk to nothing, or whose 1 m
+          // patch is outside the view frustum (view-space plane test with a 1.8 m margin: patch half-diagonal + blade
+          // height, lean, widening, parting), is collapsed to one clipped point and skips the gust noise, colour,
+          // lighting, tree-shade fetch and fog below — the cost of grass now follows the blades on screen, which is
+          // what lets every tier draw the same field.
+          vec3 vc = (viewMatrix * vec4(patchO + vec3(0.0, 0.4, 0.0), 1.0)).xyz;
+          float fx = projectionMatrix[0][0], fy = projectionMatrix[1][1];
+          if (fade <= 0.001 || vc.z > 1.8 || (fx * abs(vc.x) + vc.z) * inversesqrt(fx * fx + 1.0) > 1.8 || (fy * abs(vc.y) + vc.z) * inversesqrt(fy * fy + 1.0) > 1.8) {
+            gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+            return;
+          }
           gGust = windGust(gBW.xz, uTime, uWind);
           vec4 bwc = gBW;
           float tn = sin(bwc.x * 0.11 + sin(bwc.z * 0.07) * 3.0) * 0.5 + 0.5;

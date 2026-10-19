@@ -7,7 +7,11 @@ import * as THREE from 'three'
  *
  * FXAA (Lottes' PC variant, 9 fetches) runs at scene-RT resolution and its 4 corner fetches are
  * reused for a clamped unsharp-mask: that removes the soft look of bilinear upscaling when the
- * render scale is < 1 — the main source of "blur". Toggled by uniforms (no program variants).
+ * render scale is < 1 — the main source of "blur". When the scene RT is smaller than the canvas (`uUpscale`: LOW
+ * renders ~0.6 MP), pixels FXAA leaves alone (no edge) are UPSCALED with a 5-tap Catmull-Rom (bicubic) filter instead
+ * of bilinear, clamped to their neighbours (no ringing): texture, grass and far detail keep their crispness at 75 %
+ * scale — what made LOW read as "low". Edges keep FXAA. +5 fetches on interior pixels only. Toggled by uniforms
+ * (no program variants).
  */
 export function createGradingMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
@@ -37,6 +41,8 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
       /** Shafts / fog banks rendered this frame (PostPipeline.raysActive): else their 5 fetches + 4 exp are skipped. */
       uRaysOn: { value: 0 },
       uFxaa: { value: 1 },
+      /** Scene RT smaller than the canvas → bicubic upscale of the non-edge pixels (PostPipeline.applySize). */
+      uUpscale: { value: 0 },
       uSharpen: { value: 0.25 },
       uExposure: { value: 1 },
       uTint: { value: new THREE.Color(1, 1, 1) },
@@ -69,7 +75,7 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
       uniform vec2 uFog;
       uniform vec3 uRaysColor, uVolColor, uMistColor, uTint, uLift;
       uniform vec2 uTexel, uRaysTexel;
-      uniform float uFxaa, uSharpen, uRaysOn;
+      uniform float uFxaa, uSharpen, uRaysOn, uUpscale;
       uniform float uExposure, uSaturation, uContrast, uVignette, uGrain, uDistortion, uTime, uAspect;
       uniform int uDebugView;
       uniform float uSplit, uFlash, uDamage, uPaintFx;
@@ -78,6 +84,27 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
       float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
       // Luma on a compressed scale so HDR highlights don't dominate edge detection.
       float luma(vec3 c) { float l = dot(c, vec3(0.299, 0.587, 0.114)); return l / (1.0 + l); }
+
+      // Catmull-Rom (bicubic) sample of the scene from 5 bilinear taps (the 4 corner taps of the 9-tap kernel dropped:
+      // their weights are ~1 %). Sharper than bilinear when the RT is upscaled to the canvas.
+      vec3 bicubic(vec2 uv) {
+        vec2 size = 1.0 / uTexel;
+        vec2 sp = uv * size;
+        vec2 t1 = floor(sp - 0.5) + 0.5;
+        vec2 f = sp - t1;
+        vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+        vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+        vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+        vec2 w3 = f * f * (-0.5 + 0.5 * f);
+        vec2 w12 = w1 + w2;
+        vec2 p0 = (t1 - 1.0) * uTexel, p3 = (t1 + 2.0) * uTexel, p12 = (t1 + w2 / w12) * uTexel;
+        vec3 c = texture2D(tScene, vec2(p12.x, p0.y)).rgb * (w12.x * w0.y)
+               + texture2D(tScene, vec2(p0.x, p12.y)).rgb * (w0.x * w12.y)
+               + texture2D(tScene, p12).rgb * (w12.x * w12.y)
+               + texture2D(tScene, vec2(p3.x, p12.y)).rgb * (w3.x * w12.y)
+               + texture2D(tScene, vec2(p12.x, p3.y)).rgb * (w12.x * w3.y);
+        return c / (w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y);
+      }
 
       vec3 antialias(vec2 uv) {
         vec3 rgbM = texture2D(tScene, uv).rgb;
@@ -99,6 +126,12 @@ export function createGradingMaterial(): THREE.ShaderMaterial {
           vec3 b = a * 0.5 + 0.25 * (texture2D(tScene, uv - dir * 0.5).rgb + texture2D(tScene, uv + dir * 0.5).rgb);
           float lB = luma(b);
           col = (lB < lMin || lB > lMax) ? a : b;
+          // Not an edge (FXAA's own contrast threshold) and upscaling → the bicubic sample, clamped to the 3×3 range.
+          if (uUpscale > 0.5 && lMax - lMin < max(0.0312, lMax * 0.125)) {
+            vec3 lo = min(rgbM, min(min(rgbNW, rgbNE), min(rgbSW, rgbSE)));
+            vec3 hi = max(rgbM, max(max(rgbNW, rgbNE), max(rgbSW, rgbSE)));
+            col = clamp(bicubic(uv), lo, hi);
+          }
         }
         if (uSharpen > 0.001) {
           vec3 avg = 0.25 * (rgbNW + rgbNE + rgbSW + rgbSE);

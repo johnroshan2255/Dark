@@ -13,7 +13,6 @@ import { Toolbar } from '../ui/Toolbar'
 import { KeyArt } from '../ui/KeyArt'
 import { GameCanvas } from './Canvas'
 import { bootError, bootFinish, bootProgress } from './boot'
-import { ART_STYLES } from '../rendering/artStyle'
 
 /**
  * Every new game gets a fresh random world unless ?seed= is given (co-op joiners receive the host's
@@ -31,7 +30,6 @@ function readOptions(): GameOptions {
     adaptive: p.get('adaptive') !== '0',
     stressMs: Number(p.get('stress')) || 0,
     hour: p.get('hour') !== null ? Number(p.get('hour')) : undefined,
-    look: ART_STYLES.find((a) => a === p.get('look')),
     car: p.get('car') ?? undefined,
     play: p.get('play') === '1',
     at: p.get('at') ?? undefined,
@@ -53,6 +51,8 @@ export function App() {
           setGame((created = g))
           // Dev-only handle for console debugging / automated checks. Stripped from production builds.
           if (import.meta.env.DEV) (window as unknown as { __game?: Game }).__game = g
+          // Dev-only remote HUD (phones on the LAN report their frame stats to the dev server: debug/DevTelemetry).
+          if (import.meta.env.DEV) void import('../debug/DevTelemetry').then((m) => m.startDevTelemetry(g))
         }
       })
       .catch((e: unknown) => {

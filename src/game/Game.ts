@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { CaveSystem } from '../gameplay/caves/CaveSystem'
 import { MOUTH_X } from '../world/Formations/caves'
-import { ART, groundPalette, isGenshin, isOverland, type ArtStyle } from '../rendering/artStyle'
+import { ART, groundPalette, isGenshin, isOverland } from '../rendering/artStyle'
 import { downscaleTexture, loadModels, loadVehicle, type GameModels, type TruckModel } from '../assets/loadModels'
 import { tuningFor, vehicleDef, type VehicleTuning } from '../gameplay/vehicle/catalogue'
 import { CHUNK_SIZE } from '../world/constants'
@@ -82,8 +82,6 @@ export interface GameOptions {
   stressMs?: number
   /** Start hour override (tests / screenshots). */
   hour?: number
-  /** Art style override (?look=, not persisted). */
-  look?: ArtStyle
   /** Vehicle override (?car=<catalogue id>, not persisted). */
   car?: string
   /** Skip the landing page (tests / screenshots). */
@@ -118,7 +116,7 @@ export class Game {
   /** The moving things' shadows while the sun map is cached (rendering/shadows/DynamicShadow). */
   readonly dynShadow = new DynamicShadow()
   private lastChunkN = -1
-  private shadowRefreshT = 0
+  private lastLodSwitches = -1
   readonly beam = new LightBeam()
   readonly bike: Bike
   car: Car
@@ -199,8 +197,8 @@ export class Game {
 
   /** @param onProgress loading-screen progress (0..1) + stage text. */
   static async create(opts: GameOptions, onProgress?: (f: number, status: string) => void): Promise<Game> {
-    // Art style is fixed per session and must be known before any material/atlas/tree is built (artStyle.ts).
-    ART.style = opts.look ?? loadSettings().artStyle
+    // Art style: always BRIGHT (artStyle.ts) — set before any material/atlas/tree is built.
+    ART.style = 'bright'
     applyShadowEdgeFade() // global shader-chunk patch; must precede any program compile
     // Models load in parallel with the physics wasm (both small: ~1.8 MB total).
     let phys = 0, mdl = 0
@@ -222,7 +220,6 @@ export class Game {
     this.settings = loadSettings()
     this.savedQuality = this.settings.quality
     if (opts.tier && opts.tier !== 'auto') this.settings = { ...this.settings, quality: opts.tier }
-    this.settings = { ...this.settings, artStyle: ART.style }
     this.adaptive.enabled = opts.adaptive !== false && (this.settings.quality === 'auto' || this.settings.hold60)
     this.tod = new TimeOfDay(opts.hour ?? 15) // start in the warm afternoon (the garage view); night still comes with the cycle
     this.tod.dayLengthMinutes = this.settings.dayLength
@@ -533,14 +530,6 @@ export class Game {
 
   updateSettings(patch: Partial<Settings>): void {
     const prev = this.settings
-    if (patch.artStyle !== undefined && patch.artStyle !== ART.style) {
-      // Shader programs, atlas and tree geometry depend on the style → apply it with a reload (artStyle.ts).
-      saveSettings({ ...prev, ...patch, quality: this.savedQuality })
-      const url = new URL(location.href)
-      url.searchParams.delete('look')
-      location.replace(url.toString())
-      return
-    }
     this.settings = { ...prev, ...patch }
     if (patch.quality !== undefined) this.savedQuality = patch.quality
     saveSettings({ ...this.settings, quality: this.savedQuality })
@@ -977,12 +966,12 @@ export class Game {
           // the torch works at full strength; fog / exposure / haze below.
           this.caves.update(dt, time, p.renderPosition, this.lighting.keyStrength * (1 - this.tod.nightmare) * THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.0, 0.25))
           this.lighting.cave = this.caves.inside
-          // Cached sun map: re-render it when chunks were built / dropped round the player, and every 2 s anyway
-          // (LOD switches change the casters) — one shadow pass per ~120 frames instead of every frame.
-          this.shadowRefreshT += dt
-          if (this.world.chunks.size !== this.lastChunkN || this.shadowRefreshT > 2) {
+          // Cached sun map: re-render it only when the casters changed — chunks built / dropped round the player or a
+          // chunk switched LOD (it was every 2 s as well: a full 4096² caster pass every 120 frames standing still, a
+          // periodic hitch on weak GPUs).
+          if (this.world.chunks.size !== this.lastChunkN || this.world.stats.lodSwitches !== this.lastLodSwitches) {
             this.lastChunkN = this.world.chunks.size
-            this.shadowRefreshT = 0
+            this.lastLodSwitches = this.world.stats.lodSwitches
             this.lighting.invalidateShadow()
           }
           this.lighting.update(dt, p.renderPosition, c.flashOrigin, c.flashTarget)
@@ -1501,7 +1490,11 @@ export class Game {
       this.trails.render(renderer, this.player.renderPosition)
     }
     globalUniforms.uTrailOn.value = this.quality.fx.trails ? 1 : 0
-    this.reflection.active = this.world.stats.shoreVisible > 0
+    // (not on a frame where the sun just got its shadow back without a map yet: the mirror reuses the shadow maps,
+    // and a lit draw with no map bound is rejected — GL_INVALID_OPERATION sampler mismatch — until the main pass makes it)
+    const { sun, flashlight } = this.lighting
+    const mapless = (sun.castShadow && !sun.shadow.map) || (flashlight.castShadow && !flashlight.shadow.map)
+    this.reflection.active = this.world.stats.shoreVisible > 0 && !mapless
     this.sky.full() // the reflection's own camera/target: the dome draws the real sky there
     this.reflection.render(renderer, scene, camera)
     this.sky.prepare(renderer, camera, this.post.target.width, this.post.target.height, this.quality.skyScale)

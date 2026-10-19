@@ -84,9 +84,6 @@ export function SettingsPanel({ game }: { game: Game }) {
         <Row label="Pixel ratio">
           <Seg value={st.pixelRatio} onChange={(v) => set({ pixelRatio: v })} opts={[{ label: 'Auto', value: 'auto' }, { label: '1×', value: 1 }, { label: '1.5×', value: 1.5 }, { label: '2×', value: 2 }, { label: 'Native', value: 'native' }]} />
         </Row>
-        <Row label="Art style (reloads)">
-          <Seg value={st.artStyle} onChange={(v) => set({ artStyle: v })} opts={[{ label: 'Overland', value: 'overland' }, { label: 'Genshin', value: 'genshin' }, { label: 'Bright', value: 'bright' }, { label: 'Storybook', value: 'storybook' }]} />
-        </Row>
         <Row label="Painterly filter">
           <Seg value={st.painterly && (tier !== 'low' || st.painterlyForce)} onChange={(v) => set({ painterly: v, painterlyForce: v })} opts={[{ label: 'On', value: true }, { label: 'Off', value: false }]} />
         </Row>

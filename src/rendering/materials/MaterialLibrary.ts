@@ -189,11 +189,14 @@ export class MaterialLibrary {
   readonly cliffRock = isOverland() || isBright()
     ? this.rock
     : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', treeShade: true, rim: 0.25, surface: SURFACE.stone, cliffStone: true, toon: 0.6, cullFade: true, wet: true, biomeCover: 'rock', erosion: true })
-  /** Grass layers (GrassField): near (dense, curved blades) and far (sparse, wide) — same program, own bands. */
+  /** Grass layers (GrassField): near (dense, curved blades), mid (dense, flat blades) and far (sparse, wide) — same
+   *  program, own bands. */
   readonly grassNearU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
+  readonly grassMidU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
   readonly grassFarU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }
   /** Smooth Lambert + wind/fade/translucency patch. */
   readonly grass = stylize(createGrassMaterial(this.grassNearU.band, this.grassNearU.thin), { key: 'grass', treeShade: 'vertex', rim: 0.2, cheapFog: true, wet: true })
+  readonly grassMid = stylize(createGrassMaterial(this.grassMidU.band, this.grassMidU.thin), { key: 'grass', treeShade: 'vertex', rim: 0.2, cheapFog: true, wet: true })
   readonly grassFar = stylize(createGrassMaterial(this.grassFarU.band, this.grassFarU.thin), { key: 'grass', treeShade: 'vertex', rim: 0.2, cheapFog: true, wet: true })
   /** Vertex-coloured props (BMX, car extras, debris). */
   readonly character = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'character', rim: 0.6 })
@@ -275,7 +278,7 @@ export class MaterialLibrary {
   }
 
   all(): THREE.Material[] {
-    return [this.roadDetail, this.terrain, this.vegetation, this.landmark, this.rock, ...(this.cliffRock === this.rock ? [] : [this.cliffRock]), this.grass, this.grassFar, this.character, this.hero, this.lampGlow]
+    return [this.roadDetail, this.terrain, this.vegetation, this.landmark, this.rock, ...(this.cliffRock === this.rock ? [] : [this.cliffRock]), this.grass, this.grassMid, this.grassFar, this.character, this.hero, this.lampGlow]
   }
 
   dispose(): void {

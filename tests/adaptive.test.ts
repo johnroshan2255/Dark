@@ -86,7 +86,10 @@ function run(opts: { seconds: number; frameMs: (scale: number, tier: number) => 
   let f: Feature | null
   while ((f = nextHoldStep(base, steps))) steps.push(f)
   const floor = heldLevels(base, steps)
-  check('hold 60: costliest first, effects lowered evenly', steps[0] === 'reflections' && steps.slice(0, 5).join() === 'reflections,ao,shadows,volumetrics,grass', steps.slice(0, 8).join(' → '))
+  check('hold 60: costliest first, effects lowered evenly', steps[0] === 'reflections' && steps.slice(0, 4).join() === 'reflections,ao,shadows,volumetrics', steps.slice(0, 8).join(' → '))
+  // The grass is the same field on every preset: it goes only after the effects, trees & bushes and view distance.
+  const firstGrass = steps.indexOf('grass')
+  check('hold 60: grass lowered last (before sun shadows off)', firstGrass > steps.lastIndexOf('view') && firstGrass > steps.lastIndexOf('vegetation') && firstGrass > steps.lastIndexOf('effects'), steps.join(' → '))
   check('hold 60: floors respected (small-phone bottom)', floor.reflections === 'off' && floor.ao === 'off' && floor.shadows === 'off' && floor.view === 'low' && floor.vegetation === 'low' && floor.grass === 'off' && floor.effects === 'off', JSON.stringify(floor))
   check('hold 60: shadows switch off last', steps[steps.length - 1] === 'shadows', steps.slice(-4).join(' → '))
   check('hold 60: reductions resolve to real budgets', resolveQuality('ultra', heldLevels(base, ['reflections'])).reflections < resolveQuality('ultra').reflections)

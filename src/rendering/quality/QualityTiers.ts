@@ -191,12 +191,17 @@ export const FEATURE_TABLE: { [F in Feature]: Partial<Record<Level, FeatureField
     ultra: { godRays: { divisor: 3, samples: 32, volumeSteps: 24 }, fog: { banks: true } },
   },
   view: {
-    low: { renderRadius: 2, lodRings: [0.8, 1.4], viewDistance: 200, horizon: { size: 2400, res: 40 }, landmarkRange: 700, impostors: { start: 50, far: 260, atlas: 1024, blend: false } },
+    // LOW keeps the 2-chunk ring (draws, streaming CPU) but the far look of the tiers above: the 2048² tree atlas with
+    // 3-view blending (1024² single-view trees read as blocky blobs on the hills: +16 MB, 2 more texture reads per
+    // tree-image pixel only), the impostor forest to 400 m and a wider horizon (2026-10-19, "the real look in low").
+    low: { renderRadius: 2, lodRings: [0.8, 1.4], viewDistance: 200, horizon: { size: 3200, res: 48 }, landmarkRange: 1000, impostors: { start: 50, far: 400, atlas: 2048, blend: true } },
     medium: { renderRadius: 3, lodRings: [0.9, 1.8], viewDistance: 300, horizon: { size: 3200, res: 52 }, landmarkRange: 1000, impostors: { start: 70, far: 400, atlas: 2048, blend: true } },
     high: { renderRadius: 3, lodRings: [1.2, 2.3], viewDistance: 420, horizon: { size: 4400, res: 72 }, landmarkRange: 1500, impostors: { start: 60, far: 700, atlas: 2048, blend: true } }, // (trees are images from 60 m: was 100 — fewer per-species tree draws per chunk)
     ultra: { renderRadius: 4, lodRings: [1.5, 2.8], viewDistance: 540, horizon: { size: 5600, res: 96 }, landmarkRange: 2200, impostors: { start: 130, far: 900, atlas: 2048, blend: true } },
   },
-  // Grass field around the player (GrassField: near + far layers). OFF = the painted meadow on the terrain only.
+  // Grass field around the player (GrassField: near + mid + far layers, view-culled per patch). OFF = the painted
+  // meadow on the terrain only. Every PRESET uses 'ultra' — the same field on every device (2026-10-19: "the same
+  // grass counts must persist in low to ultra"); the lower levels remain for the menu and Hold 60's last resorts.
   grass: {
     off: { grass: { radius: 0, density: 0, blades: 1 } },
     low: { grass: { radius: 12, density: 18, blades: 1 } },
@@ -238,15 +243,22 @@ interface Preset {
 // pay a multisampled depth RESOLVE — measured HIGH vista 1080p 14.4 → 8.0 ms GPU (AO alone 4.6 → 0.9 ms);
 // tile-based phone GPUs pay it worse. MSAA stays selectable in Settings.
 export const PRESETS: Record<TierName, Preset> = {
-  // ~₹15k phones (Mali-G57 / Adreno 610, Snapdragon 6xx), Intel UHD laptops: no reflections, no AO.
+  // ~₹15k phones (Mali-G57 / Adreno 610, Snapdragon 6xx), Intel UHD laptops.
+  // THE REAL LOOK ON LOW (2026-10-19): LOW keeps its RESOLUTION and its 2-chunk ring (the costs that scale with the
+  // screen and the CPU) but draws what makes the game look like itself — the same grass as ULTRA, car / player /
+  // bike shadows with the image tree shade, undergrowth and full trees, ground detail + bloom, fog banks, ½-res AO,
+  // the skyline mirror in lakes, sharp tree images to 400 m. Each was measured on LOW (M4, 4K canvas keeping full
+  // clocks, scene 0.05 / 0.6 MP): +0.0–0.4 ms each; the grass is affordable since it is view-culled (GrassField).
+  // A device that can't hold 60 sheds them through Hold 60 (reflections, AO, effects… grass last), NOT through a
+  // blurrier image: the render scale stops at 0.6.
   // (Tried 2026-10-06: canvas at 0.75 DPR + scene at 100 % → the grading pass shades ~45 % fewer pixels, but the
   // browser's upscale made edges visibly blocky on a phone. Kept DPR 1 + scene 75 %: our pass upscales smoothly.)
   low: {
     base: {
-      maxDpr: 1, renderScale: { min: 0.5, max: 0.85, start: 0.75 }, aa: 'fxaa', sharpen: 0.35, paint: { stride: 0, bloom: 0.45 },
-      buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, particles: { vehicle: 110, rain: 0.35 }, tyreMarks: { segments: 1024, life: 40, range: 50 }, pixelBudget: 0.6e6, skyScale: 0.25,
+      maxDpr: 1, renderScale: { min: 0.6, max: 0.85, start: 0.75 }, aa: 'fxaa', sharpen: 0.35, paint: { stride: 0, bloom: 0.45 },
+      buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, particles: { vehicle: 110, rain: 0.35 }, tyreMarks: { segments: 1024, life: 40, range: 50 }, pixelBudget: 0.6e6, skyScale: 0.33,
     },
-    features: { shadows: 'low', reflections: 'off', ao: 'off', volumetrics: 'low', grass: 'low', effects: 'low', vegetation: 'low', view: 'low' },
+    features: { shadows: 'medium', reflections: 'low', ao: 'low', volumetrics: 'medium', grass: 'ultra', effects: 'medium', vegetation: 'medium', view: 'low' },
   },
   // Upper mid phones (Adreno 7xx, recent iPhones), Iris Xe / Radeon iGPU: cheap reflections (¼ res, every 2nd frame).
   medium: {
@@ -254,7 +266,7 @@ export const PRESETS: Record<TierName, Preset> = {
       maxDpr: 1.25, renderScale: { min: 0.6, max: 1, start: 0.85 }, aa: 'fxaa', sharpen: 0.25, paint: { stride: 1.4, bloom: 0.4 },
       buildPerFrame: 2, monsters: { stalkers: 2, striders: 1 }, particles: { vehicle: 220, rain: 0.7 }, tyreMarks: { segments: 2048, life: 75, range: 70 }, pixelBudget: 1.4e6, skyScale: 0.33,
     },
-    features: { shadows: 'medium', reflections: 'off', ao: 'off', volumetrics: 'medium', grass: 'medium', effects: 'medium', vegetation: 'medium', view: 'medium' },
+    features: { shadows: 'medium', reflections: 'low', ao: 'low', volumetrics: 'medium', grass: 'ultra', effects: 'medium', vegetation: 'medium', view: 'medium' },
   },
   // Discrete GPUs, Apple M-series — and the target look for Snapdragon 6xx / Intel UHD: the scene at 80 % (≤ 1.4 MP,
   // DPR ≤ 1.25), upscaled by the grading pass with a little more sharpening — ~35 % fewer shaded pixels than 100 %
@@ -264,7 +276,7 @@ export const PRESETS: Record<TierName, Preset> = {
       maxDpr: 1.25, renderScale: { min: 0.65, max: 1, start: 0.8 }, aa: 'fxaa', sharpen: 0.3, paint: { stride: 1.8, bloom: 0.45 },
       buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 320, rain: 1 }, tyreMarks: { segments: 4096, life: 120, range: 90 }, pixelBudget: 1.4e6, skyScale: 0.5,
     },
-    features: { shadows: 'high', reflections: 'high', ao: 'medium', volumetrics: 'high', grass: 'high', effects: 'high', vegetation: 'high', view: 'high' },
+    features: { shadows: 'high', reflections: 'high', ao: 'medium', volumetrics: 'high', grass: 'ultra', effects: 'high', vegetation: 'high', view: 'high' },
   },
   // Strong desktop GPUs (player's choice only): everything at its best, native-ish resolution.
   ultra: {
@@ -295,15 +307,16 @@ export function resolveQuality(name: TierName, overrides: Partial<Record<Feature
  * map is a second scene render…), never below these floors; they come back in reverse order with headroom.
  * The player's preset / overrides stay the ceiling — reductions are runtime only, never saved.
  */
-export const HOLD_ORDER: readonly Feature[] = ['reflections', 'ao', 'effects', 'shadows', 'volumetrics', 'grass', 'vegetation', 'view']
+export const HOLD_ORDER: readonly Feature[] = ['reflections', 'ao', 'effects', 'shadows', 'volumetrics', 'vegetation', 'view', 'grass']
 /**
  * Floors. Above LOW they leave the look intact; at the very bottom (auto mode already on LOW at minimum render
  * scale — a small / old phone) the same steps continue down to these: no volumetrics, no grass, no effects or
  * bloom, no sun shadows, the shortest view — the game stays playable at 60 rather than looking right at 20.
  */
 export const HOLD_FLOOR: Record<Feature, Level> = { reflections: 'off', ao: 'off', effects: 'off', shadows: 'off', volumetrics: 'off', grass: 'off', vegetation: 'low', view: 'low' }
-/** How many of HOLD_ORDER (from the start) are lowered EVENLY (the GPU effects + grass); the rest one by one after. */
-const HOLD_EVEN = 6
+/** How many of HOLD_ORDER (from the start) are lowered EVENLY (the GPU effects); the rest one by one after — the
+ *  grass last of all (it is the same field on every preset: it goes only when nothing else is left to give). */
+const HOLD_EVEN = 5
 
 /** Feature levels after applying `steps` (each entry = that feature one level lower), clamped at HOLD_FLOOR. */
 export function heldLevels(base: FeatureLevels, steps: readonly Feature[]): FeatureLevels {
@@ -317,9 +330,9 @@ export function heldLevels(base: FeatureLevels, steps: readonly Feature[]): Feat
 }
 
 /**
- * The next feature to lower, or null at the floor of everything. The GPU effects + grass (reflections, AO, shadows,
- * volumetrics, grass) step down EVENLY — always the one currently at the highest level, ties in HOLD_ORDER — so ULTRA
- * becomes "high everything" before any effect is lost; trees & bushes and view distance only after those.
+ * The next feature to lower, or null at the floor of everything. The GPU effects (reflections, AO, effects, shadows,
+ * volumetrics) step down EVENLY — always the one currently at the highest level, ties in HOLD_ORDER — so ULTRA
+ * becomes "high everything" before any effect is lost; trees & bushes, view distance and then the grass after those.
  */
 export function nextHoldStep(base: FeatureLevels, steps: readonly Feature[]): Feature | null {
   const cur = heldLevels(base, steps)

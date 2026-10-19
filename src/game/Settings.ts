@@ -1,7 +1,6 @@
 import type { CameraMode } from '../gameplay/player/CameraController'
 import type { AAMode } from '../rendering/postprocessing/PostPipeline'
 import type { Feature, Level, TierName } from '../rendering/quality/QualityTiers'
-import type { ArtStyle } from '../rendering/artStyle'
 import { DEFAULT_VEHICLE, type VehicleTuning } from '../gameplay/vehicle/catalogue'
 
 /**
@@ -46,8 +45,6 @@ export interface Settings {
   painterly: boolean
   /** Force the painterly filter on tiers where it defaults off (LOW). */
   painterlyForce: boolean
-  /** Art style (rendering/artStyle.ts): 'genshin' (default, reference-matched), 'bright' (older Genshin-like), 'overland' over the hill, or 'storybook'. Changing it reloads. */
-  artStyle: ArtStyle
   /** Monsters and storms in monster time (off = exploration mode). */
   monsters: boolean
   /** All sound on/off (one toggle), and the warm theme music on/off. */
@@ -77,7 +74,6 @@ export const DEFAULT_SETTINGS: Settings = {
   filmGrain: true,
   painterly: false,
   painterlyForce: false,
-  artStyle: 'genshin',
   monsters: true,
   sound: true,
   music: true,

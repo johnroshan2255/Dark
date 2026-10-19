@@ -80,6 +80,15 @@ const _p = new THREE.Vector3()
 const _s = new THREE.Vector3()
 const _up = new THREE.Vector3(0, 1, 0)
 const _rb = [0, 0]
+const _vp = new THREE.Matrix4()
+const _fr = new THREE.Frustum()
+const _sph = new THREE.Sphere()
+const _dir = new THREE.Vector3()
+/** Frustum planes (nx, ny, nz, d) ×6 for the inlined per-patch test. */
+const _planes = new Float32Array(24)
+/** Extra culling margin (m) so the packed set stays valid until the view moves past the re-pack thresholds. */
+const VIEW_SLACK = 1
+const _list: number[] = []
 const ZERO = new THREE.Matrix4().makeScale(0, 0, 0)
 const _bw: BiomeWeights = [0, 0]
 const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
@@ -105,11 +114,29 @@ interface Layer {
   slotOk: Uint8Array
   order: { dx: number; dz: number }[]
   key: string
+  /** The toroidal tile store (CPU): per patch matrix ×16, colour ×3, density, slope ×2 — the GPU buffers hold only
+   *  the tiles in view (`compact`). */
+  mats: Float32Array
+  cols: Float32Array
+  dens: Float32Array
+  slopes: Float32Array
+  /** Per slot: patches with blades, centre height and bounding radius (m) of the tile's blades. */
+  live: Uint8Array
+  tileY: Float32Array
+  tileR: Float32Array
+  /** Blades are visible from `inner` out to `reach` m from the player (the layer's band incl. its jitter). */
+  inner: number
+  reach: number
+  /** Slots drawn last frame (in draw order) and whether the store changed since. */
+  drawn: number[]
+  dirty: boolean
 }
 
 /**
- * Grass around the player in TWO layers (one draw call each):
- *   NEAR  0 … ~45 % of the radius: the full blade density and curved blades.
+ * Grass around the player in THREE layers (one draw call each):
+ *   NEAR  0 … ~26 % of the radius: the full blade density and curved blades (curved tiers; else to ~45 %).
+ *   MID   ~22 … 45 %: the same blades per m² as single triangles — a blade's curve doesn't read past ~8 m, so the
+ *         blade COUNT stays and its triangles drop 3× (ULTRA near-field 122 k → ~55 k triangles in view).
  *   FAR   ~40 % … 100 %: ~40 % of the blades, single triangles, 1.6× wider (the same coverage at a distance).
  * They crossfade blade by blade over a band (the far layer grows in as the near one thins), so the field looks
  * continuous while the far annulus — ~80 % of the area — costs well under half: −40…50 % grass vertices vs one
@@ -122,7 +149,11 @@ const sstepG = (a: number, b: number, x: number) => { const t = Math.min(1, Math
 export class GrassField {
   readonly root = new THREE.Group()
   private readonly near: Layer
+  private readonly mid: Layer
   private readonly far: Layer
+  private get layers(): Layer[] {
+    return [this.near, this.mid, this.far]
+  }
   private readonly corners = new Map<number, number>()
   /** Stats. */
   instances = 0
@@ -130,37 +161,59 @@ export class GrassField {
 
   constructor(
     nearMat: THREE.Material,
+    midMat: THREE.Material,
     farMat: THREE.Material,
     nearU: GrassUniforms,
+    midU: GrassUniforms,
     farU: GrassUniforms,
     private readonly fields: WorldFields,
     private readonly chunks: Map<string, WorldChunk>,
   ) {
     this.root.name = 'grass-field'
-    const layer = (mat: THREE.Material, u: GrassUniforms): Layer => ({ mat, u, mesh: null, geometry: null, density: null, slope: null, g: 0, slotTx: new Int32Array(0), slotTz: new Int32Array(0), slotOk: new Uint8Array(0), order: [], key: '' })
+    const layer = (mat: THREE.Material, u: GrassUniforms): Layer => ({
+      mat, u, mesh: null, geometry: null, density: null, slope: null, g: 0, slotTx: new Int32Array(0), slotTz: new Int32Array(0), slotOk: new Uint8Array(0), order: [], key: '',
+      mats: new Float32Array(0), cols: new Float32Array(0), dens: new Float32Array(0), slopes: new Float32Array(0), live: new Uint8Array(0), tileY: new Float32Array(0), tileR: new Float32Array(0), inner: 0, reach: 0, drawn: [], dirty: true,
+    })
     this.near = layer(nearMat, nearU)
+    this.mid = layer(midMat, midU)
     this.far = layer(farMat, farU)
   }
 
   configure(s: GrassSettings): void {
     if (s.radius <= 0 || s.density <= 0) {
       // Grass OFF: no meshes, no fills (the painted straw / meadow streaks on the terrain carry the look).
-      this.disposeLayer(this.near)
-      this.disposeLayer(this.far)
+      for (const L of this.layers) this.disposeLayer(L)
       this.instances = 0
       return
     }
     const R = s.radius
-    const nearR = R * 0.45
-    // Bands: near shrinks out over [0.36R, 0.5R]; far grows in over the same band and shrinks out at the edge.
-    this.near.u.band.value.set(-2, -1, R * 0.36, R * 0.5)
+    // Curved blades (2 segments) only in the NEAR band; the MID layer carries the same density as flat blades out to
+    // where the far layer takes over. Flat-blade tiers: one near layer as before, no mid.
+    const curved = s.blades > 1
+    const nearIn = curved ? 0.22 : 0.36, nearOut = curved ? 0.28 : 0.5
+    // Bands: (grow in from, to, shrink out from, to) — each blade at its own distance, ±18 % of the band (shader).
+    // The mid layer has GROWN IN before the near one shrinks out (blades shrink in both size axes: crossfading over
+    // one band left ~half the coverage at its middle — a visibly thinner ring of meadow 6–8 m out on ULTRA).
+    const midIn = nearIn - 0.05, midFull = nearIn + 0.01
+    this.near.u.band.value.set(-2, -1, R * nearIn, R * nearOut)
+    this.mid.u.band.value.set(R * midIn, R * midFull, R * 0.36, R * 0.5)
     this.far.u.band.value.set(R * 0.36, R * 0.5, R * 0.74, R)
     const thinStart = R * (isOverland() ? 0.6 : 0.4)
-    this.near.u.thin.value.set(thinStart, R)
-    this.far.u.thin.value.set(thinStart, R)
-    this.setupLayer(this.near, nearR * 1.12, Math.round(s.density), s.blades, s.tall ?? 1, s.wide ?? 1, s.vary ?? 1, s.lean ?? 1)
-    this.setupLayer(this.far, R, Math.max(4, Math.round(s.density * 0.32)), 1, s.tall ?? 1, (s.wide ?? 1) * 1.75, s.vary ?? 1, s.lean ?? 1)
-    this.instances = (this.near.mesh?.count ?? 0) + (this.far.mesh?.count ?? 0)
+    for (const L of this.layers) L.u.thin.value.set(thinStart, R)
+    // Reach = band end + its jitter: the tile window and the view culling cover exactly that.
+    this.near.inner = 0
+    this.near.reach = R * nearOut + 0.18 * R * (nearOut - nearIn)
+    this.mid.inner = R * midIn - 0.18 * R * (midFull - midIn)
+    this.mid.reach = R * 0.5 + 0.18 * R * 0.14
+    this.far.inner = R * 0.36 - 0.18 * R * 0.14
+    this.far.reach = R + 0.18 * R * 0.26
+    this.setupLayer(this.near, this.near.reach, Math.round(s.density), s.blades, s.tall ?? 1, s.wide ?? 1, s.vary ?? 1, s.lean ?? 1)
+    // (a flat triangle covers ¾ of the curved ribbon's area: 1.35× wider keeps the same coverage)
+    if (curved) this.setupLayer(this.mid, this.mid.reach, Math.round(s.density), 1, s.tall ?? 1, (s.wide ?? 1) * 1.35, s.vary ?? 1, s.lean ?? 1)
+    else this.disposeLayer(this.mid)
+    this.setupLayer(this.far, this.far.reach, Math.max(4, Math.round(s.density * 0.32)), 1, s.tall ?? 1, (s.wide ?? 1) * 1.75, s.vary ?? 1, s.lean ?? 1)
+    this.instances = this.layers.reduce((n, L) => n + (L.mesh ? L.mats.length / 16 : 0), 0)
+    for (const L of this.layers) L.dirty = true
   }
 
   private setupLayer(L: Layer, radius: number, blades: number, segments: number, tall: number, wide: number, vary = 1, lean = 1): void {
@@ -170,8 +223,17 @@ export class GrassField {
     this.disposeLayer(L)
     L.key = key
     L.g = g
-    L.geometry = createGrassGeometry(blades, segments, tall, wide, vary, lean, isGenshin() ? 4 : 1) // Genshin: loose tufts of 4
+    L.geometry = createGrassGeometry(blades, segments, tall, wide, vary, lean, isGenshin() ? 4 : 1, L !== this.far) // Genshin: loose tufts of 4
     const count = g * g * TILE * TILE // one 1 m² patch per cell
+    L.mats = new Float32Array(count * 16)
+    L.cols = new Float32Array(count * 3)
+    L.dens = new Float32Array(count)
+    L.slopes = new Float32Array(count * 2)
+    L.live = new Uint8Array(g * g)
+    L.tileY = new Float32Array(g * g)
+    L.tileR = new Float32Array(g * g)
+    L.drawn = []
+    L.dirty = true
     L.density = new THREE.InstancedBufferAttribute(new Float32Array(count), 1).setUsage(THREE.DynamicDrawUsage)
     L.geometry.setAttribute('iDensity', L.density)
     L.slope = new THREE.InstancedBufferAttribute(new Float32Array(count * 2), 2).setUsage(THREE.DynamicDrawUsage)
@@ -183,8 +245,8 @@ export class GrassField {
     mesh.receiveShadow = true
     mesh.castShadow = false
     mesh.matrixAutoUpdate = false
-    mesh.name = L === this.near ? 'grass.near' : 'grass.far'
-    ;(mesh.instanceMatrix.array as Float32Array).fill(0) // all degenerate until filled
+    mesh.name = L === this.near ? 'grass.near' : L === this.mid ? 'grass.mid' : 'grass.far'
+    mesh.count = 0 // (compact: only the tiles in view are drawn)
     L.mesh = mesh
     this.root.add(mesh)
     L.slotTx = new Int32Array(g * g).fill(0x7fffffff)
@@ -198,10 +260,10 @@ export class GrassField {
     L.order = order
   }
 
-  update(focus: THREE.Vector3): void {
+  update(focus: THREE.Vector3, camera?: THREE.Camera): void {
     let fills = 0
-    // The near layer first (what you see at your feet), then the far one; ≤ PATCH_FILLS_PER_FRAME patches in all.
-    for (const L of [this.near, this.far]) {
+    // The near layer first (what you see at your feet), then mid and far; ≤ PATCH_FILLS_PER_FRAME patches in all.
+    for (const L of this.layers) {
       const mesh = L.mesh
       if (!mesh) continue
       const ctx = Math.floor(focus.x / TILE)
@@ -220,6 +282,132 @@ export class GrassField {
       }
     }
     this.fillsLastFrame = fills
+    // Re-pack only when the view moved past the culling margin (VIEW_SLACK): > 0.5 m of camera / player travel or
+    // > 1.5° of turn (≤ 0.8 m of sweep at the far edge, 31 m) — or the store / field changed (L.dirty).
+    let view = !camera
+    if (camera) {
+      camera.updateMatrixWorld()
+      camera.getWorldDirection(_dir)
+      const proj = camera.projectionMatrix.elements
+      if (camera.position.distanceToSquared(this.viewPos) > 0.25 || _dir.dot(this.viewDir) < 0.99966 || focus.distanceToSquared(this.viewFocus) > 0.25 || proj[0] !== this.viewProj[0] || proj[5] !== this.viewProj[1]) {
+        view = true
+        this.viewPos.copy(camera.position)
+        this.viewDir.copy(_dir)
+        this.viewFocus.copy(focus)
+        this.viewProj[0] = proj[0]
+        this.viewProj[1] = proj[5]
+        _vp.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+        _fr.setFromProjectionMatrix(_vp)
+        for (let i = 0; i < 6; i++) {
+          const pl = _fr.planes[i]
+          _planes[i * 4] = pl.normal.x
+          _planes[i * 4 + 1] = pl.normal.y
+          _planes[i * 4 + 2] = pl.normal.z
+          _planes[i * 4 + 3] = pl.constant
+        }
+      }
+    }
+    for (const L of this.layers) this.compact(L, focus, camera ? _fr : null, view)
+  }
+  private readonly viewPos = new THREE.Vector3(1e9, 0, 0)
+  private readonly viewDir = new THREE.Vector3()
+  private readonly viewFocus = new THREE.Vector3(1e9, 0, 0)
+  private readonly viewProj = [0, 0]
+
+  /**
+   * VIEW CULLING of the field (the grass costs its SUBMITTED blades: measured on the M4, ULTRA's 330 k blade
+   * triangles cost ~1 ms even with every blade clipped in the vertex shader — vertex fetch, not shading). Each frame
+   * the tiles that have blades, lie within the layer's reach of the player and touch the view frustum are packed,
+   * nearest first (front-to-back: less overdraw on desktop GPUs), into the GPU buffers; the draw covers only those.
+   * ~⅓ of the window is in view, so every tier can afford the same field. Re-packed only when the view moved past
+   * the culling slack or the store changed (refills): ≤ ~2 k patches × 88 B per pack.
+   */
+  private compact(L: Layer, focus: THREE.Vector3, fr: THREE.Frustum | null, view: boolean): void {
+    const mesh = L.mesh
+    if (!mesh || (!view && !L.dirty)) return
+    const g = L.g
+    const ctx = Math.floor(focus.x / TILE)
+    const ctz = Math.floor(focus.z / TILE)
+    const list = _list
+    list.length = 0
+    for (const o of L.order) {
+      const tx = ctx + o.dx
+      const tz = ctz + o.dz
+      const slot = (((tx % g) + g) % g) + (((tz % g) + g) % g) * g
+      if (L.slotTx[slot] !== tx || L.slotTz[slot] !== tz || !L.live[slot]) continue
+      // Nearest point of the tile to the player beyond the reach → every blade there is shrunk to nothing.
+      const ddx = Math.max(tx * TILE - focus.x, 0, focus.x - (tx + 1) * TILE)
+      const ddz = Math.max(tz * TILE - focus.z, 0, focus.z - (tz + 1) * TILE)
+      if (ddx * ddx + ddz * ddz > (L.reach + 0.5) ** 2) continue
+      // Farthest point inside the layer's grow-in distance → the inner layer draws that tile, these blades are nil.
+      const fdx = Math.max(Math.abs(focus.x - tx * TILE), Math.abs(focus.x - (tx + 1) * TILE))
+      const fdz = Math.max(Math.abs(focus.z - tz * TILE), Math.abs(focus.z - (tz + 1) * TILE))
+      if (fdx * fdx + fdz * fdz < Math.max(0, L.inner - 1) ** 2) continue
+      if (fr) {
+        _sph.center.set((tx + 0.5) * TILE, L.tileY[slot], (tz + 0.5) * TILE)
+        _sph.radius = L.tileR[slot] + VIEW_SLACK
+        if (!fr.intersectsSphere(_sph)) continue
+      }
+      list.push(slot)
+    }
+    // Tiles pass the coarse test above; inside them every PATCH is culled on its own (4 m tiles round an 8–31 m
+    // reach send ~2–3× the patches in view) — so the pack is redone whenever the view moved (≤ ~2 k sphere tests).
+    const perPatch = fr !== null
+    L.dirty = false
+    L.drawn = list.slice()
+    const n = TILE * TILE
+    const mats = mesh.instanceMatrix.array as Float32Array
+    const cols = mesh.instanceColor!.array as Float32Array
+    const dens = L.density!.array as Float32Array
+    const slopes = L.slope!.array as Float32Array
+    let k = 0
+    const reach2 = (L.reach + 0.8) ** 2, inner2 = Math.max(0, L.inner - 0.8) ** 2
+    for (const slot of list) {
+      const b = slot * n
+      if (perPatch) {
+        // (inlined sphere-vs-frustum test and element copies: no per-patch allocation — this runs for ~2.5 k patches
+        // whenever the view moved: 0.62 → 0.10 ms per frame turning, phone emulation CPU ×4)
+        const sm = L.mats, sc = L.cols, sd = L.dens, ss = L.slopes, P = _planes, r = 1.9 + VIEW_SLACK
+        for (let i = b; i < b + n; i++) {
+          if (sd[i] <= 0) continue
+          const o = i * 16
+          const px = sm[o + 12], py = sm[o + 13] + 0.4, pz = sm[o + 14]
+          const d2 = (px - focus.x) ** 2 + (pz - focus.z) ** 2
+          if (d2 > reach2 || d2 < inner2) continue
+          if (P[0] * px + P[1] * py + P[2] * pz + P[3] < -r || P[4] * px + P[5] * py + P[6] * pz + P[7] < -r || P[8] * px + P[9] * py + P[10] * pz + P[11] < -r ||
+              P[12] * px + P[13] * py + P[14] * pz + P[15] < -r || P[16] * px + P[17] * py + P[18] * pz + P[19] < -r || P[20] * px + P[21] * py + P[22] * pz + P[23] < -r) continue
+          const d = k * 16
+          for (let j = 0; j < 16; j++) mats[d + j] = sm[o + j]
+          cols[k * 3] = sc[i * 3]
+          cols[k * 3 + 1] = sc[i * 3 + 1]
+          cols[k * 3 + 2] = sc[i * 3 + 2]
+          dens[k] = sd[i]
+          slopes[k * 2] = ss[i * 2]
+          slopes[k * 2 + 1] = ss[i * 2 + 1]
+          k++
+        }
+        continue
+      }
+      mats.set(L.mats.subarray(b * 16, (b + n) * 16), k * 16)
+      cols.set(L.cols.subarray(b * 3, (b + n) * 3), k * 3)
+      dens.set(L.dens.subarray(b, b + n), k)
+      slopes.set(L.slopes.subarray(b * 2, (b + n) * 2), k * 2)
+      k += n
+    }
+    mesh.count = k
+    if (k === 0) return
+    mesh.instanceMatrix.clearUpdateRanges()
+    mesh.instanceMatrix.addUpdateRange(0, k * 16)
+    mesh.instanceMatrix.needsUpdate = true
+    mesh.instanceColor!.clearUpdateRanges()
+    mesh.instanceColor!.addUpdateRange(0, k * 3)
+    mesh.instanceColor!.needsUpdate = true
+    L.density!.clearUpdateRanges()
+    L.density!.addUpdateRange(0, k)
+    L.density!.needsUpdate = true
+    L.slope!.clearUpdateRanges()
+    L.slope!.addUpdateRange(0, k * 2)
+    L.slope!.needsUpdate = true
   }
 
   /** Meadow density at a CORNER-grid point (cached): open ground dense, deep forest sparse; none on snow, little on sand. */
@@ -279,12 +467,12 @@ export class GrassField {
 
   /** Returns false if the terrain under the tile isn't loaded yet (retried next frames). */
   private fillTile(L: Layer, slot: number, tx: number, tz: number): boolean {
-    const mesh = L.mesh!
-    const mats = mesh.instanceMatrix.array as Float32Array
-    const cols = mesh.instanceColor!.array as Float32Array
-    const dens = L.density!.array as Float32Array
-    const slopes = L.slope!.array as Float32Array
+    const mats = L.mats
+    const cols = L.cols
+    const dens = L.dens
+    const slopes = L.slopes
     const n = TILE * TILE
+    let live = 0, yMin = Infinity, yMax = -Infinity
     const base = slot * n
     const x0 = tx * TILE
     const z0 = tz * TILE
@@ -381,6 +569,9 @@ export class GrassField {
       const edgeK = Math.min(1, Math.max(0, (road - 0.3) / 1.2)) * Math.min(1, Math.max(0, (d.netEdge[ni] + 0.3) / 1.5))
       dens[base + i] = density * (0.35 + 0.65 * edgeK) * rockK * rockK
       _p.set(wx, (onRock ? rt : gh) - 0.04, wz)
+      live++
+      yMin = Math.min(yMin, _p.y)
+      yMax = Math.max(yMax, _p.y)
       const ang = r * 97.0
       _q.setFromAxisAngle(_up, ang)
       const sc = isOverland() ? 0.95 + hashFloat(seed, tx, tz, i * 4) * 0.1 : 0.9 + hashFloat(seed, tx, tz, i * 4) * 0.25 + verge * 0.3
@@ -407,20 +598,18 @@ export class GrassField {
         else { cols[o] = tr * 0.95 * j; cols[o + 1] = tg * 1.05 * j; cols[o + 2] = tb * 0.95 * j }
       }
     }
-    mesh.instanceMatrix.addUpdateRange(base * 16, n * 16)
-    mesh.instanceMatrix.needsUpdate = true
-    mesh.instanceColor!.addUpdateRange(base * 3, n * 3)
-    mesh.instanceColor!.needsUpdate = true
-    L.density!.addUpdateRange(base, n)
-    L.density!.needsUpdate = true
-    L.slope!.addUpdateRange(base * 2, n * 2)
-    L.slope!.needsUpdate = true
+    // Bounding sphere of the tile's blades for the view test: half-diagonal + patch jitter + blade height, lean and
+    // distance widening (the grass shader's 1.8 m patch margin) + the height spread across the tile.
+    L.live[slot] = live
+    L.tileY[slot] = live ? (yMin + yMax) * 0.5 + 0.4 : 0
+    L.tileR[slot] = live ? TILE * 0.7072 + 0.35 + 1.8 + (yMax - yMin) * 0.5 : 0
+    L.dirty = true
     return ok
   }
 
   get triangles(): number {
     let t = 0
-    for (const L of [this.near, this.far]) if (L.mesh) t += L.mesh.count * (L.geometry!.getAttribute('position').count / 3)
+    for (const L of this.layers) if (L.mesh) t += L.mesh.count * (L.geometry!.getAttribute('position').count / 3)
     return t
   }
 
@@ -438,7 +627,6 @@ export class GrassField {
   }
 
   dispose(): void {
-    this.disposeLayer(this.near)
-    this.disposeLayer(this.far)
+    for (const L of this.layers) this.disposeLayer(L)
   }
 }

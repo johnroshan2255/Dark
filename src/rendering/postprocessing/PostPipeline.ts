@@ -191,6 +191,7 @@ export class PostPipeline {
     this.raysTarget.setSize(rw, rh)
     ;(this.material.uniforms.uRaysTexel.value as THREE.Vector2).set(1 / rw, 1 / rh)
     ;(this.material.uniforms.uTexel.value as THREE.Vector2).set(1 / w, 1 / h)
+    this.material.uniforms.uUpscale.value = w < this.width * 0.97 ? 1 : 0
     this.paintTarget.setSize(w, h)
     ;(this.paintMaterial.uniforms.uTexel.value as THREE.Vector2).set(1 / w, 1 / h)
     const bw = Math.max(1, Math.round(w / 4))

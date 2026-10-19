@@ -1,5 +1,7 @@
 // Headless-Chrome screenshot / probe harness (dev-only: needs `npm run dev` and window.__game).
-//   npm run shot -- <outdir> <shots.json>        env: PORT (5173), W/H (1280×720)
+//   npm run shot -- <outdir> <shots.json>        env: PORT (5173), W/H (1280×720), UNCAPPED=1 (vsync + frame-rate limit
+//   off: the GPU runs flat out at full clocks — use it for GPU-ms COST measurements; at a vsynced 60 fps the GPU clocks
+//   down and a removed feature barely changes the measured ms)
 // shots.json: [{ name, seed, tier, hour, look, x, z, yaw, pitch, cam: 'fpp'|'tpp', drive, keys, keysMs, wait, eval }]
 //   x: 'ROAD' places the shot on the main road at z (+ dx metres to the side)
 //   x/z teleport the player (yaw/pitch aim; forward = (−sin yaw, −cos yaw)), `drive` parks the truck there and gets in,
@@ -21,7 +23,7 @@ const W = Number(process.env.W || 1280), H = Number(process.env.H || 720)
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'new',
-  args: [`--use-angle=${ANGLE}`, '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--enable-gpu-rasterization', `--window-size=${W},${H}`, '--autoplay-policy=no-user-gesture-required', '--mute-audio'],
+  args: [...(process.env.UNCAPPED ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : []), `--use-angle=${ANGLE}`, '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--enable-gpu-rasterization', `--window-size=${W},${H}`, '--autoplay-policy=no-user-gesture-required', '--mute-audio'],
   defaultViewport: { width: W, height: H, deviceScaleFactor: 1 },
 })
 const page = await browser.newPage()

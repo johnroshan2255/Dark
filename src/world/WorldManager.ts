@@ -58,7 +58,7 @@ export class WorldManager {
   /** Chebyshev radius (chunks) around the player inside which every chunk is built (see update). */
   builtRadius = 0
 
-  stats = { shoreVisible: 0, loaded: 0, visible: 0, culled: 0, instances: 0, drawnInstances: 0, pending: 0, buildMs: 0, genMs: 0, physicsChunks: 0 }
+  stats = { lodSwitches: 0, shoreVisible: 0, loaded: 0, visible: 0, culled: 0, instances: 0, drawnInstances: 0, pending: 0, buildMs: 0, genMs: 0, physicsChunks: 0 }
 
   constructor(
     readonly seed: number,
@@ -70,7 +70,7 @@ export class WorldManager {
     this.fields = new WorldFields(seed)
     this.fields.palette = groundPalette() // main-thread copy (grass, HUD); the workers get it per request
     this.geos = createPropGeometries()
-    this.grass = new GrassField(mats.grass, mats.grassFar, mats.grassNearU, mats.grassFarU, this.fields, this.chunks)
+    this.grass = new GrassField(mats.grass, mats.grassMid, mats.grassFar, mats.grassNearU, mats.grassMidU, mats.grassFarU, this.fields, this.chunks)
     this.root.add(this.grass.root)
     this.farForest = new FarForest(seed, this.fields.palette, this.fields, this.geos.trees, mats.impostor)
     this.root.add(this.farForest.root)
@@ -215,7 +215,9 @@ export class WorldManager {
     for (const chunk of this.chunks.values()) {
       const { cx, cz } = chunk.data
       chunk.ring = Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz))
+      const wasLod = chunk.lod
       chunk.setLod(selectLod(chunk.lod, chunkDistance(focus.x, focus.z, cx, cz), this.q.lodRings), this.detail)
+      if (chunk.lod !== wasLod) this.stats.lodSwitches++ // (the cached sun shadow re-renders on it — Game)
       instances += chunk.instanceCount
       // Physics ring (around the player and the look-ahead point) with one ring of hysteresis.
       const ringAhead = Math.max(Math.abs(cx - acx), Math.abs(cz - acz))
@@ -227,7 +229,7 @@ export class WorldManager {
     this.visibility.update(camera, this.chunks.values())
     // Water in view (planar reflections render only then), re-tested every 4th frame.
     if ((this.frame++ & 3) === 0) this.stats.shoreVisible = this.waterInView(camera.position)
-    this.grass.update(focus)
+    this.grass.update(focus, camera)
 
     // Largest ring around the player whose chunks are ALL built: the horizon terrain only discards inside it,
     // so an unbuilt chunk shows the (slightly sunken) horizon hills, never a hole into the sky.

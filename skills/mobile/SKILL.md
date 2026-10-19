@@ -46,6 +46,42 @@ Measured (M4, 1280×720, headless, seed 7): frozen river LOW 66 draws / 132 k tr
 HIGH 172 / 447 k → ULTRA 242 / 843 k; forest LOW 84 / 148 k, HIGH 160 / 451 k, ULTRA 228 / 867 k — all 60 fps.
 SSAO (HIGH level) ≈ +0.3 ms GPU, +2 draws. All features off on HIGH: 159 → 106 draws.
 
+**The real look on LOW (2026-10-19, branch `optimization`)** — goal: LOW (Snapdragon 6xx, Intel UHD) looks like
+ULTRA, not like a different game. Findings (headless M4, `npm run shot`, 4K canvas so the GPU stays at full clocks,
+scene RT forced to 0.05 / 0.6 MP to split fixed from per-pixel cost):
+- ULTRA's cost is FIXED, not pixels: ULTRA at 0.3 MP still cost 5–9 ms vs LOW ~2 ms. Per feature (fixed, M4):
+  planar reflection 3.8 ms at a lake (a second scene render), 4096² sun map 2.0 ms, grass 1.3 ms (330 k blade
+  triangles), view ring 4 0.6–0.9 ms; AO / volumetrics / effects ~0 fixed. Projected on Adreno 610 (R ≈ 25) ULTRA is
+  ~120–210 ms — no setting makes ULTRA itself run there; its LOOK has to come from cheaper means.
+- GRASS cost = SUBMITTED blades: with every blade clipped in the vertex shader the field still cost ~1 ms (vertex fetch
+  of ~15 attributes, not shading). `GrassField` now keeps its tiles in a CPU store and packs only the patches that are
+  in view and in each layer's distance band into the GPU buffers, nearest first; a third MID layer (same blades per
+  m², flat single-triangle blades, ×1.35 wide) takes over from the curved near blades at ~0.2 R; no daisies in the far
+  layer; a vertex-shader early-out skips faded / off-screen blades. ULTRA grass 333 k → 52–76 k submitted triangles,
+  identical look (A/B at the same camera). Packing: 0.10 ms/frame while turning (phone emulation, CPU ×4), re-packed
+  only when the view moved > 0.5 m / 1.5° (1 m culling slack).
+- So every preset now uses grass 'ultra' (user: "the same grass counts must persist in low to ultra"); Hold 60 lowers
+  grass LAST (after effects, trees & bushes, view; only sun shadows go after it).
+- LOW preset: shadows medium (image tree shade + real car / player / bike shadows), reflections low (skyline mirror ¼
+  res, every 2nd frame), AO low, volumetrics medium (fog banks), effects medium (ground relief, tracks, bloom),
+  vegetation medium (undergrowth, full trees), view low with the 2048² 3-view tree atlas, impostor forest to 400 m,
+  3.2 km horizon; sky ⅓; render scale floor 0.6 (features go before resolution). MEDIUM also gets reflections + AO low.
+- Upscale: non-edge pixels of a smaller scene RT are sampled with a 5-tap Catmull-Rom (clamped) in the grading pass
+  instead of bilinear: 0.06 ms/MP (M4).
+- Cost, old LOW → new LOW (M4, full clocks; projected phone ≈ R × [fixed + 0.21 MP scene + 0.38 MP post]): spawn
+  1.0 → 1.6, lake 1.6 → 2.3, forest 0.7 → 1.8 (×1.5–2.6). Draws 48–86 → 80–116, triangles 84–114 k → 180–208 k.
+  CPU (phone emulation ×4, turning): 2.0 → 3.6 ms. On Adreno 610 the full new LOW will NOT hold 60 everywhere — Hold
+  60 (auto at LOW) sheds reflections, AO, effects… first; Adreno 618/619 should hold most of it. Real device pending.
+- BRIGHT is now the only art style (artStyle.ts; the Settings switch and ?look= are gone). The numbers above were
+  taken in the old 'genshin' default; re-verified in bright (seed 7, 1080p, M4): old LOW 2.4–3.2 ms → new LOW
+  3.8–4.7 ms GPU, draws 47–83 → 67–113, ULTRA 11.0–12.2 ms; screenshots in `screenshot/low-vs-ultra/`.
+- Dev-only REMOTE HUD: a phone on `npm run dev:lan` POSTs its frame stats every 2 s (src/debug/DevTelemetry.ts →
+  vite `devTelemetry` → node_modules/.cache/telemetry.jsonl) — real-device fps / GPU / tier / Hold-60 state without
+  remote debugging.
+- Also fixed: the cached sun shadow re-rendered every 2 s while standing still (a full 4096² caster pass) — now only
+  when chunks are built / dropped or a chunk switches LOD; switching Shadows low → ultra at runtime drew the lake
+  mirror before the new shadow map existed (GL_INVALID_OPERATION sampler mismatch) — the mirror waits a frame.
+
 **Phone pass (2026-10-05)** — measured with the §10 phone emulation + a FILL proxy (LOW/MEDIUM settings rendered at
 2–8 MP on the M4, where per-pixel cost dominates GPU ms the way it does on a fill-bound phone GPU):
 - The SKY was the most expensive pixels (2.4 of 16 ms at 8 MP on LOW: gradient + 3-octave clouds + mist, twice).
