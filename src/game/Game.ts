@@ -401,8 +401,10 @@ export class Game {
     i.onPress('KeyT', () => this.toggleDayNight())
     i.onPress('KeyG', () => this.tod.nextPreset())
     i.onPress('KeyN', () => this.toggleNightmare())
-    // R: cycle the weather (auto → clear → cloudy → rain → auto) — testing / screenshots.
+    // R: driving — RESPAWN the car where it is (stuck, wedged, rolled; also the toolbar / touch ⟲ button). On foot:
+    // cycle the weather (auto → clear → cloudy → rain → auto) — testing / screenshots.
     i.onPress('KeyR', () => {
+      if (this.car.driving) return this.respawnHere()
       const order = [null, 'clear', 'cloudy', 'rain'] as const
       this.weather.force = order[(order.indexOf(this.weather.force) + 1) % order.length]
     })
@@ -1239,6 +1241,11 @@ export class Game {
     })
   }
   private wreckClock = -1
+
+  /** R / ⟲ while driving: the car back on its wheels, still, where it is (Car.respawnHere). */
+  respawnHere(): void {
+    if (this.car.respawnHere()) this.notify('Car respawned', 1500)
+  }
 
   /** Front-end navigation: PLAY hands over control; GARAGE / BACK switch screens; the pause menu returns to it. */
   play(): void {

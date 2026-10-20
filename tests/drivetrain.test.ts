@@ -445,6 +445,19 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     check(`${id}: ESC lane change at ${(22 * 3.6).toFixed(0)} km/h on dirt stays < 35° of slide`, deg(maxSlip) < 35 && t.axesUp() > 0.8, `max slip ${deg(maxSlip).toFixed(0)}°`)
     p.dispose()
   }
+  {
+    // FAST STEERING (aids Full — VehicleSim cornerAssist): a full key at ~95 km/h on dirt turns the car (> 35° in 2 s;
+    // grip-limited steering alone gave ~22°, A / D "did nothing"), without a slide.
+    const p = world()
+    const t = car(p, id, { aids: 'full', surface: Surf.Dirt })
+    run(p, t, 1, {})
+    while (t.speed < 26) run(p, t, 0.1, { throttle: 1 })
+    const h = turned(t)
+    let maxSlip = 0
+    run(p, t, 2, { throttle: 0.5, steer: -1 }, () => { h.step(); maxSlip = Math.max(maxSlip, Math.atan2(Math.abs(t.lateral), Math.max(1, Math.abs(t.speed)))) })
+    check(`${id}: full key at 95 km/h on dirt turns (> 35° in 2 s, slide < 15°)`, deg(h.total()) > 35 && deg(maxSlip) < 15 && t.axesUp() > 0.8, `${deg(h.total()).toFixed(0)}°, slip ${deg(maxSlip).toFixed(0)}°`)
+    p.dispose()
+  }
   // ---------------- body ----------------
   {
     const p = world()

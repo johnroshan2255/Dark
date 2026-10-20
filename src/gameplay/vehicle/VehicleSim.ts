@@ -243,6 +243,51 @@ abstract class VehicleBase {
   /** A body collider was replaced (subclasses keeping collider lists update them). */
   protected colliderSwapped(_old: RAPIER.Collider, _now: RAPIER.Collider): void {}
 
+  /**
+   * UNHOOK (Car, every fixed step): a crash dents the hollow body mesh (Damage → replaceMesh) around a trunk or
+   * post, which then holds it from the inside — backing away pulled the bumper's inner face against the trunk and
+   * the car sat still under full reverse ("stuck", reload); the same with the ground's trimesh caught inside the
+   * body. Stalled (< 0.4 m/s) under throttle for 1.2 s, pushing AWAY from a prop the mesh touches or with the mesh
+   * on the ground's trimesh: the mesh ignores props and the ground trimesh for 0.6 s (the hulls still stand on the
+   * heightfield and rock formations) and the car drives out. Pushing INTO a prop stays a wall. `push` = the
+   * throttle's direction (+ forward, − reverse, 0 none).
+   * Cost: one contact-pair walk of the mesh collider per step while stalled under throttle, else nothing.
+   */
+  unhook(dt: number, push: number): void {
+    const mc = this.meshCollider
+    if (!mc) return
+    if (this.ghost > 0) {
+      if ((this.ghost -= dt) <= 0) mc.setCollisionGroups(this.meshGroups)
+      return
+    }
+    if (push === 0 || Math.abs(this.speed) > 0.4) return void (this.hooked = 0)
+    const { f } = this.axes(), w = this.physics.world, t = this.body.translation()
+    let away = false
+    w.contactPairsWith(mc, (o) => {
+      const member = o.collisionGroups() >>> 16
+      if (away) return
+      // The ground's trimesh inside the hollow body (the rear down on its bump stops over a crest or a ditch):
+      // contacts from above AND below clamp the car where it is.
+      if (member & Groups.TerrainMesh) return w.contactPair(mc, o, (m) => void (m.numContacts() && (away = true)))
+      if (!(member & Groups.Static) || member & Groups.StaticMesh) return
+      w.contactPair(mc, o, (m) => {
+        if (!m.numContacts()) return
+        // (a trunk's collider sits at the trunk: its direction in the ground plane says ahead or behind)
+        const p = o.translation(), dx = p.x - t.x, dz = p.z - t.z
+        const ahead = (dx * f[0] + dz * f[2]) / Math.max(0.1, Math.hypot(dx, dz))
+        if (ahead * push < -0.2) away = true
+      })
+    })
+    this.hooked = away ? this.hooked + dt : 0
+    if (this.hooked > 1.2) {
+      this.hooked = 0
+      this.ghost = 0.6
+      mc.setCollisionGroups(this.meshGroups & ~(Groups.Static | Groups.TerrainMesh))
+    }
+  }
+  private hooked = 0
+  private ghost = 0
+
   /** One fixed step: controls → wheel forces → raycast vehicle update. Call before world.step(). */
   step(dt: number): void {
     if (!this.enabled) return
@@ -1054,6 +1099,7 @@ export class TruckSim extends VehicleBase {
       const drag = 0.5 * 1.2 * R.cdA * sp
       body.addForce({ x: -lv.x * drag, y: -lv.y * drag, z: -lv.z * drag }, true)
     }
+    if (D.aids === 'full' && contacts >= 3 && u[1] > 0.6 && !c.handbrake) this.cornerAssist(dt, f, u, rt)
     // Effects / camera / audio read these.
     this.lateral = lv.x * rt[0] + lv.y * rt[1] + lv.z * rt[2]
     const av = Math.abs(ch.speed)
@@ -1068,6 +1114,40 @@ export class TruckSim extends VehicleBase {
       this.upsideDown = 0
       D.reset()
     }
+  }
+
+  /**
+   * CORNERING ASSIST (aids Full — GTA-smooth, gameplay): grip-limited steering asks only for what the tyres give,
+   * ~0.5 g on dirt — a full key turned 22° in 2 s at 100 km/h, so fast A / D "did nothing". When the car turns
+   * less than the key asks, the yaw rate is raised toward it and the velocity follows the nose (speed kept), up to
+   * 1.6 × the surface's grip above 72 km/h (≤ 1.2 g: ice stays slippery). It never adds to oversteer (ESC and the counter-steer
+   * help own that) and lets go in a real slide (> 26°). Std / Off aids = the raw machine.
+   */
+  private cornerAssist(dt: number, f: [number, number, number], u: [number, number, number], r: [number, number, number]): void {
+    const D = this.drivetrain!, body = this.body, st = this.controls.steer
+    const lv = body.linvel()
+    const vf = lv.x * f[0] + lv.y * f[1] + lv.z * f[2]
+    // Fades in from 43 km/h to full at 72 (slower, the tyres alone turn the car well enough).
+    const k = Math.min(1, (vf - 12) / 8)
+    if (k <= 0 || Math.abs(st) < 0.05) return
+    const vr = lv.x * r[0] + lv.y * r[1] + lv.z * r[2], vu = lv.x * u[0] + lv.y * u[1] + lv.z * u[2]
+    const slip = Math.atan2(vr, vf)
+    if (Math.abs(slip) > 0.45) return
+    const mu = (D.grips[0].mu + D.grips[1].mu + D.grips[2].mu + D.grips[3].mu) / 4
+    const aMax = G_REAL * Math.min(1.2, mu * (1 + 0.6 * k))
+    // Yaw about the body's up (+ = left; steer + = right): the key's turn, capped at the kinematic lock and aMax.
+    const wuT = -st * Math.min((vf * Math.tan(D.R.steering.lock)) / D.R.wheelbase, aMax / vf)
+    const w = body.angvel()
+    const wu = w.x * u[0] + w.y * u[1] + w.z * u[2]
+    if (wuT > 0 ? wu < wuT : wu > wuT) {
+      const dwu = (wuT - wu) * Math.min(1, dt * 4)
+      body.setAngvel({ x: w.x + u[0] * dwu, y: w.y + u[1] * dwu, z: w.z + u[2] * dwu }, true)
+    }
+    // Velocity toward the nose, at most 0.6 × aMax of extra sideways pull.
+    const turn = Math.sign(slip) * Math.min(Math.abs(slip), ((0.6 * aMax) / vf) * dt)
+    const ang = slip - turn, len = Math.hypot(vf, vr)
+    const nf = Math.cos(ang) * len, nr = Math.sin(ang) * len
+    body.setLinvel({ x: f[0] * nf + r[0] * nr + u[0] * vu, y: f[1] * nf + r[1] * nr + u[1] * vu, z: f[2] * nf + r[2] * nr + u[2] * vu }, true)
   }
 
   place(x: number, y: number, z: number, heading: number, pitch = 0): void {

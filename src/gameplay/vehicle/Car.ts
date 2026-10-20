@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { PhysicsWorld } from '../../physics/PhysicsWorld'
+import { group, Groups, type PhysicsWorld } from '../../physics/PhysicsWorld'
 import type { Input } from '../../input/Input'
 import type { WorldFields } from '../../world/WorldFields'
 import type { CharacterModel } from '../player/CharacterModel'
@@ -399,7 +399,9 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
       parts.push({ geo: skin.geometry, toLocal, collider: true })
       if (d.glass?.geometry.getAttribute('position')) parts.push({ geo: d.glass.geometry, toLocal, collider: true })
     }
-    this.damage = new Damage(parts, new THREE.Vector3(0, truck.bottom + truck.half.y, (truck.front + truck.rear) / 2), new THREE.Vector3(truck.half.x, truck.half.y, truck.half.z))
+    this.boxCy = truck.bottom + truck.half.y
+    this.boxCz = (truck.front + truck.rear) / 2
+    this.damage = new Damage(parts, new THREE.Vector3(0, this.boxCy, this.boxCz), new THREE.Vector3(truck.half.x, truck.half.y, truck.half.z))
     this.damage.onCollider = (tris) => this.sim.replaceMesh(tris)
     this.damage.onHit = (amount, at, sev) => this.onDamage?.(amount, at.clone().applyMatrix4(this.root.matrixWorld), sev)
     this.engineAt.set(0, truck.bottom + truck.half.y * 1.05, truck.front * 0.78) // (bonnet height, ahead of the cab)
@@ -638,6 +640,41 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.prevQ.copy(this.curQ)
     this.pos.copy(this.curP)
   }
+
+  /**
+   * RESPAWN (R while driving / the ⟲ button): the car back on its wheels where it is — upright, still, on the
+   * ground, same heading — for a car wedged on a rock, between trunks or on its roof. If its box there overlaps a
+   * trunk / rock / prop it takes the nearest clear spot within 9 m (rings of 3 m). Returns false for a wreck (the
+   * game brings a new car) or on the water.
+   */
+  respawnHere(): boolean {
+    if (this.damage.wrecked) return false
+    if (this.sim.afloat) return this.say('Reach the shore first')
+    if (this.flyOn) this.toggleFly()
+    const R = this.physics.R, h = this.heading
+    const box = (this.respawnBox ??= new R.Cuboid(this.half.x + 0.15, this.half.y, this.half.z + 0.15))
+    const cs = Math.sin(h), cc = Math.cos(h), q = { x: 0, y: Math.sin(h / 2), z: 0, w: Math.cos(h / 2) }
+    const filter = group(0xffff, Groups.Static | Groups.StaticMesh)
+    const x0 = this.pos.x, z0 = this.pos.z, y0 = this.pos.y
+    for (let ring = 0; ring <= 3; ring++) {
+      const n = ring ? 8 : 1
+      for (let k = 0; k < n; k++) {
+        const a = (k / n) * Math.PI * 2, x = x0 + Math.sin(a) * ring * 3, z = z0 + Math.cos(a) * ring * 3
+        const y = this.solid(x, z, y0 + 2)
+        const c = { x: x + cs * this.boxCz, y: y + this.boxCy + 0.2, z: z + cc * this.boxCz }
+        if (this.physics.world.intersectionWithShape(c, q, box, undefined, filter, undefined, this.sim.body)) continue
+        this.park(x, z, h, y + 0.6)
+        this.sim.drivetrain?.reset()
+        return true
+      }
+    }
+    this.park(x0, z0, h, y0 + 2) // boxed in all round: upright where it is
+    return true
+  }
+  private respawnBox: InstanceType<PhysicsWorld['R']['Cuboid']> | null = null
+  /** Centre of the body box in car space (y up from the ground, z along the car). */
+  private readonly boxCy: number
+  private readonly boxCz: number
 
   private readPose(p: THREE.Vector3, q: THREE.Quaternion): void {
     const t = this.sim.body.translation(), r = this.sim.body.rotation()
@@ -943,6 +980,7 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     // while steering at speed = drift).
     if (drive && this.autoAccel && this.sim.arcade && i.touch && i.touchMove.y > -0.35) c.throttle = 1
     c.steer = drive ? Math.max(-1, Math.min(1, this.keySteer + i.touchMove.x)) : 0
+    this.sim.unhook(dt, Math.abs(c.throttle) > 0.3 ? Math.sign(c.throttle) : 0)
     c.handbrake = drive && i.down('Space') && !this.touchBurn
     c.brake = drive && (i.down('KeyS') || i.touchMove.y < -0.35)
     c.boost = drive && (i.down('ShiftLeft') || i.down('ShiftRight'))

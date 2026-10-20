@@ -201,6 +201,7 @@ export function TouchControls({ game }: { game: Game }) {
         <button style={small} onPointerDown={tap('F3')}>FPS</button>
         <button style={small} onPointerDown={tap('KeyT')} data-testid="btn-daynight">{phase === 'NIGHT' || phase === 'DUSK' ? '☀' : '☾'}</button>
         <button style={small} onPointerDown={tap('KeyV')} data-testid="btn-cam">{cam === 'tpp' ? 'FPP' : 'TPP'}</button>
+        {driving && <button style={small} onPointerDown={tap('KeyR')} data-testid="btn-respawn">⟲</button>}
         <button
           style={small}
           onPointerDown={(e) => {

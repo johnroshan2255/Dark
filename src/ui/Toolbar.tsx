@@ -10,9 +10,11 @@ export function Toolbar({ game }: { game: Game }) {
   const phase = useStore(game.store, (s) => s.phase)
   const cam = useStore(game.store, (s) => s.settings.camera)
   const nightmare = useStore(game.store, (s) => s.nightmare)
+  const driving = useStore(game.store, (s) => s.driving)
   const night = phase === 'NIGHT' || phase === 'DUSK'
   return (
     <div style={bar}>
+      {driving && <button style={btn} onClick={() => game.respawnHere()} title="Respawn the car here (R)" data-testid="tb-respawn">⟲ Respawn</button>}
       <button style={btn} onClick={() => game.toggleDayNight()} title="Day ⇄ night (T)" data-testid="tb-daynight">{night ? '☀ Day' : '☾ Night'}</button>
       <button style={btn} onClick={() => game.toggleCamera()} title="Camera (V)" data-testid="tb-cam">{cam === 'tpp' ? '👁 First person' : '🧍 Third person'}</button>
       <button style={{ ...btn, ...(nightmare ? { borderColor: 'rgba(255,80,60,0.8)', color: '#ffb3a8' } : {}) }} onClick={() => game.toggleNightmare()} title="Nightmare realm (N)">⛧ Nightmare</button>
