@@ -1,3 +1,4 @@
+import type { FixedMap } from './map/FixedMap'
 import * as THREE from 'three'
 import type { PhysicsWorld } from '../physics/PhysicsWorld'
 import type { MaterialLibrary } from '../rendering/materials/MaterialLibrary'
@@ -64,10 +65,11 @@ export class WorldManager {
     readonly seed: number,
     private readonly mats: MaterialLibrary,
     private readonly physics: PhysicsWorld,
+    map: FixedMap | null = null,
   ) {
     this.root.name = 'world'
     this.root.matrixAutoUpdate = false
-    this.fields = new WorldFields(seed)
+    this.fields = new WorldFields(seed, map)
     this.fields.palette = groundPalette() // main-thread copy (grass, HUD); the workers get it per request
     this.geos = createPropGeometries()
     this.grass = new GrassField(mats.grass, mats.grassMid, mats.grassFar, mats.grassNearU, mats.grassMidU, mats.grassFarU, this.fields, this.chunks)

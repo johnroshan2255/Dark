@@ -38,7 +38,7 @@ export interface GameStateShape {
   lights: boolean
   /** Front end open (the world idles behind it, camera orbiting the car): the main menu or the garage. */
   landing: boolean
-  screen: 'menu' | 'garage'
+  screen: 'menu' | 'garage' | 'maps'
   /** The ground round the player is built (Game.playReadiness ≥ 1, set once): PLAY can start, the garage shows the live car. */
   worldReady: boolean
   /** The car's damage 0 … 100 % (on a change only; the HUD's damage bar). */

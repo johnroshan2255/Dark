@@ -13,6 +13,7 @@ import { buildBridges } from './Road/bridges'
 import { buildCamps, campsIn } from './Road/camps'
 import type { NetRoad } from './Road/RoadNetwork'
 import { sampleHeight } from './Terrain/generateTerrain'
+import type { FixedMap } from './map/FixedMap'
 
 /**
  * Deterministic chunk generator: (seed, cx, cz) → ChunkData.
@@ -26,8 +27,8 @@ import { sampleHeight } from './Terrain/generateTerrain'
 export class WorldGenerator {
   readonly fields: WorldFields
 
-  constructor(readonly seed: number, palette = 0) {
-    this.fields = new WorldFields(seed)
+  constructor(readonly seed: number, palette = 0, map: FixedMap | null = null) {
+    this.fields = new WorldFields(seed, map)
     this.fields.palette = palette
   }
 

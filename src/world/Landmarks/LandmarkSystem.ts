@@ -1,3 +1,4 @@
+import { activeMap } from '../map/FixedMap'
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type RAPIER from '@dimforge/rapier3d-compat'
@@ -88,7 +89,7 @@ export class LandmarkSystem {
     if (!missing) return false
     if (this.inflight === 0) {
       this.inflight++
-      this.worker.postMessage({ type: 'landmarks', id: this.nextId++, seed: this.seed, palette: this.palette, i0, j0, i1, j1 } satisfies LandmarksRequest)
+      this.worker.postMessage({ type: 'landmarks', id: this.nextId++, seed: this.seed, palette: this.palette, i0, j0, i1, j1, map: activeMap() } satisfies LandmarksRequest)
     }
     return true
   }

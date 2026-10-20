@@ -10,6 +10,7 @@ import { BIOMES } from './biomes/BiomeDefs'
 import { ICE_SNOW } from './types'
 import { FormationField } from './Formations/formations'
 import { LandmarkField } from './Landmarks/landmarks'
+import type { FixedMap } from './map/FixedMap'
 
 const poiBw: BiomeWeights = [0, 0]
 const sstep = (a: number, b: number, x: number): number => {
@@ -72,7 +73,12 @@ export class WorldFields {
   /** Distance over which terrain blends from road height back to the valley floor (m). */
   static readonly ROAD_SHOULDER = 9
 
-  constructor(seed: number) {
+  /**
+   * @param map a FIXED MAP (world/map/FixedMap.ts) instead of the endless procedural world: its heights, biomes,
+   * forest and roads; the main road and the river move out of the world (`MAP_FAR`) and places, formations and
+   * landmarks are empty — the generation pipeline downstream runs unchanged.
+   */
+  constructor(seed: number, readonly map: FixedMap | null = null) {
     this.seed = seed >>> 0
     this.hills = createNoise2D(hash4(seed, 11))
     this.detail = createNoise2D(hash4(seed, 12))
@@ -137,10 +143,33 @@ export class WorldFields {
       camps: (a, b) => campsIn(this, a, b),
     })
     this.roadDetail = new RoadDetail(this)
+    if (map) {
+      this.pois.region = () => []
+      this.pois.lookout = () => null
+      this.pois.home = () => null
+      this.formations.region = () => []
+      this.formations.roadFormation = () => null
+      this.landmarks.region = () => []
+      this.landmarks.home = () => null
+      const mb: BiomeWeights = [0, 0]
+      this.biomes.weightsN = (x, z, out) => {
+        map.biome(x, z, mb)
+        out.fill(0)
+        out[Biome.Desert] = mb[0]
+        out[Biome.Snow] = mb[1]
+        out[Biome.Forest] = Math.max(0, 1 - mb[0] - mb[1])
+        return out
+      }
+      this.network.setFixed(map.roads)
+    }
   }
+
+  /** Where the main road and the river go on a fixed map: far outside it (their distance queries are then huge). */
+  static readonly MAP_FAR = 1e7
 
   /** Main road: runs roughly along +Z, meandering in X. */
   roadCenterX(z: number): number {
+    if (this.map) return WorldFields.MAP_FAR
     return this.roadN(z * 0.0016, 3.7) * 110 + this.roadN(z * 0.006, 9.1) * 4 // long straight-ish runs (refs)
   }
 
@@ -155,6 +184,7 @@ export class WorldFields {
    * Biomes reshape it: deserts are flatter basins with long soft dunes; snowfields carry bigger, rounder massifs.
    */
   naturalHeight(x: number, z: number): number {
+    if (this.map) return this.map.height(x, z)
     const base = fbm(this.hills, x * 0.0021, z * 0.0021, 4) * 40
     const m = Math.max(0, fbm(this.mountN, x * 0.0008, z * 0.0008, 3) + 0.05)
     const mountains = m * m * 260
@@ -217,6 +247,7 @@ export class WorldFields {
 
   /** River: winds alongside the road through its own valley, 40–100 m to one side. */
   riverCenterX(z: number): number {
+    if (this.map) return 2 * WorldFields.MAP_FAR
     return this.roadCenterX(z) + 70 + this.riverN(z * 0.004, 21.3) * 30
   }
 
@@ -246,12 +277,14 @@ export class WorldFields {
   /** Final terrain height (see the class comment for the layering), CARVED under hillside caves (their rock mesh is
    *  the floor there — Formations/caves.ts). */
   height(x: number, z: number): number {
+    if (this.map) return this.map.height(x, z)
     return this.formations.caveCarve(x, z, this.heightNoCave(x, z))
   }
 
   /** The ground WITHOUT the secondary roads (gorges + places on the valley / river): what the rope bridges are
    *  measured on (the network builds the bridges' roads, so the bridges can't depend on it). */
   heightNoNet(x: number, z: number): number {
+    if (this.map) return this.map.height(x, z)
     const g = this.gorge(x, z, this.groundBeforePlaces(x, z))
     const s = this.poiWeight(x, z)
     return s > 0 ? g + (this.pois.near(x, z)!.baseH - g) * s : g
@@ -260,6 +293,7 @@ export class WorldFields {
   /** The terrain before the cave carve: the far horizon mesh (a coarse grid sample in a cave would dip it) and the
    *  caves' own rock cap (it follows the original hill surface). */
   heightNoCave(x: number, z: number): number {
+    if (this.map) return this.map.height(x, z) // (the map's heights already carry its roads, river and lake)
     const g = this.gorge(x, z, this.groundBeforePlaces(x, z))
     const snow = this.lastSnow // naturalHeight(x, z) ran inside groundBeforePlaces
     const s = this.poiWeight(x, z)
@@ -444,6 +478,7 @@ export class WorldFields {
    * grows above the treeline (~95–125 m) — pass the terrain height when known.
    */
   forestDensity(x: number, z: number, h?: number): number {
+    if (this.map) return this.map.forestDensity(x, z) * (h !== undefined && h > 330 ? 0 : 1)
     // GROVES, not a forest wall: only the top third of the noise grows trees (dense at the heart, thinning at the
     // edge), leaving open meadows between them — Genshin's lands are mostly open grass and flowers.
     const n = fbm(this.forestN, x * 0.006, z * 0.006, 3) * 0.5 + 0.5

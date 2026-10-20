@@ -262,6 +262,24 @@ margin of 0.35 chunk (LOD), so standing on a border does not thrash.
 
 ---
 
+### Fixed maps (2026-10-20, "Select map")
+
+The main menu offers **Explore endless world** (the procedural world above) or **Select map** (`ui/MapSelect.tsx`):
+hand-made maps listed in `world/map/FixedMap.ts` `MAPS`, each a folder `public/maps/<id>/` (heights.bin 2 m Uint16
+grid, biome.bin, map.json with roads + spawn, props.json, props.glb, bruno/). Playing one reloads on `?map=<id>`
+(world, workers and physics are built for one world per session). `FixedMap` is loaded on the main thread and in
+every chunk worker (each request carries `map`, `activeMap()`; the worker queues requests behind the load).
+`new WorldFields(seed, map)` then answers from the map: `height*` = the map grid (falling off to a −30 m sea floor
+over 320 m past its edge), biomes = its desert / snow weights (the rest forest), `forestDensity` = its tree
+placements per 16 m cell (cleared round set pieces), roads = its centrelines (`RoadNetwork.setFixed`: nothing is
+generated, nothing exported); the main road and the river move to `MAP_FAR` and places / formations / landmarks are
+empty, so the pipeline downstream (chunks, road ribbon, scatter, grass, physics, car) runs unchanged. Set pieces
+(camps, stunt park, cabins, ramps, bridges, Bruno Simon's props) are `world/map/MapProps.ts`: instanced per 200 m
+tile, fixed colliders within 140 m (trimeshes in StaticMesh). Spawn / respawn / new-car points come from the map's
+roads (`Game.roadPoint`). A map plays on ULTRA with Hold 60 unless the player chose a quality. The Island is exported
+by The-Land (`tools/blender/export_dark_map.py`). Cost on the island (ULTRA, M4, driving): 60 fps at 1080p and with
+a 4 × CPU throttle at phone resolution; ~150–190 draws, 0.35–0.65 M tris.
+
 ## 4. Rendering
 
 - `WebGLRenderer` created by R3F, configured in `src/rendering/renderer/configureRenderer.ts`:

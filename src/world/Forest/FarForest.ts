@@ -1,3 +1,4 @@
+import { activeMap } from '../map/FixedMap'
 import * as THREE from 'three'
 import { CHUNK_SIZE } from '../constants'
 import { chunkKey } from '../types'
@@ -114,7 +115,7 @@ export class FarForest {
       this.ids.set(id, w)
       this.requested.add(w.key)
       this.inflight++
-      this.worker.postMessage({ type: 'trees', id, seed: this.seed, palette: this.palette, cx: w.cx, cz: w.cz })
+      this.worker.postMessage({ type: 'trees', id, seed: this.seed, palette: this.palette, cx: w.cx, cz: w.cz, map: activeMap() })
     }
     for (const k of [...this.requested]) if (this.data.has(k)) this.requested.delete(k)
     if (this.ground && this.ground.version !== this.groundVersion) {

@@ -176,6 +176,14 @@ export class RoadNetwork {
 
   constructor(private readonly host: NetworkHost) {}
 
+  /** FIXED MAP (world/map/FixedMap.ts): the map's roads are the whole network — nothing is generated (no node links,
+   *  driveways, camp tracks or bridge roads); region lists are the fixed roads whose bounds touch the region. */
+  private fixedRoads: NetRoad[] | null = null
+  setFixed(roads: NetRoad[]): void {
+    this.fixedRoads = roads
+    this.cellRoads.clear()
+  }
+
   /** Ground samples of every search on the world's HSTEP lattice (see HeightSamples). */
   private readonly hs = new HeightSamples((x, z) => this.host.baseHeight(x, z))
 
@@ -191,6 +199,7 @@ export class RoadNetwork {
 
   /** Region road lists and bridge roads built since the last export (null: none). Structured-clonable. */
   exportNew(): RoadExport | null {
+    if (this.fixedRoads) return null // every thread has the same fixed roads: nothing to share
     const roads = new Map<string, NetRoad>()
     const ids = (list: NetRoad[]) => list.map((r) => { const id = roadId(r); roads.set(id, r); return id })
     const cells: [string, string[]][] = []
@@ -204,6 +213,7 @@ export class RoadNetwork {
 
   /** Adopt another instance's region road lists / bridge roads (regions already known here keep their own). */
   importRoads(e: RoadExport): void {
+    if (this.fixedRoads) return
     if (this.shared.size > 8000) this.shared.clear()
     const byId = new Map<string, NetRoad>()
     for (const r of e.roads) {
@@ -1015,11 +1025,13 @@ export class RoadNetwork {
 
   /** The road from a place (its driveway; null if none). */
   placeRoad(p: { x: number; z: number }): NetRoad | null {
+    if (this.fixedRoads) return null
     return this.driveway(p)
   }
 
   /** Camp track: a connector (trail) to the nearest road within 700 m. */
   campRoad(c: { x: number; z: number }): NetRoad | null {
+    if (this.fixedRoads) return null
     const key = `camp:${Math.floor(c.x)},${Math.floor(c.z)}`
     const hit = this.drives.get(key)
     if (hit !== undefined) return hit
@@ -1035,6 +1047,7 @@ export class RoadNetwork {
    * (`bridgeOK`) — no bridge to nowhere. The roads end exactly at the deck's height.
    */
   bridgeLinks(k: number): NetRoad[] | null {
+    if (this.fixedRoads) return null
     const hit = this.bridgeRoads.get(k)
     if (hit !== undefined) return hit
     this.bridgeRoads.set(k, null) // (guards re-entry while building)
@@ -1249,6 +1262,11 @@ export class RoadNetwork {
     let list = this.cellRoads.get(key)
     if (list) return list
     const x0 = ci * REGION - 40, z0 = cj * REGION - 40, x1 = (ci + 1) * REGION + 40, z1 = (cj + 1) * REGION + 40
+    if (this.fixedRoads) {
+      list = this.fixedRoads.filter((r) => r.maxX >= x0 && r.minX <= x1 && r.maxZ >= z0 && r.minZ <= z1)
+      this.cellRoads.set(key, list)
+      return list
+    }
     // Links run from a node to a 4-neighbour or the main road (bent ≤ 0.3 × length) → nodes within ±2 regions.
     list = this.netLinks(ci - 2, cj - 2, ci + 2, cj + 2, []).filter((r) => r.maxX >= x0 && r.minX <= x1 && r.maxZ >= z0 && r.minZ <= z1)
     // Driveways: every place gets a gravel road to the main road (unless it would cut across another road).

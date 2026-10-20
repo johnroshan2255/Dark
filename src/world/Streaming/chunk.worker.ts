@@ -3,8 +3,14 @@ import { generateFarTerrain } from '../Terrain/horizonGen'
 import { chunkTransferables, WorldGenerator } from '../WorldGenerator'
 import type { Landmark } from '../Landmarks/landmarks'
 import type { RoadExport } from '../Road/RoadNetwork'
+import { loadFixedMap, type FixedMap } from '../map/FixedMap'
 
-export interface ChunkRequest {
+/** Every request carries the session's map id (world/map/FixedMap.ts activeMap; null / absent = the endless world). */
+interface MapTagged {
+  map?: string | null
+}
+
+export interface ChunkRequest extends MapTagged {
   id: number
   seed: number
   /** Ground palette id (rendering/artStyle groundPalette) — colours only. */
@@ -14,7 +20,7 @@ export interface ChunkRequest {
 }
 
 /** Horizon-terrain request (same worker file, separate worker instance — see FarTerrain). */
-export interface FarRequest {
+export interface FarRequest extends MapTagged {
   type: 'far'
   id: number
   seed: number
@@ -26,7 +32,7 @@ export interface FarRequest {
 }
 
 /** Far-forest request: a chunk's tree records only (FarForest, its own worker instance). */
-export interface TreesRequest {
+export interface TreesRequest extends MapTagged {
   type: 'trees'
   id: number
   seed: number
@@ -37,7 +43,7 @@ export interface TreesRequest {
 
 /** Landmark request: the landmark regions [i0..i1] × [j0..j1] (LANDMARK_REGION grid) and the home landmark
  *  (LandmarkSystem, its own worker instance — placing landmarks runs the road network's A*, never on the main thread). */
-export interface LandmarksRequest {
+export interface LandmarksRequest extends MapTagged {
   type: 'landmarks'
   id: number
   seed: number
@@ -64,15 +70,27 @@ export interface RoadsMessage {
   roads: RoadExport
 }
 
-self.onmessage = (e: MessageEvent<ChunkRequest | FarRequest | TreesRequest | LandmarksRequest | RoadsMessage>) => {
+type Msg = ChunkRequest | FarRequest | TreesRequest | LandmarksRequest | RoadsMessage
+/** A fixed map has to be fetched before the first request can be served: requests queue behind it, in order. */
+let queue: Promise<void> = Promise.resolve()
+let map: FixedMap | null = null
+
+self.onmessage = (e: MessageEvent<Msg>) => {
   const msg = e.data
+  const id = 'type' in msg && msg.type === 'roads' ? undefined : msg.map
+  if (id && map?.id !== id) queue = queue.then(() => loadFixedMap(id).then((m) => { map = m }))
+  queue = queue.then(() => handle(msg))
+}
+
+function handle(msg: Msg): void {
   if ('type' in msg && msg.type === 'roads') {
     if (gen) gen.fields.network.importRoads(msg.roads)
     else early.push(msg.roads)
     return
   }
-  if (!gen || gen.seed !== msg.seed || gen.fields.palette !== msg.palette) {
-    gen = new WorldGenerator(msg.seed, msg.palette)
+  const want = msg.map ? map : null
+  if (!gen || gen.seed !== msg.seed || gen.fields.palette !== msg.palette || gen.fields.map !== want) {
+    gen = new WorldGenerator(msg.seed, msg.palette, want)
     for (const r of early.splice(0)) gen.fields.network.importRoads(r)
   }
   const post = (self as unknown as DedicatedWorkerGlobalScope).postMessage.bind(self)

@@ -3,6 +3,7 @@ import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
 import { vehicleClass, vehicleDef, vehicleRating, vehicleStats } from '../gameplay/vehicle/catalogue'
 import { KeyArt } from './KeyArt'
+import { playMap } from './MapSelect'
 import { ACCENT, FONT, fullscreen, glass, label, LIME, statFill, statRow, statTrack, vignette } from './theme'
 
 /**
@@ -28,11 +29,15 @@ export function MainMenu({ game }: { game: Game }) {
       <div style={vignette} />
       <div className="fe-brand">
         <h1 className="fe-title">DARK</h1>
-        <div className="fe-tag">A new world every night · <b>world #{String(seed).slice(0, 8)}</b></div>
+        <div className="fe-tag">{game.map ? <>Map · <b>{game.map.name}</b></> : <>A new world every night · <b>world #{String(seed).slice(0, 8)}</b></>}</div>
       </div>
       <div className="fe-actions">
-        <button className="fe-btn fe-btn--primary" onClick={() => game.play()} data-testid="play">
-          <span>Play</span><span className="fe-chev">▶</span>
+        {/* Two ways in: the endless procedural world, or a hand-made map (MapSelect). */}
+        <button className={game.map ? 'fe-btn' : 'fe-btn fe-btn--primary'} onClick={() => playMap(game, null)} data-testid="play">
+          <span>Explore endless world</span><span className="fe-chev">▶</span>
+        </button>
+        <button className={game.map ? 'fe-btn fe-btn--primary' : 'fe-btn'} onClick={() => game.showScreen('maps')} data-testid="menu-maps">
+          <span>Select map</span><span className="fe-chev">›</span>
         </button>
         <button className="fe-btn" onClick={() => game.showScreen('garage')} data-testid="menu-garage">
           <span>Garage</span><span className="fe-chev">›</span>

@@ -1,3 +1,5 @@
+import { loadFixedMap, setActiveMap, type FixedMap } from '../world/map/FixedMap'
+import { MapProps } from '../world/map/MapProps'
 import * as THREE from 'three'
 import { CaveSystem } from '../gameplay/caves/CaveSystem'
 import { MOUTH_X } from '../world/Formations/caves'
@@ -88,6 +90,8 @@ export interface GameOptions {
   play?: boolean
   /** Start somewhere else than the road spawn: 'cave' = outside the nearest hillside cave mouth (?at=). */
   at?: string
+  /** A fixed map (world/map/FixedMap.ts MAPS id, ?map=) instead of the endless world. */
+  map?: string
 }
 
 /**
@@ -206,20 +210,28 @@ export class Game {
     report()
     const saved = loadSettings()
     const vehicle = opts.car && vehicleDef(opts.car).id === opts.car ? opts.car : saved.garage.vehicle
-    const [R, models] = await Promise.all([
+    const [R, models, map] = await Promise.all([
       PhysicsWorld.load().then((r) => ((phys = 1), report(), r)),
       loadModels((f) => ((mdl = f), report()), vehicle),
+      opts.map ? loadFixedMap(opts.map) : Promise.resolve(null),
     ])
-    onProgress?.(0.45, 'Growing a new world…')
-    return new Game(opts, new PhysicsWorld(R), models)
+    setActiveMap(map ? map.id : null) // before any world system: every worker request carries it
+    onProgress?.(0.45, map ? `Loading ${map.name}…` : 'Growing a new world…')
+    return new Game(opts, new PhysicsWorld(R), models, map)
   }
 
-  private constructor(opts: GameOptions, physics: PhysicsWorld, private readonly models: GameModels) {
+  /** A fixed map's set pieces (camps, stunt park, cabins…; null in the endless world). */
+  private mapProps: MapProps | null = null
+
+  private constructor(opts: GameOptions, physics: PhysicsWorld, private readonly models: GameModels, readonly map: FixedMap | null = null) {
     this.physics = physics
     this.opts = opts
     this.settings = loadSettings()
     this.savedQuality = this.settings.quality
     if (opts.tier && opts.tier !== 'auto') this.settings = { ...this.settings, quality: opts.tier }
+    // A FIXED MAP plays on ULTRA with Hold 60 (this session; the saved setting is untouched): the preset stays ULTRA
+    // and only a device that can't hold 60 fps lowers resolution, then the costliest features, one at a time.
+    else if (opts.map && this.settings.quality === 'auto') this.settings = { ...this.settings, quality: 'ultra', hold60: true }
     this.adaptive.enabled = opts.adaptive !== false && (this.settings.quality === 'auto' || this.settings.hold60)
     this.tod = new TimeOfDay(opts.hour ?? 15) // start in the warm afternoon (the garage view); night still comes with the cycle
     this.tod.dayLengthMinutes = this.settings.dayLength
@@ -257,19 +269,23 @@ export class Game {
       held: null,
       fpsCap: false,
     })
-    this.world = new WorldManager(opts.seed, this.materials, physics)
+    this.world = new WorldManager(opts.seed, this.materials, physics, map)
+    if (map) {
+      this.mapProps = new MapProps(map, physics)
+      this.world.root.add(this.mapProps.root)
+    }
     this.biomeMap = new BiomeMap(this.world.fields.biomes)
 
-    // Spawn on the road near the origin.
-    const z = 8
-    const x = this.world.fields.roadCenterX(z)
+    // Spawn on the road near the origin (a fixed map: at its start point).
+    const z = map ? map.spawn.z : 8
+    const x = map ? map.spawn.x : this.world.fields.roadCenterX(z)
     // (provisional height: the ground WITHOUT the secondary roads — `surface` here ran the whole road network's A*
     // round the spawn on the main thread (driveways, summit trails: 3–12 s before the menu could open). The exact
     // placement waits for the first chunk, whose worker built those roads and hands them over — `pendingSpawn`.)
     const spawn = new THREE.Vector3(x, this.world.fields.heightNoNet(x, z) + 0.05, z)
     this.player = new PlayerController(physics, this.input, spawn)
     // Face down the road (+Z): forward = (-sin yaw, -cos yaw) = normalize(dx/dz, 1).
-    this.player.yaw = Math.atan2(-(this.world.fields.roadCenterX(z + 1) - x), -1)
+    this.player.yaw = map ? map.spawn.yaw : Math.atan2(-(this.world.fields.roadCenterX(z + 1) - x), -1)
     this.player.pitch = -0.08
 
     this.materials.hero.map = models.hero.map
@@ -307,15 +323,16 @@ export class Game {
       if (this.car.driving) this.cameraCtl.shake = Math.min(1, this.cameraCtl.shake + 0.15 + speed / 60)
     }
     {
-      // Parked on the verge ~14 m down the road from the spawn.
-      const cz = z + 14
+      // Parked on the verge ~14 m down the road from the spawn (on a map: 14 m ahead along its start road).
       const f = this.world.fields
-      const cx = f.roadCenterX(cz) + 1.4 // right lane (poles stand at +5.6 m)
+      const ahead = map ? this.roadPoint(x - Math.sin(map.spawn.yaw) * 14, z - Math.cos(map.spawn.yaw) * 14) : null
+      const cz = ahead ? ahead.z : z + 14
+      const cx = ahead ? ahead.x : f.roadCenterX(cz) + 1.4 // right lane (poles stand at +5.6 m)
       const yawP = this.player.yaw
       this.pendingSpawn = { x: cx, z: cz, place: () => {
         this.player.teleport(spawn.setY(f.surface(x, z) + 0.05))
         this.bike.parkNear(spawn, yawP, 2.4)
-        this.car.park(cx, cz, Math.atan2(-(f.roadCenterX(cz + 1) - f.roadCenterX(cz)), -1)) // along the road there
+        this.car.park(cx, cz, ahead ? ahead.yaw : Math.atan2(-(f.roadCenterX(cz + 1) - f.roadCenterX(cz)), -1)) // along the road there
         if (opts.at === 'cave') this.spawnAtCave()
       } }
       // Start looking at the car (it's what you drive first; the compass shows it either way), then — once the
@@ -937,6 +954,7 @@ export class Game {
           const v = this.car.driving ? this.car.velocity(this.ahead) : this.ahead.copy(p.velocity)
           this.ahead.copy(v).multiplyScalar(1.5).add(p.renderPosition)
           this.world.update(p.renderPosition, this.cullingDebug.cullCamera(this.camera), this.ahead)
+          this.mapProps?.update(p.renderPosition)
           {
             const q = this.quality
             this.landmarks.update(dt, p.renderPosition.x, p.renderPosition.z, q.landmarkRange, q.sunShadowExtent * 1.5, q.shadows && q.objectShadows)
@@ -1192,8 +1210,9 @@ export class Game {
     const id = this.car.modelId
     void loadVehicle(id, () => {}).then((model) => {
       const f = this.world.fields, p = this.player.curr
-      const z = p.z + 12, x = f.roadCenterX(z) + 1.4
-      this.swapCar(model, x, z, Math.atan2(-(f.roadCenterX(z + 1) - f.roadCenterX(z)), -1))
+      const on = this.map ? this.roadPoint(p.x, p.z, 12) : null
+      const z = on ? on.z : p.z + 12, x = on ? on.x : f.roadCenterX(z) + 1.4
+      this.swapCar(model, x, z, on ? on.yaw : Math.atan2(-(f.roadCenterX(z + 1) - f.roadCenterX(z)), -1))
       this.notify(`A new ${vehicleDef(id).name} is waiting on the road`, 4000)
     })
   }
@@ -1203,7 +1222,7 @@ export class Game {
   play(): void {
     this.store.set({ landing: false, screen: 'menu' })
   }
-  showScreen(screen: 'menu' | 'garage'): void {
+  showScreen(screen: 'menu' | 'garage' | 'maps'): void {
     if (document.pointerLockElement) document.exitPointerLock()
     this.store.set({ landing: true, screen, settingsOpen: false })
   }
@@ -1305,10 +1324,30 @@ export class Game {
     this.player.pitch = 0
   }
 
+  /**
+   * FIXED MAP: the road point nearest (x, z) (its samples), moved `ahead` m along the road, + the yaw facing along it
+   * (forward = (−sin yaw, −cos yaw)), 1.4 m into the right lane. Spawns, car swaps and respawns use it instead of the
+   * endless world's main road.
+   */
+  private roadPoint(x: number, z: number, ahead = 0): { x: number; z: number; yaw: number } {
+    let best = Infinity, br = this.map!.roads[0], bi = 0
+    for (const r of this.map!.roads) {
+      for (let i = 0; i < r.n; i++) {
+        const d = (r.xs[i] - x) ** 2 + (r.zs[i] - z) ** 2
+        if (d < best) (best = d), (br = r), (bi = i)
+      }
+    }
+    while (ahead > 0 && bi < br.n - 2 && br.cum[bi + 1] - br.cum[bi] > 0) (ahead -= br.cum[bi + 1] - br.cum[bi]), bi++
+    const j = Math.min(br.n - 1, bi + 1), i = j - 1
+    const dx = br.xs[j] - br.xs[i], dz = br.zs[j] - br.zs[i], l = Math.hypot(dx, dz) || 1
+    return { x: br.xs[bi] - (dz / l) * 1.4, z: br.zs[bi] + (dx / l) * 1.4, yaw: Math.atan2(-dx, -dz) }
+  }
+
   respawn(): void {
     const p = this.player.curr
-    const z = p.z
-    const x = this.world.fields.roadCenterX(z)
+    const on = this.map ? this.roadPoint(p.x, p.z) : null
+    const z = on ? on.z : p.z
+    const x = on ? on.x : this.world.fields.roadCenterX(z)
     this.player.teleport(new THREE.Vector3(x, this.world.fields.surface(x, z) + 0.05, z))
     this.player.dead = false
     this.player.stunned = 0
@@ -1527,6 +1566,7 @@ export class Game {
   }
 
   dispose(): void {
+    this.mapProps?.dispose()
     window.removeEventListener('touchstart', this.onFirstTouch)
     this.world.dispose()
     this.treeShadows.dispose()

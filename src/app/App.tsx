@@ -9,6 +9,7 @@ import { GameHud } from '../ui/GameHud'
 import { SettingsPanel } from '../ui/SettingsPanel'
 import { MainMenu } from '../ui/MainMenu'
 import { Garage } from '../ui/Garage'
+import { MapSelect } from '../ui/MapSelect'
 import { Toolbar } from '../ui/Toolbar'
 import { KeyArt } from '../ui/KeyArt'
 import { GameCanvas } from './Canvas'
@@ -17,7 +18,7 @@ import { bootError, bootFinish, bootProgress } from './boot'
 /**
  * Every new game gets a fresh random world unless ?seed= is given (co-op joiners receive the host's
  * seed the same way). URL options: ?seed=<n|text> &tier=low|medium|high &adaptive=0 &hour=<0-24> &look=<style> &car=<id> &play=1 &at=cave
- * &stress=<ms, dev>.
+ * &stress=<ms, dev> &map=<id> (a fixed map: world/map/FixedMap.ts MAPS).
  */
 function readOptions(): GameOptions {
   const p = new URLSearchParams(location.search)
@@ -33,6 +34,7 @@ function readOptions(): GameOptions {
     car: p.get('car') ?? undefined,
     play: p.get('play') === '1',
     at: p.get('at') ?? undefined,
+    map: p.get('map') ?? undefined,
   }
 }
 
@@ -83,6 +85,7 @@ export function App() {
       <GameCanvas game={game} />
       <MainMenu game={game} />
       <Garage game={game} />
+      <MapSelect game={game} />
       <InGame game={game} />
       <SettingsPanel game={game} />
     </>

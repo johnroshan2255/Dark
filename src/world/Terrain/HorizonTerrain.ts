@@ -1,3 +1,4 @@
+import { activeMap } from '../map/FixedMap'
 import * as THREE from 'three'
 import { stylize } from '../../rendering/shaders/stylize'
 import { CHUNK_SIZE } from '../constants'
@@ -103,7 +104,7 @@ export class HorizonTerrain {
     if (!(moved < Math.max(96, this.settings.size / 16))) {
       // Snap to the chunk grid so vertices don't swim between rebuilds.
       this.centre.set(Math.round(focus.x / CHUNK_SIZE) * CHUNK_SIZE, Math.round(focus.z / CHUNK_SIZE) * CHUNK_SIZE)
-      const msg: FarRequest = { type: 'far', id: ++this.pendingId, seed: this.seed, palette: groundPalette(), cx: this.centre.x, cz: this.centre.y, size: this.settings.size, res: this.settings.res }
+      const msg: FarRequest = { type: 'far', id: ++this.pendingId, seed: this.seed, palette: groundPalette(), cx: this.centre.x, cz: this.centre.y, size: this.settings.size, res: this.settings.res, map: activeMap() }
       this.worker.postMessage(msg)
     }
   }
