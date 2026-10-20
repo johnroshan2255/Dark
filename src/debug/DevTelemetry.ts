@@ -44,6 +44,8 @@ export function startDevTelemetry(g: Game): () => void {
       css: `${innerWidth}×${innerHeight}`,
       deviceDpr: devicePixelRatio,
       dpr: s?.pixelRatio,
+      res: g.settings.resolution,
+      pixelRatio: g.settings.pixelRatio,
       canvas: s?.canvas,
       scale: s?.renderScale,
       rt: s?.renderTarget,

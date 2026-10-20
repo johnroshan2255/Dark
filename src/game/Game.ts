@@ -229,9 +229,10 @@ export class Game {
     this.settings = loadSettings()
     this.savedQuality = this.settings.quality
     if (opts.tier && opts.tier !== 'auto') this.settings = { ...this.settings, quality: opts.tier }
-    // A FIXED MAP plays on ULTRA with Hold 60 (this session; the saved setting is untouched): the preset stays ULTRA
+    // EVERY device plays ULTRA with Hold 60 (2026-10-20: "always ultra at 60+"); saves from before that default still
+    // hold 'auto' and are played the same way (this session; the saved setting is untouched). The preset stays ULTRA
     // and only a device that can't hold 60 fps lowers resolution, then the costliest features, one at a time.
-    else if (opts.map && this.settings.quality === 'auto') this.settings = { ...this.settings, quality: 'ultra', hold60: true }
+    else if (this.settings.quality === 'auto') this.settings = { ...this.settings, quality: 'ultra', hold60: true }
     this.adaptive.enabled = opts.adaptive !== false && (this.settings.quality === 'auto' || this.settings.hold60)
     this.tod = new TimeOfDay(opts.hour ?? 15) // start in the warm afternoon (the garage view); night still comes with the cycle
     this.tod.dayLengthMinutes = this.settings.dayLength
@@ -549,6 +550,8 @@ export class Game {
     const prev = this.settings
     this.settings = { ...prev, ...patch }
     if (patch.quality !== undefined) this.savedQuality = patch.quality
+    // a newly chosen fixed resolution applies as is (applyOverrides only ever lowers the scale under Hold 60)
+    if (typeof patch.resolution === 'number') this.post.setRenderScale(patch.resolution)
     saveSettings({ ...this.settings, quality: this.savedQuality })
     this.store.set({ settings: this.settings, hud: this.settings.showFps })
     if (patch.quality !== undefined && patch.quality !== prev.quality) {
@@ -627,10 +630,13 @@ export class Game {
     this.reflection.skyline = q.reflectionSkyline
     this.post.setAO(q.ao.scale, q.ao.samples, q.ao.radius)
     this.horizon.configure(q.horizon)
-    this.post.setPixelBudget(q.pixelBudget)
-    // A new preset starts at its own scale; a Hold 60 feature step (same preset) keeps the current one.
+    // Phones: the scene at ≤ 1 MP on every preset. ULTRA's desktop budget (4.2 MP) let a 3.25× phone shade 2.3 MP —
+    // Mali-G720, 2026-10-20: 23–40 fps with every feature already down; the same features hold 60 at ~0.5 MP.
+    this.post.setPixelBudget(this.device?.mobile ? Math.min(q.pixelBudget, MOBILE_PIXEL_BUDGET) : q.pixelBudget)
+    // A new preset starts at its own scale (or the player's fixed one); a Hold 60 feature step (same preset) keeps the current one.
     const samePreset = this.quality.name === name && reason.startsWith('hold 60')
-    this.post.setRenderScale(samePreset ? THREE.MathUtils.clamp(this.post.renderScale, Math.min(q.renderScale.min, 0.65), q.renderScale.max) : q.renderScale.start)
+    const fixed = this.settings.resolution
+    this.post.setRenderScale(samePreset ? THREE.MathUtils.clamp(this.post.renderScale, Math.min(q.renderScale.min, 0.65), this.maxRenderScale(q)) : fixed !== 'auto' ? fixed : q.renderScale.start)
     if (this.camera) {
       // Far plane covers the horizon terrain (hills to the skyline); detail stops at viewDistance/the ring.
       this.camera.far = Math.max(q.viewDistance * 1.08, q.horizon.size * 0.56)
@@ -670,9 +676,13 @@ export class Game {
     const stride = q.paint.stride || (st.painterlyForce ? 1 : 0)
     this.post.setPaint(st.painterly ? stride : 0, q.paint.bloom * q.fx.bloom)
     this.materials.setAlphaToCoverage(this.post.aa === 'msaa2' || this.post.aa === 'msaa4')
-    if (st.resolution !== 'auto') this.post.setRenderScale(st.resolution)
+    // A fixed resolution is exact — or, with Hold 60, the ceiling Hold 60 may lower the scene from (never above it).
+    if (st.resolution !== 'auto') this.post.setRenderScale(this.holdMode ? Math.min(this.post.renderScale, st.resolution) : st.resolution)
     const native = window.devicePixelRatio || 1
-    const dpr = st.pixelRatio === 'auto' ? Math.min(native, q.maxDpr) : st.pixelRatio === 'native' ? native : Math.min(native, st.pixelRatio)
+    let dpr = st.pixelRatio === 'auto' ? Math.min(native, q.maxDpr) : st.pixelRatio === 'native' ? native : Math.min(native, st.pixelRatio)
+    // Phones holding 60: no canvas past 2× — a sharper one can't be seen at arm's length, but every pixel of it is
+    // shaded by the grading / FXAA pass (3.25× = 2.6× the pixels of 2×).
+    if (this.device?.mobile && this.holdMode) dpr = Math.min(dpr, MOBILE_MAX_DPR)
     this.setDpr?.(dpr)
     // Real dynamic shadow for the character where the sun map re-renders every frame; blob otherwise.
     const dyn = q.objectShadows && (q.shadows ? q.shadowCache : q.imageShadows) // (it casts into the dynamic map — applyCasters)
@@ -689,7 +699,7 @@ export class Game {
         this.post.setRenderScale(Math.max(this.holdMode ? Math.min(q.renderScale.min, 0.65) : q.renderScale.min, s - 0.1 * (d.steps ?? 1)))
         break
       case 'scaleUp':
-        this.post.setRenderScale(Math.min(q.renderScale.max, s + 0.1))
+        this.post.setRenderScale(Math.min(this.maxRenderScale(q), s + 0.1))
         break
       case 'tierDown': {
         // Chosen preset + Hold 60: lower the costliest feature one level instead of changing the preset.
@@ -775,6 +785,11 @@ export class Game {
   }
   /** Feature levels of the current preset + overrides (no Hold-60 reductions), set by applyQuality. */
   private presetFeatures = QUALITY.medium.features
+  /** Highest scene scale adaptive may climb to: the preset's, or the player's fixed resolution (Hold 60's ceiling). */
+  private maxRenderScale(q: QualitySettings): number {
+    const r = this.settings.resolution
+    return r === 'auto' ? q.renderScale.max : r
+  }
   /** Adaptive is holding 60 on an explicitly chosen preset (feature steps instead of tier changes). */
   private get holdMode(): boolean {
     // A chosen preset with Hold 60 — or AUTO already at the lowest preset (a small / old phone): keep lowering
@@ -1418,8 +1433,10 @@ export class Game {
     if (perf) {
       const q = this.quality
       const s = perf.stats
-      const fixedRes = this.settings.resolution !== 'auto'
       const hold = this.holdMode
+      // A fixed resolution stays put — unless Hold 60 is on: then it is the ceiling and frames that run long lower
+      // the scene below it first (2026-10-20: a saved 100 % pinned the scale, so Hold 60 dropped every feature instead).
+      const fixedRes = this.settings.resolution !== 'auto' && !hold
       // Hold 60 on a chosen preset may drop the resolution further than the preset's own range before it
       // touches a feature (a little softer is a smaller loss than no shadows / reflections).
       const minScale = hold ? Math.min(q.renderScale.min, 0.65) : q.renderScale.min
@@ -1429,7 +1446,7 @@ export class Game {
       const capped = this.capProbe > 0 || this.fpsCapped
       const d = capped ? null : this.adaptive.sample(s.rawFrameMs, s.gpuMs, s.cpuMs, {
         canScaleDown: !fixedRes && this.post.renderScale > minScale + 1e-3,
-        canScaleUp: !fixedRes && this.post.renderScale < q.renderScale.max - 1e-3,
+        canScaleUp: !fixedRes && this.post.renderScale < this.maxRenderScale(q) - 1e-3,
         canTierDown: hold ? nextHoldStep(this.presetFeatures, this.held) !== null : tierBelow(q.name) !== null,
         // Phones: never auto-upgrade past medium — sustained load causes thermal throttling minutes later.
         // Adaptive never climbs past HIGH: ULTRA is only ever the player's choice. Hold 60: restore reductions.
@@ -1599,3 +1616,6 @@ export class Game {
 }
 
 const _pb = new THREE.Box3(), _up = new THREE.Vector3()
+/** Phones: scene pixels and canvas DPR caps (see applyQuality / applyOverrides). */
+const MOBILE_PIXEL_BUDGET = 1.0e6
+const MOBILE_MAX_DPR = 2

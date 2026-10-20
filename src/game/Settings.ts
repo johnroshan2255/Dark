@@ -8,7 +8,7 @@ import { DEFAULT_VEHICLE, type VehicleTuning } from '../gameplay/vehicle/catalog
  * Persisted per browser in localStorage (a per-viewer convenience; failure is harmless).
  */
 export interface Settings {
-  /** Graphics preset ('auto' = detected + adaptive, never above HIGH). */
+  /** Graphics preset: ULTRA by default (with Hold 60); 'auto' = detected + adaptive, never above HIGH. */
   quality: 'auto' | TierName
   /** Per-feature graphics overrides on top of the preset (missing / 'auto' = the preset's level). */
   gfx: Partial<Record<Feature, Level | 'auto'>>
@@ -55,7 +55,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  quality: 'auto',
+  quality: 'ultra',
   gfx: {},
   hold60: true,
   aa: 'auto',

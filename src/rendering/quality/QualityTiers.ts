@@ -278,7 +278,8 @@ export const PRESETS: Record<TierName, Preset> = {
     },
     features: { shadows: 'high', reflections: 'high', ao: 'medium', volumetrics: 'high', grass: 'ultra', effects: 'high', vegetation: 'high', view: 'high' },
   },
-  // Strong desktop GPUs (player's choice only): everything at its best, native-ish resolution.
+  // THE DEFAULT on every device (Settings: ULTRA + Hold 60): everything at its best, native-ish resolution on desktops;
+  // phones cap it at 2× DPR and ≤ 1 MP of scene (Game MOBILE_*), and Hold 60 lowers the scale before any feature.
   ultra: {
     base: {
       maxDpr: 2, renderScale: { min: 0.8, max: 1, start: 1 }, aa: 'fxaa', sharpen: 0.22, paint: { stride: 1.8, bloom: 0.45 },
