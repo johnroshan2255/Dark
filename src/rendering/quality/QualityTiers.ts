@@ -197,7 +197,7 @@ export const FEATURE_TABLE: { [F in Feature]: Partial<Record<Level, FeatureField
     low: { renderRadius: 2, lodRings: [0.8, 1.4], viewDistance: 200, horizon: { size: 3200, res: 48 }, landmarkRange: 1000, impostors: { start: 50, far: 400, atlas: 2048, blend: true } },
     medium: { renderRadius: 3, lodRings: [0.9, 1.8], viewDistance: 300, horizon: { size: 3200, res: 52 }, landmarkRange: 1000, impostors: { start: 70, far: 400, atlas: 2048, blend: true } },
     high: { renderRadius: 3, lodRings: [1.2, 2.3], viewDistance: 420, horizon: { size: 4400, res: 72 }, landmarkRange: 1500, impostors: { start: 60, far: 700, atlas: 2048, blend: true } }, // (trees are images from 60 m: was 100 — fewer per-species tree draws per chunk)
-    ultra: { renderRadius: 4, lodRings: [1.5, 2.8], viewDistance: 540, horizon: { size: 5600, res: 96 }, landmarkRange: 2200, impostors: { start: 130, far: 900, atlas: 2048, blend: true } },
+    ultra: { renderRadius: 4, lodRings: [1.5, 2.8], viewDistance: 540, horizon: { size: 5600, res: 96 }, landmarkRange: 2200, impostors: { start: 60, far: 900, atlas: 2048, blend: true } }, // (130 → 60 m, 2026-10-20: ~1 500 → a few hundred full trees, looks the same; the phone's main cost)
   },
   // Grass field around the player (GrassField: near + mid + far layers, view-culled per patch). OFF = the painted
   // meadow on the terrain only. Every PRESET uses 'ultra' — the same field on every device (2026-10-19: "the same

@@ -219,6 +219,8 @@ export interface ChunkDetail {
 interface SpeciesMeshes {
   /** Near meshes for geometry levels [0,1] (tier picks which), sharing the species' instance attributes. */
   levels: THREE.InstancedMesh[]
+  /** All the species' trees (copies of the attributes as built): the shared buffers hold only the near ones. */
+  all: { matrix: Float32Array; color: Float32Array; count: number }
 }
 
 /** Far chunks merge species: all conifers → one mesh with spruce's far geometry, birches → one mesh. */
@@ -347,7 +349,7 @@ export class WorldChunk implements Cullable {
       // Near meshes: full detail, or level 1 tagged as the NEAR LOD band (LOW's near trees).
       const levels = [sp.levels[0], sp.near1 ?? sp.levels[1]].map((g, l) => this.add(createInstancedMesh(g, mats.vegetation, attrs, `${sp.name}.lod${l}`)))
       levels.forEach((m) => m.layers.set(LAYER_NO_REFLECT)) // the reflection draws the merged far trees instead
-      this.species.push({ id: sp.id, m: { levels } })
+      this.species.push({ id: sp.id, m: { levels, all: { matrix: (attrs.matrix.array as Float32Array).slice(), color: (attrs.color.array as Float32Array).slice(), count: attrs.count } } })
       this.instanceCount += attrs.count
     }
     // Distant trees: one octahedral-impostor card per tree, all species, one draw (shown under the per-tree LOD).
@@ -588,7 +590,43 @@ export class WorldChunk implements Cullable {
     const o = this.bands
     if (o === b || (o && b && o.near === b.near && o.mid === b.mid && o.imp === b.imp)) return
     this.bands = b && { ...b }
+    if (!b) this.compactNearTrees(0, 0, Infinity) // whole-chunk LOD: every tree back in the near meshes
     this.applyTrees()
+  }
+
+  /** Camera (chunk-local x, z) and radius of the last near-tree compaction (NaN = all trees in the buffers). */
+  private nearAt = { x: NaN, z: NaN, r: 0 }
+  /**
+   * NEAR-TREE COMPACTION (per-tree LOD): the near meshes hold only the trees within `r` m of the camera (x, z
+   * world), packed to the front of the shared instance buffers — the rest are the far set's / impostors' anyway.
+   * The shader still hides each tree past the near band (uTreeLod), but it ran the vertex shader for every
+   * vertex of every tree in the chunk first: with 60 m bands ~1 500 full trees a frame on ULTRA, the phone's main
+   * cost (Mali-G720 2026-10-20: 1.0–1.2 M triangles → 33–44 fps). Re-packed when the camera has moved r/4.
+   */
+  compactNearTrees(camX: number, camZ: number, r: number): void {
+    const x = camX - this.origin[0], z = camZ - this.origin[1], a = this.nearAt
+    if (a.r === r && Math.hypot(x - a.x, z - a.z) < r * 0.25) return
+    a.x = x; a.z = z; a.r = r
+    const r2 = (r * 1.25) ** 2 // + the move allowance: a tree is in the buffers before it enters the band
+    for (const { m } of this.species) {
+      const { matrix, color, count } = m.all
+      const mesh = m.levels[0]
+      const om = mesh.instanceMatrix.array as Float32Array, oc = mesh.instanceColor!.array as Float32Array
+      let n = 0
+      for (let k = 0; k < count; k++) {
+        const dx = matrix[k * 16 + 12] - x, dz = matrix[k * 16 + 14] - z
+        if (dx * dx + dz * dz > r2) continue
+        om.set(matrix.subarray(k * 16, k * 16 + 16), n * 16)
+        oc.set(color.subarray(k * 3, k * 3 + 3), n * 3)
+        n++
+      }
+      mesh.instanceMatrix.addUpdateRange(0, n * 16)
+      mesh.instanceMatrix.needsUpdate = true
+      mesh.instanceColor!.addUpdateRange(0, n * 3)
+      mesh.instanceColor!.needsUpdate = true
+      // (the bounding sphere stays the whole chunk's: a conservative cull for the shadow pass)
+      for (const l of m.levels) l.count = n
+    }
   }
 
   private applyTrees(): void {

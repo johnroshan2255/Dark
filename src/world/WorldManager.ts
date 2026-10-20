@@ -287,6 +287,7 @@ export class WorldManager {
       b.mid = inRing && l1 < im && dMax > l1 && dMin < im + W // no mid stage when the near mesh hands straight to the impostor
       b.imp = inRing && dMax > im
       c.setTreeBands(b)
+      if (b.near) c.compactNearTrees(cam.x, cam.z, l1 + W)
     }
     // (the far forest's worker builds the road network out there too: it waits until the 5 × 5 chunks round the
     // player exist — at a fresh start it competed with the chunk workers for the CPU)
