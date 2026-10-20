@@ -4,7 +4,35 @@ import * as THREE from 'three'
  * Shared uniform OBJECTS. Materials reference these directly (onBeforeCompile / ShaderMaterial),
  * so one write per frame updates every program. See skills/shaders.
  */
+/**
+ * VALUE-NOISE LATTICE (stylize st_noise): Hoskins' hash12 at each of 256² integer points, R16F, repeat-wrapped,
+ * linear-filtered. Sampled at (cell + smoothstep(fract) + 0.5) / 256, ONE bilinear fetch returns exactly the
+ * smoothstep blend of the 4 corner hashes that st_noise used to compute with 4 hashes (~40 ALU) — 10–15 calls per
+ * ground pixel. Only change: the pattern repeats every 256 noise cells (≥ 850 m for the big ground patches).
+ */
+function noiseLattice(): THREE.DataTexture {
+  const N = 256
+  const data = new Uint16Array(N * N)
+  const fr = (x: number) => x - Math.floor(x)
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      let a = fr(x * 0.1031), b = fr(y * 0.1031), c = fr(x * 0.1031)
+      const d = a * (b + 33.33) + b * (c + 33.33) + c * (a + 33.33)
+      a += d; b += d; c += d
+      data[y * N + x] = THREE.DataUtils.toHalfFloat(fr((a + b) * c))
+    }
+  }
+  const t = new THREE.DataTexture(data, N, N, THREE.RedFormat, THREE.HalfFloatType)
+  t.wrapS = t.wrapT = THREE.RepeatWrapping
+  t.magFilter = t.minFilter = THREE.LinearFilter
+  t.generateMipmaps = false
+  t.needsUpdate = true
+  return t
+}
+
 export const globalUniforms = {
+  /** st_noise lattice (see noiseLattice). */
+  uNoiseTex: { value: noiseLattice() },
   uTime: { value: 0 },
   /** Wind direction (xz) × strength. */
   uWind: { value: new THREE.Vector2(0.9, 0.35) },

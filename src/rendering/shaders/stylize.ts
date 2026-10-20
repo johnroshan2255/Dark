@@ -165,10 +165,13 @@ const NOISE = /* glsl */ `
 // Sin-free hash (Hoskins' hash12): ~8 ALU, no transcendental, and stable on mediump/phone GPUs where
 // fract(sin(x)·43758) loses its bits for large x. Every procedural pattern below goes through it.
 float st_hash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+// Value noise = the smoothstep blend of the 4 lattice hashes, read as ONE bilinear fetch of the pre-hashed lattice
+// (uniforms.ts noiseLattice): the coordinate is warped so the hardware's linear weights are the smoothstep ones.
+uniform sampler2D uNoiseTex;
 float st_noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(st_hash(i), st_hash(i + vec2(1.0, 0.0)), f.x), mix(st_hash(i + vec2(0.0, 1.0)), st_hash(i + vec2(1.0, 1.0)), f.x), f.y);
+  return textureLod(uNoiseTex, (mod(i, 256.0) + f + 0.5) / 256.0, 0.0).r;
 }
 `
 
@@ -223,6 +226,7 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       uTrailRect: u.uTrailRect,
       uTrailOn: u.uTrailOn,
       uSurfaceDetail: u.uSurfaceDetail,
+      uNoiseTex: u.uNoiseTex,
       uBiomeActive: u.uBiomeActive,
       uTreeShade: u.uTreeShade,
       uTreeShadeRect: u.uTreeShadeRect,
@@ -244,6 +248,9 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
         { vec4 wp4 = vec4(transformed, 1.0);
           #ifdef USE_INSTANCING
             wp4 = instanceMatrix * wp4;
+          #endif
+          #ifdef USE_BATCHING
+            wp4 = batchingMatrix * wp4;
           #endif
           vWPos = (modelMatrix * wp4).xyz; }
         ${o.cheapFog ? 'vFogSky = vec3(-1.0);' : 'vFogSky = skyColor(normalize((vec4(normalize(mvPosition.xyz), 0.0) * viewMatrix).xyz), false);'}`,

@@ -9,11 +9,13 @@ import type { FixedMap } from './FixedMap'
 
 /**
  * A fixed map's SET PIECES (its props.json placements that are not nature): camps, the stunt park, race-track gates,
- * cabins, the ranch, ramps, bridges, the dock, the ski lift, and Bruno Simon's lanterns / pole lights / benches /
- * crates / bricks (MIT, maps/<id>/bruno). Nature (trees, rocks, bushes, grass, cacti) is NOT drawn from the map: the
- * chunk scatter grows Dark's own where the map's trees were (FixedMap.forestDensity).
+ * cabins, the ranch, ramps, bridges, the dock, the ski lift, and Bruno Simon's crates / bricks (MIT, maps/<id>/bruno).
+ * Nature (trees, rocks, bushes, grass, cacti) is NOT drawn from the map: the chunk scatter grows Dark's own where
+ * the map's trees were (FixedMap.forestDensity).
  *
- * Drawing: one InstancedMesh per prop type per 200 m TILE (frustum-culled by its bounds), hidden past DRAW_DIST.
+ * Drawing: TWO draws for every set piece — one BatchedMesh per material (the map's vertex-coloured props, Bruno's
+ * palette props), every placement an instance that three frustum-culls on its own (multi-draw); instances past
+ * DRAW_DIST are hidden. (Was one InstancedMesh per type per 200 m tile: ~67 draws on screen, 2026-10-20.)
  * Physics: a fixed body per tile while the player is within PHYS_IN of it (released past PHYS_OUT) — boxes for
  * buildings / gear, cylinders for posts, hulls for ramps, the exact `<type>_col` trimesh for the loop, quarter-pipes,
  * wave ramp, bridges and dock (members of StaticMesh too, so the car's exact body meets them, like rock formations).
@@ -25,8 +27,10 @@ const PHYS_IN = 140
 const PHYS_OUT = 220
 /** Bruno's models are made for a ~2.7 m car; the map is scaled for a 4.5 m jeep (as in The-Land). */
 const BRUNO_SCALE = 1.5
+/** (Lanterns, pole lights and benches are left out: 2026-10-20, "remove the lanterns and chairs" — their placements
+ *  are skipped like any type without a shape.) */
 const BRUNO: Record<string, string> = {
-  b_lantern: 'lanterns.glb', b_pole: 'poleLights.glb', b_bench: 'benches.glb', b_crate: 'explosiveCrates.glb', b_brick: 'bricks.glb',
+  b_crate: 'explosiveCrates.glb', b_brick: 'bricks.glb',
 }
 
 type Solid = 'trunk' | 'box' | 'hull' | 'mesh' | 'arch' | 'none'
@@ -43,11 +47,14 @@ const SOLID: Record<string, Solid> = {
 const ARCH = { x: 6.5, hx: 1.6, hy: 5, hz: 1.7 }
 
 interface Shape { geo: THREE.BufferGeometry; col?: THREE.BufferGeometry; half: THREE.Vector3; center: THREE.Vector3; points: Float32Array }
-interface Tile { cx: number; cz: number; meshes: THREE.InstancedMesh[]; items: [string, number[]][]; body: RAPIER.RigidBody | null }
+interface Tile { cx: number; cz: number; items: [string, number[]][]; body: RAPIER.RigidBody | null }
+/** One batch per material: the mesh, and each instance's id + x, z (for the draw-distance test). */
+interface Batch { mesh: THREE.BatchedMesh; ids: number[]; xz: number[] }
 
 export class MapProps {
   readonly root = new THREE.Group()
   private readonly tiles: Tile[] = []
+  private readonly batches: Batch[] = []
   private shapes = new Map<string, Shape>()
   private ready = false
   private frame = 0
@@ -98,43 +105,63 @@ export class MapProps {
           const ci = Math.floor(arr[o] / TILE), cj = Math.floor(arr[o + 2] / TILE)
           const key = `${ci},${cj}`
           let t = byTile.get(key)
-          if (!t) byTile.set(key, (t = { cx: (ci + 0.5) * TILE, cz: (cj + 0.5) * TILE, meshes: [], items: [], body: null }))
+          if (!t) byTile.set(key, (t = { cx: (ci + 0.5) * TILE, cz: (cj + 0.5) * TILE, items: [], body: null }))
           let it = t.items.find((i) => i[0] === type)
           if (!it) t.items.push((it = [type, []]))
           it[1].push(arr[o], arr[o + 1] + yOff, arr[o + 2], arr[o + 3], arr[o + 4])
         }
       }
     }
+    for (const t of byTile.values()) this.tiles.push(t)
+    // Batches: every type of one material in one BatchedMesh (its geometries need the same attributes + indexing).
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0)
-    for (const t of byTile.values()) {
-      for (const [type, list] of t.items) {
-        const sh = this.shapes.get(type)!
-        const n = list.length / 5
-        const mesh = new THREE.InstancedMesh(sh.geo, type.startsWith('b_') ? brunoMat : ours, n)
-        for (let k = 0; k < n; k++) {
-          p.set(list[k * 5], list[k * 5 + 1], list[k * 5 + 2])
-          q.setFromAxisAngle(up, list[k * 5 + 3])
-          s.setScalar(list[k * 5 + 4])
-          mesh.setMatrixAt(k, m.compose(p, q, s))
+    for (const [bruno, mat] of [[false, ours], [true, brunoMat]] as const) {
+      const types = [...this.shapes.keys()].filter((t) => t.startsWith('b_') === bruno)
+      const geos = new Map(types.map((t) => [t, batchable(this.shapes.get(t)!.geo, bruno)] as const))
+      let instances = 0, verts = 0, indices = 0
+      for (const t of this.tiles) for (const [type, list] of t.items) if (geos.has(type)) instances += list.length / 5
+      if (!instances) continue
+      for (const g of geos.values()) (verts += g.getAttribute('position').count), (indices += g.index?.count ?? 0)
+      const mesh = new THREE.BatchedMesh(instances, verts, indices, mat)
+      const geoId = new Map([...geos].map(([t, g]) => [t, mesh.addGeometry(g)] as const))
+      const b: Batch = { mesh, ids: [], xz: [] }
+      for (const t of this.tiles) {
+        for (const [type, list] of t.items) {
+          const gid = geoId.get(type)
+          if (gid === undefined) continue
+          for (let k = 0; k < list.length; k += 5) {
+            p.set(list[k], list[k + 1], list[k + 2])
+            q.setFromAxisAngle(up, list[k + 3])
+            s.setScalar(list[k + 4])
+            const id = mesh.addInstance(gid)
+            mesh.setMatrixAt(id, m.compose(p, q, s))
+            mesh.setVisibleAt(id, false)
+            b.ids.push(id)
+            b.xz.push(list[k], list[k + 2])
+          }
         }
-        mesh.instanceMatrix.needsUpdate = true
-        mesh.computeBoundingSphere()
-        mesh.castShadow = mesh.receiveShadow = true
-        mesh.visible = false
-        t.meshes.push(mesh)
-        this.root.add(mesh)
       }
-      this.tiles.push(t)
+      mesh.perObjectFrustumCulled = true
+      mesh.sortObjects = true // opaque front-to-back: the near props hide what's behind them (early depth reject)
+      mesh.castShadow = mesh.receiveShadow = true
+      mesh.name = bruno ? 'map-props.bruno' : 'map-props.set'
+      this.batches.push(b)
+      this.root.add(mesh)
     }
   }
 
   /** Per frame: tile visibility (every 8th frame) and colliders near the player. */
   update(focus: THREE.Vector3): void {
     if (!this.ready || this.frame++ % 8) return
+    const r2 = DRAW_DIST * DRAW_DIST
+    for (const b of this.batches) {
+      for (let k = 0; k < b.ids.length; k++) {
+        const dx = b.xz[k * 2] - focus.x, dz = b.xz[k * 2 + 1] - focus.z
+        b.mesh.setVisibleAt(b.ids[k], dx * dx + dz * dz < r2)
+      }
+    }
     for (const t of this.tiles) {
       const d = Math.hypot(t.cx - focus.x, t.cz - focus.z) - TILE * 0.71
-      const show = d < DRAW_DIST
-      for (const mesh of t.meshes) mesh.visible = show
       if (!t.body && d < PHYS_IN) t.body = this.colliders(t)
       else if (t.body && d > PHYS_OUT) {
         this.physics.world.removeRigidBody(t.body)
@@ -179,12 +206,34 @@ export class MapProps {
   }
 
   dispose(): void {
-    for (const t of this.tiles) {
-      for (const mesh of t.meshes) mesh.dispose()
-      if (t.body) this.physics.world.removeRigidBody(t.body)
-    }
+    for (const b of this.batches) b.mesh.dispose()
+    this.batches.length = 0
+    for (const t of this.tiles) if (t.body) this.physics.world.removeRigidBody(t.body)
     this.tiles.length = 0
   }
+}
+
+/** A copy of a prop geometry in its batch's layout: Bruno's position / normal / uv, non-indexed; ours position /
+ *  normal / float RGB colour, indexed (BatchedMesh needs one attribute set and one indexing per batch). */
+function batchable(src: THREE.BufferGeometry, bruno: boolean): THREE.BufferGeometry {
+  const keep = bruno ? ['position', 'normal', 'uv'] : ['position', 'normal', 'color']
+  let g = new THREE.BufferGeometry()
+  for (const a of keep) {
+    const attr = src.getAttribute(a)
+    if (!attr) throw new Error(`map prop geometry without ${a}`)
+    const n = attr.count, size = a === 'uv' ? 2 : 3
+    const out = new Float32Array(n * size)
+    for (let k = 0; k < n; k++) {
+      out[k * size] = attr.getX(k)
+      out[k * size + 1] = attr.getY(k)
+      if (size === 3) out[k * size + 2] = attr.getZ(k)
+    }
+    g.setAttribute(a, new THREE.BufferAttribute(out, size))
+  }
+  if (src.index) g.setIndex(src.index.clone())
+  if (bruno && g.index) g = g.toNonIndexed()
+  if (!bruno && !g.index) g.setIndex(Array.from({ length: g.getAttribute('position').count }, (_, k) => k))
+  return g
 }
 
 /** Bruno's model file → one geometry: its first instance (all its meshes merged), base centred on the origin, ×1.5. */
