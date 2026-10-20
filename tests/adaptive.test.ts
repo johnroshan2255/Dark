@@ -86,7 +86,8 @@ function run(opts: { seconds: number; frameMs: (scale: number, tier: number) => 
   let f: Feature | null
   while ((f = nextHoldStep(base, steps))) steps.push(f)
   const floor = heldLevels(base, steps)
-  check('hold 60: costliest first, effects lowered evenly', steps[0] === 'reflections' && steps.slice(0, 4).join() === 'reflections,ao,shadows,volumetrics', steps.slice(0, 8).join(' → '))
+  // (ULTRA's shadows are the image level 'high' since 2026-10-20: the three 'ultra' features go first, then the 'high' ones)
+  check('hold 60: costliest first, effects lowered evenly', steps[0] === 'reflections' && steps.slice(0, 3).join() === 'reflections,ao,volumetrics' && steps.slice(3, 7).includes('shadows'), steps.slice(0, 8).join(' → '))
   // The grass is the same field on every preset: it goes only after the effects, trees & bushes and view distance.
   const firstGrass = steps.indexOf('grass')
   check('hold 60: grass lowered last (before sun shadows off)', firstGrass > steps.lastIndexOf('view') && firstGrass > steps.lastIndexOf('vegetation') && firstGrass > steps.lastIndexOf('effects'), steps.join(' → '))

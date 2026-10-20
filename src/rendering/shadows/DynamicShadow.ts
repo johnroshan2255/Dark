@@ -35,8 +35,10 @@ export class DynamicShadow {
   /**
    * Render the dynamic casters' depth from the key light (toward `sunDir`), centred on `focus`.
    * @param strength 0 = off this frame (night / cave): the receivers skip the lookup.
+   * @param skip top-level subtrees with no dynamic casters (the streamed world): hidden for this pass and left out
+   *   of its matrix update, so three neither re-updates nor projects every chunk, tree and prop to find ~18 meshes.
    */
-  render(renderer: THREE.WebGLRenderer, scene: THREE.Scene, focus: THREE.Vector3, sunDir: THREE.Vector3, strength: number): void {
+  render(renderer: THREE.WebGLRenderer, scene: THREE.Scene, focus: THREE.Vector3, sunDir: THREE.Vector3, strength: number, skip: readonly THREE.Object3D[] = []): void {
     const on = this.enabled && strength > 0.02
     globalUniforms.uDynShadowOn.value = on ? strength : 0
     if (!on) return
@@ -59,7 +61,15 @@ export class DynamicShadow {
     renderer.setRenderTarget(this.target)
     renderer.clear(false, true, false)
     scene.overrideMaterial = this.depthMat
+    for (let k = 0; k < skip.length; k++) (_vis[k] = skip[k].visible), (skip[k].visible = false)
+    // render() would also re-run scene.updateMatrixWorld() over the WHOLE graph (visible or not): update only the
+    // subtrees drawn here; the main pass updates the rest this frame anyway.
+    const prevMW = scene.matrixWorldAutoUpdate
+    scene.matrixWorldAutoUpdate = false
+    for (const c of scene.children) if (!skip.includes(c)) c.updateMatrixWorld()
     renderer.render(scene, this.cam)
+    scene.matrixWorldAutoUpdate = prevMW
+    for (let k = 0; k < skip.length; k++) skip[k].visible = _vis[k]
     scene.overrideMaterial = prevOverride
     renderer.setRenderTarget(prevRT)
     renderer.autoClear = prevAuto
@@ -86,5 +96,6 @@ export function dynamicCaster(root: THREE.Object3D, on: boolean): void {
   })
 }
 
+const _vis: boolean[] = []
 const _f = new THREE.Vector3(), _r = new THREE.Vector3(), _u = new THREE.Vector3(), _c = new THREE.Vector3()
 const _x = new THREE.Vector3(1, 0, 0), _y = new THREE.Vector3(0, 1, 0)

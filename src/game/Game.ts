@@ -166,6 +166,11 @@ export class Game {
   /** Last adaptive decision, for the HUD. */
   lastQualityChange = 'none'
   private setDpr: ((dpr: number) => void) | null = null
+  /** Scene subtrees without dynamic shadow casters (DynamicShadow skips them). */
+  private get dynSkip(): readonly THREE.Object3D[] {
+    return (this._dynSkip ??= [this.world.root])
+  }
+  private _dynSkip: THREE.Object3D[] | null = null
   private readonly opts: GameOptions
   /** Quality as saved by the player (a ?tier= URL override is never persisted). */
   private savedQuality: Settings['quality']
@@ -253,6 +258,7 @@ export class Game {
       cullingFrozen: false,
       flashlight: this.lighting.flashlightOn,
       tier: this.quality.name,
+      dpr: 1,
       adaptive: this.adaptive.enabled,
       touch: isTouchDevice(),
       settings: this.settings,
@@ -598,7 +604,7 @@ export class Game {
   applyQuality(name: TierName, reason: string): void {
     // The preset + the player's per-feature overrides (Settings → Graphics).
     if (this.quality.name !== name) this.held = [] // a different preset starts from its own levels
-    let q = resolveQuality(name, this.mobileGfx(name))
+    let q = resolveQuality(name, this.settings.gfx)
     this.presetFeatures = q.features // the preset + player overrides, before Hold-60 reductions (cached: per-frame checks)
     if (this.held.length) q = resolveQuality(name, heldLevels(q.features, this.held)) // Hold 60: runtime reductions
     this.store.set({ held: this.heldSummary(name) })
@@ -630,8 +636,8 @@ export class Game {
     this.reflection.skyline = q.reflectionSkyline
     this.post.setAO(q.ao.scale, q.ao.samples, q.ao.radius)
     this.horizon.configure(q.horizon)
-    // Phones: the scene at ≤ 1 MP on every preset. ULTRA's desktop budget (4.2 MP) let a 3.25× phone shade 2.3 MP —
-    // Mali-G720, 2026-10-20: 23–40 fps with every feature already down; the same features hold 60 at ~0.5 MP.
+    // Phones: the scene at ≤ 1.5 MP on every preset (2× canvas at full scale). ULTRA's desktop budget (4.2 MP) let a
+    // 3.25× phone shade 2.3 MP (Mali-G720, 2026-10-20: 23–40 fps with every feature already down).
     this.post.setPixelBudget(this.device?.mobile ? Math.min(q.pixelBudget, MOBILE_PIXEL_BUDGET) : q.pixelBudget)
     // A new preset starts at its own scale (or the player's fixed one); a Hold 60 feature step (same preset) keeps the current one.
     const samePreset = this.quality.name === name && reason.startsWith('hold 60')
@@ -684,6 +690,7 @@ export class Game {
     // shaded by the grading / FXAA pass (3.25× = 2.6× the pixels of 2×).
     if (this.device?.mobile && this.holdMode) dpr = Math.min(dpr, MOBILE_MAX_DPR)
     this.setDpr?.(dpr)
+    this.store.set({ dpr })
     // Real dynamic shadow for the character where the sun map re-renders every frame; blob otherwise.
     const dyn = q.objectShadows && (q.shadows ? q.shadowCache : q.imageShadows) // (it casts into the dynamic map — applyCasters)
     const realShadow = (dyn || (q.shadows && q.objectShadows && q.sunShadowEvery === 1)) && ART.style !== 'storybook'
@@ -785,17 +792,6 @@ export class Game {
   }
   /** Feature levels of the current preset + overrides (no Hold-60 reductions), set by applyQuality. */
   private presetFeatures = QUALITY.medium.features
-  /**
-   * The player's feature overrides, plus — on phones, where the player hasn't chosen shadows — IMAGE shadows on
-   * ULTRA instead of the 4096² sun map (2026-10-20, measured driving the island forest at the phone's scene size:
-   * −0.55 ms/frame on an M4, ~10 %; the map also re-rendered ~437k triangles twice a second, and switching it was
-   * Hold 60's worst freeze). The look barely changes: the image tree shadows + the car's real shadow stay.
-   */
-  private mobileGfx(name: TierName): Settings['gfx'] {
-    const g = this.settings.gfx
-    if (!this.device?.mobile || name !== 'ultra' || (g.shadows && g.shadows !== 'auto')) return g
-    return { ...g, shadows: 'high' }
-  }
   /** Highest scene scale adaptive may climb to: the preset's, or the player's fixed resolution (Hold 60's ceiling). */
   private maxRenderScale(q: QualitySettings): number {
     const r = this.settings.resolution
@@ -1566,7 +1562,7 @@ export class Game {
     this.reflection.render(renderer, scene, camera)
     this.sky.prepare(renderer, camera, this.post.target.width, this.post.target.height, this.quality.skyScale)
     this.water.setReflection(this.reflection.target.texture, this.reflection.textureMatrix, this.reflection.valid)
-    this.dynShadow.render(renderer, scene, this.player.renderPosition, this.lighting.keyDir, THREE.MathUtils.clamp(this.lighting.sun.intensity / 1.2, 0, 1) * this.lighting.sun.shadow.intensity * (1 - this.caves.inside))
+    this.dynShadow.render(renderer, scene, this.player.renderPosition, this.lighting.keyDir, THREE.MathUtils.clamp(this.lighting.sun.intensity / 1.2, 0, 1) * this.lighting.sun.shadow.intensity * (1 - this.caves.inside), this.dynSkip)
     this.post.render(renderer, scene, camera)
     perf?.gpu.end()
     if (perf) {
@@ -1628,5 +1624,5 @@ export class Game {
 
 const _pb = new THREE.Box3(), _up = new THREE.Vector3()
 /** Phones: scene pixels and canvas DPR caps (see applyQuality / applyOverrides). */
-const MOBILE_PIXEL_BUDGET = 1.0e6
+const MOBILE_PIXEL_BUDGET = 1.5e6 // a landscape phone at 2× (≈ 1.3 MP) renders at full scale
 const MOBILE_MAX_DPR = 2

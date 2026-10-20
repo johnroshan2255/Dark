@@ -21,6 +21,8 @@ export interface GameStateShape {
   cullingFrozen: boolean
   flashlight: boolean
   tier: TierName
+  /** Canvas device-pixel-ratio the game chose (Game.applyOverrides) — the Canvas `dpr` prop (see app/Canvas.tsx). */
+  dpr: number
   adaptive: boolean
   /** Touch controls shown (coarse pointer detected, or a touch happened). */
   touch: boolean

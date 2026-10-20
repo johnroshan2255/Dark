@@ -181,14 +181,16 @@ export const FEATURE_TABLE: { [F in Feature]: Partial<Record<Level, FeatureField
     low: { ao: { scale: 0.5, samples: 6, radius: 0.8 } },
     medium: { ao: { scale: 0.5, samples: 10, radius: 1.0 } },
     high: { ao: { scale: 0.5, samples: 14, radius: 1.2 } },
-    ultra: { ao: { scale: 0.75, samples: 14, radius: 1.4 } }, // full res cost 3.1 ms @1080p (M4) for little gain
+    // ½-res like HIGH, ULTRA's wider radius (2026-10-20: 0.75 → 0.5 looked identical on the island at 1600×720 and,
+    // with the volumetrics' ¼ res, saved 4.0–4.7 ms of a GPU-bound 23 ms frame — M4 at 4× the phone's pixels)
+    ultra: { ao: { scale: 0.5, samples: 14, radius: 1.4 } },
   },
   volumetrics: {
     off: { godRays: { divisor: 6, samples: 0, volumeSteps: 0 }, fog: { banks: false } },
     low: { godRays: { divisor: 6, samples: 12, volumeSteps: 8 }, fog: { banks: false } },
     medium: { godRays: { divisor: 4, samples: 20, volumeSteps: 14 }, fog: { banks: true } },
     high: { godRays: { divisor: 4, samples: 24, volumeSteps: 16 }, fog: { banks: true } },
-    ultra: { godRays: { divisor: 3, samples: 32, volumeSteps: 24 }, fog: { banks: true } },
+    ultra: { godRays: { divisor: 4, samples: 32, volumeSteps: 24 }, fog: { banks: true } }, // ¼ res (was ⅓: same image, see AO ULTRA)
   },
   view: {
     // LOW keeps the 2-chunk ring (draws, streaming CPU) but the far look of the tiers above: the 2048² tree atlas with
@@ -285,7 +287,10 @@ export const PRESETS: Record<TierName, Preset> = {
       maxDpr: 2, renderScale: { min: 0.8, max: 1, start: 1 }, aa: 'fxaa', sharpen: 0.22, paint: { stride: 1.8, bloom: 0.45 },
       buildPerFrame: 3, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 420, rain: 1 }, tyreMarks: { segments: 6144, life: 180, range: 110 }, pixelBudget: 4.2e6, skyScale: 1,
     },
-    features: { shadows: 'ultra', reflections: 'ultra', ao: 'ultra', volumetrics: 'ultra', grass: 'ultra', effects: 'high', vegetation: 'high', view: 'ultra' },
+    // Shadows 'high' = IMAGE tree shadows + the real car / player shadow, on every device (2026-10-20, "even in desktop
+    // ultra use image shadows"): measured −0.55 ms/frame at the phone's size, no 437k-triangle map redraws twice a
+    // second while driving; the look barely changes. The 4096² sun map stays selectable (Settings → Shadows → Ultra).
+    features: { shadows: 'high', reflections: 'ultra', ao: 'ultra', volumetrics: 'ultra', grass: 'ultra', effects: 'high', vegetation: 'high', view: 'ultra' },
   },
 }
 
