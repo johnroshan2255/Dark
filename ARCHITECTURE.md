@@ -277,7 +277,11 @@ empty, so the pipeline downstream (chunks, road ribbon, scatter, grass, physics,
 (camps, stunt park, cabins, ramps, bridges, Bruno Simon's props) are `world/map/MapProps.ts`: instanced per 200 m
 tile, fixed colliders within 140 m (trimeshes in StaticMesh). Spawn / respawn / new-car points come from the map's
 roads (`Game.roadPoint`). A map plays on ULTRA with Hold 60 unless the player chose a quality. The Island is exported
-by The-Land (`tools/blender/export_dark_map.py`). Cost on the island (ULTRA, M4, driving): 60 fps at 1080p and with
+by The-Land (`tools/blender/export_dark_map.py`); its DESERT was then rebuilt in place by
+`scripts/blender/island/desert.py` (2026-10-21: layered mesas, buttes, dunes, a slot canyon, three new roads — re-run
+it from the pre-rebuild files, see its header). `FixedMap.beach()` (low sand with the sea nearby) keeps the beach open:
+on fixed maps the scatter grows ~10 % of the trees and ~4 % of the rocks there (no oasis palm groves), the desert ~30 %
+of its rocks with boulders ≤ ~4.5 m. Cost on the island (ULTRA, M4, driving): 60 fps at 1080p and with
 a 4 × CPU throttle at phone resolution; ~150–190 draws, 0.35–0.65 M tris.
 
 ## 4. Rendering

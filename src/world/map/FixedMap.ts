@@ -31,7 +31,7 @@ export const MAPS: MapInfo[] = [
   {
     id: 'island',
     name: 'The Island',
-    blurb: 'Snow peaks and a frozen lake, a red-rock desert with a stunt park, forest trails, a canyon with waterfalls and a sunny coast.',
+    blurb: 'Snow peaks and a frozen lake, red-rock mesas with a cliff road, a slot canyon and dune switchbacks, a stunt park, forest trails, a canyon with waterfalls and a sunny coast.',
     areaKm2: 5.76,
     regions: ['Forest', 'Desert', 'Snowfield', 'Coast', 'Canyon'],
     preview: '/maps/island/preview.png',
@@ -63,7 +63,13 @@ const ROAD_STEP = 8
 /** The map's roads are drawn for a 4.5 m jeep; Dark's ribbon / ruts look right a bit narrower. */
 const ROAD_WIDTH_SCALE = 0.75
 
-const TREE_TYPES = ['pine', 'pine_snow', 'oak', 'birch', 'cherry', 'palm']
+/** Sea-proximity grid cell (m) and reach (m) for beach(); sand under BEACH_TOP m that close to the sea is beach. */
+const SEA_CELL = 32
+const SEA_NEAR_R = 224
+const BEACH_TOP = 30
+const _bm: [number, number] = [0, 0]
+
+const TREE_TYPES =['pine', 'pine_snow', 'oak', 'birch', 'cherry', 'palm']
 /** Nature placements (Dark grows its own): every other type is a SET PIECE (MapProps) and clears the forest round it. */
 const NATURE = new Set([...TREE_TYPES, 'rock', 'rock_snow', 'rock_red', 'bush', 'grass_tuft', 'cactus', 'log', 'stump', 'boulder', 'dead_tree'])
 /** Forest-free radius (m) round a set piece; big ones more. */
@@ -94,6 +100,8 @@ export class FixedMap {
   private readonly bstep: number
   private readonly forest: Float32Array
   private readonly fn: number
+  private readonly seaNear: Float32Array
+  private readonly sn: number
 
   constructor(meta: MapJson, heights: ArrayBuffer, biome: ArrayBuffer, props: MapProps) {
     this.id = meta.id
@@ -150,6 +158,25 @@ export class FixedMap {
         }
       }
     }
+    // Sea nearby: the share of sea cells (h < 0) within ~SEA_NEAR_R of each SEA_CELL cell (a box sum over a coarse
+    // grid) — beach() tells the low sand by the sea from the desert inland (both are the map's desert biome).
+    this.sn = Math.ceil((2 * this.half) / SEA_CELL)
+    const sea = new Float32Array(this.sn * this.sn)
+    for (let j = 0; j < this.sn; j++) for (let i = 0; i < this.sn; i++) sea[j * this.sn + i] = this.height(-this.half + (i + 0.5) * SEA_CELL, -this.half + (j + 0.5) * SEA_CELL) < 0 ? 1 : 0
+    this.seaNear = new Float32Array(sea.length)
+    const R = Math.round(SEA_NEAR_R / SEA_CELL)
+    for (let j = 0; j < this.sn; j++) {
+      for (let i = 0; i < this.sn; i++) {
+        let s = 0, c = 0
+        for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
+          const ii = i + di, jj = j + dj
+          c++
+          if (ii < 0 || jj < 0 || ii >= this.sn || jj >= this.sn) s++ // past the edge: the open sea
+          else s += sea[jj * this.sn + ii]
+        }
+        this.seaNear[j * this.sn + i] = s / c
+      }
+    }
     this.roads = meta.roads.map((r) => toNetRoad(r, meta.heightOffset))
   }
 
@@ -183,6 +210,17 @@ export class FixedMap {
     const i = Math.floor((x + this.half) / FOREST_CELL), j = Math.floor((z + this.half) / FOREST_CELL)
     if (i < 0 || j < 0 || i >= this.fn || j >= this.fn) return 0
     return this.forest[j * this.fn + i]
+  }
+
+  /** BEACH 0..1: low sand by the sea (desert biome under BEACH_TOP m with sea nearby) — the scatter keeps it open
+   *  (few rocks, a few palms). The desert inland and the cliff-top desert by the sea are not beach. */
+  beach(x: number, z: number, h: number): number {
+    if (h > BEACH_TOP) return 0
+    const i = Math.floor((x + this.half) / SEA_CELL), j = Math.floor((z + this.half) / SEA_CELL)
+    const sea = i < 0 || j < 0 || i >= this.sn || j >= this.sn ? 1 : this.seaNear[j * this.sn + i]
+    const near = Math.min(1, Math.max(0, (sea - 0.03) / 0.12))
+    const low = Math.min(1, (BEACH_TOP - h) / 10)
+    return near * low * this.biome(x, z, _bm)[0]
   }
 
   /** Is (x, z) inside the playable map (with a margin, m)? */

@@ -477,6 +477,11 @@ export class WorldFields {
    * Forest density 0..1: dense belts with clearings. Deserts are nearly bare, snowfields sparse, and nothing
    * grows above the treeline (~95–125 m) — pass the terrain height when known.
    */
+  /** Fixed maps: beach 0..1 (low sand by the sea — FixedMap.beach); the endless world has none. */
+  beach(x: number, z: number, h: number): number {
+    return this.map ? this.map.beach(x, z, h) : 0
+  }
+
   forestDensity(x: number, z: number, h?: number): number {
     if (this.map) return this.map.forestDensity(x, z) * (h !== undefined && h > 330 ? 0 : 1)
     // GROVES, not a forest wall: only the top third of the noise grows trees (dense at the heart, thinning at the

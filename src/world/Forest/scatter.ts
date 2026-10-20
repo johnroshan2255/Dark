@@ -110,6 +110,7 @@ export function oasisAt(fields: WorldFields, wx: number, wz: number, h: number):
 
 function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: number): number {
   if (oasisAt(fields, wx, wz, h) > 0.2) return r < 0.85 ? TreeSpecies.Palm : TreeSpecies.Cactus
+  if (fields.beach(wx, wz, h) > 0.4) return TreeSpecies.Palm // fixed maps: the few beach trees are palms
   const sp = pickBaseSpecies(fields, wx, wz, r, h)
   return sp === TreeSpecies.Birch ? broadleafStand(fields, wx, wz) : sp
 }
@@ -180,8 +181,11 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
       const sand = fields.biome(wx, wz, _bw, h)[0]
       const clump = Math.min(1, Math.max(0, (fields.colorVariation(wx * 0.5 + 91, wz * 0.5 - 37) - 0.62) * 5))
       // Trees: 60 % of the grove density (the player asked for fewer — more open meadow between thinner groves).
-      const density = Math.max(fields.forestDensity(wx, wz, h) * TREE_SHARE, sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - clearRoad) / 45) * (fields.palette === 1 ? 0.55 : 1) // overland: big trees, spaced
-      const oas = oasisAt(fields, wx, wz, h)
+      // Fixed maps: the BEACH stays open — a tenth of the trees, and its low sand no longer counts as oasis palm
+      // groves (2026-10-21, "remove lot of rocks and trees from beach area").
+      const beach = fields.beach(wx, wz, h)
+      const density = Math.max(fields.forestDensity(wx, wz, h) * TREE_SHARE, sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - clearRoad) / 45) * (fields.palette === 1 ? 0.55 : 1) * (1 - 0.9 * beach) // overland: big trees, spaced
+      const oas = oasisAt(fields, wx, wz, h) * (1 - 0.9 * beach)
       if (oas > 0.2) { // palm groves along the oasis water
         const dp = 0.45 * oas
         return r > dp ? 0 : 0.85 + (r / dp) * 0.4
@@ -201,10 +205,13 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     // Bright desert (their canyon floors): twice the stones — RUBBLE everywhere — and the biggest ones truck-sized
     // (up to ~7 m), so you drive between boulders.
     const oth = fields.palette === 0 ? w[0] : 0
-    const p = 0.14 * (1 + w[0] * 1.2 + w[1] * 0.5) * (1 + 1.2 * oth) // sparse (≈ 9 per chunk in the forest); deserts and snowfields stonier
+    // Fixed maps (2026-10-21, "it has a lot of rocks"): the sand keeps ~30 % of its stones, the beach ~4 %, and the
+    // truck-sized boulders stay under ~4.5 m (the mesas' cliffs carry the big rock now).
+    const few = fields.map ? 1 - w[0] * (0.7 + 0.26 * fields.beach(wx, wz, h)) : 1
+    const p = 0.14 * (1 + w[0] * 1.2 + w[1] * 0.5) * (1 + 1.2 * oth) * few // sparse (≈ 9 per chunk in the forest); deserts and snowfields stonier
     if (r >= p) return 0
     const t = r / p
-    const scale = 0.4 + t * t * t * (2.2 + 4.6 * oth) // mostly small stones, a rare 2.6 m boulder (bright desert: up to ~7 m)
+    const scale = 0.4 + t * t * t * (2.2 + (fields.map ? 2 : 4.6) * oth) // mostly small stones, a rare 2.6 m boulder (bright desert: up to ~7 m)
     // The main road and its shoulders stay clear; big boulders further out (footprint ≈ 1.4 m × scale).
     if (fields.roadDistance(wx, wz) < WorldFields.ROAD_HALF_WIDTH + 1.5 + scale * 1.5) return 0
     return scale
@@ -226,7 +233,9 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     // SMALL bushes only, and ~40 % of the old count (the player asked for few, small ones): 0.45–0.8 scale
     // (was 0.7–1.6 — the big leafy mounds), a lighter verge band.
     const density = ((0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1]) * 0.4 * Math.min(1.6, reg) + w[0] * (fields.palette === 0 ? 0.11 + 0.35 * oasisAt(fields, wx, wz, h) : 0.05)) * (fields.palette === 1 ? 0.45 : 1)
-    return r < density ? 0.45 + (r / Math.max(density, 1e-3)) * 0.35 : 0
+    // Fixed maps: the beach keeps a third of its bushes (open sand by the sea).
+    const d2 = density * (1 - 0.65 * fields.beach(wx, wz, h))
+    return r < d2 ? 0.45 + (r / Math.max(d2, 1e-3)) * 0.35 : 0
   })
 
   return { trees, rocks, plants }
