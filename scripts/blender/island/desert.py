@@ -4,7 +4,8 @@
 # ORIG = the map as The-Land exported it (before this rebuild: `git show 695a1f4:public/maps/island/<file>` for
 # heights.bin, map.json, props.json, biome.bin). It always starts from those, so it can be re-run while tuning
 # (deterministic: fixed seeds). Without WRITE it only reports (and writes OUTH + OUTH.roads.json for the previews:
-# render_preview.py = a 3D Eevee view, topdown.py = a hillshaded map, preview_composite.py = the map card).
+# render_preview.py = a 3D Eevee view, topdown.py = a hillshaded map; the map card is map_preview.py). Its road
+# heights were then corrected and every bed re-carved by roads.py (run after this one).
 #
 #   * irregular layered-sandstone MESAS (stepped cliffs: ledges + sheer risers, talus aprons, a higher cap tier)
 #     instead of the four perfect cylinder mesas, BUTTES, rolling sand HILLS and DUNES on the floor, the Dune Dome
