@@ -54,12 +54,16 @@ pub fn router(app: Arc<App>) -> Router {
         let origins: Vec<HeaderValue> = app.cfg.allowed_origins.iter().filter_map(|o| o.parse().ok()).collect();
         CorsLayer::new().allow_origin(origins)
     }
-    .allow_methods([Method::GET, Method::POST])
+    .allow_methods([Method::GET, Method::POST, Method::PATCH])
     .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
     Router::new()
         .route("/v1/auth/guest", post(http::guest))
         .route("/v1/matchmake", post(http::matchmake))
         .route("/v1/matches", get(http::matches))
+        .route("/v1/rooms", get(http::rooms).post(http::create_room))
+        .route("/v1/rooms/{code}", get(http::room).patch(http::configure_room))
+        .route("/v1/rooms/{code}/join", post(http::join_room))
+        .route("/v1/rooms/{code}/kick", post(http::kick))
         .route("/v1/ws", get(ws::handler))
         .route("/healthz", get(http::healthz))
         .route("/readyz", get(http::readyz))
@@ -93,6 +97,7 @@ pub async fn serve(
         default_map,
         rules,
         cfg.max_matches,
+        cfg.max_rooms,
         Duration::from_secs(cfg.ticket_ttl_s + 5),
     );
     let signer = auth::Signer::new(cfg.secret_bytes()?);

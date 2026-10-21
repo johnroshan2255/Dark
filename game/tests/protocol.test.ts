@@ -4,7 +4,7 @@
  * spot-checked. Skipped (with a note) when the server folder isn't next to the game.
  */
 import { existsSync, readFileSync } from 'node:fs'
-import { decodeClient, decodeServer, encodeClient, encodeServer, Flags, NO_PLAYER, Phase, ProtocolError, yawToU16, u16ToYaw } from '../src/net/protocol'
+import { decodeClient, decodeServer, encodeClient, encodeServer, Flags, NO_PLAYER, Phase, ProtocolError, RoomFlags, yawToU16, u16ToYaw } from '../src/net/protocol'
 
 let failures = 0
 const check = (name: string, ok: boolean, detail = '') => {
@@ -34,6 +34,8 @@ if (!existsSync(path)) {
   check('protocol: state fields', st.t === 'state' && st.state.seq === 4000000001 && st.state.pos[0] === -120034 && st.state.epoch === 3 && st.state.flags === (Flags.DRIVING | Flags.LIGHTS))
   const el = decodeServer(bytes(golden['s.eliminated']))
   check('protocol: eliminated by the zone', el.t === 'eliminated' && el.killer === NO_PLAYER)
+  const rm = decodeServer(bytes(golden['s.room']))
+  check('protocol: room settings', rm.t === 'room' && rm.room.code === 'K7QX2M' && rm.room.name === "Asha's world" && rm.room.maxPlayers === 64 && rm.room.owner === 1 && rm.room.flags === (RoomFlags.PRIVATE | RoomFlags.ROADKILL))
   const ph = decodeServer(bytes(golden['s.phase']))
   check('protocol: phase', ph.t === 'phase' && ph.phase === Phase.Countdown)
   // every prefix of every packet is an error, never a wrong message

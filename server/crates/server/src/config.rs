@@ -55,6 +55,10 @@ pub struct Config {
     #[arg(long, env = "DARK_MAX_MATCHES", default_value_t = 8)]
     pub max_matches: usize,
 
+    /// Most player-hosted rooms this process runs at once (free roam: light — a few players each, mostly).
+    #[arg(long, env = "DARK_MAX_ROOMS", default_value_t = 400)]
+    pub max_rooms: usize,
+
     /// Optional TOML file overriding match rules (players per match, timers, zone, limits…).
     #[arg(long, env = "DARK_MATCH_CONFIG")]
     pub match_config: Option<PathBuf>,
@@ -129,6 +133,7 @@ impl Config {
             allowed_origins: vec![],
             trust_proxy: false,
             max_matches: 4,
+            max_rooms: 16,
             http_rate: 100.0,
             http_burst: 100.0,
             match_config: None,

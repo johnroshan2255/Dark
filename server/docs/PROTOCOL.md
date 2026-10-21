@@ -1,4 +1,6 @@
-# DARK wire protocol — version 1
+# DARK wire protocol — version 2
+
+v2 (2026-10-21) added rooms: `Phase FreeRoam`, `Kick Kicked`, the `Room` packet and `Welcome.spawn` = `NO_SPAWN`.
 
 One packet per **binary** WebSocket frame: `[kind: u8][payload]`, little-endian, no padding, ≤ 16 KiB.
 Client → server kinds are `0x01–0x7f`, server → client `0x80–0xff`.
@@ -39,19 +41,29 @@ update both, bump `PROTOCOL_VERSION`, regenerate the vectors (`UPDATE_GOLDEN=1 c
 | `0x82` | Snapshot | `tick u32`, `server_time u32`, `ack_seq u32`, `hp u8`, `alive u8`, `n u8`, n × Entity (26 B: `id u16`, `flags u8`, `model u8`, `pos`, `yaw u16`, `pitch i16`, `vel`), `m u8`, m × `removed id u16` |
 | `0x83` | PlayerJoined | `id u16`, `name str` |
 | `0x84` | PlayerLeft | `id u16` |
-| `0x85` | Phase | `phase u8` (0 Lobby · 1 Countdown · 2 Running · 3 Ended), `ends_in_ms u32` (0 = no timer) |
+| `0x85` | Phase | `phase u8` (0 Lobby · 1 Countdown · 2 Running · 3 Ended · 4 FreeRoam), `ends_in_ms u32` (0 = no timer) |
 | `0x86` | Zone | `x i32`, `z i32`, `radius u32` (cm, current circle) · `target_x`, `target_z`, `target_radius` · `shrink_start_ms u32`, `shrink_end_ms u32` (match time) · `dps u8` |
 | `0x87` | Eliminated | `victim u16`, `killer u16` (0xffff = none), `cause u8` (1 Zone · 2 Roadkill · 3 Disconnect), `placement u8` |
 | `0x88` | MatchEnd | `winner u16` (0xffff = none), `placement u8` |
 | `0x89` | Correction | `seq u32`, `epoch u8`, `pos`, `yaw u16` — snap to this pose, send `epoch` from now on |
 | `0x8a` | Pong | `client_time u32` (echo), `server_time u32` |
-| `0x8b` | Kick | `reason u8` (1 BadTicket · 2 VersionMismatch · 3 MatchFull · 4 MatchOver · 5 Cheating · 6 Flooding · 7 Malformed · 8 Timeout · 9 ServerShutdown · 10 Duplicate), `message str` — the socket closes with code 4000 + reason |
+| `0x8b` | Kick | `reason u8` (1 BadTicket · 2 VersionMismatch · 3 MatchFull · 4 MatchOver · 5 Cheating · 6 Flooding · 7 Malformed · 8 Timeout · 9 ServerShutdown · 10 Duplicate · 11 Kicked by the room owner), `message str` — the socket closes with code 4000 + reason |
+| `0x8c` | Room | `code str`, `name str`, `flags u8` (bit 0 PRIVATE · 1 ROADKILL · 2 FLYING), `max_players u16`, `owner u16` (0xffff = none) — on joining a room and whenever its settings or owner change |
 
 ## Flow
 
+**Rooms** (free roam, what the game uses): `POST /v1/rooms` (create; you own it) or `POST /v1/rooms/{code}/join`
+returns the same seat shape as matchmaking plus `room`, then steps 3–5 below. A room is `Phase FreeRoam` from the
+start: join any time, no zone. `Welcome.spawn` is near the owner, or `x = NO_SPAWN` (`i32::MIN`) for the first
+player (keep your own spawn). `FLYING` lets the `FLYING` state flag through; `ROADKILL` turns car hits on (knocked
+down, `Eliminated` with `placement 0`, back up at once).
+
+**Battle royale:**
+
+
 1. `POST /v1/auth/guest {name}` → `token` (session).
 2. `POST /v1/matchmake` (Bearer token) `{map?}` → `{match_id, player_id, ticket, ws_url, map, region, expires_in}`.
-3. Open `ws_url`, send `Hello {protocol: 1, ticket}` → `Welcome` (+ `PlayerJoined` per player, `Phase`).
+3. Open `ws_url`, send `Hello {protocol: 2, ticket}` → `Welcome` (+ `PlayerJoined` per player, `Phase`).
 4. Stream `State` at your tick rate from the `Welcome.spawn`; render remote entities from `Snapshot`s ~100 ms in the
    past (interpolate on `server_time`); drop entities listed in `removed`.
 5. On `Correction`: move there, adopt its `epoch`. The drop at the start of a match is a `Correction` too.
@@ -64,5 +76,6 @@ update both, bump `PROTOCOL_VERSION`, regenerate the vectors (`UPDATE_GOLDEN=1 c
 - ≤ 90 packets/s per client (burst 180); 2 s over the limit → `Kick Flooding`. 8 malformed packets → `Kick Malformed`.
 - 20 s without a packet → `Kick Timeout` (WebSocket pings every 10 s).
 - Movement: ≤ 10 m/s on foot (vehicle speed for 3 s after bailing out), ≤ 75 m/s in a vehicle, ≤ 40 m/s climbing,
-  not under the terrain (2.5 m tolerance), inside the map + 250 m, not flying. A rejected `State` → `Correction`;
+  not under the terrain (2.5 m tolerance), inside the map + 250 m, not flying (unless the room allows it: then no
+  climb limit either). Endless-world rooms have no heightfield on the server: speed and teleport checks only. A rejected `State` → `Correction`;
   a decaying violation score past 25 → `Kick Cheating`.

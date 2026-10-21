@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 import type { TimeLabel } from '../rendering/lighting/TimeOfDay'
 import type { TierName } from '../rendering/quality/QualityTiers'
 import type { Settings } from './Settings'
+import type { NetState, RoomSetup } from '../net/NetClient'
 
 /**
  * Low-frequency game state for UI (changes a few times per minute at most).
@@ -52,6 +53,11 @@ export interface GameStateShape {
   held: string | null
   /** The browser / OS is capping the page at 30 fps (Low Power Mode / battery saver). */
   fpsCap: boolean
+  /** Multiplayer: the room this game is in (net/NetClient) — changes on join / leave / roster / settings only. */
+  net: NetState
+  /** The settings the next room opens with (menu: Make private, Room settings), and the player's display name. */
+  roomSetup: RoomSetup
+  playerName: string
 }
 
 export interface Store<T> {

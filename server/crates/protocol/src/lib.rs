@@ -18,13 +18,17 @@ pub use codec::{DecodeError, Reader, Writer};
 pub use messages::*;
 
 /// Bumped on any incompatible layout change; the server rejects a `Hello` with another version.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Largest packet either side accepts (bytes). Snapshots are bounded by [`MAX_SNAPSHOT_ENTITIES`].
 pub const MAX_PACKET: usize = 16 * 1024;
 
 /// Most entities one snapshot may carry (interest management keeps the nearest ones).
 pub const MAX_SNAPSHOT_ENTITIES: usize = 96;
+
+/// `Welcome.spawn[1]` (height) with this value: the server has no spawn for you (an endless-world room whose terrain only
+/// the clients know) — start where your own world puts you.
+pub const NO_SPAWN: i32 = i32::MIN;
 
 /// Sentinel player id: "nobody" (e.g. the zone as a killer).
 pub const NO_PLAYER: u16 = u16::MAX;

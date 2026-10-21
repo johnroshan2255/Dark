@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react'
 import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
+import { InGameRoom } from './Rooms'
 
 /**
  * Quick actions (desktop: clickable while the pointer is free; keys work any time).
@@ -14,6 +15,7 @@ export function Toolbar({ game }: { game: Game }) {
   const night = phase === 'NIGHT' || phase === 'DUSK'
   return (
     <div style={bar}>
+      <InGameRoom game={game} variant="toolbar" />
       {driving && <button style={btn} onClick={() => game.respawnHere()} title="Respawn the car here (R)" data-testid="tb-respawn">⟲ Respawn</button>}
       <button style={btn} onClick={() => game.toggleDayNight()} title="Day ⇄ night (T)" data-testid="tb-daynight">{night ? '☀ Day' : '☾ Night'}</button>
       <button style={btn} onClick={() => game.toggleCamera()} title="Camera (V)" data-testid="tb-cam">{cam === 'tpp' ? '👁 First person' : '🧍 Third person'}</button>

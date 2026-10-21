@@ -1,4 +1,5 @@
-//! One MATCH: lobby → countdown → running (zone closes, damage, eliminations) → ended.
+//! One MATCH: lobby → countdown → running (zone closes, damage, eliminations) → ended — or a ROOM (free roam): join
+//! any time, no zone, roadkill only if the room allows it (a knock-down, not an elimination), owner-configured.
 
 use crate::interest::{self, Grid, InterestConfig};
 use crate::map::MapData;
@@ -10,9 +11,21 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
+/// What kind of session this is.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// Lobby → countdown → drop → closing zone → last one standing.
+    #[default]
+    BattleRoyale,
+    /// A room: free roam with the room's rules (see `RoomSettings`).
+    FreeRoam,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct MatchConfig {
+    pub mode: Mode,
     /// Seats per match.
     pub max_players: usize,
     /// Players needed before the lobby timer starts.
@@ -43,6 +56,7 @@ pub struct MatchConfig {
 impl Default for MatchConfig {
     fn default() -> Self {
         Self {
+            mode: Mode::BattleRoyale,
             max_players: 100,
             min_players: 2,
             lobby_s: 60.0,
@@ -97,6 +111,7 @@ struct Player {
     violations: f32,
     bail_ms: Option<u64>,
     grace: bool,
+    /// When this player was last hurt by a vehicle (0 = never): a 1 s cooldown between hits.
     last_hit_ms: u64,
     known: HashSet<u16>,
     spectate: Option<u16>,
@@ -106,7 +121,10 @@ pub struct Match {
     pub id: u64,
     pub seed: u32,
     cfg: MatchConfig,
-    map: Arc<MapData>,
+    /// None: an endless-world room (its terrain lives only in the clients' generator).
+    map: Option<Arc<MapData>>,
+    /// Rooms only: what clients see (code, name, flags, seats, owner).
+    room: Option<RoomSettings>,
     rng: Rng,
     now_ms: u64,
     tick: u32,
@@ -146,16 +164,29 @@ fn violation_weight(r: Reject) -> f32 {
 }
 
 impl Match {
-    pub fn new(id: u64, seed: u32, map: Arc<MapData>, cfg: MatchConfig, now_ms: u64) -> Self {
+    pub fn new(
+        id: u64,
+        seed: u32,
+        map: Option<Arc<MapData>>,
+        cfg: MatchConfig,
+        room: Option<RoomSettings>,
+        now_ms: u64,
+    ) -> Self {
+        let phase = if cfg.mode == Mode::FreeRoam {
+            Phase::FreeRoam
+        } else {
+            Phase::Lobby
+        };
         Self {
             id,
             seed,
             rng: Rng::new(id ^ ((seed as u64) << 32)),
             cfg,
             map,
+            room,
             now_ms,
             tick: 0,
-            phase: Phase::Lobby,
+            phase,
             phase_until_ms: 0,
             lobby_armed: false,
             players: BTreeMap::new(),
@@ -189,7 +220,7 @@ impl Match {
     }
     /// Seats can still be taken (lobby / countdown, not full).
     pub fn joinable(&self) -> bool {
-        matches!(self.phase, Phase::Lobby | Phase::Countdown)
+        matches!(self.phase, Phase::Lobby | Phase::Countdown | Phase::FreeRoam)
             && self.players.len() < self.cfg.max_players
             && !self.finished
     }
@@ -197,8 +228,75 @@ impl Match {
     pub fn finished(&self) -> bool {
         self.finished
     }
+    /// The map id, or "world" for an endless-world room.
     pub fn map_id(&self) -> &str {
-        &self.map.id
+        self.map.as_ref().map_or("world", |m| m.id.as_str())
+    }
+    /// Rooms: the current settings.
+    pub fn room(&self) -> Option<&RoomSettings> {
+        self.room.as_ref()
+    }
+    fn room_flag(&self, f: u8) -> bool {
+        self.room.as_ref().is_some_and(|r| r.flags & f != 0)
+    }
+
+    /// Rooms: the owner changed the settings (name, privacy, seats, rules). Code and owner stay; everyone is told.
+    pub fn configure(&mut self, mut r: RoomSettings) {
+        let Some(cur) = &self.room else { return };
+        r.code = cur.code.clone();
+        r.owner = cur.owner;
+        r.max_players = r.max_players.clamp(1, 100);
+        self.cfg.max_players = r.max_players as usize;
+        self.out.push(Out::All(ServerMsg::Room(r.clone())));
+        self.room = Some(r);
+    }
+
+    /// Rooms: the owner removes a player.
+    pub fn kick(&mut self, id: u16) {
+        if self.players.contains_key(&id) {
+            self.out
+                .push(Out::Kick(id, KickReason::Kicked, "removed by the room owner"));
+        }
+    }
+
+    /// Where a newcomer starts: a lobby slot on a map; in an endless-world room beside the owner (or anyone), or
+    /// nowhere (`None`: the client picks its own spawn) when nobody has a pose yet.
+    fn spawn_for(&mut self) -> Option<(Pose, bool)> {
+        if let Some(map) = &self.map {
+            let s = map.lobby_spawn(self.lobby_slots);
+            self.lobby_slots += 1;
+            return Some((
+                Pose {
+                    pos: s.pos,
+                    yaw: s.yaw,
+                    ..Default::default()
+                },
+                false,
+            ));
+        }
+        let owner = self.room.as_ref().map_or(NO_PLAYER, |r| r.owner);
+        let anchor = self
+            .players
+            .get(&owner)
+            .filter(|p| p.has_pose)
+            .or_else(|| self.players.values().find(|p| p.has_pose))
+            .map(|p| p.pose)?;
+        let k = self.lobby_slots as f32 * 2.399_963;
+        self.lobby_slots += 1;
+        let pos = [
+            anchor.pos[0] + 4.0 * k.cos(),
+            anchor.pos[1] + 1.0,
+            anchor.pos[2] + 4.0 * k.sin(),
+        ];
+        // (the client settles onto its own terrain: its first state is a granted reposition)
+        Some((
+            Pose {
+                pos,
+                yaw: anchor.yaw,
+                ..Default::default()
+            },
+            true,
+        ))
     }
     pub fn players(&self) -> impl Iterator<Item = PlayerView> + '_ {
         self.players.iter().map(|(&id, p)| PlayerView {
@@ -240,12 +338,10 @@ impl Match {
                 KickReason::MatchOver
             });
         }
-        let s = self.map.lobby_spawn(self.lobby_slots);
-        self.lobby_slots += 1;
-        let pose = Pose {
-            pos: s.pos,
-            yaw: s.yaw,
-            ..Default::default()
+        let spawn = self.spawn_for();
+        let (pose, has_pose, grace) = match spawn {
+            Some((p, g)) => (p, true, g),
+            None => (Pose::default(), false, true),
         };
         // the newcomer learns who is here; everyone learns the newcomer
         for (&other, p) in &self.players {
@@ -262,7 +358,7 @@ impl Match {
             Player {
                 name: name.to_owned(),
                 pose,
-                has_pose: true,
+                has_pose,
                 last_accept_ms: self.now_ms,
                 last_seq: 0,
                 epoch: 0,
@@ -271,7 +367,7 @@ impl Match {
                 placement: 0,
                 violations: 0.0,
                 bail_ms: None,
-                grace: false, // the client starts where Welcome puts it: validated from there
+                grace, // on a map the client starts where Welcome puts it: validated from there
                 last_hit_ms: 0,
                 known: HashSet::new(),
                 spectate: None,
@@ -282,15 +378,23 @@ impl Match {
             name: name.to_owned(),
         }));
         self.out.push(Out::To(id, self.phase_msg()));
+        if let Some(r) = &self.room {
+            self.out.push(Out::To(id, ServerMsg::Room(r.clone())));
+        }
+        let spawn = if has_pose {
+            [m_to_cm(pose.pos[0]), m_to_cm(pose.pos[1]), m_to_cm(pose.pos[2])]
+        } else {
+            [0, NO_SPAWN, 0]
+        };
         Ok(ServerMsg::Welcome {
             protocol: PROTOCOL_VERSION,
             player_id: id,
             match_id: self.id,
             tick_rate: self.cfg.tick_hz.min(255) as u8,
-            map: self.map.id.clone(),
+            map: self.map_id().to_owned(),
             seed: self.seed,
-            spawn: [m_to_cm(s.pos[0]), m_to_cm(s.pos[1]), m_to_cm(s.pos[2])],
-            yaw: yaw_to_u16(s.yaw),
+            spawn,
+            yaw: yaw_to_u16(pose.yaw),
             server_time: self.now_ms.min(u32::MAX as u64) as u32,
         })
     }
@@ -306,12 +410,21 @@ impl Match {
             p.known.remove(&id);
         }
         self.out.push(Out::All(ServerMsg::PlayerLeft { id }));
+        // the owner left: the longest-present player (lowest id) runs the room now
+        let next = self.players.keys().next().copied().unwrap_or(NO_PLAYER);
+        if let Some(r) = self.room.as_mut()
+            && r.owner == id
+        {
+            r.owner = next;
+            self.out.push(Out::All(ServerMsg::Room(r.clone())));
+        }
     }
 
     /// The client's pose. Accepted, or answered with a correction (and a kick past the violation limit).
     pub fn on_state(&mut self, id: u16, s: &State) {
         let now = self.now_ms;
-        let (map, lim, kick_at) = (&self.map, &self.cfg.limits, self.cfg.violation_kick);
+        let flying_ok = self.room_flag(room_flags::FLYING);
+        let (map, lim, kick_at) = (self.map.as_deref(), &self.cfg.limits, self.cfg.violation_kick);
         let Some(p) = self.players.get_mut(&id) else { return };
         // spectators don't move; old / duplicate states and states from before a correction are ignored
         if !p.alive || s.epoch != p.epoch || s.seq <= p.last_seq && p.last_seq != 0 {
@@ -327,6 +440,7 @@ impl Match {
                 .bail_ms
                 .map_or(f32::INFINITY, |b| now.saturating_sub(b) as f32 / 1000.0),
             grace: p.grace,
+            flying_ok,
         };
         match validate::check(&p.pose, &next, ctx, map, lim) {
             Ok(()) => {
@@ -408,9 +522,14 @@ impl Match {
                     self.begin_running();
                 }
             }
+            Phase::FreeRoam => {
+                if self.room_flag(room_flags::ROADKILL) {
+                    self.roadkill();
+                }
+            }
             Phase::Running => {
-                if let Some(z) = self.zone.as_mut()
-                    && z.update(&self.map, now_ms, &mut self.rng)
+                if let (Some(z), Some(map)) = (self.zone.as_mut(), self.map.as_ref())
+                    && z.update(map, now_ms, &mut self.rng)
                 {
                     let w = z.wire(self.running_start_ms);
                     self.out.push(Out::All(ServerMsg::Zone(w)));
@@ -434,12 +553,13 @@ impl Match {
     }
 
     fn begin_running(&mut self) {
+        let Some(map) = self.map.clone() else {
+            return; // (a battle royale needs a map: the registry only makes them with one)
+        };
         self.phase = Phase::Running;
         self.running_start_ms = self.now_ms;
         self.started_with = self.players.len();
-        let spawns = self
-            .map
-            .spawn_points(self.players.len(), self.cfg.spawn_spacing_m, &mut self.rng);
+        let spawns = map.spawn_points(self.players.len(), self.cfg.spawn_spacing_m, &mut self.rng);
         for ((&id, p), s) in self.players.iter_mut().zip(spawns) {
             p.pose = Pose {
                 pos: s.pos,
@@ -461,7 +581,7 @@ impl Match {
                 },
             ));
         }
-        let z = ZoneState::new(&self.map, self.cfg.zone.clone(), self.now_ms, &mut self.rng);
+        let z = ZoneState::new(&map, self.cfg.zone.clone(), self.now_ms, &mut self.rng);
         self.out.push(Out::All(ServerMsg::Zone(z.wire(self.running_start_ms))));
         self.zone = Some(z);
         self.phase_until_ms = self.now_ms;
@@ -508,7 +628,7 @@ impl Match {
                 if !v.alive || v.pose.flags & flags::DRIVING != 0 || (v.pose.pos[1] - d.pos[1]).abs() > 2.5 {
                     continue;
                 }
-                if self.now_ms < v.last_hit_ms + 1000 {
+                if v.last_hit_ms != 0 && self.now_ms < v.last_hit_ms + 1000 {
                     continue;
                 }
                 let rel = speed(&[
@@ -527,7 +647,7 @@ impl Match {
             if !v.alive {
                 continue;
             }
-            v.last_hit_ms = now;
+            v.last_hit_ms = now.max(1);
             v.hp -= dmg;
             if v.hp <= 0.0 {
                 self.eliminate(vid, did, Cause::Roadkill);
@@ -536,6 +656,19 @@ impl Match {
     }
 
     fn eliminate(&mut self, victim: u16, killer: u16, cause: Cause) {
+        if self.phase == Phase::FreeRoam {
+            // a room: knocked down, not out — told to everyone (placement 0), back on their feet at full health
+            if let Some(p) = self.players.get_mut(&victim) {
+                p.hp = 100.0;
+                self.out.push(Out::All(ServerMsg::Eliminated {
+                    victim,
+                    killer,
+                    cause,
+                    placement: 0,
+                }));
+            }
+            return;
+        }
         let placement = self.alive_count().min(255) as u8;
         let Some(p) = self.players.get_mut(&victim) else { return };
         if !p.alive {
@@ -716,7 +849,7 @@ mod tests {
     #[test]
     fn lobby_countdown_running_zone_kills_and_a_winner() {
         let map = Arc::new(MapData::flat(1000.0, 0.0));
-        let mut m = Match::new(1, 2, map, cfg(), 0);
+        let mut m = Match::new(1, 2, Some(map), cfg(), None, 0);
         assert!(matches!(
             m.join(1, "a").unwrap(),
             ServerMsg::Welcome { player_id: 1, .. }
@@ -754,7 +887,7 @@ mod tests {
     #[test]
     fn cheats_are_corrected_then_kicked() {
         let map = Arc::new(MapData::flat(1000.0, 0.0));
-        let mut m = Match::new(1, 2, map, cfg(), 0);
+        let mut m = Match::new(1, 2, Some(map), cfg(), None, 0);
         let ServerMsg::Welcome { spawn, .. } = m.join(1, "a").unwrap() else {
             panic!()
         };
@@ -790,7 +923,7 @@ mod tests {
         let mut m = Match::new(
             1,
             2,
-            map,
+            Some(map),
             MatchConfig {
                 zone: vec![Stage {
                     wait_s: 999.0,
@@ -800,6 +933,7 @@ mod tests {
                 }],
                 ..cfg()
             },
+            None,
             0,
         );
         for id in 1..=3 {
@@ -845,11 +979,12 @@ mod tests {
         let mut m = Match::new(
             1,
             2,
-            map,
+            Some(map),
             MatchConfig {
                 min_players: 99,
                 ..cfg()
             },
+            None,
             0,
         );
         for id in 1..=30u16 {
@@ -891,7 +1026,7 @@ mod tests {
     #[test]
     fn states_from_before_a_correction_are_ignored_not_judged() {
         let map = Arc::new(MapData::flat(1000.0, 0.0));
-        let mut m = Match::new(1, 2, map, cfg(), 0);
+        let mut m = Match::new(1, 2, Some(map), cfg(), None, 0);
         let ServerMsg::Welcome { spawn, .. } = m.join(1, "a").unwrap() else {
             panic!()
         };
@@ -918,5 +1053,126 @@ mod tests {
         );
         assert!(m.players[&1].violations <= v);
         assert_eq!(m.players[&1].pose.pos, s);
+    }
+
+    fn room(owner: u16, flags_: u8) -> RoomSettings {
+        RoomSettings {
+            code: "ABC123".into(),
+            name: "r".into(),
+            flags: flags_,
+            max_players: 3,
+            owner,
+        }
+    }
+
+    #[test]
+    fn world_room_spawns_owner_rules_and_kicks() {
+        let rc = MatchConfig {
+            mode: Mode::FreeRoam,
+            max_players: 3,
+            ..cfg()
+        };
+        let mut m = Match::new(1, 77, None, rc, Some(room(1, room_flags::ROADKILL)), 0);
+        assert_eq!(m.phase(), Phase::FreeRoam);
+        // the owner joins first: no server spawn in an endless world
+        let ServerMsg::Welcome { spawn, map, .. } = m.join(1, "owner").unwrap() else {
+            panic!()
+        };
+        assert_eq!((spawn[1], map.as_str()), (NO_SPAWN, "world"));
+        assert!(
+            kinds(&mut m)
+                .iter()
+                .any(|o| matches!(o, Out::To(1, ServerMsg::Room(r)) if r.owner == 1))
+        );
+        // its first state anywhere is accepted (it knows its terrain), then validated normally
+        m.step(33);
+        send(&mut m, 1, state(1, [500.0, 80.0, -300.0], [0.0; 3], 0));
+        // a joiner starts beside the owner
+        let ServerMsg::Welcome { spawn, .. } = m.join(2, "friend").unwrap() else {
+            panic!()
+        };
+        let d = ((cm_to_m(spawn[0]) - 500.0).powi(2) + (cm_to_m(spawn[2]) + 300.0).powi(2)).sqrt();
+        assert!(d < 6.0, "{d}");
+        assert!(m.joinable(), "rooms take players any time");
+        m.join(3, "third").unwrap();
+        assert!(!m.joinable(), "full at max_players");
+        // the owner raises the seats: everyone is told, a fourth fits
+        m.configure(RoomSettings {
+            name: "renamed".into(),
+            max_players: 10,
+            ..room(99, room_flags::PRIVATE | room_flags::ROADKILL)
+        });
+        let out = kinds(&mut m);
+        assert!(out.iter().any(
+            |o| matches!(o, Out::All(ServerMsg::Room(r)) if r.name == "renamed" && r.owner == 1 && r.code == "ABC123")
+        ));
+        assert!(m.joinable());
+        // roadkill in a room knocks down (placement 0) and the victim stays in
+        for k in 0..20u32 {
+            m.step(100 + k as u64 * 33);
+            m.on_action(1, ActionKind::RespawnVehicle, 0);
+            m.on_action(2, ActionKind::RespawnVehicle, 0);
+            send(
+                &mut m,
+                1,
+                state(10 + k, [0.0, 0.5, 0.0], [30.0, 0.0, 0.0], flags::DRIVING),
+            );
+            send(&mut m, 2, state(10 + k, [1.0, 0.5, 0.0], [0.0; 3], 0));
+        }
+        let out = kinds(&mut m);
+        let knocks = out
+            .iter()
+            .filter(|o| {
+                matches!(
+                    o,
+                    Out::All(ServerMsg::Eliminated {
+                        victim: 2,
+                        placement: 0,
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert!(knocks >= 1, "{out:?}");
+        assert_eq!(m.alive_count(), 3);
+        // owner kicks 3; the owner leaving hands the room to the lowest id left
+        m.kick(3);
+        assert!(
+            kinds(&mut m)
+                .iter()
+                .any(|o| matches!(o, Out::Kick(3, KickReason::Kicked, _)))
+        );
+        m.leave(1);
+        assert!(
+            kinds(&mut m)
+                .iter()
+                .any(|o| matches!(o, Out::All(ServerMsg::Room(r)) if r.owner == 2))
+        );
+        assert_eq!(m.room().unwrap().owner, 2);
+    }
+
+    #[test]
+    fn flying_only_where_the_room_allows_it() {
+        let rc = MatchConfig {
+            mode: Mode::FreeRoam,
+            ..cfg()
+        };
+        for (fl, allowed) in [(0u8, false), (room_flags::FLYING, true)] {
+            let mut m = Match::new(1, 77, None, rc.clone(), Some(room(1, fl)), 0);
+            m.join(1, "a").unwrap();
+            m.step(33);
+            send(&mut m, 1, state(1, [0.0, 50.0, 0.0], [0.0; 3], 0));
+            kinds(&mut m);
+            m.step(66);
+            send(
+                &mut m,
+                1,
+                state(2, [0.0, 50.3, 0.0], [0.0, 9.0, 0.0], flags::DRIVING | flags::FLYING),
+            );
+            let corrected = kinds(&mut m)
+                .iter()
+                .any(|o| matches!(o, Out::To(1, ServerMsg::Correction { .. })));
+            assert_eq!(corrected, !allowed);
+        }
     }
 }

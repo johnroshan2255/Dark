@@ -559,7 +559,7 @@ building mesh rebuilt, power-line spans of a broken post dropped), ≤ 48 physic
 thrown with the truck, which keeps (1 − loss) of its speed. Broken props are listed per chunk (`PhysicsWorld.broken`)
 and REBUILT when the chunk unloads (drive away and come back). Crash sound synthesized (`AudioSystem.crash`).
 
-## 7. Multiplayer (2026-10-21: dedicated server in `../server/`, client not wired yet)
+## 7. Multiplayer (2026-10-21: dedicated server in `../server/`; rooms wired)
 
 Battle-royale matches of up to 100 players on the fixed maps run on a dedicated, authoritative **Rust server**
 (`../server/README.md`). Over WebSocket, clients stream their own simulated pose at ~30 Hz. The server validates it
@@ -568,7 +568,25 @@ sends each client the players near it (interest tiers, 30 / 15 / 5 Hz) to interp
 is **not** sent: the map id (or the seed) and deltas only.
 
 The wire format is `src/net/protocol.ts` (`npm run test:protocol` checks it against the server's golden vectors).
-Next: the net client, a remote-player pool, interpolation, and the zone in the HUD / minimap. The older 4-player
+
+**Rooms** (what players see). There is no host / join menu: every game started (endless world or a map) opens a
+room the player owns: `Game.play()` / `?play=1` → `NetClient.ensureRoom()`, with the menu's PUBLIC / PRIVATE toggle
+and ROOM SETTINGS (`store.roomSetup`, persisted). The landing page lists public rooms (top-right panel on desktop, a
+floating ROOMS button + modal on phones: `ui/Rooms.tsx`) and joins by click or code. A room in another world reloads
+into it (`?seed=` / `?map=` + `?room=CODE&play=1`, `App.tsx`), since worlds are built once per page. In game the
+room pill (toolbar / under the minimap on touch) opens the room card: code, players, the owner's settings + kicks.
+- `net/NetClient.ts` (loop system `net`, after `bike`): guest session, room REST calls, the socket. It sends the
+  local pose at 30 Hz (`Game.localPose`: the car's when driving) and applies `Welcome` spawns / `Correction`s
+  (`netRelocate` / `netCorrect`). Roster, room and status go to `store.net` (low frequency), never per-frame state.
+- `net/RemotePlayers.ts`: others drawn ~100 ms in the past (interpolated, ≤ 200 ms extrapolation). The 16 nearest
+  on foot get a skinned hero clone (`MAX_CHARACTERS`), the rest a capsule; cars share one geometry set per model;
+  a canvas name tag each. Cost: ~0.1–0.2 ms CPU (`sys net` in F3) with one remote; per-tier caps are not wired yet
+  (TODO: `MAX_CHARACTERS` from `game.quality`).
+- Offline (no server) the game plays on alone; the room UI says the server can't be reached. Server URL:
+  `VITE_DARK_SERVER`, else this host on port 7350.
+- Check: `node scripts/rooms-probe.mjs <dir>` and `scripts/rooms-touch.mjs` (with `npm run dev` + the server).
+
+Next: battle royale in the game (zone in the HUD / minimap, spectating). The older 4-player
 peer-host notes in `skills/multiplayer` still apply to a co-op mode.
 
 ---
@@ -588,7 +606,7 @@ src/
   gameplay/       player/ bmx/ monsters/ flashlight/ interaction/ survival/
   input/          keyboard/mouse/pointer-lock
   multiplayer/    networking/ interpolation/ state/ (reserved)
-  net/            protocol.ts — the server's wire format (../server/docs/PROTOCOL.md)
+  net/            protocol.ts (the server's wire format, ../server/docs/PROTOCOL.md), NetClient.ts, RemotePlayers.ts
   assets/         models/ textures/ animations/ audio/  (optimized outputs only)
   debug/          PerformanceMonitor, CullingDebug, ChunkDebug, PhysicsDebug, DebugHud
 skills/           how-to docs per system (read before implementing)

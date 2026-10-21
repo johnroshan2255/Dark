@@ -6,18 +6,21 @@
  * Full table: `server/docs/PROTOCOL.md`.
  */
 
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 export const MAX_PACKET = 16 * 1024
 export const MAX_SNAPSHOT_ENTITIES = 96
 /** "Nobody" (e.g. the zone as a killer). */
 export const NO_PLAYER = 0xffff
+/** `welcome.spawn[1]` with this value: no server spawn (an endless-world room) — start where your world puts you. */
+export const NO_SPAWN = -2147483648
 
 export const Flags = { DRIVING: 1, BOAT: 2, AIRBORNE: 4, DEAD: 8, BOOST: 16, LIGHTS: 32, BRAKING: 64, FLYING: 128 } as const
 export const Action = { RespawnVehicle: 1, Ready: 2, Spectate: 3 } as const
-export const Phase = { Lobby: 0, Countdown: 1, Running: 2, Ended: 3 } as const
+export const Phase = { Lobby: 0, Countdown: 1, Running: 2, Ended: 3, FreeRoam: 4 } as const
+export const RoomFlags = { PRIVATE: 1, ROADKILL: 2, FLYING: 4 } as const
 export const Cause = { Zone: 1, Roadkill: 2, Disconnect: 3 } as const
 export const Kick = {
-  BadTicket: 1, VersionMismatch: 2, MatchFull: 3, MatchOver: 4, Cheating: 5, Flooding: 6, Malformed: 7, Timeout: 8, ServerShutdown: 9, Duplicate: 10,
+  BadTicket: 1, VersionMismatch: 2, MatchFull: 3, MatchOver: 4, Cheating: 5, Flooding: 6, Malformed: 7, Timeout: 8, ServerShutdown: 9, Duplicate: 10, Kicked: 11,
 } as const
 
 export type V3 = [number, number, number]
@@ -59,6 +62,16 @@ export interface Zone {
   dps: number
 }
 
+/** A room's settings as clients see them. */
+export interface RoomSettings {
+  code: string
+  name: string
+  flags: number
+  maxPlayers: number
+  /** The owner's player id (NO_PLAYER when the owner has left). */
+  owner: number
+}
+
 export type ClientMsg =
   | { t: 'hello'; protocol: number; ticket: string }
   | { t: 'state'; state: State }
@@ -78,11 +91,12 @@ export type ServerMsg =
   | { t: 'correction'; seq: number; epoch: number; pos: V3; yaw: number }
   | { t: 'pong'; clientTime: number; serverTime: number }
   | { t: 'kick'; reason: number; message: string }
+  | { t: 'room'; room: RoomSettings }
 
 const C = { HELLO: 0x01, STATE: 0x02, PING: 0x03, ACTION: 0x04, LEAVE: 0x05 } as const
 const S = {
   WELCOME: 0x81, SNAPSHOT: 0x82, PLAYER_JOINED: 0x83, PLAYER_LEFT: 0x84, PHASE: 0x85, ZONE: 0x86, ELIMINATED: 0x87, MATCH_END: 0x88,
-  CORRECTION: 0x89, PONG: 0x8a, KICK: 0x8b,
+  CORRECTION: 0x89, PONG: 0x8a, KICK: 0x8b, ROOM: 0x8c,
 } as const
 
 export class ProtocolError extends Error {}
@@ -107,7 +121,7 @@ const enc = new TextEncoder()
 const dec = new TextDecoder('utf-8', { fatal: true })
 
 class Writer {
-  private buf = new Uint8Array(256)
+  private buf: Uint8Array<ArrayBuffer> = new Uint8Array(256)
   private view = new DataView(this.buf.buffer)
   n = 0
   private room(k: number) {
@@ -140,7 +154,7 @@ class Writer {
     this.u16(b.length)
     this.bytes(b)
   }
-  done(): Uint8Array { return this.buf.slice(0, this.n) }
+  done(): Uint8Array<ArrayBuffer> { return this.buf.slice(0, this.n) }
 }
 
 class Reader {
@@ -168,7 +182,7 @@ class Reader {
 }
 
 // ---------------------------------------------------------------- client → server
-export function encodeClient(m: ClientMsg): Uint8Array {
+export function encodeClient(m: ClientMsg): Uint8Array<ArrayBuffer> {
   const w = new Writer()
   switch (m.t) {
     case 'hello': w.u8(C.HELLO); w.u16(m.protocol); w.longStr(m.ticket); break
@@ -206,7 +220,7 @@ export function decodeClient(buf: Uint8Array): ClientMsg {
 }
 
 // ---------------------------------------------------------------- server → client
-export function encodeServer(m: ServerMsg): Uint8Array {
+export function encodeServer(m: ServerMsg): Uint8Array<ArrayBuffer> {
   const w = new Writer()
   switch (m.t) {
     case 'welcome':
@@ -247,6 +261,7 @@ export function encodeServer(m: ServerMsg): Uint8Array {
       break
     case 'pong': w.u8(S.PONG); w.u32(m.clientTime); w.u32(m.serverTime); break
     case 'kick': w.u8(S.KICK); w.u8(m.reason); w.str(m.message); break
+    case 'room': w.u8(S.ROOM); w.str(m.room.code); w.str(m.room.name); w.u8(m.room.flags); w.u16(m.room.maxPlayers); w.u16(m.room.owner); break
   }
   return w.done()
 }
@@ -283,6 +298,7 @@ export function decodeServer(buf: Uint8Array): ServerMsg {
     case S.CORRECTION: m = { t: 'correction', seq: r.u32(), epoch: r.u8(), pos: r.v3i32(), yaw: r.u16() }; break
     case S.PONG: m = { t: 'pong', clientTime: r.u32(), serverTime: r.u32() }; break
     case S.KICK: m = { t: 'kick', reason: r.u8(), message: r.str() }; break
+    case S.ROOM: m = { t: 'room', room: { code: r.str(), name: r.str(), flags: r.u8(), maxPlayers: r.u16(), owner: r.u16() } }; break
     default: throw new ProtocolError(`unknown server kind 0x${k.toString(16)}`)
   }
   r.finish()

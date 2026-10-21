@@ -4,6 +4,7 @@ import { useStore } from '../game/GameState'
 import { vehicleClass, vehicleDef, vehicleRating, vehicleStats } from '../gameplay/vehicle/catalogue'
 import { KeyArt } from './KeyArt'
 import { playMap } from './MapSelect'
+import { LandingRooms, RoomStartRow } from './Rooms'
 import { ACCENT, FONT, fullscreen, glass, label, LIME, statFill, statRow, statTrack, vignette } from './theme'
 
 /**
@@ -32,6 +33,8 @@ export function MainMenu({ game }: { game: Game }) {
         <div className="fe-tag">{game.map ? <>Map · <b>{game.map.name}</b></> : <>A new world every night · <b>world #{String(seed).slice(0, 8)}</b></>}</div>
       </div>
       <div className="fe-actions">
+        {/* Every game opens a room (net/NetClient): public (listed) or private (code only), and its settings. */}
+        <RoomStartRow game={game} />
         {/* Two ways in: the endless procedural world, or a hand-made map (MapSelect). */}
         <button className={game.map ? 'fe-btn' : 'fe-btn fe-btn--primary'} onClick={() => playMap(game, null)} data-testid="play">
           <span>Explore endless world</span><span className="fe-chev">▶</span>
@@ -68,6 +71,7 @@ export function MainMenu({ game }: { game: Game }) {
           <div className="fe-change" style={{ ...label, marginTop: 8, color: ACCENT }}>Change car ›</div>
         </div>
       </button>
+      <LandingRooms game={game} />
       <div className="fe-hint">{touch ? 'Touch controls' : 'WASD · Space brake · Shift boost · E enter · F lights'}</div>
     </div>
   )

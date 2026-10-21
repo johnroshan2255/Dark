@@ -86,24 +86,33 @@ pub struct Ctx {
     pub since_bail: f32,
     /// The server granted a reposition (vehicle respawn, match start): skip the distance check once.
     pub grace: bool,
+    /// The room allows flying vehicles (no FLYING rejection, no climb limit).
+    pub flying_ok: bool,
 }
 
-pub fn check(prev: &Pose, next: &Pose, ctx: Ctx, map: &MapData, lim: &Limits) -> Result<(), Reject> {
+/// `map`: None for an endless-world room (only the clients know its terrain): no ground / bounds checks there.
+pub fn check(prev: &Pose, next: &Pose, ctx: Ctx, map: Option<&MapData>, lim: &Limits) -> Result<(), Reject> {
     let finite =
         next.pos.iter().chain(next.vel.iter()).all(|v| v.is_finite()) && next.yaw.is_finite() && next.pitch.is_finite();
     if !finite {
         return Err(Reject::BadNumber);
     }
-    if next.flags & flags::FLYING != 0 {
+    let flying = next.flags & flags::FLYING != 0;
+    if flying && !ctx.flying_ok {
         return Err(Reject::Flying);
     }
     let [x, y, z] = next.pos;
-    let edge = map.half + lim.bounds_margin;
-    if x.abs() > edge || z.abs() > edge || !(-200.0..=2000.0).contains(&y) {
+    if !(-200.0..=2000.0).contains(&y) {
         return Err(Reject::OutOfBounds);
     }
-    if y < map.height(x, z) - lim.ground_tolerance {
-        return Err(Reject::UnderGround);
+    if let Some(map) = map {
+        let edge = map.half + lim.bounds_margin;
+        if x.abs() > edge || z.abs() > edge {
+            return Err(Reject::OutOfBounds);
+        }
+        if y < map.height(x, z) - lim.ground_tolerance {
+            return Err(Reject::UnderGround);
+        }
     }
     let driving = next.flags & flags::DRIVING != 0 || prev.flags & flags::DRIVING != 0;
     let cap = if driving || ctx.since_bail < lim.bail_grace_s {
@@ -112,7 +121,8 @@ pub fn check(prev: &Pose, next: &Pose, ctx: Ctx, map: &MapData, lim: &Limits) ->
         lim.foot_speed
     };
     let [vx, vy, vz] = next.vel;
-    if (vx * vx + vz * vz).sqrt() > cap * 1.15 || vy > lim.climb_speed * 1.15 {
+    let climb = if flying { f32::INFINITY } else { lim.climb_speed };
+    if (vx * vx + vz * vz).sqrt() > cap * 1.15 || vy > climb * 1.15 {
         return Err(Reject::TooFast);
     }
     if ctx.grace {
@@ -130,7 +140,7 @@ pub fn check(prev: &Pose, next: &Pose, ctx: Ctx, map: &MapData, lim: &Limits) ->
         });
     }
     // climbing faster than possible (falling is unlimited)
-    if dy > lim.climb_speed * t + lim.slack_m {
+    if dy > climb * t + lim.slack_m {
         return Err(Reject::TooFast);
     }
     Ok(())
@@ -150,6 +160,7 @@ mod tests {
         dt: 1.0 / 30.0,
         since_bail: f32::INFINITY,
         grace: false,
+        flying_ok: false,
     };
 
     #[test]
@@ -158,42 +169,57 @@ mod tests {
         let lim = Limits::default();
         let a = pose(0.0, 0.5, 0.0);
         // a sprint step at 30 Hz
-        assert_eq!(check(&a, &pose(0.25, 0.5, 0.0), CTX, &map, &lim), Ok(()));
+        assert_eq!(check(&a, &pose(0.25, 0.5, 0.0), CTX, Some(&map), &lim), Ok(()));
         // 40 m in one frame on foot
-        assert_eq!(check(&a, &pose(40.0, 0.5, 0.0), CTX, &map, &lim), Err(Reject::Teleport));
+        assert_eq!(
+            check(&a, &pose(40.0, 0.5, 0.0), CTX, Some(&map), &lim),
+            Err(Reject::Teleport)
+        );
         // 7 m in a frame on foot: too fast, not a teleport
-        assert_eq!(check(&a, &pose(7.0, 0.5, 0.0), CTX, &map, &lim), Err(Reject::TooFast));
+        assert_eq!(
+            check(&a, &pose(7.0, 0.5, 0.0), CTX, Some(&map), &lim),
+            Err(Reject::TooFast)
+        );
         // the same 2 m frame is fine in a car
         let mut car = pose(2.0, 0.5, 0.0);
         car.flags = flags::DRIVING;
-        assert_eq!(check(&a, &car, CTX, &map, &lim), Ok(()));
+        assert_eq!(check(&a, &car, CTX, Some(&map), &lim), Ok(()));
         // under the ground
         assert_eq!(
-            check(&a, &pose(0.0, -5.0, 0.0), CTX, &map, &lim),
+            check(&a, &pose(0.0, -5.0, 0.0), CTX, Some(&map), &lim),
             Err(Reject::UnderGround)
         );
         // far outside the map
         assert_eq!(
-            check(&a, &pose(5000.0, 0.5, 0.0), Ctx { grace: true, ..CTX }, &map, &lim),
+            check(
+                &a,
+                &pose(5000.0, 0.5, 0.0),
+                Ctx { grace: true, ..CTX },
+                Some(&map),
+                &lim
+            ),
             Err(Reject::OutOfBounds)
         );
         // flying, NaN
         let mut fly = pose(0.0, 30.0, 0.0);
         fly.flags = flags::FLYING;
-        assert_eq!(check(&a, &fly, CTX, &map, &lim), Err(Reject::Flying));
+        assert_eq!(check(&a, &fly, CTX, Some(&map), &lim), Err(Reject::Flying));
         assert_eq!(
-            check(&a, &pose(f32::NAN, 0.5, 0.0), CTX, &map, &lim),
+            check(&a, &pose(f32::NAN, 0.5, 0.0), CTX, Some(&map), &lim),
             Err(Reject::BadNumber)
         );
         // a reported velocity beyond the cap
         let mut fast = pose(0.1, 0.5, 0.0);
         fast.vel = [60.0, 0.0, 0.0];
-        assert_eq!(check(&a, &fast, CTX, &map, &lim), Err(Reject::TooFast));
+        assert_eq!(check(&a, &fast, CTX, Some(&map), &lim), Err(Reject::TooFast));
         // ... unless just bailed out of a car
-        assert_eq!(check(&a, &fast, Ctx { since_bail: 1.0, ..CTX }, &map, &lim), Ok(()));
+        assert_eq!(
+            check(&a, &fast, Ctx { since_bail: 1.0, ..CTX }, Some(&map), &lim),
+            Ok(())
+        );
         // a granted reposition skips the distance check
         assert_eq!(
-            check(&a, &pose(300.0, 0.5, 0.0), Ctx { grace: true, ..CTX }, &map, &lim),
+            check(&a, &pose(300.0, 0.5, 0.0), Ctx { grace: true, ..CTX }, Some(&map), &lim),
             Ok(())
         );
         // falling fast is fine, rocketing up is not
@@ -202,11 +228,45 @@ mod tests {
                 &pose(0.0, 100.0, 0.0),
                 &pose(0.0, 90.0, 0.0),
                 Ctx { dt: 0.2, ..CTX },
-                &map,
+                Some(&map),
                 &lim
             ),
             Ok(())
         );
-        assert_eq!(check(&a, &pose(0.0, 60.0, 0.0), CTX, &map, &lim), Err(Reject::TooFast));
+        assert_eq!(
+            check(&a, &pose(0.0, 60.0, 0.0), CTX, Some(&map), &lim),
+            Err(Reject::TooFast)
+        );
+    }
+
+    #[test]
+    fn rooms_without_a_map_and_with_flying() {
+        let lim = Limits::default();
+        let a = pose(0.0, 0.5, 0.0);
+        // endless world: no ground / bounds data — far below "ground" or 5 km out is not judged
+        assert_eq!(check(&a, &pose(0.2, -5.0, 0.0), CTX, None, &lim), Ok(()));
+        assert_eq!(
+            check(&a, &pose(0.0, 0.5, 0.0), Ctx { grace: true, ..CTX }, None, &lim),
+            Ok(())
+        );
+        // flying allowed: a fast climb in a flying car is fine
+        let mut up = pose(0.0, 40.0, 0.0);
+        up.flags = flags::FLYING | flags::DRIVING;
+        up.vel = [0.0, 30.0, 0.0];
+        assert_eq!(
+            check(
+                &a,
+                &up,
+                Ctx {
+                    dt: 1.0,
+                    flying_ok: true,
+                    ..CTX
+                },
+                None,
+                &lim
+            ),
+            Ok(())
+        );
+        assert_eq!(check(&a, &up, Ctx { dt: 1.0, ..CTX }, None, &lim), Err(Reject::Flying));
     }
 }

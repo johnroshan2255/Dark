@@ -150,6 +150,16 @@ fn server_samples() -> Vec<(&'static str, ServerMsg)> {
             },
         ),
         (
+            "room",
+            ServerMsg::Room(RoomSettings {
+                code: "K7QX2M".into(),
+                name: "Asha's world".into(),
+                flags: room_flags::PRIVATE | room_flags::ROADKILL,
+                max_players: 64,
+                owner: 1,
+            }),
+        ),
+        (
             "kick",
             ServerMsg::Kick {
                 reason: KickReason::Cheating,

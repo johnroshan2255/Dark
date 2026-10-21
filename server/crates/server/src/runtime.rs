@@ -8,7 +8,7 @@
 
 use crate::metrics as m;
 use bytes::Bytes;
-use dark_protocol::{ClientMsg, KickReason, Phase, ServerMsg, Writer};
+use dark_protocol::{ClientMsg, KickReason, Phase, RoomSettings, ServerMsg, Writer};
 use dark_sim::{MapData, Match, MatchConfig, Out};
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
@@ -51,6 +51,10 @@ pub enum Cmd {
         pid: u16,
         msg: ClientMsg,
     },
+    /// Rooms: the owner's new settings.
+    Configure(RoomSettings),
+    /// Rooms: the owner removes a player.
+    Kick(u16),
     Leave {
         pid: u16,
     },
@@ -61,9 +65,11 @@ pub enum Cmd {
 /// Shared, lock-free view of a match (matchmaking, listings, readiness).
 pub struct MatchInfo {
     pub id: u64,
+    /// Map id, or "world" for an endless-world room.
     pub map: String,
+    pub seed: u32,
     pub created: Instant,
-    pub max_players: usize,
+    pub max_players: AtomicUsize,
     pub players: AtomicUsize,
     pub alive: AtomicUsize,
     phase: AtomicU8,
@@ -71,6 +77,8 @@ pub struct MatchInfo {
     pub finished: AtomicBool,
     /// Player ids with a live connection (seat reservations count until then).
     pub connected: Mutex<HashSet<u16>>,
+    /// Rooms: the current settings (owner, name, flags, seats) as the match last published them.
+    pub room: Mutex<Option<RoomSettings>>,
 }
 
 impl MatchInfo {
@@ -79,6 +87,7 @@ impl MatchInfo {
             0 => Phase::Lobby,
             1 => Phase::Countdown,
             2 => Phase::Running,
+            4 => Phase::FreeRoam,
             _ => Phase::Ended,
         }
     }
@@ -102,23 +111,26 @@ impl MatchHandle {
 pub fn spawn_match(
     id: u64,
     seed: u32,
-    map: Arc<MapData>,
+    map: Option<Arc<MapData>>,
     rules: MatchConfig,
+    room: Option<RoomSettings>,
     on_close: impl FnOnce(u64) + Send + 'static,
 ) -> MatchHandle {
     let (tx, rx) = mpsc::channel(CMD_DEPTH);
     let epoch = Instant::now();
     let info = Arc::new(MatchInfo {
         id,
-        map: map.id.clone(),
+        map: map.as_ref().map_or_else(|| "world".to_owned(), |m| m.id.clone()),
+        seed,
         created: epoch,
-        max_players: rules.max_players,
+        max_players: AtomicUsize::new(rules.max_players),
         players: AtomicUsize::new(0),
         alive: AtomicUsize::new(0),
         phase: AtomicU8::new(Phase::Lobby as u8),
         joinable: AtomicBool::new(true),
         finished: AtomicBool::new(false),
         connected: Mutex::new(HashSet::new()),
+        room: Mutex::new(room.clone()),
     });
     let handle = MatchHandle {
         tx,
@@ -126,7 +138,7 @@ pub fn spawn_match(
         epoch,
     };
     let hz = rules.tick_hz.max(1);
-    let game = Match::new(id, seed, map, rules, 0);
+    let game = Match::new(id, seed, map, rules, room, 0);
     tokio::spawn(async move {
         info!(match_id = format_args!("{id:016x}"), map = %info.map, "match open");
         metrics::counter!(m::MATCHES_STARTED).increment(1);
@@ -237,13 +249,22 @@ impl Runtime {
         info.alive.store(self.game.alive_count(), Ordering::Relaxed);
         info.phase.store(self.game.phase() as u8, Ordering::Relaxed);
         info.joinable.store(self.game.joinable(), Ordering::Relaxed);
+        info.max_players
+            .store(self.game.config().max_players, Ordering::Relaxed);
+        if let Some(r) = self.game.room()
+            && let Ok(mut cur) = info.room.lock()
+            && cur.as_ref() != Some(r)
+        {
+            *cur = Some(r.clone());
+        }
         if self.game.finished() {
             return Flow::Close(KickReason::MatchOver, "match over");
         }
         if self.conns.is_empty() {
             let since = *self.empty_since.get_or_insert_with(Instant::now);
-            // an empty lobby waits a while (seats may be reserved); a match everyone left ends now
-            if self.game.phase() != Phase::Lobby || since.elapsed() > IDLE_CLOSE {
+            // an empty lobby / room waits a while (seats may be reserved, the owner may be reloading into the room's
+            // world); a match everyone left ends now
+            if !matches!(self.game.phase(), Phase::Lobby | Phase::FreeRoam) || since.elapsed() > IDLE_CLOSE {
                 return Flow::Close(KickReason::MatchOver, "match closed");
             }
         } else {
@@ -278,6 +299,8 @@ impl Runtime {
                 ClientMsg::Leave => self.drop_player(pid),
                 ClientMsg::Hello { .. } | ClientMsg::Ping { .. } => {}
             },
+            Cmd::Configure(r) => self.game.configure(r),
+            Cmd::Kick(pid) => self.game.kick(pid),
             Cmd::Leave { pid } => self.drop_player(pid),
             Cmd::Shutdown => {}
         }

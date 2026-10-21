@@ -59,6 +59,14 @@ time, or opens a new one, up to `DARK_MAX_MATCHES` per process.
   countdown. Then everyone is dropped at spread-out road points (≥ 60 m apart, seeded) and the zone starts closing,
   six stages over about 14 minutes.
 
+**Rooms.** What the game uses: every game a player starts opens a free-roam room they own (an endless world by seed,
+or a map), public or private, up to `DARK_MAX_ROOMS` per process.
+- **Join any time** by a 6-character code (`ABCDEFGHJKMNPQRSTUVWXYZ23456789`), or from `GET /v1/rooms` (public rooms
+  with at least one player). Joiners spawn near the owner.
+- **The owner configures it** (`PATCH`: name, private, max players 1–100, roadkill, flying), and can remove players
+  (banned from that room). When the owner leaves, the longest-present player becomes owner.
+- **Empty rooms close** after 2 minutes (so the owner can reload into another world without losing it).
+
 **Auth.** Stateless HMAC-SHA256 tokens, so any server of a deployment that shares `DARK_SECRET` can verify them:
 - a **session** (`/v1/auth/guest` today; accounts later), sent as `Authorization: Bearer`;
 - a short-lived **ticket** for one seat, sent inside the WebSocket `Hello` and never in a URL.
@@ -70,6 +78,11 @@ time, or opens a new one, up to `DARK_MAX_MATCHES` per process.
 | `POST /v1/auth/guest` `{name}` | `{token, player, name, expires_in}` |
 | `POST /v1/matchmake` `{map?}` + `Authorization: Bearer <token>` | `{match_id, player_id, ticket, ws_url, map, region, expires_in}` |
 | `GET /v1/matches` | running matches: id, map, phase, players, alive |
+| `POST /v1/rooms` `{kind: "world"\|"map", seed?, map?, name?, private?, max_players?, roadkill?, flying?}` + Bearer | create a room you own → `{room, player_id, ticket, ws_url, …}` |
+| `GET /v1/rooms` · `GET /v1/rooms/{code}` | public rooms · one room (also private, by code): `{code, name, kind, seed?, map?, players, max_players, private, roadkill, flying, region, age_s}` |
+| `POST /v1/rooms/{code}/join` + Bearer | a seat in that room (409 `room_full`, 404 `no_room`, 403 `banned`) |
+| `PATCH /v1/rooms/{code}` `{name?, private?, max_players?, roadkill?, flying?}` + Bearer | owner only (403 `not_owner`) → the room |
+| `POST /v1/rooms/{code}/kick` `{player_id}` + Bearer | owner only → 204 |
 | `GET /v1/ws` | the game socket — [docs/PROTOCOL.md](docs/PROTOCOL.md) |
 | `GET /healthz` · `/readyz` · `/metrics` | liveness · readiness (503 while draining) · Prometheus |
 
@@ -88,6 +101,7 @@ Every flag has an environment variable (`dark-server --help`).
 | `DARK_TRUST_PROXY` | false | honour `X-Forwarded-For`/`-Proto` behind a proxy / load balancer |
 | `DARK_MAPS_DIR`, `DARK_MAPS` | `../game/public/maps`, `island` | maps hosted (`<id>/map.json`, `heights.bin`) |
 | `DARK_MAX_MATCHES` | 8 | concurrent matches per process |
+| `DARK_MAX_ROOMS` | 400 | concurrent rooms per process |
 | `DARK_MATCH_CONFIG` | — | TOML overriding match rules (`dark_sim::MatchConfig`: seats, timers, zone stages, limits, interest) |
 | `DARK_DRAIN_SECS` | 1200 | on SIGTERM: stop matchmaking, let matches finish this long, then close |
 | `DARK_SESSION_TTL` / `DARK_TICKET_TTL` | 86400 / 60 | token lifetimes (s) |
@@ -132,8 +146,8 @@ measure there (`dark_tick_seconds`, `dark_tick_overruns_total`).
 
 ## Not in v1 (next steps)
 
-1. **Client integration:** wire `game/src/net/protocol.ts` into the game (net client, remote-player pool,
-   interpolation, the zone and the minimap). The codec exists and is tested; the game doesn't connect yet.
+1. **Battle royale in the game:** rooms are wired (`game/src/net/`); the BR mode still needs its menu entry, the
+   zone in the HUD / minimap and spectating.
 2. **Reconnects:** today a disconnect mid-match eliminates the player. A reconnect window with seat re-use is next.
 3. **Accounts and persistence:** guests only, with no database. Accounts, stats and leaderboards would go in a
    separate service (Postgres).

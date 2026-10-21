@@ -70,6 +70,9 @@ import { GameLoop } from './GameLoop'
 import { bakeImpostors, useImpostorAtlas, type ImpostorAtlas } from '../rendering/impostors/Impostors'
 import { TREE_FADE } from '../world/WorldManager'
 import { createStore, type GameStateShape, type Store } from './GameState'
+import { NetClient, loadPlayerName, loadSetup, wireModel, type LocalPose, type RoomSetup } from '../net/NetClient'
+import { RemotePlayers } from '../net/RemotePlayers'
+import { Flags, NO_PLAYER } from '../net/protocol'
 import { loadSettings, saveSettings, type Settings } from './Settings'
 import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../world/Biomes'
 import { BIOMES } from '../world/biomes/BiomeDefs'
@@ -124,6 +127,9 @@ export class Game {
   readonly beam = new LightBeam()
   readonly bike: Bike
   car: Car
+  /** Multiplayer rooms (net/NetClient) and everyone else in the room (net/RemotePlayers). */
+  readonly net: NetClient
+  readonly remotes: RemotePlayers
   readonly health = new Health()
   readonly audio = new AudioSystem()
   readonly ash = new AshParticles()
@@ -273,6 +279,9 @@ export class Game {
       worldReady: false,
       vehicle: models.truck.id,
       vehicleLoading: null,
+      net: { status: 'off', message: null, room: null, me: NO_PLAYER, owner: NO_PLAYER, players: [] },
+      roomSetup: loadSetup(),
+      playerName: loadPlayerName(),
       held: null,
       fpsCap: false,
     })
@@ -374,6 +383,9 @@ export class Game {
     this.physicsDebug = new PhysicsDebug(physics)
     this.envRoot.name = 'environment'
     this.envRoot.add(this.caves.group, this.destruction.mesh, this.drift.points, this.sky.mesh, this.bike.root, this.car.root, this.vehicleFx.points, this.rain.points, this.horizon.mesh, this.landmarks.group, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
+    this.remotes = new RemotePlayers(this.materials.hero, models.hero, (id) => loadVehicle(id), this.materials.character, (x, z) => this.world.groundAt(x, z) ?? this.world.fields.height(x, z))
+    this.envRoot.add(this.remotes.root)
+    this.net = new NetClient(this)
     // Not in the water's mirror: the water itself, near-field grass, particles, the torch beam, debug helpers.
     this.envRoot.add(this.tyreMarks.mesh)
     this.reflection.hide.push(this.tyreMarks.mesh, this.water.mesh, this.world.grass.root, this.drift.points, this.vehicleFx.points, this.rain.points, this.ash.points, this.beam.mesh, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
@@ -434,7 +446,10 @@ export class Game {
     })
     // L (touch FLY / LAND): the flying car — wheels turn into jets; ↑ / ↓ climb and sink (on the ground: lift the body).
     // From the boat too (the hull folds away); landing over water puts the hull out.
-    i.onPress('KeyL', () => this.car.toggleFly())
+    i.onPress('KeyL', () => {
+      if (!this.net.flyingAllowed && !this.car.flyMode) return this.notify('Flying is off in this room', 2000)
+      this.car.toggleFly()
+    })
     // Simulation handling: X / Z gears (manual gearbox), Q low range, K locking differentials.
     i.onPress('KeyX', () => this.car.shift(1))
     i.onPress('KeyZ', () => this.car.shift(-1))
@@ -948,6 +963,15 @@ export class Game {
       })
       .add({ name: 'bike', update: (dt) => this.bike.update(dt, this.physics.alpha) }) // after camera: overrides the rider pose
       .add({
+        name: 'net',
+        update: (dt) => {
+          // multiplayer: this frame's pose out (30 Hz), everyone else placed at the interpolated server time
+          this.net.update(dt)
+          const t = this.net.serverNow()
+          if (t !== null && this.camera) this.remotes.update(dt, t, this.camera.position)
+        },
+      })
+      .add({
         name: 'car',
         update: (dt) => {
           this.car.showDriver = this.cameraCtl.mode === 'tpp'
@@ -1242,12 +1266,94 @@ export class Game {
 
   /** R / ⟲ while driving: the car back on its wheels, still, where it is (Car.respawnHere). */
   respawnHere(): void {
-    if (this.car.respawnHere()) this.notify('Car respawned', 1500)
+    if (this.car.respawnHere()) {
+      this.net.respawned()
+      this.notify('Car respawned', 1500)
+    }
   }
 
   /** Front-end navigation: PLAY hands over control; GARAGE / BACK switch screens; the pause menu returns to it. */
   play(): void {
     this.store.set({ landing: false, screen: 'menu' })
+    void this.net.ensureRoom() // every game is a room (offline: plays on alone)
+  }
+
+  /** Menu: the settings the next room opens with (persisted). */
+  setRoomSetup(patch: Partial<RoomSetup>): void {
+    const roomSetup = { ...this.store.get().roomSetup, ...patch }
+    this.store.set({ roomSetup })
+    try {
+      localStorage.setItem('dark.room.setup', JSON.stringify(roomSetup))
+    } catch {
+      /* private mode */
+    }
+  }
+
+  /** The name other players see (persisted; the next session token carries it). */
+  setPlayerName(name: string): void {
+    const n = name.replace(/\s+/g, ' ').trim().slice(0, 20)
+    if (!n) return
+    this.store.set({ playerName: n })
+    try {
+      localStorage.setItem('dark.player.name', n)
+    } catch {
+      /* private mode */
+    }
+  }
+
+  private readonly pose: LocalPose = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, vx: 0, vy: 0, vz: 0, flags: 0, model: 0 }
+  /** The local player's pose for the server: the car's when driving, the bike's rider, else the player's feet. */
+  localPose(): LocalPose {
+    const o = this.pose
+    const car = this.car
+    let flags = this.lighting.flashlightOn ? Flags.LIGHTS : 0
+    if (car.driving) {
+      const v = car.sim.body.linvel(), q = car.sim.body.rotation()
+      o.x = car.pos.x; o.y = car.pos.y; o.z = car.pos.z
+      o.vx = v.x; o.vy = v.y; o.vz = v.z
+      o.yaw = car.heading
+      // nose-up pitch from the chassis forward axis (−Z rotated by q)
+      const fy = 2 * (q.y * q.z - q.w * q.x) * -1
+      o.pitch = Math.asin(Math.max(-1, Math.min(1, fy)))
+      flags |= Flags.DRIVING | (car.flyMode ? Flags.FLYING : 0) | (car.boatMode ? Flags.BOAT : 0) | (car.lights ? Flags.LIGHTS : 0)
+      if (car.sim.controls.brake) flags |= Flags.BRAKING
+      o.model = wireModel(car.modelId, false)
+    } else {
+      const p = this.player
+      o.x = p.curr.x; o.y = p.curr.y; o.z = p.curr.z
+      o.vx = p.velocity.x; o.vy = p.velocity.y; o.vz = p.velocity.z
+      o.yaw = this.character.yaw
+      o.pitch = 0
+      if (!p.grounded) flags |= Flags.AIRBORNE
+      const bike = this.bike.riding
+      if (bike) flags |= Flags.DRIVING
+      o.model = wireModel(null, bike)
+    }
+    o.flags = flags
+    return o
+  }
+
+  /** The server put us somewhere (joining a room: beside its owner / at a map spawn). The world streams in round the
+   *  spot first (DEFERRED SPAWN), then the player and the car are placed there. */
+  netRelocate(x: number, y: number, z: number, yaw: number): void {
+    if (this.car.driving) this.car.forceOut()
+    const at = new THREE.Vector3(x, this.world.fields.heightNoNet(x, z) + 0.05, z)
+    this.player.teleport(at)
+    this.pendingSpawn = {
+      x, z, place: () => {
+        const f = this.world.fields
+        this.player.teleport(at.setY(Math.max(f.surface(x, z), y - 1) + 0.05))
+        this.player.yaw = yaw
+        this.character.yaw = yaw
+        this.car.park(x - Math.cos(yaw) * 4, z + Math.sin(yaw) * 4, yaw)
+      },
+    }
+  }
+
+  /** The server rejected our pose: snap to its. */
+  netCorrect(x: number, y: number, z: number, yaw: number): void {
+    if (this.car.driving) this.car.park(x, z, yaw, y + 2)
+    else this.player.teleport(new THREE.Vector3(x, y, z))
   }
   showScreen(screen: 'menu' | 'garage' | 'maps'): void {
     if (document.pointerLockElement) document.exitPointerLock()

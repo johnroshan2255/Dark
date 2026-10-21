@@ -353,3 +353,236 @@ async fn bad_tickets_and_versions_are_refused() {
     assert_eq!(list["matches"].as_array().unwrap().len(), 1);
     let _ = stop.send(());
 }
+
+async fn post(http: &reqwest::Client, url: String, token: &str, body: Value) -> reqwest::Response {
+    http.post(url).bearer_auth(token).json(&body).send().await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rooms_list_join_configure_and_kick() {
+    let (base, stop) = start().await;
+    let http = reqwest::Client::new();
+    let asha = guest(&http, &base, "Asha").await;
+    let ben = guest(&http, &base, "Ben").await;
+
+    // Asha starts playing the endless world (seed 4242): a public room opens with her settings
+    let r = post(
+        &http,
+        format!("{base}/v1/rooms"),
+        &asha,
+        serde_json::json!({ "kind": "world", "seed": 4242, "max_players": 8, "roadkill": true }),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let a: Value = r.json().await.unwrap();
+    let code = a["room"]["code"].as_str().unwrap().to_owned();
+    assert_eq!(code.len(), 6);
+    assert_eq!(a["room"]["name"], "Asha's room");
+    assert_eq!(
+        (a["room"]["kind"].as_str(), a["room"]["seed"].as_u64()),
+        (Some("world"), Some(4242))
+    );
+    let (mut wa, ida, spawn_a) = join_room_ws(&a).await;
+    assert_eq!(
+        spawn_a[1], NO_SPAWN,
+        "the owner of an endless world picks her own spawn"
+    );
+    let room = until(&mut wa, 3, |m| matches!(m, ServerMsg::Room(_))).await;
+    assert!(matches!(room, Some(ServerMsg::Room(RoomSettings { owner, max_players: 8, .. })) if owner == ida));
+    // she streams a pose
+    for seq in 1..=5u32 {
+        send(
+            &mut wa,
+            ClientMsg::State(State {
+                seq,
+                pos: [10_000, 5_000, -2_000],
+                ..Default::default()
+            }),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    // Ben sees it in the public list and joins by its code
+    let list: Value = http
+        .get(format!("{base}/v1/rooms"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let listed = list["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["code"] == code.as_str())
+        .cloned()
+        .expect("listed");
+    assert_eq!(listed["players"], 1);
+    let b: Value = post(
+        &http,
+        format!("{base}/v1/rooms/{}/join", code.to_lowercase()),
+        &ben,
+        serde_json::json!({}),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(b["room"]["code"], code.as_str());
+    let (mut wb, idb, spawn_b) = join_room_ws(&b).await;
+    let d = (((spawn_b[0] - 10_000) as f64).powi(2) + ((spawn_b[2] + 2_000) as f64).powi(2)).sqrt();
+    assert!(d < 600.0, "Ben starts beside Asha ({d} cm)");
+    // Ben settles and streams; each sees the other
+    for seq in 1..=5u32 {
+        send(
+            &mut wb,
+            ClientMsg::State(State {
+                seq,
+                pos: [spawn_b[0], 5_000, spawn_b[2]],
+                ..Default::default()
+            }),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert!(
+        until(
+            &mut wb,
+            3,
+            |m| matches!(m, ServerMsg::Snapshot { entities, .. } if entities.iter().any(|e| e.id == ida))
+        )
+        .await
+        .is_some()
+    );
+    assert!(
+        until(
+            &mut wa,
+            3,
+            |m| matches!(m, ServerMsg::Snapshot { entities, .. } if entities.iter().any(|e| e.id == idb))
+        )
+        .await
+        .is_some()
+    );
+
+    // only the owner configures: Ben can't, Asha makes it private and smaller — Ben is told, the list hides it
+    let r = http
+        .patch(format!("{base}/v1/rooms/{code}"))
+        .bearer_auth(&ben)
+        .json(&serde_json::json!({ "private": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let r = http
+        .patch(format!("{base}/v1/rooms/{code}"))
+        .bearer_auth(&asha)
+        .json(&serde_json::json!({ "private": true, "name": "Night drive", "max_players": 4 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let got = until(
+        &mut wb,
+        3,
+        |m| matches!(m, ServerMsg::Room(r) if r.name == "Night drive"),
+    )
+    .await;
+    assert!(
+        matches!(got, Some(ServerMsg::Room(RoomSettings { flags, max_players: 4, .. })) if flags & room_flags::PRIVATE != 0)
+    );
+    let list: Value = http
+        .get(format!("{base}/v1/rooms"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        list["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["code"] != code.as_str()),
+        "private rooms aren't listed"
+    );
+    let byc: Value = http
+        .get(format!("{base}/v1/rooms/{code}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(byc["private"], true, "but the code still finds it");
+
+    // Asha removes Ben: he's kicked and can't come back
+    let r = post(
+        &http,
+        format!("{base}/v1/rooms/{code}/kick"),
+        &asha,
+        serde_json::json!({ "player_id": idb }),
+    )
+    .await;
+    assert_eq!(r.status(), 204);
+    assert!(matches!(
+        until(&mut wb, 3, |m| matches!(m, ServerMsg::Kick { .. })).await,
+        Some(ServerMsg::Kick {
+            reason: KickReason::Kicked,
+            ..
+        })
+    ));
+    let r = post(
+        &http,
+        format!("{base}/v1/rooms/{code}/join"),
+        &ben,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(r.status(), 403);
+    assert!(
+        until(&mut wa, 3, |m| matches!(m, ServerMsg::PlayerLeft { id } if *id == idb))
+            .await
+            .is_some()
+    );
+
+    // a map room: spawns on the map; a wrong code is 404
+    let m: Value = post(
+        &http,
+        format!("{base}/v1/rooms"),
+        &ben,
+        serde_json::json!({ "kind": "map", "map": "island" }),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(m["room"]["map"], "island");
+    let r = post(
+        &http,
+        format!("{base}/v1/rooms/ZZZZZZ/join"),
+        &asha,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(r.status(), 404);
+    let _ = stop.send(());
+}
+
+async fn join_room_ws(seat: &Value) -> (Ws, u16, [i32; 3]) {
+    let (mut ws, _) = connect_async(seat["ws_url"].as_str().unwrap()).await.unwrap();
+    send(
+        &mut ws,
+        ClientMsg::Hello {
+            protocol: PROTOCOL_VERSION,
+            ticket: seat["ticket"].as_str().unwrap().into(),
+        },
+    )
+    .await;
+    match recv(&mut ws, 5).await {
+        Some(ServerMsg::Welcome { player_id, spawn, .. }) => (ws, player_id, spawn),
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+}

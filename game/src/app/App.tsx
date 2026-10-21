@@ -11,6 +11,7 @@ import { MainMenu } from '../ui/MainMenu'
 import { Garage } from '../ui/Garage'
 import { MapSelect } from '../ui/MapSelect'
 import { Toolbar } from '../ui/Toolbar'
+import { InGameRoom } from '../ui/Rooms'
 import { KeyArt } from '../ui/KeyArt'
 import { GameCanvas } from './Canvas'
 import { bootError, bootFinish, bootProgress } from './boot'
@@ -18,9 +19,10 @@ import { bootError, bootFinish, bootProgress } from './boot'
 /**
  * Every new game gets a fresh random world unless ?seed= is given (co-op joiners receive the host's
  * seed the same way). URL options: ?seed=<n|text> &tier=low|medium|high &adaptive=0 &hour=<0-24> &look=<style> &car=<id> &play=1 &at=cave
- * &stress=<ms, dev> &map=<id> (a fixed map: world/map/FixedMap.ts MAPS).
+ * &stress=<ms, dev> &map=<id> (a fixed map: world/map/FixedMap.ts MAPS) &room=<code> (join that multiplayer room —
+ * the link a room's world reloads into, ui/Rooms.tsx joinRoom).
  */
-function readOptions(): GameOptions {
+function readOptions(): GameOptions & { room?: string } {
   const p = new URLSearchParams(location.search)
   const s = p.get('seed')
   const seed = s ? (/^\d+$/.test(s) ? Number(s) >>> 0 : seedFromString(s)) : crypto.getRandomValues(new Uint32Array(1))[0]
@@ -35,6 +37,7 @@ function readOptions(): GameOptions {
     play: p.get('play') === '1',
     at: p.get('at') ?? undefined,
     map: p.get('map') ?? undefined,
+    room: p.get('room')?.toUpperCase() ?? undefined,
   }
 }
 
@@ -46,11 +49,21 @@ export function App() {
     let cancelled = false
     let created: Game | null = null
     bootProgress(0.1, 'Starting…')
-    Game.create(readOptions(), bootProgress)
+    const opts = readOptions()
+    Game.create(opts, bootProgress)
       .then((g) => {
         if (cancelled) g.dispose()
         else {
           setGame((created = g))
+          // Multiplayer: a ?room= link joins that room; skipping the landing page (?play=1) opens our own.
+          if (opts.room) {
+            const code = opts.room
+            void g.net.join(code).then((ok) => {
+              if (ok) return
+              g.notify(`${g.store.get().net.message ?? 'Could not join'} — playing in a room of your own`, 5000)
+              void g.net.ensureRoom()
+            })
+          } else if (opts.play) void g.net.ensureRoom()
           // Dev-only handle for console debugging / automated checks. Stripped from production builds.
           if (import.meta.env.DEV) (window as unknown as { __game?: Game }).__game = g
           // Dev-only remote HUD (phones on the LAN report their frame stats to the dev server: debug/DevTelemetry).
@@ -112,6 +125,7 @@ function Controls({ game }: { game: Game }) {
   return touch ? (
     <>
       <TouchControls game={game} />
+      <InGameRoom game={game} variant="float" />
       <RotateHint />
     </>
   ) : (

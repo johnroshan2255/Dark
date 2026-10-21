@@ -72,6 +72,7 @@ export function playMap(game: Game, id: string | null): void {
   }
   const p = new URLSearchParams(location.search)
   p.delete('seed')
+  p.delete('room')
   if (id) p.set('map', id)
   else p.delete('map')
   p.set('play', '1')

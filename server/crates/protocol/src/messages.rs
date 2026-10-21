@@ -186,6 +186,7 @@ pub const S_MATCH_END: u8 = 0x88;
 pub const S_CORRECTION: u8 = 0x89;
 pub const S_PONG: u8 = 0x8a;
 pub const S_KICK: u8 = 0x8b;
+pub const S_ROOM: u8 = 0x8c;
 
 /// Match phases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +199,8 @@ pub enum Phase {
     Running = 2,
     /// A winner (or none); the match closes after `ends_in_ms`.
     Ended = 3,
+    /// A ROOM: free roam, join any time, no zone; damage only if the room allows roadkill.
+    FreeRoam = 4,
 }
 
 impl Phase {
@@ -207,9 +210,32 @@ impl Phase {
             1 => Self::Countdown,
             2 => Self::Running,
             3 => Self::Ended,
+            4 => Self::FreeRoam,
             value => return Err(DecodeError::UnknownValue { what: "phase", value }),
         })
     }
+}
+
+/// Room flag bits (`RoomSettings.flags`).
+pub mod room_flags {
+    /// Hidden from the public room list (join by code only).
+    pub const PRIVATE: u8 = 1 << 0;
+    /// Vehicles hurt players on foot.
+    pub const ROADKILL: u8 = 1 << 1;
+    /// Flying vehicles allowed (else a FLYING state is rejected).
+    pub const FLYING: u8 = 1 << 2;
+}
+
+/// A room's settings as clients see them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoomSettings {
+    /// Join code (also shown for public rooms).
+    pub code: String,
+    pub name: String,
+    pub flags: u8,
+    pub max_players: u16,
+    /// The owner's player id (NO_PLAYER when the owner has left).
+    pub owner: u16,
 }
 
 /// Why a player was eliminated.
@@ -247,6 +273,8 @@ pub enum KickReason {
     Timeout = 8,
     ServerShutdown = 9,
     Duplicate = 10,
+    /// The room's owner removed this player.
+    Kicked = 11,
 }
 
 impl KickReason {
@@ -262,6 +290,7 @@ impl KickReason {
             8 => Self::Timeout,
             9 => Self::ServerShutdown,
             10 => Self::Duplicate,
+            11 => Self::Kicked,
             value => {
                 return Err(DecodeError::UnknownValue {
                     what: "kick reason",
@@ -368,6 +397,8 @@ pub enum ServerMsg {
         reason: KickReason,
         message: String,
     },
+    /// The room's settings (on join and whenever the owner changes them).
+    Room(RoomSettings),
 }
 
 impl ServerMsg {
@@ -488,6 +519,14 @@ impl ServerMsg {
                 w.u8(*reason as u8);
                 w.str(message);
             }
+            Self::Room(r) => {
+                w.u8(S_ROOM);
+                w.str(&r.code);
+                w.str(&r.name);
+                w.u8(r.flags);
+                w.u16(r.max_players);
+                w.u16(r.owner);
+            }
         }
     }
 
@@ -586,6 +625,13 @@ impl ServerMsg {
                 reason: KickReason::from_u8(r.u8()?)?,
                 message: r.str()?,
             },
+            S_ROOM => Self::Room(RoomSettings {
+                code: r.str()?,
+                name: r.str()?,
+                flags: r.u8()?,
+                max_players: r.u16()?,
+                owner: r.u16()?,
+            }),
             k => return Err(DecodeError::UnknownKind(k)),
         };
         r.finish()?;
