@@ -60,7 +60,7 @@ impl World {
     /// Ground height (endless: the road's, off the road the clients use their own terrain).
     fn ground(&self, x: f32, z: f32) -> f32 {
         match self {
-            World::Map { map, .. } => map.height(x, z),
+            World::Map { map, .. } => map.surface(x, z), // (the ice on a frozen lake / sea)
             World::Endless(e) => e.road_y(z as f64) as f32,
         }
     }
@@ -81,7 +81,7 @@ impl World {
                     return false;
                 }
                 let d = ((bx - ax).powi(2) + (bz - az).powi(2)).sqrt().max(0.5);
-                let rise = (map.height(bx, bz) - map.height(ax, az)).abs();
+                let rise = (map.surface(bx, bz) - map.surface(ax, az)).abs();
                 rise / d < if foot { 1.0 } else { 0.85 }
             }
             World::Endless(e) => {

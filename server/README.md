@@ -74,7 +74,7 @@ overtaking, junction choices, U-turns), races (the organiser gathers 3–6 at a 
 route), convoys behind another bot or a player, exploring cross-country (and respawning when stuck), boating
 (into the water at a shore crossing, round open water, out again), flying (rooms with flying), strolling on foot,
 hanging out with a player, AFK. Maps: a road graph and a water grid from `map.json` / `heights.bin` (`sim/src/nav.rs`,
-built once per map); endless world: the game's main road and river ported bit-exactly (`sim/src/noise.rs`, pinned by
+built once per map — water in the snow is ICE there, from `biome.bin`: bots drive on it, no boats); endless world: the game's main road and river ported bit-exactly (`sim/src/noise.rs`, pinned by
 `tests/world_golden.json`). Bots far from every human update at a quarter rate and are recycled near them.
 Cost (`cargo test --release -p dark-sim bench_room -- --ignored --nocapture`): 100 players + 100 bots all in one
 place, **0.54 ms per tick** (step 67 µs + snapshots 468 µs; was 1.10 ms before the snapshot work below), 34 KB/s per

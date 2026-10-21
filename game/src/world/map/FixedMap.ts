@@ -34,7 +34,7 @@ export const MAPS: MapInfo[] = [
   {
     id: 'island',
     name: 'The Island',
-    blurb: 'Snow peaks and a frozen lake, red-rock mesas with a cliff road, a slot canyon and dune switchbacks, a stunt park, forest trails, a canyon with waterfalls and a sunny coast.',
+    blurb: 'An island under snow: frozen peaks and lake, icy mesas with a cliff road, a slot canyon and drifted switchbacks, a stunt park, snowy pine trails and a frozen sea.',
     areaKm2: 5.76,
     regions: ['Forest', 'Desert', 'Snowfield', 'Coast', 'Canyon'],
     preview: '/maps/island/preview.jpg',
@@ -79,6 +79,7 @@ const ROAD_WIDTH_SCALE = 0.75
 /** Share of the map's palms kept (the scatter grows them as Dark's palms) and the tree cell they're keyed by (m). */
 const PALM_KEEP = 0.2
 const PALM_CELL = 4
+const _palmBw: [number, number] = [0, 0]
 const palmKey = (gx: number, gz: number) => (gx + 32768) * 65536 + (gz + 32768)
 const POOL_CELL = 120
 const POOL_P = 0.55
@@ -92,7 +93,9 @@ const SEA_NEAR_R = 224
 const BEACH_TOP = 30
 const _bm: [number, number] = [0, 0]
 
-const TREE_TYPES =['pine', 'pine_snow', 'oak', 'birch', 'cherry', 'palm']
+const TREE_TYPES = ['pine', 'pine_snow', 'oak', 'birch', 'cherry', 'palm']
+/** Desert plants whose sites grow the snow's conifers when the map there is snow (a map repainted snowy). */
+const SNOW_TREE_SITES = ['cactus', 'dead_tree']
 /** Nature placements (Dark grows its own): every other type is a SET PIECE (MapProps) and clears the forest round it. */
 const NATURE = new Set([...TREE_TYPES, 'rock', 'rock_snow', 'rock_red', 'bush', 'grass_tuft', 'cactus', 'log', 'stump', 'boulder', 'dead_tree'])
 /** Forest-free radius (m) round a set piece; big ones more. */
@@ -159,13 +162,18 @@ export class FixedMap {
     // Forest density: tree count per FOREST_CELL² cell, blurred once (3 × 3), normalised.
     this.fn = Math.ceil((2 * this.half) / FOREST_CELL)
     const count = new Float32Array(this.fn * this.fn)
+    const bw: [number, number] = [0, 0]
     for (const types of Object.values(props.placements)) {
-      for (const t of TREE_TYPES) {
+      for (const t of [...TREE_TYPES, ...SNOW_TREE_SITES]) {
         const a = types[t]
         if (!a) continue
+        const snowSite = SNOW_TREE_SITES.includes(t)
         for (let o = 0; o < a.length; o += props.stride) {
+          // the desert's cacti / snags where the map is snow now: sites of the snow's own conifers (the desert's
+          // sparse clumps, counted double → small snowy groves, as the snowfields of the endless world)
+          if (snowSite && this.biome(a[o], a[o + 2], bw)[1] < 0.5) continue
           const i = Math.floor((a[o] + this.half) / FOREST_CELL), j = Math.floor((a[o + 2] + this.half) / FOREST_CELL)
-          if (i >= 0 && j >= 0 && i < this.fn && j < this.fn) count[j * this.fn + i]++
+          if (i >= 0 && j >= 0 && i < this.fn && j < this.fn) count[j * this.fn + i] += snowSite ? 2 : 1
         }
       }
     }
@@ -226,6 +234,8 @@ export class FixedMap {
       const a = types.palm
       if (!a) continue
       for (let o = 0; o < a.length; o += props.stride) {
+        // (no palms in the snow: a map repainted snowy keeps its placements but grows only conifers)
+        if (this.biome(a[o], a[o + 2], _palmBw)[1] > 0.5) continue
         if (hashFloat(5531, Math.round(a[o] * 10), Math.round(a[o + 2] * 10)) < PALM_KEEP) this.palmCells.add(palmKey(Math.floor(a[o] / PALM_CELL), Math.floor(a[o + 2] / PALM_CELL)))
       }
     }

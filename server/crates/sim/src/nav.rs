@@ -556,7 +556,13 @@ fn water_of(map: &MapData) -> (Option<WaterGrid>, Vec<Shore>, Vec<[f32; 2]>) {
     let wet: Vec<bool> = (0..n * n)
         .map(|k| {
             let (i, j) = (k % n, k / n);
-            i > 0 && j > 0 && i < n - 1 && j < n - 1 && h[k] < WATER - WET
+            // (frozen water is ice: land to a bot)
+            i > 0
+                && j > 0
+                && i < n - 1
+                && j < n - 1
+                && h[k] < WATER - WET
+                && !map.frozen(x0 + i as f32 * cell, z0 + j as f32 * cell)
         })
         .collect();
     if !wet.iter().any(|&w| w) {
@@ -738,13 +744,18 @@ mod tests {
             "{reach}/{} nodes reachable",
             nav.nodes.len()
         );
-        let w = nav.water.as_ref().expect("the island has a sea");
-        assert!(nav.shores.len() > 20, "{} shores", nav.shores.len());
-        assert!(nav.open_water.len() > 100);
-        // across the sea between two open-water points
-        let (a, b) = (nav.open_water[0], nav.open_water[nav.open_water.len() / 2]);
-        let r = w.route(a, b, 12.0);
-        assert!(r.is_some());
+        if map.frozen(-1000.0, 1000.0) {
+            // an all-snow island: the sea and lakes are ice — no boat water, and the ice is the surface bots stand on
+            assert!(nav.water.is_none() && nav.shores.is_empty());
+            assert_eq!(map.surface(-1000.0, 1000.0), WATER);
+        } else {
+            let w = nav.water.as_ref().expect("the island has a sea");
+            assert!(nav.shores.len() > 20, "{} shores", nav.shores.len());
+            assert!(nav.open_water.len() > 100);
+            // across the sea between two open-water points
+            let (a, b) = (nav.open_water[0], nav.open_water[nav.open_water.len() / 2]);
+            assert!(w.route(a, b, 12.0).is_some());
+        }
         assert!(nav.nearest(map.lobby[0], map.lobby[1], 200.0).is_some());
         eprintln!(
             "island nav: {} roads, {} edges, {} nodes, {} shores, {} open water pts, {ms} ms",

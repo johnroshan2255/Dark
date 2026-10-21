@@ -6,6 +6,8 @@
 #           OUT=public/maps/island/preview.jpg [PX=1100] [SAMPLES=64] [TILT=43.5] [SUN_AZ=70] [POOLS=<pools.json>]
 # MINIMAP (in-game, GameHud): TILT=0 FULL=1 PX=1024 OUT=public/maps/island/minimap.jpg — top-down, exactly the map's
 # 2·half square (pixel = (x + half, z + half) / 2·half · PX).
+# Biome-driven: a map repainted all-snow (2026-10-21) renders frozen sea / lakes as ice and every tree site in the
+# snow as a snowy conifer, like the game.
 import json, math, os, sys
 import numpy as np
 import bpy
@@ -168,7 +170,8 @@ col[lake] = srgb(214, 236, 246)
 # beach: wet sand rim + surf line at the water
 depth = WATER - sub
 shore = sstep(4, 0, np.abs(sub - WATER))[..., None] * (~water)[..., None]
-col = col * (1 - 0.35 * shore) + srgb(205, 118, 78) * 0.35 * shore
+rim = np.where((sw > ICE_SNOW)[..., None], srgb(176, 200, 222), srgb(205, 118, 78))  # wet sand / an icy shore in the snow
+col = col * (1 - 0.35 * shore) + rim * 0.35 * shore
 seaS, seaD = srgb(124, 214, 216), srgb(34, 128, 178)
 wc = seaS + (seaD - seaS) * sstep(0.5, 14, depth)[..., None]
 wc = wc * (1 + 0.04 * n2[..., None])
@@ -183,14 +186,20 @@ for pl in POOLS:
     col = np.where((d < 1.4)[..., None] & (d >= 0)[..., None], srgb(150, 110, 76), col)
     col = np.where((d < 0)[..., None], srgb(60, 168, 186), col)
     sub[d < 0] = pl['y']
-zz = np.where(water, WATER, sub)
+# FROZEN water (snow: the game's ice — WorldFields.surface): flat at the water level, pale blue-white with darker
+# clear-ice windows and a snowy rim
+ice = (sub < WATER) & (sw > ICE_SNOW)
+icec = srgb(210, 230, 244) * (1 + 0.025 * n2[..., None]) + (srgb(168, 202, 228) - srgb(210, 230, 244)) * (np.clip(0.45 + 0.35 * n3 + 0.25 * n1, 0, 1) * 0.55)[..., None]  # soft clear-ice sheets
+col = np.where(ice[..., None], icec, col)
+zz = np.where(water | ice, WATER, sub)
 verts = np.stack([XX.ravel(), -ZZ.ravel(), zz.ravel()], 1)
 idx = np.arange(nv * nv).reshape(nv, nv)
 quads = np.stack([idx[:-1, :-1], idx[1:, :-1], idx[1:, 1:], idx[:-1, 1:]], -1).ravel()
 mesh_obj('terrain', verts, quads, 4, col.reshape(-1, 3), TERR, smooth=True)
 # open sea past the map edge
 sea = bpy.data.materials.new('sea'); sea.use_nodes = True
-em = sea.node_tree.nodes.new('ShaderNodeEmission'); em.inputs['Color'].default_value = (*seaD, 1)
+FROZEN_SEA = float(np.mean(np.concatenate([BIO[0, :, 1], BIO[-1, :, 1], BIO[:, 0, 1], BIO[:, -1, 1]]))) > ICE_SNOW
+em = sea.node_tree.nodes.new('ShaderNodeEmission'); em.inputs['Color'].default_value = (*(srgb(196, 222, 240) if FROZEN_SEA else seaD), 1)
 sea.node_tree.links.new(em.outputs['Emission'], sea.node_tree.nodes['Material Output'].inputs['Surface'])
 bpy.ops.mesh.primitive_plane_add(size=8000, location=(0, 0, WATER - 0.5)); bpy.context.object.data.materials.append(sea)
 
@@ -251,8 +260,14 @@ def placements(t):
     out = [np.array(tile[t]).reshape(-1, props['stride']) for tile in props['placements'].values() if tile.get(t)]
     return np.vstack(out) if out else np.zeros((0, props['stride']))
 def ground(p): return sample(H, p[:, 0], p[:, 2])
+def snowy(p):
+    """Placements standing in the snow (the game grows only conifers there)."""
+    if not len(p): return np.zeros(0, bool)
+    return BIO[np.clip(np.round((p[:, 2] + HALF) / bg['step']).astype(int), 0, BN - 1), np.clip(np.round((p[:, 0] + HALF) / bg['step']).astype(int), 0, BN - 1)][:, 1] > 0.5
+ALL = {t: placements(t) for t in ('pine', 'oak', 'birch', 'cherry', 'pine_snow', 'palm', 'cactus', 'dead_tree')}  # (desert sites in the snow grow conifers: FixedMap SNOW_TREE_SITES)
+SNOWY = np.vstack([a[snowy(a)] for a in ALL.values() if len(a)] or [np.zeros((0, props['stride']))])
 # forest trees: mostly round dot canopies (the game's broadleaf look), some dark-teal conifers
-p = placements('pine'); k = len(p); gy = ground(p); r_ = rng.uniform(0, 1, k)
+p = placements('pine'); p = p[~snowy(p)]; k = len(p); gy = ground(p); r_ = rng.uniform(0, 1, k)
 broad = r_ < 0.7
 sz = rng.uniform(4.0, 6.4, k)
 greens = np.array([srgb(52, 128, 40), srgb(84, 150, 42), srgb(126, 170, 46), srgb(40, 104, 54)])
@@ -261,10 +276,10 @@ pos = np.stack([p[:, 0], -p[:, 2], gy + sz * 1.6], 1)
 add((ICO_V, ICO_F), pos[broad], np.stack([sz, sz, sz * 0.85], 1)[broad], gc[broad])
 hc = rng.uniform(9, 14, k)
 add((CONE_V, CONE_F), np.stack([p[:, 0], -p[:, 2], gy + 1.5], 1)[~broad], np.stack([sz * 0.75, sz * 0.75, hc], 1)[~broad], np.repeat(srgb(30, 92, 84)[None], k, 0)[~broad])
-p = placements('pine_snow'); k = len(p); gy = ground(p); sz = rng.uniform(2.6, 4.0, k)
+p = SNOWY; k = len(p); gy = ground(p); sz = rng.uniform(2.6, 4.0, k)
 add((CONE_V, CONE_F), np.stack([p[:, 0], -p[:, 2], gy + 1.2], 1), np.stack([sz, sz, sz * 3.2], 1), np.repeat(srgb(236, 244, 250)[None], k, 0) * rng.uniform(0.92, 1.0, (k, 1)))
 add((CONE_V, CONE_F), np.stack([p[:, 0], -p[:, 2], gy + 0.6], 1), np.stack([sz * 1.1, sz * 1.1, sz * 1.4], 1), np.repeat(srgb(38, 96, 96)[None], k, 0))
-p = placements('palm')
+p = placements('palm'); p = p[~snowy(p)]
 p = p[[kept_palm(a[0], a[2]) for a in p]] if len(p) else p  # the game grows a fifth of them
 k = len(p); gy = ground(p)
 # a clump of bushes round each palm (scatter.beachTreeNear) and round each desert pool
@@ -276,11 +291,11 @@ for pl in POOLS:
 if cl:
     cl = np.array(cl); cs = rng.uniform(1.5, 2.6, len(cl)); cy = sample(H, cl[:, 0], cl[:, 1])
     add((ICO_V, ICO_F), np.stack([cl[:, 0], -cl[:, 1], cy + cs * 0.4], 1), np.stack([cs, cs, cs * 0.7], 1), np.repeat(srgb(96, 156, 52)[None], len(cl), 0))
-for a in range(5):
+for a in (range(5) if k else ()):  # (no palms: an all-snow map)
     ang = a * 2 * math.pi / 5 + rng.uniform(0, 1, k)
     add((ICO_V, ICO_F), np.stack([p[:, 0] + 2.6 * np.cos(ang), -p[:, 2] + 2.6 * np.sin(ang), gy + 8], 1), np.stack([2.8, 2.8, 0.6] * np.ones((k, 1)), 1).reshape(k, 3), np.repeat(srgb(70, 170, 50)[None], k, 0))
-p = placements('cactus'); k = len(p); gy = ground(p)
-add((ICO_V, ICO_F), np.stack([p[:, 0], -p[:, 2], gy + 1.5], 1), np.stack([0.9, 0.9, 2.2] * np.ones((k, 1)), 1).reshape(k, 3), np.repeat(srgb(86, 140, 50)[None], k, 0))
+p = placements('cactus'); p = p[~snowy(p)]; k = len(p); gy = ground(p)
+if k: add((ICO_V, ICO_F), np.stack([p[:, 0], -p[:, 2], gy + 1.5], 1), np.stack([0.9, 0.9, 2.2] * np.ones((k, 1)), 1).reshape(k, 3), np.repeat(srgb(86, 140, 50)[None], k, 0))
 p = placements('bush')
 pb = BIO[np.clip(np.round((p[:, 2] + HALF) / bg['step']).astype(int), 0, BN - 1), np.clip(np.round((p[:, 0] + HALF) / bg['step']).astype(int), 0, BN - 1)]
 p = p[pb[:, 0] < 0.3]  # the game grows no stray bushes on the desert / beach sand (scatter: pools and palm clumps only)
@@ -291,7 +306,8 @@ s = rng.uniform(1.4, 2.4, k)
 add((ICO_V, ICO_F), np.stack([p[:, 0], -p[:, 2], gy + s * 0.4], 1), np.stack([s, s, s * 0.7], 1), bc)
 for t, c, s0 in (('rock_red', srgb(186, 100, 66), 2.2), ('rock_snow', srgb(150, 162, 190), 2.0), ('rock', srgb(150, 146, 132), 1.8), ('boulder', srgb(160, 150, 136), 3.4)):
     p = placements(t); k = len(p); gy = ground(p); s = rng.uniform(0.7, 1.3, k) * s0
-    add((ICO_V, ICO_F), np.stack([p[:, 0], -p[:, 2], gy + s * 0.3], 1), np.stack([s, s * 0.9, s * 0.7], 1), np.repeat(c[None], k, 0))
+    rc_ = np.where(snowy(p)[:, None], srgb(150, 162, 190), c[None]) if k else np.zeros((0, 3))  # snow-dusted grey in the snow
+    add((ICO_V, ICO_F), np.stack([p[:, 0], -p[:, 2], gy + s * 0.3], 1), np.stack([s, s * 0.9, s * 0.7], 1), rc_)
 
 # ---------------------------------------------------------------- set pieces: small coloured blocks (tents, cabins…)
 SP = {'tent_orange': srgb(240, 128, 40), 'tent_blue': srgb(60, 120, 220), 'tent_red': srgb(220, 60, 50), 'cabin': srgb(130, 80, 50),

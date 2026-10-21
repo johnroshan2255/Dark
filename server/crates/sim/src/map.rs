@@ -56,9 +56,21 @@ struct MapJson {
     #[serde(rename = "heightOffset")]
     height_offset: f32,
     grid: Grid,
+    #[serde(rename = "biomeGrid", default)]
+    biome_grid: Option<BiomeGrid>,
     spawn: [f32; 3],
     roads: Vec<Road>,
 }
+
+#[derive(Deserialize)]
+struct BiomeGrid {
+    n: usize,
+    step: f32,
+    origin: [f32; 2],
+}
+
+/// Snow weight above which water is frozen (the game's `ICE_SNOW`, world/types.ts): ice, not water.
+pub const ICE_SNOW: f32 = 0.32;
 
 /// A point on a road where a player can start: position (world, y = road surface) and facing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -96,6 +108,11 @@ pub struct MapData {
     road_points: Vec<SpawnPoint>,
     /// The roads themselves (bots drive them).
     pub roads: Vec<RoadLine>,
+    /// Snow weight 0..255 per biome cell (biome.bin's second channel; empty = no biome file), its grid.
+    snow: Vec<u8>,
+    bn: usize,
+    bstep: f32,
+    borigin: [f32; 2],
     /// Bot navigation (road graph, water), built on first use.
     pub(crate) nav: std::sync::OnceLock<std::sync::Arc<crate::nav::Nav>>,
 }
@@ -112,7 +129,44 @@ impl MapData {
         };
         let meta: MapJson = serde_json::from_slice(&read("map.json")?)?;
         let raw = read("heights.bin")?;
-        Self::from_parts(meta, &raw)
+        // the biomes (optional): where the water is frozen (a lake / sea in the snow is ice — drive on it, no boats)
+        let bio = if meta.biome_grid.is_some() {
+            read("biome.bin").ok()
+        } else {
+            None
+        };
+        let mut m = Self::from_parts(meta, &raw)?;
+        if let Some(b) = bio
+            && b.len() == m.bn * m.bn * 2
+        {
+            m.snow = b.chunks_exact(2).map(|c| c[1]).collect();
+        }
+        Ok(m)
+    }
+
+    /// Snow weight 0..1 at (x, z) (nearest biome cell, clamped to the map's edge like the game's `FixedMap.biome`).
+    pub fn snow(&self, x: f32, z: f32) -> f32 {
+        if self.snow.is_empty() {
+            return 0.0;
+        }
+        let i = (((x - self.borigin[0]) / self.bstep).round().max(0.0) as usize).min(self.bn - 1);
+        let j = (((z - self.borigin[1]) / self.bstep).round().max(0.0) as usize).min(self.bn - 1);
+        self.snow[j * self.bn + i] as f32 / 255.0
+    }
+
+    /// Water at (x, z) is frozen (ice to stand / drive on).
+    pub fn frozen(&self, x: f32, z: f32) -> bool {
+        self.snow(x, z) > ICE_SNOW
+    }
+
+    /// The SOLID surface: the terrain, or the ice at the water level where the water is frozen (`WorldFields.surface`).
+    pub fn surface(&self, x: f32, z: f32) -> f32 {
+        let h = self.height(x, z);
+        if h < crate::noise::WATER && self.frozen(x, z) {
+            crate::noise::WATER
+        } else {
+            h
+        }
     }
 
     fn from_parts(meta: MapJson, raw: &[u8]) -> Result<Self, MapError> {
@@ -175,6 +229,10 @@ impl MapData {
             origin: g.origin,
             road_points,
             roads,
+            snow: Vec::new(),
+            bn: meta.biome_grid.as_ref().map_or(0, |b| b.n),
+            bstep: meta.biome_grid.as_ref().map_or(1.0, |b| b.step),
+            borigin: meta.biome_grid.as_ref().map_or([0.0; 2], |b| b.origin),
             nav: std::sync::OnceLock::new(),
         })
     }
@@ -270,6 +328,10 @@ impl MapData {
                 })
                 .collect(),
             roads: Vec::new(),
+            snow: Vec::new(),
+            bn: 0,
+            bstep: 1.0,
+            borigin: [0.0; 2],
             nav: std::sync::OnceLock::new(),
         }
     }
