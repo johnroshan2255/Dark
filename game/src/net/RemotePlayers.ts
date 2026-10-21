@@ -4,8 +4,8 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { CharacterModel, createBlobShadow } from '../gameplay/player/CharacterModel'
 import { DYN_LAYER } from '../rendering/shadows/DynamicShadow'
 import { VEHICLES } from '../gameplay/vehicle/catalogue'
-import { stylize } from '../rendering/shaders/stylize'
 import type { HeroAsset, VehicleModel } from '../assets/loadModels'
+import { RemoteCar } from './RemoteCar'
 import { cmToM, cmsToMps, Flags, i16ToPitch, isBot, u16ToYaw, type EntityState } from './protocol'
 
 /**
@@ -14,9 +14,10 @@ import { cmToM, cmsToMps, Flags, i16ToPitch, isBot, u16ToYaw, type EntityState }
  * SERVER clock, extrapolated ≤ EXTRAP_MS on a late packet).
  *
  * Built for a crowd: draw calls do not grow with the number of players.
- *  * CARS: one InstancedMesh per catalogue model and part (body, wheels, glass) within CAR_NEAR m, a low-poly
- *    stand-in (one InstancedMesh per model) out to CAR_FAR — ≤ 4 draws per model in use, whatever the count. A car
- *    STAYS where its driver got out (parked, PARK_MS) until they drive again.
+ *  * CARS: the nearest `maxCars` within CAR_NEAR m are drawn exactly like the player's own car (RemoteCar: doors,
+ *    cabin, rolling + steering wheels, dampers, lamps, jets when flying, the hull as a boat — posed from the state);
+ *    the rest a simplified model to CAR_MID and a low-poly stand-in to CAR_FAR (one InstancedMesh per model each). A
+ *    car STAYS where its driver got out (parked, PARK_MS) until they drive again.
  *  * ON FOOT: the game's own animated character for the nearest `maxCharacters` (per tier: 1 draw each), an instanced
  *    silhouette for the rest (1 draw).
  *  * NAME TAGS: one instanced billboard draw from a name atlas (TagLayer).
@@ -77,6 +78,9 @@ interface Remote {
   yaw: number
   pitch: number
   speed: number
+  /** Signed speed along the heading (m/s) and the turn rate (rad/s): the remote car's wheels roll and steer by them. */
+  fwd: number
+  yawRate: number
   vy: number
   flags: number
   model: number
@@ -92,15 +96,12 @@ interface Parked extends CarPose {
   until: number
 }
 
-/** Instanced meshes for one car model: near (body, wheels, glass) and the far stand-in. */
+/** One car model: its baked model (the full RemoteCars), the simplified and the far stand-in. */
 interface CarSet {
-  body: THREE.InstancedMesh
-  wheels: THREE.InstancedMesh
-  glass: THREE.InstancedMesh
+  vm: VehicleModel
   /** 45–160 m: body + glass simplified (vertex clustering) + 12-sided wheels, colours baked — one draw. */
   mid: THREE.InstancedMesh
   far: THREE.InstancedMesh
-  near: number
   midN: number
   farN: number
 }
@@ -119,8 +120,12 @@ export class RemotePlayers {
   private readonly carSets = new Map<number, CarSet>()
   private readonly carLoads = new Set<number>()
   private readonly carMat: THREE.Material
-  private readonly texMats = new Map<string, THREE.Material>()
-  private readonly glassMat = new THREE.MeshLambertMaterial({ color: 0x1a2430, transparent: true, opacity: 0.55 })
+  /** Full cars in use (by remote id, or −1 − owner when parked) and idle ones per model. */
+  private readonly cars = new Map<number, RemoteCar>()
+  private readonly idleCars = new Map<number, RemoteCar[]>()
+  private readonly usedCars = new Set<number>()
+  /** Night 0 … 1 (Game): remote headlights. */
+  darkness = 0
   private readonly proxies: THREE.InstancedMesh
   /** Soft contact shadows under the simplified cars and the far people (they cast no sun shadow): one draw. */
   private readonly blobs: THREE.InstancedMesh
@@ -135,7 +140,7 @@ export class RemotePlayers {
   /** Animated characters (the rest are silhouettes) and full-model cars (the rest simplified) — per tier. */
   maxCharacters = 12
   maxCars = 6
-  /** The cars (remote id, or −1 − parked index) drawn full this quarter second. */
+  /** The cars (remote id, or −1 − owner when parked) drawn full this quarter second. */
   private readonly fullCars = new Set<number>()
   private readonly carDist: { id: number; d: number }[] = []
   private readonly tagged: Remote[] = []
@@ -224,7 +229,7 @@ export class RemotePlayers {
     const name = this.names.get(id) ?? (bot ? 'Bot' : `Player ${id}`)
     const r: Remote = {
       id, bot, samples: [], char: null, name, tagSlot: this.tags.alloc(), pos: new THREE.Vector3(), yaw: 0, pitch: 0,
-      speed: 0, vy: 0, flags: 0, model: 0, dist: Infinity, visible: false, lastCar: null, wasDriving: false,
+      speed: 0, fwd: 0, yawRate: 0, vy: 0, flags: 0, model: 0, dist: Infinity, visible: false, lastCar: null, wasDriving: false,
     }
     this.tags.write(r.tagSlot, name, bot)
     this.remotes.set(id, r)
@@ -263,14 +268,6 @@ export class RemotePlayers {
     const def = VEHICLES[(model - 1) % VEHICLES.length]
     void this.loadVehicle(def.id)
       .then((vm) => {
-        const wheels = mergeGeometries(
-          vm.wheelPos.map(([x, y, z], i) => {
-            const g = vm.wheel.clone()
-            if (i % 2 === 1) g.rotateY(Math.PI) // right-side wheels face out
-            return g.translate(x, y, z)
-          }),
-        )
-        if (!wheels) return
         vm.body.computeBoundingBox()
         const bb = vm.body.boundingBox!
         this.footprint.set(model, [(bb.max.x - bb.min.x) * 1.15, (bb.max.z - bb.min.z) * 1.1])
@@ -284,15 +281,10 @@ export class RemotePlayers {
           this.root.add(im)
           return im
         }
-        // a textured model (the pickup) keeps its texture: one shared textured program for all of them
-        const bodyMat = vm.map ? (this.texMats.get(def.id) ?? this.texMats.set(def.id, stylize(new THREE.MeshLambertMaterial({ map: vm.map, vertexColors: true }), { key: 'remote-car', rim: 0.14, toon: 0.3 })).get(def.id)!) : this.carMat
         this.carSets.set(model, {
-          body: mk(vm.body, bodyMat, 'body', true),
-          wheels: mk(wheels, this.carMat, 'wheels', true),
-          glass: mk(vm.glass, this.glassMat, 'glass', false),
+          vm,
           mid: mk(midCar(vm), this.carMat, 'mid', false),
           far: mk(lowPolyCar(vm), this.carMat, 'far', false),
-          near: 0,
           midN: 0,
           farN: 0,
         })
@@ -336,7 +328,10 @@ export class RemotePlayers {
       dy = Math.atan2(Math.sin(dy), Math.cos(dy))
       r.yaw = a.yaw + dy * k
       r.pitch = a.pitch + (b.pitch - a.pitch) * k
-      r.speed = Math.hypot(a.vx + (b.vx - a.vx) * k, a.vz + (b.vz - a.vz) * k)
+      const vx = a.vx + (b.vx - a.vx) * k, vz = a.vz + (b.vz - a.vz) * k
+      r.speed = Math.hypot(vx, vz)
+      r.fwd = -vx * Math.sin(r.yaw) - vz * Math.cos(r.yaw)
+      r.yawRate = b !== a ? dy / Math.max(0.001, (b.t - a.t) / 1000) : 0
       r.vy = a.vy + (b.vy - a.vy) * k
       r.flags = b.flags
       r.model = b.model
@@ -392,17 +387,18 @@ export class RemotePlayers {
       const cd = this.carDist
       cd.length = 0
       for (const r of this.remotes.values()) if (r.visible && r.flags & Flags.DRIVING && r.model !== BIKE_MODEL && r.dist < CAR_NEAR) cd.push({ id: r.id, d: r.dist })
-      this.parked.forEach((c, i) => {
+      for (const c of this.parked) {
         const d = Math.hypot(c.x - eye.x, c.y - eye.y, c.z - eye.z)
-        if (d < CAR_NEAR) cd.push({ id: -1 - i, d })
-      })
+        if (d < CAR_NEAR) cd.push({ id: -1 - c.owner, d })
+      }
       cd.sort((a, b) => a.d - b.d)
       this.fullCars.clear()
       for (let i = 0; i < Math.min(cd.length, this.maxCars); i++) this.fullCars.add(cd[i].id)
     }
 
     // ---- fill the batches
-    for (const s of this.carSets.values()) s.near = s.midN = s.farN = 0
+    for (const s of this.carSets.values()) s.midN = s.farN = 0
+    this.usedCars.clear()
     let px = 0
     this.blobN = 0
     this.tags.begin()
@@ -416,7 +412,7 @@ export class RemotePlayers {
         }
       }
       if (!r.visible) continue
-      if (driving) this.putCar(r.model, r.pos.x, r.pos.y, r.pos.z, r.yaw, r.pitch, r.dist, this.fullCars.has(r.id))
+      if (driving) this.putCar(r.model, r.pos.x, r.pos.y, r.pos.z, r.yaw, r.pitch, r.dist, this.fullCars.has(r.id) ? r : null, dt)
       else if (!r.char && px < CAP && r.dist < 400) {
         _e.set(0, r.yaw, 0)
         this.proxies.setMatrixAt(px++, _m.compose(r.pos, _q.setFromEuler(_e), _s))
@@ -432,10 +428,18 @@ export class RemotePlayers {
       this.tags.put(r.tagSlot, r.pos.x, r.pos.y + (driving ? 2.6 : 2.15), r.pos.z)
     }
     this.tagged.length = 0
-    this.parked.forEach((c, i) => {
+    for (const c of this.parked) {
       _p.set(c.x, c.y, c.z)
-      this.putCar(c.model, c.x, c.y, c.z, c.yaw, c.pitch, _p.distanceTo(eye), this.fullCars.has(-1 - i))
-    })
+      this.putCar(c.model, c.x, c.y, c.z, c.yaw, c.pitch, _p.distanceTo(eye), this.fullCars.has(-1 - c.owner) ? -1 - c.owner : null, dt)
+    }
+    // full cars not drawn this frame go back to their model's pool
+    for (const [key, car] of this.cars) {
+      if (this.usedCars.has(key)) continue
+      car.root.visible = false
+      this.cars.delete(key)
+      const idle = this.idleCars.get(car.model) ?? this.idleCars.set(car.model, []).get(car.model)!
+      idle.push(car)
+    }
     this.blobs.count = this.blobN
     this.blobs.visible = this.blobN > 0
     if (this.blobN) this.blobs.instanceMatrix.needsUpdate = true
@@ -443,11 +447,6 @@ export class RemotePlayers {
     this.proxies.visible = px > 0
     if (px) this.proxies.instanceMatrix.needsUpdate = true
     for (const s of this.carSets.values()) {
-      for (const im of [s.body, s.wheels, s.glass]) {
-        im.count = s.near
-        im.visible = s.near > 0
-        if (s.near) im.instanceMatrix.needsUpdate = true
-      }
       s.mid.count = s.midN
       s.mid.visible = s.midN > 0
       if (s.midN) s.mid.instanceMatrix.needsUpdate = true
@@ -462,19 +461,34 @@ export class RemotePlayers {
     for (let i = this.parked.length - 1; i >= 0; i--) if (this.parked[i].owner === owner) this.parked.splice(i, 1)
   }
 
-  private putCar(model: number, x: number, y: number, z: number, yaw: number, pitch: number, dist: number, full: boolean): void {
+  /** @param full the driver (a moving car) or the parked key (−1 − owner) when it gets the full model, else null */
+  private putCar(model: number, x: number, y: number, z: number, yaw: number, pitch: number, dist: number, full: Remote | number | null, dt: number): void {
     if (dist > CAR_FAR) return
     const s = this.carSet(model)
     if (!s) return
+    if (full !== null && dist < CAR_NEAR) {
+      const key = typeof full === 'number' ? full : full.id
+      let car = this.cars.get(key)
+      if (car && car.model !== model) {
+        car.dispose()
+        this.cars.delete(key)
+        car = undefined
+      }
+      if (!car) {
+        car = this.idleCars.get(model)?.pop() ?? new RemoteCar(model, s.vm)
+        this.cars.set(key, car)
+        this.root.add(car.root)
+      }
+      car.root.visible = true
+      this.usedCars.add(key)
+      const r = typeof full === 'number' ? null : full
+      const f = r?.flags ?? 0
+      car.update(dt, _p.set(x, y, z), yaw, pitch, r?.fwd ?? 0, r?.yawRate ?? 0, (f & Flags.FLYING) !== 0, (f & Flags.BOAT) !== 0, (f & Flags.LIGHTS) !== 0, (f & Flags.BRAKING) !== 0, this.darkness)
+      return
+    }
     _e.set(pitch, yaw, 0)
     _m.compose(_p.set(x, y, z), _q.setFromEuler(_e), _s)
-    if (full && dist < CAR_NEAR) {
-      if (s.near >= CAP) return
-      s.body.setMatrixAt(s.near, _m)
-      s.wheels.setMatrixAt(s.near, _m)
-      s.glass.setMatrixAt(s.near, _m)
-      s.near++
-    } else if (dist < CAR_MID) {
+    if (dist < CAR_MID) {
       if (s.midN < CAP) s.mid.setMatrixAt(s.midN++, _m)
       const f = this.footprint.get(model)
       if (f && dist < 90) this.blob(x, y, z, yaw, f[0], f[1])
@@ -494,14 +508,15 @@ export class RemotePlayers {
     for (const c of this.charPool) c.dispose()
     this.charPool.length = 0
     for (const s of this.carSets.values()) {
-      s.wheels.geometry.dispose()
       s.far.geometry.dispose()
       s.mid.geometry.dispose()
-      for (const im of [s.body, s.wheels, s.glass, s.mid, s.far]) im.dispose()
+      for (const im of [s.mid, s.far]) im.dispose()
     }
+    for (const c of this.cars.values()) c.dispose()
+    for (const l of this.idleCars.values()) for (const c of l) c.dispose()
+    this.cars.clear()
+    this.idleCars.clear()
     this.proxies.geometry.dispose()
-    this.glassMat.dispose()
-    for (const m of this.texMats.values()) m.dispose()
     this.tags.dispose()
   }
 }

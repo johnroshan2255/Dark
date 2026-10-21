@@ -188,149 +188,11 @@ export class Car {
     this.root.name = 'car'
     this.root.add(this.body)
     this.modelId = truck.id
-    // Vertex colours carry the baked material colours (white where a texture is used); the paint colour tints
-    // the masked panels only (`paintMask` attribute) — the garage's colour picker.
-    const mat = new THREE.MeshLambertMaterial({ ...(truck.map ? { map: truck.map } : {}), vertexColors: true })
-    const paint = this.paint
-    const paintMask = { value: truck.paintMap }
-    const tyre = this.tyreU
-    tyre.uTyreR.value = truck.wheelRadius
+    this.tyreU.uTyreR.value = truck.wheelRadius
     this.rimRatio = truck.rim
-    mat.onBeforeCompile = (shader) => {
-      shader.uniforms.uPaint = paint
-      shader.uniforms.uPaintMask = paintMask
-      Object.assign(shader.uniforms, tyre)
-      // TYRE DEFORMATION (skills/realistic-vehicle-system §8.9; only where `tyreW` > 0 — the wheels' rubber, one
-      // instance per wheel): the contact patch flattens by the wheel's squash (from its real load), the sidewall
-      // bulges out over the bottom, and on HIGH the tread shears sideways with the cornering force. Then DIRT: a
-      // mud / dust coat by height above the ground (wheels, sills, arches), broken up by noise, in the colour of
-      // the ground the car last drove on (vehicle_realism.py bakes the AO into the vertex colours).
-      shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', `#include <common>
-attribute float paintMask; varying float vPaint;
-attribute float tyreW; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
-uniform vec4 uTyre[4]; uniform float uTyreShear[4]; uniform float uTyreR;`)
-        .replace('#include <begin_vertex>', `#include <begin_vertex>
-vPaint = paintMask;
-vTyre = tyreW;
-if (tyreW > 0.0) {
-  int wi = min(gl_InstanceID, 3);
-  vec4 ty = uTyre[wi];
-  float plane = uTyreR - ty.w;
-  float d = dot(transformed, ty.xyz);
-  transformed -= ty.xyz * max(d - plane, 0.0) * tyreW;                     // flat contact patch
-  float band = smoothstep(plane - 0.45 * uTyreR, plane, d);
-  transformed.x += sign(transformed.x) * ty.w * 0.45 * band * tyreW;       // sidewall bulge
-  transformed.x += uTyreShear[wi] * band * tyreW;                          // cornering shear (0 below HIGH)
-}`)
-        .replace('#include <worldpos_vertex>', `#include <worldpos_vertex>
-{ vec4 wp = vec4(transformed, 1.0);
-  #ifdef USE_INSTANCING
-  wp = instanceMatrix * wp;
-  #endif
-  vDirtP = (modelMatrix * wp).xyz;
-  vDirtN = (vec4(transformedNormal, 0.0) * viewMatrix).xyz; } // world-space normal (snow settles on up-facing panels)`)
-      // Paint REPLACES the panel's hue (keeps its shading/luminance) so a red coat on a blue textured van is red,
-      // not black; white = the model's own colours (stock look).
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
-uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss; uniform float uSnowCoat; uniform float uSandCoat; uniform float uMudCoat; uniform float uBurn;
-float carCoat = 0.0;
-float dirtHash(vec3 p) { return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
-float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(mix(dirtHash(i), dirtHash(i + vec3(1,0,0)), f.x), mix(dirtHash(i + vec3(0,1,0)), dirtHash(i + vec3(1,1,0)), f.x), f.y),
-             mix(mix(dirtHash(i + vec3(0,0,1)), dirtHash(i + vec3(1,0,1)), f.x), mix(dirtHash(i + vec3(0,1,1)), dirtHash(i + vec3(1,1,1)), f.x), f.y), f.z); }${truck.paintMap ? '\nuniform sampler2D uPaintMask;' : ''}`)
-        .replace('#include <color_fragment>', `#include <color_fragment>
-        { float lum = dot(diffuseColor.rgb, vec3(0.3, 0.59, 0.11));
-          float isWhite = step(2.95, uPaint.r + uPaint.g + uPaint.b);
-          // Textured models: only the body-paint texels (paint mask from the texture's dominant body hue) — rims,
-          // tyres, glass, chrome, lights, seats and rust keep their own colours.
-          float m = vPaint${truck.paintMap ? ' * texture2D(uPaintMask, vMapUv).r' : ''};
-          diffuseColor.rgb = mix(diffuseColor.rgb, uPaint * (lum * 1.3 + 0.08), m * (1.0 - isWhite));
-          // DIRT: thick on the tyres and the lowest 30 cm, fading out by ~0.9 m; splashes broken up by noise.
-          float h = vDirtP.y - uGroundY;
-          float n = dirtNoise(vDirtP * 3.1) * 0.6 + dirtNoise(vDirtP * 9.0) * 0.4;
-          float coat = (1.0 - smoothstep(0.12, 0.9, h + (n - 0.5) * 0.35)) * smoothstep(0.25, 0.65, n + 0.25 * uDirt);
-          coat = max(coat * uDirt, vTyre * 0.3 * uDirt);
-          // Tyres take grey-brown dust, not mud paint.
-          vec3 dcol = mix(uDirtCol, vec3(0.42, 0.4, 0.37), vTyre * 0.6) * (0.75 + 0.35 * n);
-          carCoat = clamp(coat, 0.0, 0.85);
-          diffuseColor.rgb = mix(diffuseColor.rgb, dcol, carCoat);
-          // SAND + SNOW BUILD-UP (over the hill): grows while driving in the desert / snow (Car.updateDirt), melts
-          // and washes off elsewhere. Sand: a fine dust film over the whole car, caked sand low down and dust settled
-          // on the flat tops. Snow: caps on every up-facing panel (roof, hood, rack, bed) spreading in clumps as it
-          // builds, and packed snow sprayed up the sides / arches / bumpers and into the tyres. Both stay matte.
-          if (uMudCoat > 0.003) {
-            // Wet red-brown mud: thrown up the sides from the wheels (splatter blobs climbing with the coat), caked
-            // on the lower body and tyres, a sheen on the wet clumps (kept glossy: carCoat stays low on it).
-            float hM = vDirtP.y - uGroundY;
-            float nM = dirtNoise(vDirtP * 5.0) * 0.6 + dirtNoise(vDirtP * 16.0) * 0.4;
-            float topM = 0.35 + 1.0 * uMudCoat;
-            float cake = (1.0 - smoothstep(topM - 0.25, topM + 0.1, hM + (nM - 0.5) * 0.6)) * smoothstep(0.62 - uMudCoat * 0.45, 0.72 - uMudCoat * 0.45, nM);
-            float blob = step(1.0 - uMudCoat * 0.35 * (1.0 - smoothstep(0.3, 1.8, hM)), dirtHash(floor(vDirtP * 22.0)));
-            float mud = clamp(max(max(cake, blob * 0.9), vTyre * 0.7 * uMudCoat), 0.0, 0.95);
-            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.2, 0.11, 0.06) * (0.8 + 0.4 * nM), mud);
-            carCoat = max(carCoat, mud * 0.4);
-          }
-          if (uSandCoat + uSnowCoat > 0.003) {
-            float up = normalize(vDirtN).y;
-            float nS = dirtNoise(vDirtP * 4.3) * 0.65 + dirtNoise(vDirtP * 13.0) * 0.35;
-            // Fine speckled grunge (their dusty / muddy trucks): ~2 cm specks, denser low down and as the coat grows.
-            float low = 1.0 - smoothstep(0.0, 1.6, h);
-            // (Specks smaller than ~a pixel fade to their mean coverage — no sparkle at a distance.)
-            float specP = uSandCoat * (0.25 + 0.55 * low) * (0.6 + 0.8 * nS);
-            // ~7 mm round-ish specks (2 hash layers), averaged once they get near pixel size → fine grit, not squares.
-            float specFar = smoothstep(0.45, 1.3, length(fwidth(vDirtP)) * 90.0);
-            vec3 sp = vDirtP * 90.0;
-            float sk = max(step(1.0 - specP * 0.7, dirtHash(sp)), step(1.0 - specP * 0.5, dirtHash(sp * 1.37 + 3.1)));
-            float speck = mix(sk, specP * 0.85, specFar);
-            float sand = uSandCoat * (0.06 + 0.06 * nS) + speck * 0.7;
-            sand += (1.0 - smoothstep(0.1, 0.3 + 0.6 * uSandCoat, h + (nS - 0.5) * 0.4)) * smoothstep(0.35, 0.65, nS + 0.25 * uSandCoat) * uSandCoat;
-            sand += smoothstep(0.5, 0.85, up) * smoothstep(0.35, 0.7, nS) * 0.5 * uSandCoat + vTyre * 0.35 * uSandCoat;
-            sand = clamp(sand, 0.0, 0.85);
-            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.74, 0.5, 0.34) * (0.85 + 0.25 * nS), sand);
-            float cap = smoothstep(0.45, 0.8, up) * smoothstep(1.0 - uSnowCoat, 1.2 - uSnowCoat, nS + 0.12);
-            // Packed snow up the sides: a solid band whose top edge climbs with the coat (≈ 0.3 m → 1.25 m), ragged.
-            float sTop = 0.25 + 1.0 * uSnowCoat;
-            float spray = (1.0 - smoothstep(sTop - 0.12, sTop + 0.12, h + (nS - 0.5) * 0.5)) * smoothstep(1.0 - uSnowCoat * 1.3, 1.15 - uSnowCoat * 1.3, nS + 0.05);
-            spray = max(spray, mix(step(1.0 - uSnowCoat * 0.6 * low, dirtHash(vDirtP * 90.0)), uSnowCoat * 0.6 * low, specFar)); // flecks thrown up the sides
-            float snow = clamp(max(max(cap, spray), vTyre * 0.55 * uSnowCoat), 0.0, 0.95);
-            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86, 0.9, 0.97) * (0.9 + 0.12 * nS) * mix(0.85, 1.0, up * 0.5 + 0.5), snow);
-            carCoat = max(carCoat, max(snow, sand * 0.8));
-          }
-          // BURNT (Damage: the wreck after the explosion): charred black paint, soot streaks, bare rusty metal.
-          if (uBurn > 0.003) {
-            float nb = dirtNoise(vDirtP * 6.0) * 0.6 + dirtNoise(vDirtP * 19.0) * 0.4;
-            vec3 burnt = mix(vec3(0.03, 0.028, 0.026), vec3(0.16, 0.08, 0.04), smoothstep(0.62, 0.8, nb));
-            diffuseColor.rgb = mix(diffuseColor.rgb, burnt, uBurn * (0.85 + 0.15 * nb));
-            carCoat = max(carCoat, uBurn);
-          } }`)
-        // GLOSS (MEDIUM+): painted metal catches the sun as a highlight and the sky at grazing angles (Fresnel);
-        // rubber and the dirt coat stay matte. Fog applies after it, like the rest of the colour.
-        .replace('#include <tonemapping_fragment>', `{
-  vec3 Vg = normalize(vViewPosition);
-  float fres = pow(1.0 - max(dot(normal, Vg), 0.0), 4.0);
-  float shine = uGloss * (0.35 + 0.65 * vPaint) * (1.0 - vTyre) * (1.0 - carCoat);
-  vec3 g = vec3(0.0);
-  #if NUM_DIR_LIGHTS > 0
-  vec3 Lg = directionalLights[0].direction;
-  g += directionalLights[0].color * pow(max(dot(normal, normalize(Lg + Vg)), 0.0), 56.0) * 0.32 * step(0.0, dot(normal, Lg));
-  #endif
-  #ifdef USE_FOG
-  g += fogColor * fres * 0.2;
-  #endif
-  gl_FragColor.rgb += g * shine;
-}
-#include <tonemapping_fragment>`)
-    }
-    mat.customProgramCacheKey = () => `truck-paint2-${truck.map ? 'tex' : 'flat'}${truck.paintMap ? '-mask' : ''}`
-    // A machine, not a cartoon: a soft terminator (toon 0.3) and a faint rim — real light and the baked AO shape it.
-    this.bodyMat = stylize(mat, { key: 'truck', rim: 0.14, toon: 0.3 })
-    this.bodyMat.name = 'lib/truck'
+    this.bodyMat = truckMaterial(truck, this.paint, this.tyreU)
     // Body as a 1-instance InstancedMesh: it then shares the wheels' (instanced) program → 1 truck program, not 2.
     // The CABIN (vehicle_cabin.py: dash, seats, console…) draws with it (not part of the collider: loadModels).
-    // Both faces: from inside, the shell's panels are its inner walls (the Żuk's painted-metal cab).
-    this.bodyMat.side = THREE.DoubleSide
     this.bodyGeo = truck.cabin ? mergeGeometries([truck.body, truck.cabin], false) ?? truck.body : truck.body
     this.ownBodyGeo = this.bodyGeo !== truck.body
     const bodyMesh = new THREE.InstancedMesh(this.bodyGeo, this.bodyMat, 1)
@@ -425,16 +287,7 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     // AXLES (pickup, Żuk): a unit cylinder along X, instanced 5× — front / rear beams hub to hub (they tilt with
     // the suspension like a real solid axle), the two diff housings and the driveshaft between them.
     // Same program as the body: the gear carries its colour in the vertices and samples a neutral texel.
-    const gear = (g: THREE.BufferGeometry, rgb: [number, number, number]) => {
-      const n = g.getAttribute('position').count
-      const col = new Float32Array(n * 3)
-      const uv = new Float32Array(n * 2)
-      for (let i = 0; i < n; i++) (col.set(rgb, i * 3), uv.set(truck.neutralUv, i * 2))
-      g.setAttribute('color', new THREE.BufferAttribute(col, 3))
-      g.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
-      g.setAttribute('paintMask', new THREE.BufferAttribute(new Float32Array(n), 1))
-      return zeroTyre(g)
-    }
+    const gear = (g: THREE.BufferGeometry, rgb: [number, number, number]) => gearGeometry(truck, g, rgb)
     const inst = (g: THREE.BufferGeometry, n: number) => {
       const m = new THREE.InstancedMesh(g, this.bodyMat, n)
       m.frustumCulled = false
@@ -442,11 +295,10 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
       this.body.add(m)
       return m
     }
-    const cyl = () => new THREE.CylinderGeometry(1, 1, 1, 8, 1, false).rotateZ(Math.PI / 2).toNonIndexed() // unit, along X
     this.hasAxles = !!def.axles
-    this.axles = inst(gear(cyl(), [0.025, 0.025, 0.025]), 9)
+    this.axles = inst(gear(gearCylinder(), [0.025, 0.025, 0.025]), 9)
     // Damper: chrome shaft into a dark body; coil springs in black powder coat (no toy-blue).
-    this.rods = inst(gear(cyl(), [0.62, 0.64, 0.68]), 4)
+    this.rods = inst(gear(gearCylinder(), [0.62, 0.64, 0.68]), 4)
     this.springs = inst(gear(coilGeometry(), [0.045, 0.045, 0.05]), 4)
     for (let k = 0; k < 9; k++) this.axles.setMatrixAt(k, _zero)
     // Struts stand just inboard of each tyre, from the hub up to a mount in the wheel arch (above the tyre).
@@ -454,26 +306,8 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     const wb = truck.wheel.boundingBox!
     this.inboard = (wb.max.x - wb.min.x) / 2 + 0.05
     this.mounts = truck.wheelPos.map(([x, y, z]) => new THREE.Vector3(x - Math.sign(x) * this.inboard, y + truck.wheelRadius * 1.1, z))
-    // Jet flames: an open cone, nozzle at y = 0, tip at y = −1 (scaled per instance).
-    const cone = new THREE.ConeGeometry(1, 1, 14, 1, true).rotateX(Math.PI).translate(0, -0.5, 0)
-    this.jetMat = new THREE.ShaderMaterial({
-      name: 'CarJets', transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
-      uniforms: { uTime: { value: 0 }, uPower: { value: 0 } },
-      vertexShader: /* glsl */ `
-        varying float vH; varying float vId;
-        void main() { vH = -position.y; vId = float(gl_InstanceID);
-          gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0); }`,
-      fragmentShader: /* glsl */ `
-        uniform float uTime, uPower; varying float vH; varying float vId;
-        void main() {
-          // White-hot at the nozzle → blue → gone at the tip, flickering per jet.
-          float core = pow(1.0 - vH, 3.0);
-          float flick = 0.8 + 0.2 * sin(uTime * 57.0 + vId * 2.1 + vH * 18.0);
-          vec3 c = mix(vec3(0.15, 0.45, 1.0), vec3(0.85, 0.95, 1.0), core * core) * core * (2.2 + 4.0 * uPower) * flick;
-          gl_FragColor = vec4(c, 1.0);
-        }`,
-    })
-    this.jets = new THREE.InstancedMesh(cone, this.jetMat, 4)
+    this.jetMat = jetMaterial()
+    this.jets = new THREE.InstancedMesh(jetCone(), this.jetMat, 4)
     this.jets.frustumCulled = false
     this.jets.renderOrder = 9
     this.jets.visible = false
@@ -490,60 +324,10 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     this.sim.hullPts = this.hull.floatPoints
     this.sim.hullDraft = DRAFT
     this.applyLook(t)
-    // LAMPS: two head + two tail + two reverse quads (additive, HDR when lit → bloom) ON the model's own lenses:
-    // found in the texture at load (loadModels findLamps: pale lenses facing forward, red ones facing back), else the
-    // catalogue, else a guess from the body box. Each quad sits 2 cm proud of its lens (so it passes the depth test).
-    // Reverse lamps: the lower part of the tail cluster (white).
-    const h = truck.half, b = truck.bottom
-    const found = truck.lamps
-    const head = found.head?.c ?? def.lamps?.head ?? [h.x * 0.62, b + h.y * 0.62, truck.front - 0.03]
-    const tail = found.tail?.c ?? def.lamps?.tail ?? [h.x * 0.66, b + h.y * 0.62, truck.rear + 0.03]
-    const headSize = found.head ? [found.head.w, found.head.h] : [0.17, 0.11]
-    const tailSize = found.tail ? [found.tail.w, found.tail.h] : [0.2, 0.08]
-    this.headPos.set(0, head[1], head[2])
-    const pos: number[] = [], id: number[] = [], corner: number[] = [], idx: number[] = []
-    const quad = (cx: number, cy: number, cz: number, w: number, hh: number, back: boolean, lamp: number) => {
-      const base = pos.length / 3
-      for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
-        pos.push(cx + u * w * (back ? -1 : 1), cy + v * hh, cz)
-        id.push(lamp)
-        corner.push(u, v)
-      }
-      idx.push(base, base + 1, base + 2, base, base + 2, base + 3)
-    }
-    for (const side of [-1, 1]) {
-      quad(side * head[0], head[1], head[2], headSize[0] * 1.15, headSize[1] * 1.15, false, 0)
-      quad(side * tail[0], tail[1], tail[2], tailSize[0] * 1.1, tailSize[1] * 1.1, true, 1)
-      quad(side * (tail[0] - tailSize[0] * 0.25), tail[1] - tailSize[1] * 0.55, tail[2] + 0.004, tailSize[0] * 0.5, tailSize[1] * 0.4, true, 2)
-    }
-    const g = new THREE.BufferGeometry()
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
-    g.setAttribute('lampId', new THREE.Float32BufferAttribute(id, 1))
-    g.setAttribute('corner', new THREE.Float32BufferAttribute(corner, 2))
-    g.setIndex(idx)
-    this.lampMat = new THREE.ShaderMaterial({
-      name: 'CarLamps', transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
-      uniforms: { uHead: { value: 0 }, uTail: { value: 0 }, uBrake: { value: 0 }, uRev: { value: 0 }, uDark: { value: 0 } },
-      vertexShader: /* glsl */ `
-        attribute float lampId; attribute vec2 corner; varying float vId; varying vec2 vC;
-        void main() { vId = lampId; vC = corner; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-      fragmentShader: /* glsl */ `
-        uniform float uHead, uTail, uBrake, uRev, uDark; varying float vId; varying vec2 vC;
-        void main() {
-          float d = length(vC);
-          float soft = smoothstep(1.0, 0.35, d);
-          // Heads: warm white, HDR when on (bloom halo), a faint lens even when off. Tails: dim red with the
-          // lights, bright red under braking — always visible a little by day (a real brake light). Reverse: white.
-          vec3 head = vec3(1.0, 0.93, 0.78) * (0.12 + uHead * (1.6 + 2.4 * uDark));
-          vec3 tail = vec3(1.0, 0.1, 0.06) * (0.1 + uTail * 0.6 + uBrake * (1.4 + 1.6 * uDark));
-          vec3 rev = vec3(1.0, 0.97, 0.92) * uRev * (1.2 + 1.8 * uDark);
-          vec3 c = vId < 0.5 ? head : vId < 1.5 ? tail : rev;
-          gl_FragColor = vec4(c * soft, 1.0);
-        }`,
-    })
-    this.lamps = new THREE.Mesh(g, this.lampMat)
-    this.lamps.frustumCulled = false
-    this.lamps.renderOrder = 9
+    const lamps = carLamps(truck)
+    this.lamps = lamps.mesh
+    this.lampMat = lamps.mat
+    this.headPos.copy(lamps.head)
     this.body.add(this.lamps)
   }
 
@@ -807,19 +591,7 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
   wetness = 0
 
   /** Tyre-deformation uniforms (per wheel: wheel-local down + squash; sideways shear) and the dirt coat. */
-  private readonly tyreU = {
-    uTyre: { value: [0, 1, 2, 3].map(() => new THREE.Vector4(0, -1, 0, 0)) },
-    uTyreShear: { value: [0, 0, 0, 0] },
-    uTyreR: { value: 0.4 },
-    uDirt: { value: 0.55 },
-    uDirtCol: { value: new THREE.Color(0.3, 0.22, 0.14) },
-    uGroundY: { value: 0 },
-    uGloss: { value: 1 },
-    uSnowCoat: { value: 0 },
-    uSandCoat: { value: 0 },
-    uMudCoat: { value: 0 },
-    uBurn: { value: 0 },
-  }
+  private readonly tyreU = tyreUniforms()
   /** Run `fn` with the dirt / mud / sand / snow coats off (the garage's photo shows the paint as it is). */
   clean<T>(fn: () => T): T {
     const u = this.tyreU, keep = [u.uDirt.value, u.uMudCoat.value, u.uSandCoat.value, u.uSnowCoat.value]
@@ -1479,10 +1251,278 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
 }
 
 /**
+ * The car BODY material (every car — yours and the other players' / bots' — shares it: one program): textured or
+ * vertex-coloured Lambert with the garage paint, tyre deformation, dirt / mud / sand / snow coats, burn and gloss.
+ * `paint` and `tyre` are the car's own uniforms (tyreUniforms()).
+ */
+export function truckMaterial(truck: TruckModel, paint: { value: THREE.Color }, tyre: TyreUniforms): THREE.MeshLambertMaterial {
+  // Vertex colours carry the baked material colours (white where a texture is used); the paint colour tints
+  // the masked panels only (`paintMask` attribute) — the garage's colour picker.
+  const mat = new THREE.MeshLambertMaterial({ ...(truck.map ? { map: truck.map } : {}), vertexColors: true })
+  const paintMask = { value: truck.paintMap }
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uPaint = paint
+    shader.uniforms.uPaintMask = paintMask
+    Object.assign(shader.uniforms, tyre)
+    // TYRE DEFORMATION (skills/realistic-vehicle-system §8.9; only where `tyreW` > 0 — the wheels' rubber, one
+    // instance per wheel): the contact patch flattens by the wheel's squash (from its real load), the sidewall
+    // bulges out over the bottom, and on HIGH the tread shears sideways with the cornering force. Then DIRT: a
+    // mud / dust coat by height above the ground (wheels, sills, arches), broken up by noise, in the colour of
+    // the ground the car last drove on (vehicle_realism.py bakes the AO into the vertex colours).
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+attribute float paintMask; varying float vPaint;
+attribute float tyreW; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
+uniform vec4 uTyre[4]; uniform float uTyreShear[4]; uniform float uTyreR;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+vPaint = paintMask;
+vTyre = tyreW;
+if (tyreW > 0.0) {
+int wi = min(gl_InstanceID, 3);
+vec4 ty = uTyre[wi];
+float plane = uTyreR - ty.w;
+float d = dot(transformed, ty.xyz);
+transformed -= ty.xyz * max(d - plane, 0.0) * tyreW;                     // flat contact patch
+float band = smoothstep(plane - 0.45 * uTyreR, plane, d);
+transformed.x += sign(transformed.x) * ty.w * 0.45 * band * tyreW;       // sidewall bulge
+transformed.x += uTyreShear[wi] * band * tyreW;                          // cornering shear (0 below HIGH)
+}`)
+      .replace('#include <worldpos_vertex>', `#include <worldpos_vertex>
+{ vec4 wp = vec4(transformed, 1.0);
+#ifdef USE_INSTANCING
+wp = instanceMatrix * wp;
+#endif
+vDirtP = (modelMatrix * wp).xyz;
+vDirtN = (vec4(transformedNormal, 0.0) * viewMatrix).xyz; } // world-space normal (snow settles on up-facing panels)`)
+    // Paint REPLACES the panel's hue (keeps its shading/luminance) so a red coat on a blue textured van is red,
+    // not black; white = the model's own colours (stock look).
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
+uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss; uniform float uSnowCoat; uniform float uSandCoat; uniform float uMudCoat; uniform float uBurn;
+float carCoat = 0.0;
+float dirtHash(vec3 p) { return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+return mix(mix(mix(dirtHash(i), dirtHash(i + vec3(1,0,0)), f.x), mix(dirtHash(i + vec3(0,1,0)), dirtHash(i + vec3(1,1,0)), f.x), f.y),
+           mix(mix(dirtHash(i + vec3(0,0,1)), dirtHash(i + vec3(1,0,1)), f.x), mix(dirtHash(i + vec3(0,1,1)), dirtHash(i + vec3(1,1,1)), f.x), f.y), f.z); }${truck.paintMap ? '\nuniform sampler2D uPaintMask;' : ''}`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+      { float lum = dot(diffuseColor.rgb, vec3(0.3, 0.59, 0.11));
+        float isWhite = step(2.95, uPaint.r + uPaint.g + uPaint.b);
+        // Textured models: only the body-paint texels (paint mask from the texture's dominant body hue) — rims,
+        // tyres, glass, chrome, lights, seats and rust keep their own colours.
+        float m = vPaint${truck.paintMap ? ' * texture2D(uPaintMask, vMapUv).r' : ''};
+        diffuseColor.rgb = mix(diffuseColor.rgb, uPaint * (lum * 1.3 + 0.08), m * (1.0 - isWhite));
+        // DIRT: thick on the tyres and the lowest 30 cm, fading out by ~0.9 m; splashes broken up by noise.
+        float h = vDirtP.y - uGroundY;
+        float n = dirtNoise(vDirtP * 3.1) * 0.6 + dirtNoise(vDirtP * 9.0) * 0.4;
+        float coat = (1.0 - smoothstep(0.12, 0.9, h + (n - 0.5) * 0.35)) * smoothstep(0.25, 0.65, n + 0.25 * uDirt);
+        coat = max(coat * uDirt, vTyre * 0.3 * uDirt);
+        // Tyres take grey-brown dust, not mud paint.
+        vec3 dcol = mix(uDirtCol, vec3(0.42, 0.4, 0.37), vTyre * 0.6) * (0.75 + 0.35 * n);
+        carCoat = clamp(coat, 0.0, 0.85);
+        diffuseColor.rgb = mix(diffuseColor.rgb, dcol, carCoat);
+        // SAND + SNOW BUILD-UP (over the hill): grows while driving in the desert / snow (Car.updateDirt), melts
+        // and washes off elsewhere. Sand: a fine dust film over the whole car, caked sand low down and dust settled
+        // on the flat tops. Snow: caps on every up-facing panel (roof, hood, rack, bed) spreading in clumps as it
+        // builds, and packed snow sprayed up the sides / arches / bumpers and into the tyres. Both stay matte.
+        if (uMudCoat > 0.003) {
+          // Wet red-brown mud: thrown up the sides from the wheels (splatter blobs climbing with the coat), caked
+          // on the lower body and tyres, a sheen on the wet clumps (kept glossy: carCoat stays low on it).
+          float hM = vDirtP.y - uGroundY;
+          float nM = dirtNoise(vDirtP * 5.0) * 0.6 + dirtNoise(vDirtP * 16.0) * 0.4;
+          float topM = 0.35 + 1.0 * uMudCoat;
+          float cake = (1.0 - smoothstep(topM - 0.25, topM + 0.1, hM + (nM - 0.5) * 0.6)) * smoothstep(0.62 - uMudCoat * 0.45, 0.72 - uMudCoat * 0.45, nM);
+          float blob = step(1.0 - uMudCoat * 0.35 * (1.0 - smoothstep(0.3, 1.8, hM)), dirtHash(floor(vDirtP * 22.0)));
+          float mud = clamp(max(max(cake, blob * 0.9), vTyre * 0.7 * uMudCoat), 0.0, 0.95);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.2, 0.11, 0.06) * (0.8 + 0.4 * nM), mud);
+          carCoat = max(carCoat, mud * 0.4);
+        }
+        if (uSandCoat + uSnowCoat > 0.003) {
+          float up = normalize(vDirtN).y;
+          float nS = dirtNoise(vDirtP * 4.3) * 0.65 + dirtNoise(vDirtP * 13.0) * 0.35;
+          // Fine speckled grunge (their dusty / muddy trucks): ~2 cm specks, denser low down and as the coat grows.
+          float low = 1.0 - smoothstep(0.0, 1.6, h);
+          // (Specks smaller than ~a pixel fade to their mean coverage — no sparkle at a distance.)
+          float specP = uSandCoat * (0.25 + 0.55 * low) * (0.6 + 0.8 * nS);
+          // ~7 mm round-ish specks (2 hash layers), averaged once they get near pixel size → fine grit, not squares.
+          float specFar = smoothstep(0.45, 1.3, length(fwidth(vDirtP)) * 90.0);
+          vec3 sp = vDirtP * 90.0;
+          float sk = max(step(1.0 - specP * 0.7, dirtHash(sp)), step(1.0 - specP * 0.5, dirtHash(sp * 1.37 + 3.1)));
+          float speck = mix(sk, specP * 0.85, specFar);
+          float sand = uSandCoat * (0.06 + 0.06 * nS) + speck * 0.7;
+          sand += (1.0 - smoothstep(0.1, 0.3 + 0.6 * uSandCoat, h + (nS - 0.5) * 0.4)) * smoothstep(0.35, 0.65, nS + 0.25 * uSandCoat) * uSandCoat;
+          sand += smoothstep(0.5, 0.85, up) * smoothstep(0.35, 0.7, nS) * 0.5 * uSandCoat + vTyre * 0.35 * uSandCoat;
+          sand = clamp(sand, 0.0, 0.85);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.74, 0.5, 0.34) * (0.85 + 0.25 * nS), sand);
+          float cap = smoothstep(0.45, 0.8, up) * smoothstep(1.0 - uSnowCoat, 1.2 - uSnowCoat, nS + 0.12);
+          // Packed snow up the sides: a solid band whose top edge climbs with the coat (≈ 0.3 m → 1.25 m), ragged.
+          float sTop = 0.25 + 1.0 * uSnowCoat;
+          float spray = (1.0 - smoothstep(sTop - 0.12, sTop + 0.12, h + (nS - 0.5) * 0.5)) * smoothstep(1.0 - uSnowCoat * 1.3, 1.15 - uSnowCoat * 1.3, nS + 0.05);
+          spray = max(spray, mix(step(1.0 - uSnowCoat * 0.6 * low, dirtHash(vDirtP * 90.0)), uSnowCoat * 0.6 * low, specFar)); // flecks thrown up the sides
+          float snow = clamp(max(max(cap, spray), vTyre * 0.55 * uSnowCoat), 0.0, 0.95);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86, 0.9, 0.97) * (0.9 + 0.12 * nS) * mix(0.85, 1.0, up * 0.5 + 0.5), snow);
+          carCoat = max(carCoat, max(snow, sand * 0.8));
+        }
+        // BURNT (Damage: the wreck after the explosion): charred black paint, soot streaks, bare rusty metal.
+        if (uBurn > 0.003) {
+          float nb = dirtNoise(vDirtP * 6.0) * 0.6 + dirtNoise(vDirtP * 19.0) * 0.4;
+          vec3 burnt = mix(vec3(0.03, 0.028, 0.026), vec3(0.16, 0.08, 0.04), smoothstep(0.62, 0.8, nb));
+          diffuseColor.rgb = mix(diffuseColor.rgb, burnt, uBurn * (0.85 + 0.15 * nb));
+          carCoat = max(carCoat, uBurn);
+        } }`)
+      // GLOSS (MEDIUM+): painted metal catches the sun as a highlight and the sky at grazing angles (Fresnel);
+      // rubber and the dirt coat stay matte. Fog applies after it, like the rest of the colour.
+      .replace('#include <tonemapping_fragment>', `{
+vec3 Vg = normalize(vViewPosition);
+float fres = pow(1.0 - max(dot(normal, Vg), 0.0), 4.0);
+float shine = uGloss * (0.35 + 0.65 * vPaint) * (1.0 - vTyre) * (1.0 - carCoat);
+vec3 g = vec3(0.0);
+#if NUM_DIR_LIGHTS > 0
+vec3 Lg = directionalLights[0].direction;
+g += directionalLights[0].color * pow(max(dot(normal, normalize(Lg + Vg)), 0.0), 56.0) * 0.32 * step(0.0, dot(normal, Lg));
+#endif
+#ifdef USE_FOG
+g += fogColor * fres * 0.2;
+#endif
+gl_FragColor.rgb += g * shine;
+}
+#include <tonemapping_fragment>`)
+  }
+  mat.customProgramCacheKey = () => `truck-paint2-${truck.map ? 'tex' : 'flat'}${truck.paintMap ? '-mask' : ''}`
+  // A machine, not a cartoon: a soft terminator (toon 0.3) and a faint rim — real light and the baked AO shape it.
+  const m = stylize(mat, { key: 'truck', rim: 0.14, toon: 0.3 })
+  m.name = 'lib/truck'
+  // Both faces: from inside, the shell's panels are its inner walls (the Żuk's painted-metal cab).
+  m.side = THREE.DoubleSide
+  return m
+}
+
+/** Per-car uniforms of truckMaterial: per wheel wheel-local down + squash and sideways shear; the dirt coat. */
+export function tyreUniforms() {
+  return {
+    uTyre: { value: [0, 1, 2, 3].map(() => new THREE.Vector4(0, -1, 0, 0)) },
+    uTyreShear: { value: [0, 0, 0, 0] },
+    uTyreR: { value: 0.4 },
+    uDirt: { value: 0.55 },
+    uDirtCol: { value: new THREE.Color(0.3, 0.22, 0.14) },
+    uGroundY: { value: 0 },
+    uGloss: { value: 1 },
+    uSnowCoat: { value: 0 },
+    uSandCoat: { value: 0 },
+    uMudCoat: { value: 0 },
+    uBurn: { value: 0 },
+  }
+}
+export type TyreUniforms = ReturnType<typeof tyreUniforms>
+
+/** JET FLAMES (flying): an open cone, nozzle at y = 0, tip at y = −1 (scaled per instance), and its additive material. */
+export function jetCone(): THREE.BufferGeometry {
+  return new THREE.ConeGeometry(1, 1, 14, 1, true).rotateX(Math.PI).translate(0, -0.5, 0)
+}
+
+export function jetMaterial(): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    name: 'CarJets', transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+    uniforms: { uTime: { value: 0 }, uPower: { value: 0 } },
+    vertexShader: /* glsl */ `
+      varying float vH; varying float vId;
+      void main() { vH = -position.y; vId = float(gl_InstanceID);
+        gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform float uTime, uPower; varying float vH; varying float vId;
+      void main() {
+        // White-hot at the nozzle → blue → gone at the tip, flickering per jet.
+        float core = pow(1.0 - vH, 3.0);
+        float flick = 0.8 + 0.2 * sin(uTime * 57.0 + vId * 2.1 + vH * 18.0);
+        vec3 c = mix(vec3(0.15, 0.45, 1.0), vec3(0.85, 0.95, 1.0), core * core) * core * (2.2 + 4.0 * uPower) * flick;
+        gl_FragColor = vec4(c, 1.0);
+      }`,
+  })
+}
+
+/** The lamp quads of a car (head, tail, reverse; lampId 0 / 1 / 2) and their material (uHead, uTail, uBrake, uRev,
+ *  uDark), and the headlamp centre in car space. */
+export function carLamps(truck: TruckModel): { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; head: THREE.Vector3 } {
+  const def = vehicleDef(truck.id)
+  // LAMPS: two head + two tail + two reverse quads (additive, HDR when lit → bloom) ON the model's own lenses:
+  // found in the texture at load (loadModels findLamps: pale lenses facing forward, red ones facing back), else the
+  // catalogue, else a guess from the body box. Each quad sits 2 cm proud of its lens (so it passes the depth test).
+  // Reverse lamps: the lower part of the tail cluster (white).
+  const h = truck.half, b = truck.bottom
+  const found = truck.lamps
+  const head = found.head?.c ?? def.lamps?.head ?? [h.x * 0.62, b + h.y * 0.62, truck.front - 0.03]
+  const tail = found.tail?.c ?? def.lamps?.tail ?? [h.x * 0.66, b + h.y * 0.62, truck.rear + 0.03]
+  const headSize = found.head ? [found.head.w, found.head.h] : [0.17, 0.11]
+  const tailSize = found.tail ? [found.tail.w, found.tail.h] : [0.2, 0.08]
+  const headPos = new THREE.Vector3(0, head[1], head[2])
+  const pos: number[] = [], id: number[] = [], corner: number[] = [], idx: number[] = []
+  const quad = (cx: number, cy: number, cz: number, w: number, hh: number, back: boolean, lamp: number) => {
+    const base = pos.length / 3
+    for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
+      pos.push(cx + u * w * (back ? -1 : 1), cy + v * hh, cz)
+      id.push(lamp)
+      corner.push(u, v)
+    }
+    idx.push(base, base + 1, base + 2, base, base + 2, base + 3)
+  }
+  for (const side of [-1, 1]) {
+    quad(side * head[0], head[1], head[2], headSize[0] * 1.15, headSize[1] * 1.15, false, 0)
+    quad(side * tail[0], tail[1], tail[2], tailSize[0] * 1.1, tailSize[1] * 1.1, true, 1)
+    quad(side * (tail[0] - tailSize[0] * 0.25), tail[1] - tailSize[1] * 0.55, tail[2] + 0.004, tailSize[0] * 0.5, tailSize[1] * 0.4, true, 2)
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setAttribute('lampId', new THREE.Float32BufferAttribute(id, 1))
+  g.setAttribute('corner', new THREE.Float32BufferAttribute(corner, 2))
+  g.setIndex(idx)
+  const mat = new THREE.ShaderMaterial({
+    name: 'CarLamps', transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+    uniforms: { uHead: { value: 0 }, uTail: { value: 0 }, uBrake: { value: 0 }, uRev: { value: 0 }, uDark: { value: 0 } },
+    vertexShader: /* glsl */ `
+      attribute float lampId; attribute vec2 corner; varying float vId; varying vec2 vC;
+      void main() { vId = lampId; vC = corner; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform float uHead, uTail, uBrake, uRev, uDark; varying float vId; varying vec2 vC;
+      void main() {
+        float d = length(vC);
+        float soft = smoothstep(1.0, 0.35, d);
+        // Heads: warm white, HDR when on (bloom halo), a faint lens even when off. Tails: dim red with the
+        // lights, bright red under braking — always visible a little by day (a real brake light). Reverse: white.
+        vec3 head = vec3(1.0, 0.93, 0.78) * (0.12 + uHead * (1.6 + 2.4 * uDark));
+        vec3 tail = vec3(1.0, 0.1, 0.06) * (0.1 + uTail * 0.6 + uBrake * (1.4 + 1.6 * uDark));
+        vec3 rev = vec3(1.0, 0.97, 0.92) * uRev * (1.2 + 1.8 * uDark);
+        vec3 c = vId < 0.5 ? head : vId < 1.5 ? tail : rev;
+        gl_FragColor = vec4(c * soft, 1.0);
+      }`,
+  })
+  const mesh = new THREE.Mesh(g, mat)
+  mesh.frustumCulled = false
+  mesh.renderOrder = 9
+  return { mesh, mat, head: headPos }
+}
+
+/** Running gear (axles, dampers, springs) on the body's program: a set colour in the vertices, a neutral texel of the
+ *  map, never painted, no tyre deformation. */
+export function gearGeometry(truck: TruckModel, g: THREE.BufferGeometry, rgb: [number, number, number]): THREE.BufferGeometry {
+  const n = g.getAttribute('position').count
+  const col = new Float32Array(n * 3)
+  const uv = new Float32Array(n * 2)
+  for (let i = 0; i < n; i++) (col.set(rgb, i * 3), uv.set(truck.neutralUv, i * 2))
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3))
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
+  g.setAttribute('paintMask', new THREE.BufferAttribute(new Float32Array(n), 1))
+  return zeroTyre(g)
+}
+
+/** A unit cylinder along X (axles, damper rods / bodies). */
+export function gearCylinder(): THREE.BufferGeometry {
+  return new THREE.CylinderGeometry(1, 1, 1, 8, 1, false).rotateZ(Math.PI / 2).toNonIndexed()
+}
+
+/**
  * Unit coil spring along +Y (0 … 1), radius 1: 6 turns of a 4-sided wire (240 tris). Scaled per instance to the
  * strut's length and the spring's radius — the coils spread out as the strut stretches (air-suspension lift).
  */
-function coilGeometry(): THREE.BufferGeometry {
+export function coilGeometry(): THREE.BufferGeometry {
   const turns = 6, seg = 10, n = turns * seg
   const wr = 0.17, wy = 0.045 // wire: radial / vertical half thickness (relative units)
   const ring: [number, number][] = [[wr, 0], [0, wy], [-wr, 0], [0, -wy]]
@@ -1504,7 +1544,7 @@ function coilGeometry(): THREE.BufferGeometry {
   return g
 }
 
-const smooth = (a: number, b: number, x: number) => {
+export const smooth = (a: number, b: number, x: number) => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)))
   return t * t * (3 - 2 * t)
 }
@@ -1539,7 +1579,7 @@ const _s = new THREE.Vector3(1, 1, 1)
  * drawn after the cabin without writing depth. One small transparent program.
  */
 let _glass: THREE.MeshBasicMaterial | null = null
-function carGlass(): THREE.MeshBasicMaterial {
+export function carGlass(): THREE.MeshBasicMaterial {
   if (_glass) return _glass
   const m = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.035, 0.05, 0.06), transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide })
   m.onBeforeCompile = (sh) => {

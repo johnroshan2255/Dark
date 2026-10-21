@@ -1060,6 +1060,7 @@ export class Game {
           this.lighting.spotIsHeadlights = this.car.driving
           this.beam.update(c.flashOrigin, c.flashTarget, lit, darkness, c.mode === 'fpp' && !this.car.driving)
           this.car.updateLamps(darkness)
+          if (this.remotes) this.remotes.darkness = darkness
           // Street lamps: on from dusk; `lampT` = seconds since they switched on (each post flickers to life in its own time).
           if (darkness > 0.55) this.lampOnAt ??= time
           else this.lampOnAt = null
