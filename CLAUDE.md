@@ -1,20 +1,14 @@
-# DARK — agent notes
+# DARK — monorepo
 
-Browser co-op survival horror: React + R3F + Three.js r186 + Rapier (compat) + TypeScript, Vite.
+| folder | what | read first |
+|---|---|---|
+| `game/` | the browser game (React + R3F + Three.js + Rapier, TypeScript, Vite) | `game/CLAUDE.md`, `game/ARCHITECTURE.md` |
+| `server/` | multiplayer backend (Rust: tokio + axum) | `server/CLAUDE.md`, `server/README.md` |
 
-- **Read `ARCHITECTURE.md` first**, then the relevant `skills/<system>/SKILL.md` before implementing or
-  changing any rendering/world-system feature (`skills/README.md` has a task → skill map).
-- Before visual work, look at the matching `refer/<subject>/` images and read `skills/art-direction`; verify with a
-  headless side-by-side against `refer/roads/forest-road-evening-hero.png`.
-- Performance rule: every feature states and measures its CPU / GPU / memory cost **per quality tier**
-  (F3 HUD). Floor: ≥ 60 fps on ~₹15k phones and Intel UHD laptops, uncapped above. Read `skills/mobile`.
-- Budgets come from `game.quality` (`src/rendering/quality/QualityTiers.ts`), never hard-coded constants.
-- Every game is a new random world; `?seed=` reproduces one. Touch controls must keep working.
-- Never put per-frame state in React. Systems are plain TS classes run by `GameLoop`; React mounts roots.
-- World generation must stay deterministic (no `Math.random`, hash-based RNG keyed by seed/cell/layer).
-- Don't add dependencies without a concrete, stated reason (see ARCHITECTURE.md §1).
-
-Commands: `npm run dev` · `npm run typecheck` · `npm test` (determinism, seams, collider/mesh agreement, terrain
-layering, biomes, vehicle simulation) · `npm run build` · `npm run validate:assets [dir] [--strict]` ·
-`npm run dev:lan` (test on a phone over Wi-Fi) · `npm run shot -- <outdir> <shots.json>` (headless-Chrome
-screenshots + fps/GPU ms per tier while `npm run dev` runs — verify visual/world changes with it).
+- Run each side's commands from its own folder (`cd game && npm test`, `cd server && cargo test`).
+- The wire protocol is shared: `server/crates/protocol` (Rust) ⇄ `game/src/net/protocol.ts` (TypeScript), both tested
+  against `server/crates/protocol/golden.json`. Change both together and bump `PROTOCOL_VERSION`.
+- The server reads the game's maps (`game/public/maps/<id>/map.json`, `heights.bin`): a map edit changes what the
+  server validates against — rerun `cargo test` too.
+- Git: `.gitignore` at the root covers both sides (`game/node_modules`, `game/dist`, `server/target`, `.env*`, logs).
+  `server/Cargo.lock` and `game/package-lock.json` are committed. CI (`.github/workflows/ci.yml`) runs both.

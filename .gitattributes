@@ -1,0 +1,27 @@
+# Normalise text to LF in the repository.
+* text=auto eol=lf
+
+# Binary assets: never diff / merge / convert line endings.
+*.bin     binary
+*.glb     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.webp    binary
+*.gif     binary
+*.ktx2    binary
+*.basis   binary
+*.wasm    binary
+*.mp3     binary
+*.ogg     binary
+*.wav     binary
+*.blend   binary
+*.zip     binary
+*.ttf     binary
+*.woff    binary
+*.woff2   binary
+
+# Generated / lock files: show as changed, don't diff line by line in reviews.
+game/package-lock.json   linguist-generated=true -diff
+server/Cargo.lock        linguist-generated=true
+server/crates/protocol/golden.json linguist-generated=true

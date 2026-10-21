@@ -1,4 +1,54 @@
-node_modules
-dist
+# ─── DARK monorepo ────────────────────────────────────────────────────────────
+#   game/    browser game (Vite + TypeScript)
+#   server/  multiplayer backend (Rust workspace)
+
+# OS / editors
 .DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Secrets and local config — never commit these (examples: *.example)
+.env
+.env.*
+!.env.example
 *.local
+*.pem
+*.key
+*.p12
+secrets/
+
+# Logs / crash dumps
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+core
+core.*
+
+# ─── game/ (Node / Vite) ──────────────────────────────────────────────────────
+game/node_modules/
+game/dist/
+game/dist-ssr/
+game/coverage/
+game/.vite/
+# headless probe / screenshot output (scripts/drive-probe.mjs, shoot.mjs default dirs)
+game/probe-out/
+game/shots-out/
+
+# ─── server/ (Rust) ───────────────────────────────────────────────────────────
+server/target/
+**/*.rs.bk
+# (server/Cargo.lock IS committed: binaries pin their dependency versions)
+
+# Any stray dependency / build folders elsewhere
+node_modules/
+target/
