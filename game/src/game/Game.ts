@@ -383,7 +383,8 @@ export class Game {
     this.physicsDebug = new PhysicsDebug(physics)
     this.envRoot.name = 'environment'
     this.envRoot.add(this.caves.group, this.destruction.mesh, this.drift.points, this.sky.mesh, this.bike.root, this.car.root, this.vehicleFx.points, this.rain.points, this.horizon.mesh, this.landmarks.group, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
-    this.remotes = new RemotePlayers(this.materials.hero, models.hero, (id) => loadVehicle(id), this.materials.character, (x, z) => this.world.groundAt(x, z) ?? this.world.fields.height(x, z))
+    this.remotes = new RemotePlayers(this.materials.hero, models.hero, (id) => loadVehicle(id), this.materials.character, (x, z) => this.world.groundAt(x, z) ?? this.world.fields.height(x, z), (x, z) => this.world.groundAt(x, z))
+    this.remotes.setQuality(this.quality.remoteCharacters, this.quality.remoteCars)
     this.envRoot.add(this.remotes.root)
     this.net = new NetClient(this)
     // Not in the water's mirror: the water itself, near-field grass, particles, the torch beam, debug helpers.
@@ -645,6 +646,8 @@ export class Game {
     this.post.setPaint(q.paint.stride, q.paint.bloom * q.fx.bloom)
     globalUniforms.uSurfaceDetail.value = q.fx.surface ? 1 : 0
     this.vehicleFx.budget = q.particles.vehicle
+    // phones: a crowd is the vertex load that matters most (a ₹15k GPU) — fewer full models on every preset
+    this.remotes?.setQuality(this.device?.mobile ? Math.min(q.remoteCharacters, 6) : q.remoteCharacters, this.device?.mobile ? Math.min(q.remoteCars, 3) : q.remoteCars)
     this.tyreMarks.setBudget(q.tyreMarks)
     this.rainBudget = q.particles.rain
     this.caves.fxShare = q.particles.rain
@@ -968,7 +971,7 @@ export class Game {
           // multiplayer: this frame's pose out (30 Hz), everyone else placed at the interpolated server time
           this.net.update(dt)
           const t = this.net.serverNow()
-          if (t !== null && this.camera) this.remotes.update(dt, t, this.camera.position)
+          if (t !== null && this.camera) this.remotes.update(dt, t, this.camera.position, this.post.targetHeight)
         },
       })
       .add({

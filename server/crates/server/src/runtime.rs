@@ -71,6 +71,8 @@ pub struct MatchInfo {
     pub created: Instant,
     pub max_players: AtomicUsize,
     pub players: AtomicUsize,
+    /// Server-run bots (rooms).
+    pub bots: AtomicUsize,
     pub alive: AtomicUsize,
     phase: AtomicU8,
     pub joinable: AtomicBool,
@@ -125,6 +127,7 @@ pub fn spawn_match(
         created: epoch,
         max_players: AtomicUsize::new(rules.max_players),
         players: AtomicUsize::new(0),
+        bots: AtomicUsize::new(0),
         alive: AtomicUsize::new(0),
         phase: AtomicU8::new(Phase::Lobby as u8),
         joinable: AtomicBool::new(true),
@@ -155,6 +158,7 @@ pub fn spawn_match(
             last_reject: None,
         };
         rt.run(hz).await;
+        metrics::gauge!(m::BOTS_ACTIVE).decrement(info.bots.swap(0, Ordering::Relaxed) as f64);
         info.finished.store(true, Ordering::Relaxed);
         info.joinable.store(false, Ordering::Relaxed);
         metrics::gauge!(m::MATCHES_ACTIVE).decrement(1.0);
@@ -246,6 +250,11 @@ impl Runtime {
         metrics::counter!(m::SNAPSHOT_BYTES).increment(bytes);
         let info = &self.info;
         info.players.store(self.game.player_count(), Ordering::Relaxed);
+        let bots = self.game.bot_count();
+        let before = info.bots.swap(bots, Ordering::Relaxed);
+        if bots != before {
+            metrics::gauge!(m::BOTS_ACTIVE).increment(bots as f64 - before as f64);
+        }
         info.alive.store(self.game.alive_count(), Ordering::Relaxed);
         info.phase.store(self.game.phase() as u8, Ordering::Relaxed);
         info.joinable.store(self.game.joinable(), Ordering::Relaxed);

@@ -1,4 +1,6 @@
-# DARK wire protocol — version 2
+# DARK wire protocol — version 3
+
+v3 (2026-10-21) added room BOTS: `Room.bots u8`; bots are players with ids ≥ `BOT_ID_BASE` (0xC000).
 
 v2 (2026-10-21) added rooms: `Phase FreeRoam`, `Kick Kicked`, the `Room` packet and `Welcome.spawn` = `NO_SPAWN`.
 
@@ -48,7 +50,7 @@ update both, bump `PROTOCOL_VERSION`, regenerate the vectors (`UPDATE_GOLDEN=1 c
 | `0x89` | Correction | `seq u32`, `epoch u8`, `pos`, `yaw u16` — snap to this pose, send `epoch` from now on |
 | `0x8a` | Pong | `client_time u32` (echo), `server_time u32` |
 | `0x8b` | Kick | `reason u8` (1 BadTicket · 2 VersionMismatch · 3 MatchFull · 4 MatchOver · 5 Cheating · 6 Flooding · 7 Malformed · 8 Timeout · 9 ServerShutdown · 10 Duplicate · 11 Kicked by the room owner), `message str` — the socket closes with code 4000 + reason |
-| `0x8c` | Room | `code str`, `name str`, `flags u8` (bit 0 PRIVATE · 1 ROADKILL · 2 FLYING), `max_players u16`, `owner u16` (0xffff = none) — on joining a room and whenever its settings or owner change |
+| `0x8c` | Room | `code str`, `name str`, `flags u8` (bit 0 PRIVATE · 1 ROADKILL · 2 FLYING), `max_players u16`, `owner u16` (0xffff = none), `bots u8` (server-run players) — on joining a room and whenever its settings or owner change |
 
 ## Flow
 
@@ -63,7 +65,7 @@ down, `Eliminated` with `placement 0`, back up at once).
 
 1. `POST /v1/auth/guest {name}` → `token` (session).
 2. `POST /v1/matchmake` (Bearer token) `{map?}` → `{match_id, player_id, ticket, ws_url, map, region, expires_in}`.
-3. Open `ws_url`, send `Hello {protocol: 2, ticket}` → `Welcome` (+ `PlayerJoined` per player, `Phase`).
+3. Open `ws_url`, send `Hello {protocol: 3, ticket}` → `Welcome` (+ `PlayerJoined` per player, `Phase`).
 4. Stream `State` at your tick rate from the `Welcome.spawn`; render remote entities from `Snapshot`s ~100 ms in the
    past (interpolate on `server_time`); drop entities listed in `removed`.
 5. On `Correction`: move there, adopt its `epoch`. The drop at the start of a match is a `Correction` too.

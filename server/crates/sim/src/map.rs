@@ -34,6 +34,12 @@ struct Grid {
 
 #[derive(Deserialize)]
 struct Road {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    class: String,
+    #[serde(default)]
+    closed: bool,
     #[serde(rename = "halfWidth")]
     half_width: f32,
     x: Vec<f32>,
@@ -61,6 +67,21 @@ pub struct SpawnPoint {
     pub yaw: f32,
 }
 
+/// A road as the map draws it: centreline samples with the surface height (world y), for the bots' road graph.
+#[derive(Clone, Debug)]
+pub struct RoadLine {
+    pub name: String,
+    /// "highway", "trail", "track", "pump" …
+    pub class: String,
+    /// A loop (the last sample joins the first).
+    pub closed: bool,
+    pub half_width: f32,
+    /// (x, y, z) per sample.
+    pub pts: Vec<[f32; 3]>,
+    /// Per sample: on a bridge deck.
+    pub bridge: Vec<bool>,
+}
+
 pub struct MapData {
     pub id: String,
     /// Half the map's side (m): the playable square is ±half.
@@ -73,6 +94,10 @@ pub struct MapData {
     origin: [f32; 2],
     /// Road samples ~every 20 m (bridges excluded), for spawns.
     road_points: Vec<SpawnPoint>,
+    /// The roads themselves (bots drive them).
+    pub roads: Vec<RoadLine>,
+    /// Bot navigation (road graph, water), built on first use.
+    pub(crate) nav: std::sync::OnceLock<std::sync::Arc<crate::nav::Nav>>,
 }
 
 impl MapData {
@@ -125,6 +150,21 @@ impl MapData {
         if road_points.is_empty() {
             return Err(MapError::NoRoads);
         }
+        let roads = meta
+            .roads
+            .iter()
+            .map(|r| {
+                let n = r.x.len().min(r.z.len()).min(r.h.len());
+                RoadLine {
+                    name: r.name.clone(),
+                    class: r.class.clone(),
+                    closed: r.closed,
+                    half_width: r.half_width,
+                    pts: (0..n).map(|i| [r.x[i], r.h[i] + meta.height_offset, r.z[i]]).collect(),
+                    bridge: (0..n).map(|i| r.bridge.get(i).copied().unwrap_or(0) != 0).collect(),
+                }
+            })
+            .collect();
         Ok(Self {
             id: meta.id,
             half: meta.half,
@@ -134,6 +174,8 @@ impl MapData {
             step: g.step,
             origin: g.origin,
             road_points,
+            roads,
+            nav: std::sync::OnceLock::new(),
         })
     }
 
@@ -227,6 +269,8 @@ impl MapData {
                     yaw: 0.0,
                 })
                 .collect(),
+            roads: Vec::new(),
+            nav: std::sync::OnceLock::new(),
         }
     }
 }

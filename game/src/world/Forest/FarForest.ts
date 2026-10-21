@@ -6,6 +6,7 @@ import type { WorldFields } from '../WorldFields'
 import type { SpeciesDef } from './treeFactory'
 import { createImpostorMesh, speciesTreeAttrs } from '../WorldChunk'
 import type { InstanceAttributes } from '../../optimization/instancing/InstanceBuilder'
+import type { ImpostorBatch } from '../../optimization/batching/ImpostorBatch'
 
 /** Chunks per far-forest block side: one InstancedMesh (one draw) per 4×4 chunks = 256 m. */
 const BLOCK = 4
@@ -44,6 +45,7 @@ export class FarForest {
   private far = 0
   private radius = 0
   enabled = false
+  private shown = false
   /** The drawn ground beyond the chunks (HorizonTerrain): far trees stand on it, re-seated when it is rebuilt. */
   ground: { heightAt(x: number, z: number): number | null; version: number } | null = null
   private groundVersion = -1
@@ -54,6 +56,8 @@ export class FarForest {
     private readonly fields: WorldFields,
     private readonly species: readonly SpeciesDef[],
     private readonly material: THREE.Material,
+    /** The world's one impostor draw: each block is a range in it. */
+    private readonly batch: ImpostorBatch,
   ) {
     this.root.name = 'far-forest'
     this.root.matrixAutoUpdate = false
@@ -85,6 +89,10 @@ export class FarForest {
    */
   update(pcx: number, pcz: number, covered: (key: string) => boolean): void {
     this.root.visible = this.enabled
+    if (this.shown !== this.enabled) {
+      this.shown = this.enabled
+      for (const bk of this.blocks.keys()) this.batch.setVisible(`far ${bk}`, this.enabled)
+    }
     if (!this.enabled || !this.radius) return
     if (pcx !== this.cx || pcz !== this.cz) {
       this.cx = pcx
@@ -139,7 +147,8 @@ export class FarForest {
     }
     for (const [bk, blk] of this.blocks) {
       if (byBlock.has(bk)) continue
-      blk.mesh && (blk.mesh.removeFromParent(), blk.mesh.geometry.dispose(), blk.mesh.dispose())
+      this.batch.remove(`far ${bk}`)
+      blk.mesh && (blk.mesh.geometry.dispose(), blk.mesh.dispose())
       this.blocks.delete(bk)
     }
     let budget = 1
@@ -168,15 +177,8 @@ export class FarForest {
           if (h !== null) m[k * 16 + 13] = h
         }
       }
-      if (cur?.mesh) (cur.mesh.removeFromParent(), cur.mesh.geometry.dispose(), cur.mesh.dispose())
-      if (mesh) {
-        mesh.position.set(ox, 0, oz)
-        mesh.updateMatrix()
-        mesh.computeBoundingSphere()
-        mesh.frustumCulled = true
-        this.root.add(mesh)
-        mesh.updateMatrixWorld(true)
-      }
+      this.batch.set(`far ${bk}`, mesh, ox, oz, this.enabled)
+      if (cur?.mesh) (cur.mesh.geometry.dispose(), cur.mesh.dispose())
       this.blocks.set(bk, { mesh, sig })
     }
     this.dirty = pending || this.inflight > 0
@@ -191,7 +193,10 @@ export class FarForest {
 
   dispose(): void {
     this.worker.terminate()
-    for (const b of this.blocks.values()) b.mesh && (b.mesh.geometry.dispose(), b.mesh.dispose())
+    for (const [bk, b] of this.blocks) {
+      this.batch.remove(`far ${bk}`)
+      b.mesh && (b.mesh.geometry.dispose(), b.mesh.dispose())
+    }
     this.blocks.clear()
     this.root.removeFromParent()
   }

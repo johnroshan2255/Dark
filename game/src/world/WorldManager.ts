@@ -1,10 +1,15 @@
 import type { FixedMap } from './map/FixedMap'
+import { ImpostorBatch } from '../optimization/batching/ImpostorBatch'
+import { InstanceBatcher } from '../optimization/batching/InstanceBatcher'
+import { TerrainBatch } from '../optimization/batching/TerrainBatch'
+import { MeshBatcher } from '../optimization/batching/MeshBatcher'
+import { LAYER_REFLECT_SKYLINE } from '../rendering/water/PlanarReflection'
 import * as THREE from 'three'
 import type { PhysicsWorld } from '../physics/PhysicsWorld'
 import type { MaterialLibrary } from '../rendering/materials/MaterialLibrary'
 import { ChunkVisibility } from '../optimization/culling/ChunkVisibility'
 import { chunkDistance, selectLod } from '../optimization/lod/LodSelector'
-import { CELL_SIZE, CHUNK_DATA_CACHE, CHUNK_RES, CHUNK_SIZE, RADIUS } from './constants'
+import { CELL_SIZE, CHUNK_DATA_CACHE, CHUNK_RES, CHUNK_SIZE, CHUNK_VERTS, RADIUS } from './constants'
 import type { QualitySettings } from '../rendering/quality/QualityTiers'
 import { createPropGeometries, type PropGeometries } from './Forest/propGeometries'
 import { ChunkStreamer } from './Streaming/ChunkStreamer'
@@ -58,6 +63,17 @@ export class WorldManager {
   private impostorsOn = false
   /** Chebyshev radius (chunks) around the player inside which every chunk is built (see update). */
   builtRadius = 0
+  /** All tree impostor cards (chunks + far forest): one draw. */
+  readonly impostors: ImpostorBatch
+  /** The chunks' instanced meshes (trees, rocks, plants, poles…): one draw per kind for all chunks. */
+  readonly batcher = new InstanceBatcher()
+  /** Every chunk's terrain grid: one multi-draw. */
+  readonly terrainBatch: TerrainBatch
+  /** The chunks' one-off meshes (formations, road ribbons, buildings): one multi-draw per kind. */
+  readonly meshBatcher = new MeshBatcher()
+  private readonly adopted = new WeakSet<THREE.Object3D>()
+  /** `?batch=0` turns the cross-chunk batching off (A/B checks: the frame must look identical). */
+  private readonly batching = typeof location === 'undefined' || new URLSearchParams(location.search).get('batch') !== '0'
 
   stats = { lodSwitches: 0, shoreVisible: 0, loaded: 0, visible: 0, culled: 0, instances: 0, drawnInstances: 0, pending: 0, buildMs: 0, genMs: 0, physicsChunks: 0 }
 
@@ -74,7 +90,13 @@ export class WorldManager {
     this.geos = createPropGeometries()
     this.grass = new GrassField(mats.grass, mats.grassMid, mats.grassFar, mats.grassNearU, mats.grassMidU, mats.grassFarU, this.fields, this.chunks)
     this.root.add(this.grass.root)
-    this.farForest = new FarForest(seed, this.fields.palette, this.fields, this.geos.trees, mats.impostor)
+    // every tree impostor (streamed chunks + far forest) in one draw
+    this.impostors = new ImpostorBatch(mats.impostor)
+    this.impostors.mesh.layers.enable(LAYER_REFLECT_SKYLINE)
+    this.root.add(this.impostors.mesh, this.batcher.root, this.meshBatcher.root)
+    // slot = a LOD0 grid: CHUNK_VERTS² vertices + the skirt loop; 6 indices per cell + 12 per skirt edge (double-sided)
+    this.terrainBatch = new TerrainBatch(this.root, mats.terrain, 1 | (1 << LAYER_REFLECT_SKYLINE), CHUNK_VERTS * CHUNK_VERTS + 4 * (CHUNK_VERTS - 1), (CHUNK_VERTS - 1) * (CHUNK_VERTS - 1) * 6 + 4 * (CHUNK_VERTS - 1) * 12)
+    this.farForest = new FarForest(seed, this.fields.palette, this.fields, this.geos.trees, mats.impostor, this.impostors)
     this.root.add(this.farForest.root)
     this.streamer = new ChunkStreamer(seed, (d) => {
       const key = chunkKey(d.cx, d.cz)
@@ -229,6 +251,22 @@ export class WorldManager {
     }
     this.treeBands(camera.position)
     this.visibility.update(camera, this.chunks.values())
+    if (this.batching) {
+      this.batcher.sync()
+      this.terrainBatch.sync(this.chunks.values())
+      // static meshes a chunk built since (road ribbons appear with LOD0): into the mesh batches
+      for (const c of this.chunks.values()) {
+        for (let k = c.group.children.length - 1; k >= 0; k--) {
+          const m = c.group.children[k] as THREE.Mesh
+          if (!m.isMesh || (m as THREE.InstancedMesh).isInstancedMesh || m.material === this.mats.terrain || this.adopted.has(m)) continue
+          if (m.rotation.x || m.rotation.y || m.rotation.z || m.scale.x !== 1 || m.scale.y !== 1 || m.scale.z !== 1) continue
+          this.adopted.add(m)
+          this._mat.makeTranslation(c.originX + m.position.x, m.position.y, c.originZ + m.position.z)
+          this.meshBatcher.adopt(c, m, this._mat, () => c.isVisible)
+        }
+      }
+      this.meshBatcher.sync()
+    }
     // Water in view (planar reflections render only then), re-tested every 4th frame.
     if ((this.frame++ & 3) === 0) this.stats.shoreVisible = this.waterInView(camera.position)
     this.grass.update(focus, camera)
@@ -244,7 +282,7 @@ export class WorldManager {
     }
     this.builtRadius = r
 
-    let drawn = 0
+    let drawn = this.batcher.stats.instances
     for (const chunk of this.chunks.values()) drawn += chunk.drawnInstances
     const s = this.stats
     s.loaded = this.chunks.size
@@ -266,6 +304,7 @@ export class WorldManager {
     if (!on) for (const c of this.chunks.values()) c.setTreeBands(null)
   }
 
+  private readonly _mat = new THREE.Matrix4()
   private readonly _bands = { near: false, mid: false, imp: false }
   /**
    * PER-TREE LOD: from the camera's nearest / farthest distance to each chunk's box, which tree sets (near mesh,
@@ -319,6 +358,9 @@ export class WorldManager {
       if (!this.inRing(chunk.data.cx, chunk.data.cz, keepR)) {
         this.physics.removeChunk(key)
         this.physics.broken.delete(key) // smashed props are rebuilt when you come back
+        this.batcher.release(chunk)
+        this.terrainBatch.free(key)
+        this.meshBatcher.release(chunk)
         chunk.dispose()
         this.chunks.delete(key)
         this.farForest.invalidate()
@@ -342,9 +384,15 @@ export class WorldManager {
       if (built >= this.q.buildPerFrame || (built > 0 && performance.now() - t0 > BUILD_BUDGET_MS)) break
       const key = chunkKey(d.cx, d.cz)
       this.buildQueue.delete(key)
-      const chunk = new WorldChunk(d, this.mats, this.geos, this.fields)
+      const chunk = new WorldChunk(d, this.mats, this.geos, this.fields, this.batching ? this.impostors : null)
       chunk.setLod(selectLod(-1, chunkDistance(focus.x, focus.z, d.cx, d.cz), this.q.lodRings), this.detail)
       this.root.add(chunk.group)
+      // its instanced meshes are drawn by the cross-chunk batches (translation-only children: offset baked in)
+      if (this.batching) for (const o of [...chunk.group.children]) {
+        const m = o as THREE.InstancedMesh
+        if (!m.isInstancedMesh || m.rotation.x || m.rotation.y || m.rotation.z || m.scale.x !== 1 || m.scale.y !== 1 || m.scale.z !== 1) continue
+        this.batcher.adopt(chunk, m, d.cx * CHUNK_SIZE + m.position.x, d.cz * CHUNK_SIZE + m.position.z, () => (!chunk.isVisible ? 0 : chunk.inView ? 1 : 2))
+      }
       this.chunks.set(key, chunk)
       this.farForest.invalidate()
       built++
@@ -362,6 +410,10 @@ export class WorldManager {
     this.geos.dispose()
     this.grass.dispose()
     this.farForest.dispose()
+    this.impostors.dispose()
+    this.batcher.dispose()
+    this.terrainBatch.dispose()
+    this.meshBatcher.dispose()
   }
 }
 

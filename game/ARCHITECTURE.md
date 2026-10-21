@@ -444,6 +444,21 @@ World → loaded chunk ring (streaming radius)
 Never iterate individual trees on the CPU per frame. Trees are `InstancedMesh` per chunk per species per LOD,
 with a bounding sphere covering the chunk; the chunk decides visibility.
 
+**Cross-chunk batching (2026-10-21, `src/optimization/batching/`)** — the chunks still BUILD per-chunk meshes, but
+they don't DRAW them: ULTRA went from ~160–200 draws to ~50–80 (island / endless world), same frame, same programs
+(`?batch=0` turns it off for A/B checks — the screenshots must match).
+- `ImpostorBatch`: every tree impostor card (chunks + far forest) in ONE InstancedMesh; each source owns a range,
+  re-uploaded only when it streams / changes LOD (47 draws → 1).
+- `InstanceBatcher`: each chunk's InstancedMeshes (tree species, rocks, ferns, bushes, poles, fences…) leave the
+  scene; one batch per (geometry, material, shadow flags, layers) draws them all, chunk offset baked into the
+  instances. `sync()` polls each source's `visible` / `count` / buffer versions (WorldChunk logic is untouched).
+  Near-ring chunks out of view go to a SHADOW-ONLY batch (0 instances in every other render) — they still cast.
+- `TerrainBatch`: every chunk's terrain grid in one `BatchedMesh` (multi-draw), one LOD0-sized slot per chunk.
+- `MeshBatcher`: the one-off meshes (formations, road ribbons, buildings) in `BatchedMesh`es (28 draws → 1–2).
+BatchedMesh culls per chunk (camera and light) and sorts front to back. Shaders that read world positions handle
+`USE_BATCHING` (stylize: terrain `vWorldPos`, biome cover). Without `WEBGL_multi_draw` three loops the draws — never
+worse than before.
+
 **Trees: per-tree LOD + octahedral impostors + far forest** (skills/lod §2): past `impostors.start` (60–130 m by
 tier) each tree dithers from its mesh into a camera-facing card showing the tree baked from 64 directions
 (`rendering/impostors`, atlas baked at load), choosing its LOD by its own distance in the shaders (no chunk
@@ -559,7 +574,7 @@ building mesh rebuilt, power-line spans of a broken post dropped), ≤ 48 physic
 thrown with the truck, which keeps (1 − loss) of its speed. Broken props are listed per chunk (`PhysicsWorld.broken`)
 and REBUILT when the chunk unloads (drive away and come back). Crash sound synthesized (`AudioSystem.crash`).
 
-## 7. Multiplayer (2026-10-21: dedicated server in `../server/`; rooms wired)
+## 7. Multiplayer (2026-10-21: dedicated server in `../server/`; rooms + bots wired)
 
 Battle-royale matches of up to 100 players on the fixed maps run on a dedicated, authoritative **Rust server**
 (`../server/README.md`). Over WebSocket, clients stream their own simulated pose at ~30 Hz. The server validates it
@@ -578,10 +593,18 @@ room pill (toolbar / under the minimap on touch) opens the room card: code, play
 - `net/NetClient.ts` (loop system `net`, after `bike`): guest session, room REST calls, the socket. It sends the
   local pose at 30 Hz (`Game.localPose`: the car's when driving) and applies `Welcome` spawns / `Correction`s
   (`netRelocate` / `netCorrect`). Roster, room and status go to `store.net` (low frequency), never per-frame state.
-- `net/RemotePlayers.ts`: others drawn ~100 ms in the past (interpolated, ≤ 200 ms extrapolation). The 16 nearest
-  on foot get a skinned hero clone (`MAX_CHARACTERS`), the rest a capsule; cars share one geometry set per model;
-  a canvas name tag each. Cost: ~0.1–0.2 ms CPU (`sys net` in F3) with one remote; per-tier caps are not wired yet
-  (TODO: `MAX_CHARACTERS` from `game.quality`).
+- `net/RemotePlayers.ts`: others drawn ~100 ms in the past (interpolated, ≤ 200 ms extrapolation), built for a crowd
+  (draws don't grow with players): cars instanced per model in three LODs — the full model for the nearest
+  `remoteCars` within 35 m, a simplified one (vertex-clustered ≤ 2 k-triangle body, texture baked into colours,
+  12-sided wheels) to 110 m, boxes to 900 m; a car stays PARKED where its driver got out; the nearest
+  `remoteCharacters` on foot animated (1 skinned draw each, no sun / dynamic shadow), the rest instanced
+  low-poly people; blob shadows under both (1 draw); all name tags in 1 draw (atlas, nearest 10). Phones cap the
+  full models at 6 people / 3 cars on every preset. BOTS (ids ≥ `BOT_ID_BASE`) are set on this client's ground.
+  WORST CASE (100 cars + 100 people within 70 m, `scripts/crowd-probe.mjs`): 2.26 M → 0.96 M triangles, 96 → 160
+  fps uncapped (M4, ULTRA, desktop and phone viewports), +16–20 draws.
+- ROOM BOTS (`../server/crates/sim/src/bots.rs`): server-run players the owner sets (0–100, room settings); they
+  cruise, race, convoy, explore, boat, fly, stroll and hang out; the client only draws them. `scripts/bots-probe.mjs`.
+- `?net=0` plays offline (screenshot / benchmark runs teleport — the server would correct that).
 - Offline (no server) the game plays on alone; the room UI says the server can't be reached. Server URL:
   `VITE_DARK_SERVER`, else this host on port 7350.
 - Check: `node scripts/rooms-probe.mjs <dir>` and `scripts/rooms-touch.mjs` (with `npm run dev` + the server).

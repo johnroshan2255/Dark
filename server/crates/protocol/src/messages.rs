@@ -236,6 +236,8 @@ pub struct RoomSettings {
     pub max_players: u16,
     /// The owner's player id (NO_PLAYER when the owner has left).
     pub owner: u16,
+    /// Server-run bots in the room (0–100; ids from `BOT_ID_BASE`).
+    pub bots: u8,
 }
 
 /// Why a player was eliminated.
@@ -526,6 +528,7 @@ impl ServerMsg {
                 w.u8(r.flags);
                 w.u16(r.max_players);
                 w.u16(r.owner);
+                w.u8(r.bots);
             }
         }
     }
@@ -631,6 +634,7 @@ impl ServerMsg {
                 flags: r.u8()?,
                 max_players: r.u16()?,
                 owner: r.u16()?,
+                bots: r.u8()?,
             }),
             k => return Err(DecodeError::UnknownKind(k)),
         };

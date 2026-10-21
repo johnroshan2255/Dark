@@ -584,8 +584,16 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
     return this.sim.tune
   }
 
+  /** Sun shadows: the body, wheels, doors and hull cast; small parts (pedals, wipers, dials, gear lever, mirrors —
+   *  under 0.45 m across) don't: invisible in the shadow, a shadow-pass draw each (7 draws saved). */
   set castShadow(v: boolean) {
-    this.root.traverse((o) => ((o as THREE.Mesh).isMesh ? ((o as THREE.Mesh).castShadow = v) : 0))
+    this.root.traverse((o) => {
+      const m = o as THREE.Mesh
+      if (!m.isMesh) return
+      const g = m.geometry
+      if (!g.boundingSphere) g.computeBoundingSphere()
+      m.castShadow = v && (g.boundingSphere?.radius ?? 1) * Math.max(m.scale.x, m.scale.y, m.scale.z) > 0.45
+    })
   }
 
   get heading(): number {

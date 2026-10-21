@@ -7,6 +7,7 @@ pub const MATCHES_STARTED: &str = "dark_matches_started_total";
 pub const MATCHES_FINISHED: &str = "dark_matches_finished_total";
 pub const MATCH_PANICS: &str = "dark_match_panics_total";
 pub const PLAYERS_CONNECTED: &str = "dark_players_connected";
+pub const BOTS_ACTIVE: &str = "dark_bots_active";
 pub const TICK_SECONDS: &str = "dark_tick_seconds";
 pub const TICK_OVERRUNS: &str = "dark_tick_overruns_total";
 pub const SNAPSHOT_BYTES: &str = "dark_snapshot_bytes_total";
@@ -27,6 +28,7 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
         .install_recorder()?;
     metrics::describe_gauge!(MATCHES_ACTIVE, "Matches running in this process");
     metrics::describe_gauge!(PLAYERS_CONNECTED, "Players connected to a match");
+    metrics::describe_gauge!(BOTS_ACTIVE, "Server-run bots playing in rooms");
     metrics::describe_histogram!(
         TICK_SECONDS,
         metrics::Unit::Seconds,

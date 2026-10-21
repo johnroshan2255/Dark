@@ -6,11 +6,14 @@
  * Full table: `server/docs/PROTOCOL.md`.
  */
 
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
 export const MAX_PACKET = 16 * 1024
 export const MAX_SNAPSHOT_ENTITIES = 96
 /** "Nobody" (e.g. the zone as a killer). */
 export const NO_PLAYER = 0xffff
+/** Server-run players (room bots) have ids from here up (≤ 100 of them). */
+export const BOT_ID_BASE = 0xc000
+export const isBot = (id: number): boolean => id >= BOT_ID_BASE && id < NO_PLAYER
 /** `welcome.spawn[1]` with this value: no server spawn (an endless-world room) — start where your world puts you. */
 export const NO_SPAWN = -2147483648
 
@@ -70,6 +73,8 @@ export interface RoomSettings {
   maxPlayers: number
   /** The owner's player id (NO_PLAYER when the owner has left). */
   owner: number
+  /** Server-run bots in the room (0–100). */
+  bots: number
 }
 
 export type ClientMsg =
@@ -261,7 +266,7 @@ export function encodeServer(m: ServerMsg): Uint8Array<ArrayBuffer> {
       break
     case 'pong': w.u8(S.PONG); w.u32(m.clientTime); w.u32(m.serverTime); break
     case 'kick': w.u8(S.KICK); w.u8(m.reason); w.str(m.message); break
-    case 'room': w.u8(S.ROOM); w.str(m.room.code); w.str(m.room.name); w.u8(m.room.flags); w.u16(m.room.maxPlayers); w.u16(m.room.owner); break
+    case 'room': w.u8(S.ROOM); w.str(m.room.code); w.str(m.room.name); w.u8(m.room.flags); w.u16(m.room.maxPlayers); w.u16(m.room.owner); w.u8(m.room.bots); break
   }
   return w.done()
 }
@@ -298,7 +303,7 @@ export function decodeServer(buf: Uint8Array): ServerMsg {
     case S.CORRECTION: m = { t: 'correction', seq: r.u32(), epoch: r.u8(), pos: r.v3i32(), yaw: r.u16() }; break
     case S.PONG: m = { t: 'pong', clientTime: r.u32(), serverTime: r.u32() }; break
     case S.KICK: m = { t: 'kick', reason: r.u8(), message: r.str() }; break
-    case S.ROOM: m = { t: 'room', room: { code: r.str(), name: r.str(), flags: r.u8(), maxPlayers: r.u16(), owner: r.u16() } }; break
+    case S.ROOM: m = { t: 'room', room: { code: r.str(), name: r.str(), flags: r.u8(), maxPlayers: r.u16(), owner: r.u16(), bots: r.u8() } }; break
     default: throw new ProtocolError(`unknown server kind 0x${k.toString(16)}`)
   }
   r.finish()

@@ -11,8 +11,8 @@
 //! At most `max_entities` (nearest first) per snapshot. Updates within a tier are staggered by entity id so the
 //! bandwidth is spread over ticks.
 
+use crate::fasthash::FastMap;
 use serde::Deserialize;
-use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(default)]
@@ -23,6 +23,9 @@ pub struct InterestConfig {
     pub mid_every: u32,
     pub far_every: u32,
     pub max_entities: usize,
+    /// Only the nearest `near_cap` get every tick even inside `near_m` (a crowd): the rest of the near ring goes at
+    /// the mid rate — in a crowd of 100 the bytes per player halve and the nearest still move every tick.
+    pub near_cap: usize,
 }
 
 impl Default for InterestConfig {
@@ -34,6 +37,7 @@ impl Default for InterestConfig {
             mid_every: 2,
             far_every: 6,
             max_entities: 64,
+            near_cap: 24,
         }
     }
 }
@@ -44,14 +48,14 @@ type Cell = Vec<(u16, f32, f32)>;
 /// Uniform spatial hash of entity positions (x, z).
 pub struct Grid {
     cell: f32,
-    cells: HashMap<(i32, i32), Cell>,
+    cells: FastMap<(i32, i32), Cell>,
 }
 
 impl Grid {
     pub fn new(cell: f32) -> Self {
         Self {
             cell,
-            cells: HashMap::new(),
+            cells: FastMap::default(),
         }
     }
 
@@ -101,10 +105,15 @@ pub fn select(
     out: &mut Vec<u16>,
 ) {
     out.clear();
-    candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+    // only the nearest `max_entities` matter: partition them out first (O(n)), then sort just those
+    let cap = cfg.max_entities.min(candidates.len());
+    if cap > 0 && cap < candidates.len() {
+        candidates.select_nth_unstable_by(cap - 1, |a, b| a.1.total_cmp(&b.1));
+    }
+    candidates[..cap].sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
     let (n2, m2) = (cfg.near_m * cfg.near_m, cfg.mid_m * cfg.mid_m);
-    for &(id, d2) in candidates.iter().take(cfg.max_entities) {
-        let every = if d2 <= n2 {
+    for (rank, &(id, d2)) in candidates.iter().take(cfg.max_entities).enumerate() {
+        let every = if d2 <= n2 && rank < cfg.near_cap.max(1) {
             1
         } else if d2 <= m2 {
             cfg.mid_every.max(1)

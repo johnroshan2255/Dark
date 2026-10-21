@@ -1,4 +1,6 @@
 import * as THREE from 'three'
+import type { ImpostorBatch } from '../optimization/batching/ImpostorBatch'
+import type { TerrainSource } from '../optimization/batching/TerrainBatch'
 import type { MaterialLibrary } from '../rendering/materials/MaterialLibrary'
 import { buildInstanceAttributes, createInstancedMesh, type InstanceAttributes } from '../optimization/instancing/InstanceBuilder'
 import type { Cullable } from '../optimization/culling/ChunkVisibility'
@@ -243,7 +245,7 @@ interface FarGroup {
  *   LOD1: trees level 1, low-poly rocks      LOD2: trees level 2 (dead snags hidden)
  * Grass is NOT per chunk: GrassField draws it around the player in one call.
  */
-export class WorldChunk implements Cullable {
+export class WorldChunk implements Cullable, TerrainSource {
   readonly key: string
   readonly group = new THREE.Group()
   readonly bounds = new THREE.Box3()
@@ -251,6 +253,7 @@ export class WorldChunk implements Cullable {
   ring = 0
   lod = -1
   isVisible = true
+  inView = true
   instanceCount = 0
 
   private terrain: (THREE.Mesh | null)[] = new Array(LOD_COUNT).fill(null)
@@ -294,6 +297,8 @@ export class WorldChunk implements Cullable {
     private readonly mats: MaterialLibrary,
     private readonly geos: PropGeometries,
     private readonly fields: WorldFields,
+    /** The world's one impostor draw (optimization/batching/ImpostorBatch): this chunk's cards are a range in it. */
+    private readonly impostorBatch: ImpostorBatch | null = null,
   ) {
     this.key = `${data.cx},${data.cz}`
     this.shore = data.minY < WorldFields.WATER + 0.5 && data.maxY > WorldFields.WATER - 0.5
@@ -354,7 +359,8 @@ export class WorldChunk implements Cullable {
     }
     // Distant trees: one octahedral-impostor card per tree, all species, one draw (shown under the per-tree LOD).
     this.impostors = createImpostorMesh(perSpecies, geos.trees, mats.impostor)
-    if (this.impostors) this.add(this.impostors).layers.enable(LAYER_REFLECT_SKYLINE)
+    if (this.impostors && this.impostorBatch) this.impostorBatch.set(this.key, this.impostors, this.origin[0], this.origin[1], false)
+    else if (this.impostors) this.add(this.impostors).layers.enable(LAYER_REFLECT_SKYLINE)
     const t = data.trees
     const spruce = geos.trees.find((x) => x.id === TreeSpecies.Spruce)!
     const birch = geos.trees.find((x) => x.id === TreeSpecies.Birch)!
@@ -652,7 +658,22 @@ export class WorldChunk implements Cullable {
       // shadows don't stop at a chunk border. The shadow frustum culls the far ones.
       f.lod1.castShadow = mid
     }
-    if (this.impostors) this.impostors.visible = !!b && b.imp
+    if (this.impostors) {
+      if (this.impostorBatch) this.impostorBatch.setVisible(this.key, !!b && b.imp)
+      else this.impostors.visible = !!b && b.imp
+    }
+  }
+
+  /** The terrain grid shown now (TerrainBatch draws it). */
+  terrainMesh(): THREE.Mesh | null {
+    for (const m of this.terrain) if (m && m.visible) return m
+    return null
+  }
+  get originX(): number {
+    return this.origin[0]
+  }
+  get originZ(): number {
+    return this.origin[1]
   }
 
   /** Point lookup on the road ribbon (built on first use; null when the chunk has none) — WorldManager.groundAt. */
@@ -684,6 +705,7 @@ export class WorldChunk implements Cullable {
     // Shared geometries/materials belong to the libraries; only per-chunk buffers are freed.
     for (const { m } of this.species) m.levels.forEach((x) => x.dispose())
     for (const f of this.far) (f.lod1.dispose(), f.lod2.dispose())
+    this.impostorBatch?.remove(this.key)
     if (this.impostors) (this.impostors.geometry.dispose(), this.impostors.dispose())
     for (const m of [this.rocks, this.rocksFar]) if (m) disposeRockGeometry(m.geometry)
     for (const m of [this.rocks, this.rocksFar, this.ferns, this.bushes, this.agaves, this.shrubs, this.leafPiles, this.glowShrooms, this.poles, this.lamps, this.fences]) m?.dispose()

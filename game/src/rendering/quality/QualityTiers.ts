@@ -117,6 +117,12 @@ export interface QualitySettings {
   monsters: { stalkers: number; striders: number }
   /** Particle caps: vehicle exhaust + tyre smoke/dust sprites alive at once (one draw; ~0.03 ms CPU at 320); rain = share of the 1600-drop pool. */
   particles: { vehicle: number; rain: number }
+  /** Other players / room bots on foot drawn as the animated character (1 skinned draw each); the rest a silhouette
+   *  (net/RemotePlayers — all of them 1 instanced draw). */
+  remoteCharacters: number
+  /** Other players' / bots' cars drawn as the full model (the nearest, within 35 m); the rest simplified (~2–4 k
+   *  triangles) or boxes — a crowd of 100 cars costs ~0.4 M triangles instead of ~2 M. */
+  remoteCars: number
   /** Tyre marks (rendering/particles/TyreMarks.ts, one draw): ring size in quads (208 B each), seconds before a mark
    *  has faded, camera distance (m) where marks are gone (kept inside the LOD0 terrain ring). */
   tyreMarks: { segments: number; life: number; range: number }
@@ -258,7 +264,7 @@ export const PRESETS: Record<TierName, Preset> = {
   low: {
     base: {
       maxDpr: 1, renderScale: { min: 0.6, max: 0.85, start: 0.75 }, aa: 'fxaa', sharpen: 0.35, paint: { stride: 0, bloom: 0.45 },
-      buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, particles: { vehicle: 110, rain: 0.35 }, tyreMarks: { segments: 1024, life: 40, range: 50 }, pixelBudget: 0.6e6, skyScale: 0.33,
+      buildPerFrame: 1, monsters: { stalkers: 1, striders: 0 }, remoteCharacters: 4, remoteCars: 2, particles: { vehicle: 110, rain: 0.35 }, tyreMarks: { segments: 1024, life: 40, range: 50 }, pixelBudget: 0.6e6, skyScale: 0.33,
     },
     features: { shadows: 'medium', reflections: 'low', ao: 'low', volumetrics: 'medium', grass: 'ultra', effects: 'medium', vegetation: 'medium', view: 'low' },
   },
@@ -266,7 +272,7 @@ export const PRESETS: Record<TierName, Preset> = {
   medium: {
     base: {
       maxDpr: 1.25, renderScale: { min: 0.6, max: 1, start: 0.85 }, aa: 'fxaa', sharpen: 0.25, paint: { stride: 1.4, bloom: 0.4 },
-      buildPerFrame: 2, monsters: { stalkers: 2, striders: 1 }, particles: { vehicle: 220, rain: 0.7 }, tyreMarks: { segments: 2048, life: 75, range: 70 }, pixelBudget: 1.4e6, skyScale: 0.33,
+      buildPerFrame: 2, monsters: { stalkers: 2, striders: 1 }, remoteCharacters: 6, remoteCars: 3, particles: { vehicle: 220, rain: 0.7 }, tyreMarks: { segments: 2048, life: 75, range: 70 }, pixelBudget: 1.4e6, skyScale: 0.33,
     },
     features: { shadows: 'medium', reflections: 'low', ao: 'low', volumetrics: 'medium', grass: 'ultra', effects: 'medium', vegetation: 'medium', view: 'medium' },
   },
@@ -276,7 +282,7 @@ export const PRESETS: Record<TierName, Preset> = {
   high: {
     base: {
       maxDpr: 1.25, renderScale: { min: 0.65, max: 1, start: 0.8 }, aa: 'fxaa', sharpen: 0.3, paint: { stride: 1.8, bloom: 0.45 },
-      buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 320, rain: 1 }, tyreMarks: { segments: 4096, life: 120, range: 90 }, pixelBudget: 1.4e6, skyScale: 0.5,
+      buildPerFrame: 2, monsters: { stalkers: 3, striders: 2 }, remoteCharacters: 10, remoteCars: 5, particles: { vehicle: 320, rain: 1 }, tyreMarks: { segments: 4096, life: 120, range: 90 }, pixelBudget: 1.4e6, skyScale: 0.5,
     },
     features: { shadows: 'high', reflections: 'high', ao: 'medium', volumetrics: 'high', grass: 'ultra', effects: 'high', vegetation: 'high', view: 'high' },
   },
@@ -285,7 +291,7 @@ export const PRESETS: Record<TierName, Preset> = {
   ultra: {
     base: {
       maxDpr: 2, renderScale: { min: 0.8, max: 1, start: 1 }, aa: 'fxaa', sharpen: 0.22, paint: { stride: 1.8, bloom: 0.45 },
-      buildPerFrame: 3, monsters: { stalkers: 3, striders: 2 }, particles: { vehicle: 420, rain: 1 }, tyreMarks: { segments: 6144, life: 180, range: 110 }, pixelBudget: 4.2e6, skyScale: 1,
+      buildPerFrame: 3, monsters: { stalkers: 3, striders: 2 }, remoteCharacters: 12, remoteCars: 6, particles: { vehicle: 420, rain: 1 }, tyreMarks: { segments: 6144, life: 180, range: 110 }, pixelBudget: 4.2e6, skyScale: 1,
     },
     // Shadows 'high' = IMAGE tree shadows + the real car / player shadow, on every device (2026-10-20, "even in desktop
     // ultra use image shadows"): measured −0.55 ms/frame at the phone's size, no 437k-triangle map redraws twice a

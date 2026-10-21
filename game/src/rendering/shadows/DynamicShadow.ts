@@ -91,7 +91,10 @@ export function dynamicCaster(root: THREE.Object3D, on: boolean): void {
     const m = o as THREE.Mesh
     if (!m.isMesh) return
     const mat = (Array.isArray(m.material) ? m.material[0] : m.material) as THREE.Material
-    if (on && !mat.transparent && mat.blending === THREE.NormalBlending) m.layers.enable(DYN_LAYER)
+    // small parts (pedals, wipers, dials, gear lever: < 0.45 m across) add a draw each and no visible shadow
+    if (!m.geometry.boundingSphere) m.geometry.computeBoundingSphere()
+    const big = (m.geometry.boundingSphere?.radius ?? 1) * Math.max(m.scale.x, m.scale.y, m.scale.z) > 0.45
+    if (on && big && !mat.transparent && mat.blending === THREE.NormalBlending) m.layers.enable(DYN_LAYER)
     else m.layers.disable(DYN_LAYER)
   })
 }

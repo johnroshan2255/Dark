@@ -10,9 +10,13 @@
 //! health, damage (zone, roadkill), eliminations, placement and the winner. Remote players are sent per client by
 //! interest management ([`interest`]).
 
+pub mod bots;
+pub mod fasthash;
 pub mod game;
 pub mod interest;
 pub mod map;
+pub mod nav;
+pub mod noise;
 pub mod rng;
 pub mod validate;
 pub mod zone;

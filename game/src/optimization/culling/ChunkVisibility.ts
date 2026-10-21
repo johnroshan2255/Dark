@@ -11,6 +11,8 @@ export interface Cullable {
   readonly bounds: THREE.Box3
   /** Chebyshev ring distance from the player's chunk. */
   ring: number
+  /** In the camera's view (the near rings are drawn even when not — for their shadows). */
+  inView?: boolean
   setVisible(v: boolean): void
 }
 
@@ -32,7 +34,9 @@ export class ChunkVisibility {
     let v = 0
     let c = 0
     for (const chunk of chunks) {
-      const vis = chunk.ring <= 1 || (chunk.bounds.distanceToPoint(this.camPos) < this.maxDistance && this.frustum.intersectsBox(chunk.bounds))
+      const inView = chunk.bounds.distanceToPoint(this.camPos) < this.maxDistance && this.frustum.intersectsBox(chunk.bounds)
+      const vis = chunk.ring <= 1 || inView
+      chunk.inView = inView
       chunk.setVisible(vis)
       if (vis) v++
       else c++

@@ -1,6 +1,8 @@
 //! One MATCH: lobby → countdown → running (zone closes, damage, eliminations) → ended — or a ROOM (free roam): join
 //! any time, no zone, roadkill only if the room allows it (a knock-down, not an elimination), owner-configured.
 
+use crate::bots::{BotEvent, Bots, Seen, World};
+use crate::fasthash::FastSet;
 use crate::interest::{self, Grid, InterestConfig};
 use crate::map::MapData;
 use crate::rng::Rng;
@@ -8,7 +10,7 @@ use crate::validate::{self, Ctx, Limits, Pose, Reject};
 use crate::zone::{self, Stage, ZoneState};
 use dark_protocol::*;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// What kind of session this is.
@@ -113,8 +115,10 @@ struct Player {
     grace: bool,
     /// When this player was last hurt by a vehicle (0 = never): a 1 s cooldown between hits.
     last_hit_ms: u64,
-    known: HashSet<u16>,
+    known: FastSet<u16>,
     spectate: Option<u16>,
+    /// A server-run bot (no connection: no snapshots, no states).
+    bot: bool,
 }
 
 pub struct Match {
@@ -142,6 +146,15 @@ pub struct Match {
     cand: Vec<(u16, f32)>,
     sel: Vec<u16>,
     w: Writer,
+    /// Rooms: the server-run bots.
+    bots: Option<Bots>,
+    bot_events: Vec<BotEvent>,
+    seen: Vec<Seen>,
+    /// Snapshot scratch (reused every tick: no allocation per player but the packet itself).
+    snap_ids: Vec<u16>,
+    relevant: FastSet<u16>,
+    removed: Vec<u16>,
+    ents: Vec<EntityState>,
 }
 
 fn pose_from(s: &State) -> Pose {
@@ -177,7 +190,23 @@ impl Match {
         } else {
             Phase::Lobby
         };
+        let bots = room.as_ref().map(|r| {
+            let world = match &map {
+                Some(m) => World::for_map(m.clone()),
+                None => World::Endless(Box::new(crate::noise::Endless::new(seed))),
+            };
+            let mut b = Bots::new(world, id ^ seed as u64);
+            b.configure(r.bots as usize, r.flags & room_flags::FLYING != 0);
+            b
+        });
         Self {
+            bots,
+            bot_events: Vec::new(),
+            seen: Vec::new(),
+            snap_ids: Vec::new(),
+            relevant: FastSet::default(),
+            removed: Vec::new(),
+            ents: Vec::new(),
             id,
             seed,
             rng: Rng::new(id ^ ((seed as u64) << 32)),
@@ -212,16 +241,25 @@ impl Match {
     pub fn tick(&self) -> u32 {
         self.tick
     }
+    /// Humans in the match (bots don't take seats).
     pub fn player_count(&self) -> usize {
-        self.players.len()
+        self.players.values().filter(|p| !p.bot).count()
     }
     pub fn alive_count(&self) -> usize {
-        self.players.values().filter(|p| p.alive).count()
+        self.players.values().filter(|p| p.alive && !p.bot).count()
+    }
+    /// Server-run bots in the room.
+    pub fn bot_count(&self) -> usize {
+        self.players.values().filter(|p| p.bot).count()
+    }
+    /// What the bots have been doing (metrics).
+    pub fn bot_stats(&self) -> Option<crate::bots::BotStats> {
+        self.bots.as_ref().map(|b| b.stats)
     }
     /// Seats can still be taken (lobby / countdown, not full).
     pub fn joinable(&self) -> bool {
         matches!(self.phase, Phase::Lobby | Phase::Countdown | Phase::FreeRoam)
-            && self.players.len() < self.cfg.max_players
+            && self.player_count() < self.cfg.max_players
             && !self.finished
     }
     /// The match is over and its result has been shown: the runtime closes it.
@@ -246,14 +284,18 @@ impl Match {
         r.code = cur.code.clone();
         r.owner = cur.owner;
         r.max_players = r.max_players.clamp(1, 100);
+        r.bots = r.bots.min(100);
         self.cfg.max_players = r.max_players as usize;
+        if let Some(b) = self.bots.as_mut() {
+            b.configure(r.bots as usize, r.flags & room_flags::FLYING != 0);
+        }
         self.out.push(Out::All(ServerMsg::Room(r.clone())));
         self.room = Some(r);
     }
 
     /// Rooms: the owner removes a player.
     pub fn kick(&mut self, id: u16) {
-        if self.players.contains_key(&id) {
+        if self.players.get(&id).is_some_and(|p| !p.bot) {
             self.out
                 .push(Out::Kick(id, KickReason::Kicked, "removed by the room owner"));
         }
@@ -279,7 +321,7 @@ impl Match {
             .players
             .get(&owner)
             .filter(|p| p.has_pose)
-            .or_else(|| self.players.values().find(|p| p.has_pose))
+            .or_else(|| self.players.values().find(|p| p.has_pose && !p.bot))
             .map(|p| p.pose)?;
         let k = self.lobby_slots as f32 * 2.399_963;
         self.lobby_slots += 1;
@@ -332,7 +374,7 @@ impl Match {
             return Err(KickReason::Duplicate);
         }
         if !self.joinable() {
-            return Err(if self.players.len() >= self.cfg.max_players {
+            return Err(if self.player_count() >= self.cfg.max_players {
                 KickReason::MatchFull
             } else {
                 KickReason::MatchOver
@@ -369,8 +411,9 @@ impl Match {
                 bail_ms: None,
                 grace, // on a map the client starts where Welcome puts it: validated from there
                 last_hit_ms: 0,
-                known: HashSet::new(),
+                known: FastSet::default(),
                 spectate: None,
+                bot: false,
             },
         );
         self.out.push(Out::All(ServerMsg::PlayerJoined {
@@ -411,7 +454,7 @@ impl Match {
         }
         self.out.push(Out::All(ServerMsg::PlayerLeft { id }));
         // the owner left: the longest-present player (lowest id) runs the room now
-        let next = self.players.keys().next().copied().unwrap_or(NO_PLAYER);
+        let next = self.players.iter().find(|(_, p)| !p.bot).map_or(NO_PLAYER, |(&k, _)| k);
         if let Some(r) = self.room.as_mut()
             && r.owner == id
         {
@@ -523,6 +566,7 @@ impl Match {
                 }
             }
             Phase::FreeRoam => {
+                self.step_bots(dt);
                 if self.room_flag(room_flags::ROADKILL) {
                     self.roadkill();
                 }
@@ -544,6 +588,64 @@ impl Match {
             }
         }
         self.rebuild_grid();
+    }
+
+    /// Rooms: the bots think and move; joins / leaves become roster packets.
+    fn step_bots(&mut self, dt: f32) {
+        let Some(bots) = self.bots.as_mut() else { return };
+        self.seen.clear();
+        for (&id, p) in &self.players {
+            if p.has_pose && p.alive {
+                self.seen.push(Seen {
+                    id,
+                    pose: p.pose,
+                    bot: p.bot,
+                });
+            }
+        }
+        self.bot_events.clear();
+        bots.step(dt, self.now_ms, &self.seen, &mut self.bot_events);
+        for ev in self.bot_events.drain(..) {
+            match ev {
+                BotEvent::Joined(id, name) => {
+                    self.players.insert(
+                        id,
+                        Player {
+                            name: name.clone(),
+                            pose: Pose::default(),
+                            has_pose: false,
+                            last_accept_ms: self.now_ms,
+                            last_seq: 0,
+                            epoch: 0,
+                            hp: 100.0,
+                            alive: true,
+                            placement: 0,
+                            violations: 0.0,
+                            bail_ms: None,
+                            grace: false,
+                            last_hit_ms: 0,
+                            known: FastSet::default(),
+                            spectate: None,
+                            bot: true,
+                        },
+                    );
+                    self.out.push(Out::All(ServerMsg::PlayerJoined { id, name }));
+                }
+                BotEvent::Left(id) => {
+                    self.players.remove(&id);
+                    for p in self.players.values_mut() {
+                        p.known.remove(&id);
+                    }
+                    self.out.push(Out::All(ServerMsg::PlayerLeft { id }));
+                }
+            }
+        }
+        for b in &bots.bots {
+            if let Some(p) = self.players.get_mut(&b.id) {
+                p.pose = b.pose;
+                p.has_pose = true;
+            }
+        }
     }
 
     fn begin_countdown(&mut self) {
@@ -658,6 +760,9 @@ impl Match {
     fn eliminate(&mut self, victim: u16, killer: u16, cause: Cause) {
         if self.phase == Phase::FreeRoam {
             // a room: knocked down, not out — told to everyone (placement 0), back on their feet at full health
+            if let Some(b) = self.bots.as_mut() {
+                b.knocked(victim, self.now_ms);
+            }
             if let Some(p) = self.players.get_mut(&victim) {
                 p.hp = 100.0;
                 self.out.push(Out::All(ServerMsg::Eliminated {
@@ -718,13 +823,16 @@ impl Match {
         }
     }
 
-    /// Encode this tick's snapshot for every player into `out` (player id, packet bytes). Reuses buffers.
+    /// Encode this tick's snapshot for every player into `out` (player id, packet bytes). Reuses its scratch buffers:
+    /// the only allocation per player is the packet.
     pub fn snapshots(&mut self, out: &mut Vec<(u16, Vec<u8>)>) {
         out.clear();
-        let ids: Vec<u16> = self.players.keys().copied().collect();
+        let mut ids = std::mem::take(&mut self.snap_ids);
+        ids.clear();
+        ids.extend(self.players.iter().filter(|(_, p)| !p.bot).map(|(&k, _)| k));
         let alive = self.alive_count().min(255) as u8;
         let far = self.cfg.interest.far_m;
-        for id in ids {
+        for &id in &ids {
             let (centre, hp, ack) = {
                 let p = &self.players[&id];
                 let focus = if p.alive {
@@ -739,7 +847,8 @@ impl Match {
                 )
             };
             self.grid.query(centre[0], centre[2], far, id, &mut self.cand);
-            let relevant: HashSet<u16> = self.cand.iter().map(|c| c.0).collect();
+            self.relevant.clear();
+            self.relevant.extend(self.cand.iter().map(|c| c.0));
             {
                 let known = &self.players[&id].known;
                 interest::select(
@@ -750,42 +859,52 @@ impl Match {
                     &mut self.sel,
                 );
             }
-            let p = self.players.get(&id).expect("listed");
-            let removed: Vec<u16> = p.known.iter().copied().filter(|e| !relevant.contains(e)).collect();
-            let entities: Vec<EntityState> = self
-                .sel
-                .iter()
-                .filter_map(|e| self.players.get(e).map(|q| (*e, q)))
-                .map(|(e, q)| EntityState {
-                    id: e,
-                    flags: q.pose.flags,
-                    model: q.pose.model,
-                    pos: [m_to_cm(q.pose.pos[0]), m_to_cm(q.pose.pos[1]), m_to_cm(q.pose.pos[2])],
-                    yaw: yaw_to_u16(q.pose.yaw),
-                    pitch: pitch_to_i16(q.pose.pitch),
-                    vel: [
-                        mps_to_cms(q.pose.vel[0]),
-                        mps_to_cms(q.pose.vel[1]),
-                        mps_to_cms(q.pose.vel[2]),
-                    ],
-                })
-                .collect();
+            let (players, relevant) = (&self.players, &self.relevant);
+            let p = &players[&id];
+            self.removed.clear();
+            self.removed
+                .extend(p.known.iter().copied().filter(|e| !relevant.contains(e)));
+            self.ents.clear();
+            self.ents.extend(
+                self.sel
+                    .iter()
+                    .filter_map(|e| players.get(e).map(|q| (*e, q)))
+                    .map(|(e, q)| EntityState {
+                        id: e,
+                        flags: q.pose.flags,
+                        model: q.pose.model,
+                        pos: [m_to_cm(q.pose.pos[0]), m_to_cm(q.pose.pos[1]), m_to_cm(q.pose.pos[2])],
+                        yaw: yaw_to_u16(q.pose.yaw),
+                        pitch: pitch_to_i16(q.pose.pitch),
+                        vel: [
+                            mps_to_cms(q.pose.vel[0]),
+                            mps_to_cms(q.pose.vel[1]),
+                            mps_to_cms(q.pose.vel[2]),
+                        ],
+                    }),
+            );
             let msg = ServerMsg::Snapshot {
                 tick: self.tick,
                 server_time: self.now_ms.min(u32::MAX as u64) as u32,
                 ack_seq: ack,
                 hp,
                 alive,
-                entities,
-                removed,
+                entities: std::mem::take(&mut self.ents),
+                removed: std::mem::take(&mut self.removed),
             };
             self.w.clear();
             msg.encode(&mut self.w);
+            if let ServerMsg::Snapshot { entities, removed, .. } = msg {
+                self.ents = entities;
+                self.removed = removed;
+            }
             out.push((id, self.w.buf.clone()));
+            let relevant = &self.relevant;
             let p = self.players.get_mut(&id).expect("listed");
             p.known.retain(|e| relevant.contains(e));
             p.known.extend(self.sel.iter().copied());
         }
+        self.snap_ids = ids;
     }
 }
 
@@ -1062,7 +1181,58 @@ mod tests {
             flags: flags_,
             max_players: 3,
             owner,
+            bots: 0,
         }
+    }
+
+    #[test]
+    fn endless_room_bots_join_move_and_stay_out_of_seats() {
+        let mut m = Match::new(
+            5,
+            7,
+            None,
+            MatchConfig {
+                mode: Mode::FreeRoam,
+                ..cfg()
+            },
+            Some(RoomSettings { bots: 6, ..room(1, 0) }),
+            0,
+        );
+        m.join(1, "asha").unwrap();
+        send(&mut m, 1, state(1, [0.0, 3.0, 0.0], [0.0; 3], 0));
+        run(&mut m, 0, 8000);
+        let out = kinds(&mut m);
+        let joined = out
+            .iter()
+            .filter(|o| matches!(o, Out::All(ServerMsg::PlayerJoined { id, .. }) if *id >= dark_protocol::BOT_ID_BASE))
+            .count();
+        assert_eq!(joined, 6);
+        assert_eq!(m.player_count(), 1);
+        assert_eq!(m.bot_count(), 6);
+        assert!(m.joinable());
+        // bots are in the human's snapshots, and only the human gets one
+        let mut snaps = Vec::new();
+        m.snapshots(&mut snaps);
+        assert_eq!(snaps.len(), 1);
+        match ServerMsg::decode(&snaps[0].1).unwrap() {
+            ServerMsg::Snapshot { entities, .. } => assert!(
+                entities.iter().filter(|e| e.id >= dark_protocol::BOT_ID_BASE).count() >= 3,
+                "{}",
+                entities.len()
+            ),
+            other => panic!("{other:?}"),
+        }
+        // the owner turns them off
+        m.configure(RoomSettings { bots: 0, ..room(1, 0) });
+        run(&mut m, 8000, 8200);
+        assert_eq!(m.bot_count(), 0);
+        let out = kinds(&mut m);
+        assert_eq!(
+            out.iter()
+                .filter(|o| matches!(o, Out::All(ServerMsg::PlayerLeft { .. })))
+                .count(),
+            6
+        );
     }
 
     #[test]
@@ -1174,5 +1344,94 @@ mod tests {
                 .any(|o| matches!(o, Out::To(1, ServerMsg::Correction { .. })));
             assert_eq!(corrected, !allowed);
         }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::path::Path;
+
+    /// The heaviest room: 100 connected players moving + 100 bots on the island; µs per tick (step + snapshots).
+    /// `cargo test --release -p dark-sim bench_room -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_room_tick() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../game/public/maps/island");
+        if !dir.exists() {
+            return;
+        }
+        let map = Arc::new(MapData::load(&dir).unwrap());
+        let room = RoomSettings {
+            code: "BENCH1".into(),
+            name: "b".into(),
+            flags: room_flags::FLYING | room_flags::ROADKILL,
+            max_players: 100,
+            owner: 1,
+            bots: 100,
+        };
+        let mut m = Match::new(
+            1,
+            7,
+            Some(map.clone()),
+            MatchConfig {
+                mode: Mode::FreeRoam,
+                max_players: 100,
+                ..Default::default()
+            },
+            Some(room),
+            0,
+        );
+        for id in 1..=100u16 {
+            m.join(id, &format!("p{id}")).unwrap();
+        }
+        let mut snaps = Vec::new();
+        let mut now = 0u64;
+        let (mut step_t, mut snap_t, mut bytes) = (0f64, 0f64, 0usize);
+        let ticks = 30 * 60;
+        for t in 0..ticks {
+            now += 33;
+            let seq = t as u32 + 1;
+            // every player drives round a circle near the lobby (all in one place: the worst case for interest)
+            for id in 1..=100u16 {
+                let a = (t as f32 * 0.02) + id as f32 * 0.063;
+                let r = 30.0 + (id % 10) as f32 * 12.0;
+                let (x, z) = (map.lobby[0] + a.cos() * r, map.lobby[1] + a.sin() * r);
+                let y = map.height(x, z) + 0.5;
+                let epoch = m.players[&id].epoch;
+                let s = State {
+                    seq,
+                    client_time: 0,
+                    epoch,
+                    flags: flags::DRIVING,
+                    model: 1,
+                    pos: [m_to_cm(x), m_to_cm(y), m_to_cm(z)],
+                    yaw: 0,
+                    pitch: 0,
+                    vel: [0, 0, 0],
+                };
+                m.on_state(id, &s);
+            }
+            let t0 = std::time::Instant::now();
+            m.step(now);
+            let t1 = std::time::Instant::now();
+            m.snapshots(&mut snaps);
+            let t2 = std::time::Instant::now();
+            m.drain().for_each(drop);
+            if t > 300 {
+                step_t += (t1 - t0).as_secs_f64();
+                snap_t += (t2 - t1).as_secs_f64();
+                bytes += snaps.iter().map(|s| s.1.len()).sum::<usize>();
+            }
+        }
+        let n = (ticks - 301) as f64;
+        eprintln!(
+            "room tick (100 players + {} bots, all together): step {:.0} µs + snapshots {:.0} µs = {:.0} µs per tick; {:.1} KB/s per player",
+            m.bot_count(),
+            step_t / n * 1e6,
+            snap_t / n * 1e6,
+            (step_t + snap_t) / n * 1e6,
+            bytes as f64 / n * 30.0 / 100.0 / 1024.0
+        );
     }
 }

@@ -5,7 +5,7 @@
 //! | `POST /v1/auth/guest` `{name}` | a guest session token |
 //! | `POST /v1/matchmake` `{map?}` (Bearer session) | a seat: match id, player id, join ticket, WebSocket URL |
 //! | `GET  /v1/matches` | running matches (public summary) |
-//! | `POST /v1/rooms` `{kind, seed?, map?, name?, private?, max_players?, roadkill?, flying?}` (Bearer) | open a room (you own it) |
+//! | `POST /v1/rooms` `{kind, seed?, map?, name?, private?, max_players?, roadkill?, flying?, bots?}` (Bearer) | open a room (you own it) |
 //! | `GET  /v1/rooms` | public rooms |
 //! | `GET  /v1/rooms/{code}` · `POST /v1/rooms/{code}/join` (Bearer) | a room by code · a seat in it |
 //! | `PATCH /v1/rooms/{code}` (owner) · `POST /v1/rooms/{code}/kick {player_id}` (owner) | settings · remove a player |
@@ -294,6 +294,8 @@ pub struct RoomJson {
     private: bool,
     roadkill: bool,
     flying: bool,
+    /// Server-run bots in the room.
+    bots: u8,
     region: String,
     age_s: u64,
 }
@@ -315,6 +317,7 @@ fn room_json(app: &App, r: RoomView) -> RoomJson {
         private: f & room_flags::PRIVATE != 0,
         roadkill: f & room_flags::ROADKILL != 0,
         flying: f & room_flags::FLYING != 0,
+        bots: r.settings.bots,
         region: app.cfg.region.clone(),
         age_s: r.age_s,
     }
@@ -365,6 +368,8 @@ pub struct CreateRoomReq {
     roadkill: Option<bool>,
     #[serde(default)]
     flying: Option<bool>,
+    #[serde(default)]
+    bots: Option<u8>,
 }
 
 /// Open a room (the caller starts playing and owns it).
@@ -405,6 +410,7 @@ pub async fn create_room(
         max_players: req.max_players.unwrap_or(100),
         roadkill: req.roadkill.unwrap_or(false),
         flying: req.flying.unwrap_or(true),
+        bots: req.bots.unwrap_or(0),
     };
     let (seat, view) = app.registry.create_room(&who.sub, setup).map_err(mm_err)?;
     Ok(Json(seat_res(&app, &headers, &who, seat, view)))
@@ -452,6 +458,8 @@ pub struct RoomPatchReq {
     roadkill: Option<bool>,
     #[serde(default)]
     flying: Option<bool>,
+    #[serde(default)]
+    bots: Option<u8>,
 }
 
 /// The owner changes the room's settings.
@@ -474,6 +482,7 @@ pub async fn configure_room(
         max_players: req.max_players,
         roadkill: req.roadkill,
         flying: req.flying,
+        bots: req.bots,
     };
     let view = app.registry.configure(&code, &who.sub, patch).map_err(mm_err)?;
     Ok(Json(room_json(&app, view)))

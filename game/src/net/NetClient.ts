@@ -1,6 +1,6 @@
 import { VEHICLES } from '../gameplay/vehicle/catalogue'
 import {
-  Action, Flags, Kick, NO_PLAYER, NO_SPAWN, PROTOCOL_VERSION, RoomFlags, decodeServer, encodeClient, mToCm, mpsToCms, pitchToI16, yawToU16, cmToM, u16ToYaw,
+  Action, Flags, Kick, NO_PLAYER, isBot, NO_SPAWN, PROTOCOL_VERSION, RoomFlags, decodeServer, encodeClient, mToCm, mpsToCms, pitchToI16, yawToU16, cmToM, u16ToYaw,
   type ServerMsg,
 } from './protocol'
 import { BIKE_MODEL } from './RemotePlayers'
@@ -36,6 +36,8 @@ export interface RoomInfo {
   private: boolean
   roadkill: boolean
   flying: boolean
+  /** Server-run bots. */
+  bots: number
   region: string
   age_s: number
 }
@@ -48,6 +50,8 @@ export interface RoomSetup {
   maxPlayers: number
   roadkill: boolean
   flying: boolean
+  /** Bots (server-run players, 0–100). */
+  bots: number
 }
 
 export interface NetPlayer {
@@ -67,7 +71,7 @@ export interface NetState {
   players: NetPlayer[]
 }
 
-export const DEFAULT_SETUP: RoomSetup = { name: '', private: false, maxPlayers: 100, roadkill: false, flying: true }
+export const DEFAULT_SETUP: RoomSetup = { name: '', private: false, maxPlayers: 100, roadkill: false, flying: true, bots: 12 }
 const SETUP_KEY = 'dark.room.setup'
 const NAME_KEY = 'dark.player.name'
 const SESSION_KEY = 'dark.net.session'
@@ -206,6 +210,8 @@ export class NetClient {
   /** Starting to play: open a room for this world with the saved setup (no-op when already in / joining one). */
   async ensureRoom(): Promise<void> {
     if (this.joining || this.ws || this.state.status === 'connecting') return
+    // ?net=0: offline (benchmarks / screenshot runs teleport around — the server would correct that as cheating)
+    if (new URLSearchParams(location.search).get('net') === '0') return
     const setup = this.game.store.get().roomSetup
     const map = this.game.map
     this.joining = true
@@ -222,6 +228,7 @@ export class NetClient {
           private: setup.private,
           max_players: setup.maxPlayers,
           roadkill: setup.roadkill,
+          bots: setup.bots,
           flying: setup.flying,
         }),
       })
@@ -252,7 +259,7 @@ export class NetClient {
   }
 
   /** Owner: change the room's settings. */
-  async configure(patch: { name?: string; private?: boolean; max_players?: number; roadkill?: boolean; flying?: boolean }): Promise<void> {
+  async configure(patch: { name?: string; private?: boolean; max_players?: number; roadkill?: boolean; flying?: boolean; bots?: number }): Promise<void> {
     const room = this.state.room
     if (!room) return
     const r = await this.api<RoomInfo>(`/v1/rooms/${room.code}`, { method: 'PATCH', auth: true, body: JSON.stringify(patch) })
@@ -329,7 +336,7 @@ export class NetClient {
         if (room) {
           this.set({
             owner: r.owner,
-            room: { ...room, name: r.name, max_players: r.maxPlayers, private: (r.flags & RoomFlags.PRIVATE) !== 0, roadkill: (r.flags & RoomFlags.ROADKILL) !== 0, flying: (r.flags & RoomFlags.FLYING) !== 0 },
+            room: { ...room, name: r.name, max_players: r.maxPlayers, private: (r.flags & RoomFlags.PRIVATE) !== 0, roadkill: (r.flags & RoomFlags.ROADKILL) !== 0, flying: (r.flags & RoomFlags.FLYING) !== 0, bots: r.bots },
           })
         }
         break
@@ -338,14 +345,14 @@ export class NetClient {
         this.names.set(m.id, m.name)
         this.game.remotes.setName(m.id, m.name)
         this.set({ players: [...this.state.players.filter((p) => p.id !== m.id), { id: m.id, name: m.name }] })
-        if (m.id !== this.state.me && this.state.status === 'online') this.game.notify(`${m.name} joined`, 2500)
+        if (m.id !== this.state.me && this.state.status === 'online' && !isBot(m.id)) this.game.notify(`${m.name} joined`, 2500)
         break
       }
       case 'playerLeft': {
         const name = this.names.get(m.id)
         this.game.remotes.remove(m.id)
         this.set({ players: this.state.players.filter((p) => p.id !== m.id) })
-        if (name) this.game.notify(`${name} left`, 2500)
+        if (name && !isBot(m.id)) this.game.notify(`${name} left`, 2500)
         break
       }
       case 'snapshot': {
@@ -360,7 +367,8 @@ export class NetClient {
       }
       case 'eliminated': {
         const who = (id: number) => (id === this.state.me ? 'You' : this.names.get(id) ?? 'Someone')
-        if (m.killer !== NO_PLAYER) this.game.notify(`${who(m.killer)} ran over ${who(m.victim) === 'You' ? 'you' : who(m.victim)}`, 3000)
+        // (bots knocking bots over isn't news)
+        if (m.killer !== NO_PLAYER && !(isBot(m.killer) && isBot(m.victim))) this.game.notify(`${who(m.killer)} ran over ${who(m.victim) === 'You' ? 'you' : who(m.victim)}`, 3000)
         break
       }
       case 'pong': {

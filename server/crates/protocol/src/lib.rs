@@ -18,7 +18,7 @@ pub use codec::{DecodeError, Reader, Writer};
 pub use messages::*;
 
 /// Bumped on any incompatible layout change; the server rejects a `Hello` with another version.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Largest packet either side accepts (bytes). Snapshots are bounded by [`MAX_SNAPSHOT_ENTITIES`].
 pub const MAX_PACKET: usize = 16 * 1024;
@@ -32,6 +32,9 @@ pub const NO_SPAWN: i32 = i32::MIN;
 
 /// Sentinel player id: "nobody" (e.g. the zone as a killer).
 pub const NO_PLAYER: u16 = u16::MAX;
+
+/// Server-run players (room bots) have ids from here up (`BOT_ID_BASE + slot`, ≤ 100 of them); clients mark them.
+pub const BOT_ID_BASE: u16 = 0xC000;
 
 /// Metres → wire centimetres (saturating).
 #[inline]

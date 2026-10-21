@@ -29,14 +29,14 @@ export function DebugHud({ game }: { game: Game }) {
       s.worstFrameMs = 0
       if (compact) {
         pre.current.textContent = [
-          `FPS ${f(s.fps, 0)}  ${f(s.frameMs, 1)} ms (worst ${f(worst, 1)})  gpu ${f(s.gpuMs, 1)}`,
+          `FPS ${f(s.fps, 0)} / ${f(game.perf?.displayHz ?? 0, 0)} Hz  ${f(s.frameMs, 1)} ms (worst ${f(worst, 1)})  gpu ${f(s.gpuMs, 1)}`,
           `${game.quality.name}  scale ${f(s.renderScale, 2)}  dpr ${f(s.pixelRatio, 2)}  auto ${a.enabled ? a.state : 'off'}`,
           `draws ${s.drawCalls}  tris ${(s.triangles / 1000).toFixed(0)}k  chunks ${s.chunksVisible}/${s.chunksLoaded}  seed ${st.seed}`,
         ].join('\n')
         return
       }
       pre.current.textContent = [
-        `FPS ${f(s.fps, 0)}  frame ${f(s.frameMs, 2)} ms (worst ${f(worst, 1)})  cpu ${f(s.cpuMs, 2)} ms  gpu ${f(s.gpuMs, 2)} ms`,
+        `FPS ${f(s.fps, 0)}  display ${f(game.perf?.displayHz ?? 0, 0)} Hz (uncapped)  frame ${f(s.frameMs, 2)} ms (worst ${f(worst, 1)})  cpu ${f(s.cpuMs, 2)} ms  gpu ${f(s.gpuMs, 2)} ms`,
         `tier ${game.quality.name}  auto ${a.enabled ? a.state : 'off'}  last: ${game.lastQualityChange}`,
         `device ${game.device?.mobile ? 'mobile' : 'desktop'} ${game.device?.touch ? 'touch' : ''}  ${game.device?.gpu.slice(0, 60) ?? ''}`,
         `draws ${s.drawCalls}  tris ${(s.triangles / 1000).toFixed(1)}k  lines ${s.lines}`,

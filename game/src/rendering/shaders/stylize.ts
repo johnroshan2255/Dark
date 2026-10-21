@@ -276,6 +276,9 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
           #ifdef USE_INSTANCING
             vec3 bOrigin = (modelMatrix * vec4(instanceMatrix[3].xyz, 1.0)).xyz;
             vec3 bN = mat3(modelMatrix) * mat3(instanceMatrix) * objectNormal;
+          #elif defined(USE_BATCHING)
+            vec3 bOrigin = (modelMatrix * batchingMatrix * vec4(transformed, 1.0)).xyz; // (MeshBatcher: chunk meshes)
+            vec3 bN = mat3(modelMatrix) * mat3(batchingMatrix) * objectNormal;
           #else
             vec3 bOrigin = (modelMatrix * vec4(transformed, 1.0)).xyz;
             vec3 bN = mat3(modelMatrix) * objectNormal;
@@ -312,7 +315,7 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
     if (o.terrain) {
       vs = vs
         .replace('#include <common>', '#include <common>\nattribute float roadLat;\nattribute vec2 roadNet;\nattribute vec2 biome;\nattribute float mud;\nvarying float vRoadLat;\nvarying vec2 vRoadNet;\nvarying vec2 vBiome;\nvarying float vMud;\nvarying vec3 vWorldPos;\nvarying float vUpN;\nvarying vec2 vNxz;')
-        .replace('#include <project_vertex>', '#include <project_vertex>\nvRoadLat = roadLat;\nvRoadNet = roadNet;\nvBiome = biome;\nvMud = mud;\nvWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvUpN = normal.y; // terrain normals are world-space (the mesh is only translated)\nvNxz = normal.xz;')
+        .replace('#include <project_vertex>', '#include <project_vertex>\nvRoadLat = roadLat;\nvRoadNet = roadNet;\nvBiome = biome;\nvMud = mud;\n#ifdef USE_BATCHING\nvWorldPos = (modelMatrix * batchingMatrix * vec4(transformed, 1.0)).xyz; // (TerrainBatch: the chunk origin)\n#else\nvWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n#endif\nvUpN = normal.y; // terrain normals are world-space (the mesh is only translated)\nvNxz = normal.xz;')
     }
     if (o.surface !== undefined) {
       const surf = o.surface === 'atlas' ? ATLAS_SURF : o.surface.toFixed(1)

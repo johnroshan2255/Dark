@@ -52,6 +52,11 @@ export class PerformanceMonitor {
   readonly gpu: GpuTimer
   private frameStart = 0
   private lastFrame = 0
+  /** The display's refresh rate as the browser paces frames (Hz): the fastest median frame interval of any second
+   *  so far — the landing page draws nothing, so it shows the vsync rate. The game never caps below it (no frame
+   *  limiter): a 144 Hz screen runs at up to 144 fps. */
+  displayHz = 0
+  private win: number[] = []
 
   constructor(private readonly renderer: THREE.WebGLRenderer) {
     this.gpu = new GpuTimer(renderer.getContext() as WebGL2RenderingContext)
@@ -66,6 +71,13 @@ export class PerformanceMonitor {
       if (ms > s.worstFrameMs) s.worstFrameMs = ms
       s.frameMs = s.frameMs * 0.9 + ms * 0.1
       s.fps = 1000 / s.frameMs
+      this.win.push(ms)
+      if (this.win.length >= 60) {
+        this.win.sort((a, b) => a - b)
+        const med = this.win[this.win.length >> 1]
+        if (med > 2) this.displayHz = Math.max(this.displayHz, 1000 / med)
+        this.win.length = 0
+      }
     }
     this.lastFrame = now
     this.frameStart = now

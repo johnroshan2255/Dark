@@ -3,7 +3,8 @@
  * (server/crates/protocol/golden.json): every packet decodes, re-encodes to the same bytes, and a few fields are
  * spot-checked. Skipped (with a note) when the server folder isn't next to the game.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { WorldFields } from '../src/world/WorldFields'
 import { decodeClient, decodeServer, encodeClient, encodeServer, Flags, NO_PLAYER, Phase, ProtocolError, RoomFlags, yawToU16, u16ToYaw } from '../src/net/protocol'
 
 let failures = 0
@@ -35,7 +36,7 @@ if (!existsSync(path)) {
   const el = decodeServer(bytes(golden['s.eliminated']))
   check('protocol: eliminated by the zone', el.t === 'eliminated' && el.killer === NO_PLAYER)
   const rm = decodeServer(bytes(golden['s.room']))
-  check('protocol: room settings', rm.t === 'room' && rm.room.code === 'K7QX2M' && rm.room.name === "Asha's world" && rm.room.maxPlayers === 64 && rm.room.owner === 1 && rm.room.flags === (RoomFlags.PRIVATE | RoomFlags.ROADKILL))
+  check('protocol: room settings', rm.t === 'room' && rm.room.code === 'K7QX2M' && rm.room.name === "Asha's world" && rm.room.maxPlayers === 64 && rm.room.owner === 1 && rm.room.bots === 24 && rm.room.flags === (RoomFlags.PRIVATE | RoomFlags.ROADKILL))
   const ph = decodeServer(bytes(golden['s.phase']))
   check('protocol: phase', ph.t === 'phase' && ph.phase === Phase.Countdown)
   // every prefix of every packet is an error, never a wrong message
@@ -53,6 +54,27 @@ if (!existsSync(path)) {
     }
   }
   check('protocol: truncated packets are rejected', prefixOk)
+}
+// The server's port of the endless world's road and river (server/crates/sim/src/noise.rs) — bit-exact against
+// the game's generator. UPDATE_WORLD_GOLDEN=1 rewrites the file from the TypeScript.
+{
+  const wpath = '../server/crates/sim/tests/world_golden.json'
+  const cases = [7, 12345, 2959388163, 1, 4294967295].map((seed) => {
+    const f = new WorldFields(seed)
+    const samples: number[][] = []
+    for (let k = 0; k < 40; k++) {
+      const z = (k - 20) * 517.3 + seed % 97
+      samples.push([z, f.roadCenterX(z), f.roadHeight(z), f.riverCenterX(z)])
+    }
+    return { seed, samples }
+  })
+  if (process.env.UPDATE_WORLD_GOLDEN) writeFileSync(wpath, JSON.stringify(cases))
+  if (!existsSync(wpath)) console.log(`SKIP  world golden (${wpath} not found)`)
+  else {
+    const want = JSON.parse(readFileSync(wpath, 'utf8')) as typeof cases
+    const same = JSON.stringify(want) === JSON.stringify(cases)
+    check('world: the server\'s road / river golden matches the generator', same)
+  }
 }
 check('protocol: yaw quantisation', Math.abs(u16ToYaw(yawToU16(1.234)) - 1.234) < 1e-3 && yawToU16(-0.0001) > 65000)
 

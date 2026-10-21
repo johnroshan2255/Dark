@@ -10,7 +10,7 @@
 //! players the room's owner removed.
 
 use crate::runtime::{Cmd, MatchHandle, spawn_match};
-use dark_protocol::{NO_PLAYER, RoomSettings, room_flags};
+use dark_protocol::{BOT_ID_BASE, NO_PLAYER, RoomSettings, room_flags};
 use dark_sim::game::Mode;
 use dark_sim::{MapData, MatchConfig};
 use std::collections::{HashMap, HashSet};
@@ -55,6 +55,8 @@ pub struct RoomSetup {
     pub max_players: u16,
     pub roadkill: bool,
     pub flying: bool,
+    /// Server-run bots (0–100).
+    pub bots: u8,
 }
 
 /// A change to a room's settings (absent = unchanged).
@@ -65,6 +67,7 @@ pub struct RoomPatch {
     pub max_players: Option<u16>,
     pub roadkill: Option<bool>,
     pub flying: Option<bool>,
+    pub bots: Option<u8>,
 }
 
 struct Entry {
@@ -80,8 +83,8 @@ struct Entry {
 impl Entry {
     fn take_seat(&mut self, sub: &str) -> u16 {
         let pid = self.next_pid;
-        // ids 1 … 65 534 (0 unused, u16::MAX = NO_PLAYER)
-        self.next_pid = if self.next_pid >= u16::MAX - 1 {
+        // ids 1 … BOT_ID_BASE − 1 (0 unused; bots have the ids above)
+        self.next_pid = if self.next_pid >= BOT_ID_BASE - 1 {
             1
         } else {
             self.next_pid + 1
@@ -311,6 +314,7 @@ impl Registry {
             flags,
             max_players,
             owner: 1,
+            bots: setup.bots.min(100),
         };
         let id = crate::auth::random_u64();
         let rules = MatchConfig {
@@ -448,6 +452,9 @@ impl Registry {
         set(room_flags::FLYING, patch.flying);
         if let Some(m) = patch.max_players {
             s.max_players = m.clamp(1, 100);
+        }
+        if let Some(b) = patch.bots {
+            s.bots = b.min(100);
         }
         // the runtime publishes them next tick; mirror now so the listing shows the change at once
         if let Ok(mut cur) = e.handle.info.room.lock() {

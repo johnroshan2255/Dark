@@ -67,6 +67,20 @@ or a map), public or private, up to `DARK_MAX_ROOMS` per process.
   (banned from that room). When the owner leaves, the longest-present player becomes owner.
 - **Empty rooms close** after 2 minutes (so the owner can reload into another world without losing it).
 
+**Bots.** A room can have up to 100 server-run bots (`bots` in its settings): players with ids from `BOT_ID_BASE`
+(0xC000), in the roster and the snapshots like anyone, but simulated by the match (`sim/src/bots.rs`, kinematic). Each
+has a personality and picks activities the way a person plays: cruising the roads (lane keeping, IDM car-following,
+overtaking, junction choices, U-turns), races (the organiser gathers 3–6 at a start line, counts down, they race a
+route), convoys behind another bot or a player, exploring cross-country (and respawning when stuck), boating
+(into the water at a shore crossing, round open water, out again), flying (rooms with flying), strolling on foot,
+hanging out with a player, AFK. Maps: a road graph and a water grid from `map.json` / `heights.bin` (`sim/src/nav.rs`,
+built once per map); endless world: the game's main road and river ported bit-exactly (`sim/src/noise.rs`, pinned by
+`tests/world_golden.json`). Bots far from every human update at a quarter rate and are recycled near them.
+Cost (`cargo test --release -p dark-sim bench_room -- --ignored --nocapture`): 100 players + 100 bots all in one
+place, **0.54 ms per tick** (step 67 µs + snapshots 468 µs; was 1.10 ms before the snapshot work below), 34 KB/s per
+player. Snapshots reuse their buffers, the per-player sets use a fast integer hasher, only the nearest
+`interest.near_cap` (24) go every tick inside `near_m`, and the nearest `max_entities` are partitioned before sorting.
+
 **Auth.** Stateless HMAC-SHA256 tokens, so any server of a deployment that shares `DARK_SECRET` can verify them:
 - a **session** (`/v1/auth/guest` today; accounts later), sent as `Authorization: Bearer`;
 - a short-lived **ticket** for one seat, sent inside the WebSocket `Hello` and never in a URL.
@@ -78,10 +92,10 @@ or a map), public or private, up to `DARK_MAX_ROOMS` per process.
 | `POST /v1/auth/guest` `{name}` | `{token, player, name, expires_in}` |
 | `POST /v1/matchmake` `{map?}` + `Authorization: Bearer <token>` | `{match_id, player_id, ticket, ws_url, map, region, expires_in}` |
 | `GET /v1/matches` | running matches: id, map, phase, players, alive |
-| `POST /v1/rooms` `{kind: "world"\|"map", seed?, map?, name?, private?, max_players?, roadkill?, flying?}` + Bearer | create a room you own → `{room, player_id, ticket, ws_url, …}` |
-| `GET /v1/rooms` · `GET /v1/rooms/{code}` | public rooms · one room (also private, by code): `{code, name, kind, seed?, map?, players, max_players, private, roadkill, flying, region, age_s}` |
+| `POST /v1/rooms` `{kind: "world"\|"map", seed?, map?, name?, private?, max_players?, roadkill?, flying?, bots?}` + Bearer | create a room you own → `{room, player_id, ticket, ws_url, …}` |
+| `GET /v1/rooms` · `GET /v1/rooms/{code}` | public rooms · one room (also private, by code): `{code, name, kind, seed?, map?, players, max_players, private, roadkill, flying, bots, region, age_s}` |
 | `POST /v1/rooms/{code}/join` + Bearer | a seat in that room (409 `room_full`, 404 `no_room`, 403 `banned`) |
-| `PATCH /v1/rooms/{code}` `{name?, private?, max_players?, roadkill?, flying?}` + Bearer | owner only (403 `not_owner`) → the room |
+| `PATCH /v1/rooms/{code}` `{name?, private?, max_players?, roadkill?, flying?, bots?}` + Bearer | owner only (403 `not_owner`) → the room |
 | `POST /v1/rooms/{code}/kick` `{player_id}` + Bearer | owner only → 204 |
 | `GET /v1/ws` | the game socket — [docs/PROTOCOL.md](docs/PROTOCOL.md) |
 | `GET /healthz` · `/readyz` · `/metrics` | liveness · readiness (503 while draining) · Prometheus |
@@ -131,7 +145,7 @@ measure there (`dark_tick_seconds`, `dark_tick_overruns_total`).
 ## Operating it
 
 - **Metrics:**
-  - `dark_matches_active`, `dark_players_connected`
+  - `dark_matches_active`, `dark_players_connected`, `dark_bots_active`
   - `dark_tick_seconds` (histogram), `dark_tick_overruns_total`
   - `dark_snapshot_bytes_total`, `dark_packets_in_total{kind}`, `dark_packets_dropped_total{why}`
   - `dark_corrections_total{why}` (`reposition` = the drop; `teleport`/`too_fast`/… = rejected poses)

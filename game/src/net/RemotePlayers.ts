@@ -1,28 +1,44 @@
 import * as THREE from 'three'
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import { CharacterModel } from '../gameplay/player/CharacterModel'
+import { CharacterModel, createBlobShadow } from '../gameplay/player/CharacterModel'
+import { DYN_LAYER } from '../rendering/shadows/DynamicShadow'
 import { VEHICLES } from '../gameplay/vehicle/catalogue'
+import { stylize } from '../rendering/shaders/stylize'
 import type { HeroAsset, VehicleModel } from '../assets/loadModels'
-import { cmToM, cmsToMps, Flags, i16ToPitch, u16ToYaw, type EntityState } from './protocol'
+import { cmToM, cmsToMps, Flags, i16ToPitch, isBot, u16ToYaw, type EntityState } from './protocol'
 
 /**
- * REMOTE PLAYERS: everyone else in the room, drawn from the server's snapshots ~INTERP_MS in the past (interpolated
- * between the two snapshots round the render time on the SERVER clock, extrapolated ≤ EXTRAP_MS on a late packet),
- * so they move smoothly at any network jitter.
+ * REMOTE PLAYERS: everyone else in the room — people and the room's BOTS (server-run players, up to 100) — drawn
+ * from the server's snapshots ~INTERP_MS in the past (interpolated between the snapshots round the render time on the
+ * SERVER clock, extrapolated ≤ EXTRAP_MS on a late packet).
  *
- *  * on foot: the game's own character (animated by speed / ground like the player) for the MAX_CHARACTERS nearest;
- *    farther ones a cheap silhouette (one capsule);
- *  * driving: the car they drive (catalogue model, loaded on first sight, shared geometry), body + glass + wheels;
- *  * a name tag over each.
- *
- * Cost: per remote ≤ 1 skinned character (nearest 16) or 1 capsule, ≤ 3 draws for a car, 1 sprite. No per-frame
- * allocation. Interest management on the server caps what arrives (≤ 64 players, nearest first).
+ * Built for a crowd: draw calls do not grow with the number of players.
+ *  * CARS: one InstancedMesh per catalogue model and part (body, wheels, glass) within CAR_NEAR m, a low-poly
+ *    stand-in (one InstancedMesh per model) out to CAR_FAR — ≤ 4 draws per model in use, whatever the count. A car
+ *    STAYS where its driver got out (parked, PARK_MS) until they drive again.
+ *  * ON FOOT: the game's own animated character for the nearest `maxCharacters` (per tier: 1 draw each), an instanced
+ *    silhouette for the rest (1 draw).
+ *  * NAME TAGS: one instanced billboard draw from a name atlas (TagLayer).
+ *  * BOTS on the ground are set on THIS client's ground (the server only knows the endless world's road): wheels and
+ *    feet meet the terrain the player sees.
+ * CPU: interpolation + instance matrices, a few µs per remote; nothing allocated per frame.
  */
 const INTERP_MS = 100
 const EXTRAP_MS = 200
 const MAX_SAMPLES = 16
-const MAX_CHARACTERS = 16
+/** Instances per batch (the server's interest cap is 64 per snapshot; parked cars on top). */
+const CAP = 160
+/** Full car model within CAR_NEAR (m), the simplified one to CAR_MID, the box stand-in to CAR_FAR, nothing beyond. */
+const CAR_NEAR = 35
+const CAR_MID = 110
+const CAR_FAR = 900
+/** A parked car stays this long after its driver walked off (ms). */
+const PARK_MS = 180_000
+/** Name tags within this distance (m): people / bots — the nearest MAX_TAGS of them (a crowd isn't a wall of names). */
+const TAG_FAR = 260
+const TAG_FAR_BOT = 30
+const MAX_TAGS = 10
 /** Bike riders arrive as DRIVING with this model id (no car to draw: the character rides). */
 export const BIKE_MODEL = 255
 
@@ -40,16 +56,22 @@ interface Sample {
   model: number
 }
 
+interface CarPose {
+  model: number
+  x: number
+  y: number
+  z: number
+  yaw: number
+  pitch: number
+}
+
 interface Remote {
   id: number
+  bot: boolean
   samples: Sample[]
-  root: THREE.Group
   char: CharacterModel | null
-  proxy: THREE.Mesh
-  car: THREE.Group | null
-  carModel: number
-  tag: THREE.Sprite
   name: string
+  tagSlot: number
   /** Interpolated now. */
   pos: THREE.Vector3
   yaw: number
@@ -59,30 +81,90 @@ interface Remote {
   flags: number
   model: number
   dist: number
-  seen: boolean
+  visible: boolean
+  /** Last car it drove — parked there when it gets out. */
+  lastCar: CarPose | null
+  wasDriving: boolean
 }
 
+interface Parked extends CarPose {
+  owner: number
+  until: number
+}
+
+/** Instanced meshes for one car model: near (body, wheels, glass) and the far stand-in. */
+interface CarSet {
+  body: THREE.InstancedMesh
+  wheels: THREE.InstancedMesh
+  glass: THREE.InstancedMesh
+  /** 45–160 m: body + glass simplified (vertex clustering) + 12-sided wheels, colours baked — one draw. */
+  mid: THREE.InstancedMesh
+  far: THREE.InstancedMesh
+  near: number
+  midN: number
+  farN: number
+}
+
+const _m = new THREE.Matrix4()
+const _q = new THREE.Quaternion()
+const _e = new THREE.Euler(0, 0, 0, 'YXZ')
+const _s = new THREE.Vector3(1, 1, 1)
+const _p = new THREE.Vector3()
+const _sb = new THREE.Vector3()
 
 export class RemotePlayers {
   readonly root = new THREE.Group()
   private readonly remotes = new Map<number, Remote>()
   private readonly charPool: CharacterModel[] = []
-  private readonly cars = new Map<string, Promise<{ body: THREE.BufferGeometry; glass: THREE.BufferGeometry; wheels: THREE.BufferGeometry } | null>>()
+  private readonly carSets = new Map<number, CarSet>()
+  private readonly carLoads = new Set<number>()
   private readonly carMat: THREE.Material
+  private readonly texMats = new Map<string, THREE.Material>()
   private readonly glassMat = new THREE.MeshLambertMaterial({ color: 0x1a2430, transparent: true, opacity: 0.55 })
-  private readonly proxyGeo = new THREE.CapsuleGeometry(0.28, 1.1, 3, 8).translate(0, 0.83, 0)
-  private readonly proxyMat = new THREE.MeshLambertMaterial({ color: 0x4a3f6b })
+  private readonly proxies: THREE.InstancedMesh
+  /** Soft contact shadows under the simplified cars and the far people (they cast no sun shadow): one draw. */
+  private readonly blobs: THREE.InstancedMesh
+  private blobN = 0
+  /** Per car model: blob footprint (width, length). */
+  private readonly footprint = new Map<number, [number, number]>()
+  private readonly tags = new TagLayer()
   private readonly names = new Map<number, string>()
+  private readonly parked: Parked[] = []
+  private readonly onFoot: Remote[] = []
+  private pickClock = 0
+  /** Animated characters (the rest are silhouettes) and full-model cars (the rest simplified) — per tier. */
+  maxCharacters = 12
+  maxCars = 6
+  /** The cars (remote id, or −1 − parked index) drawn full this quarter second. */
+  private readonly fullCars = new Set<number>()
+  private readonly carDist: { id: number; d: number }[] = []
+  private readonly tagged: Remote[] = []
 
   constructor(
     private readonly heroMaterial: THREE.Material,
     private readonly hero: HeroAsset,
     private readonly loadVehicle: (id: string) => Promise<VehicleModel>,
     carMaterial: THREE.Material,
+    /** Ground for animated feet (any point). */
     private readonly ground: (x: number, z: number) => number,
+    /** Cheap ground where the world is loaded (null elsewhere) — bots are set on it. */
+    private readonly loadedGround: (x: number, z: number) => number | null,
   ) {
     this.root.name = 'remote-players'
     this.carMat = carMaterial
+    this.proxies = new THREE.InstancedMesh(mannequin(), carMaterial, CAP)
+    const blob = createBlobShadow()
+    this.blobs = new THREE.InstancedMesh(blob.geometry, blob.material, CAP * 2)
+    this.blobs.count = 0
+    this.blobs.frustumCulled = false
+    this.blobs.renderOrder = 1
+    this.blobs.name = 'remote-blob-shadows'
+    this.root.add(this.blobs)
+    this.proxies.count = 0
+    this.proxies.frustumCulled = false
+    this.proxies.visible = false
+    this.proxies.name = 'remote-silhouettes'
+    this.root.add(this.proxies, this.tags.mesh)
   }
 
   get count(): number {
@@ -92,30 +174,32 @@ export class RemotePlayers {
   setName(id: number, name: string): void {
     this.names.set(id, name)
     const r = this.remotes.get(id)
-    if (r && r.name !== name) this.retag(r, name)
+    if (r && r.name !== name) {
+      r.name = name
+      this.tags.write(r.tagSlot, name, r.bot)
+    }
   }
 
   /** A snapshot: new samples for the entities in it, removals. `t` = its server time (ms). */
   apply(t: number, entities: EntityState[], removed: number[]): void {
     for (const e of entities) {
       const r = this.remotes.get(e.id) ?? this.add(e.id)
-      const s: Sample = {
-        t,
-        x: cmToM(e.pos[0]),
-        y: cmToM(e.pos[1]),
-        z: cmToM(e.pos[2]),
-        yaw: u16ToYaw(e.yaw),
-        pitch: i16ToPitch(e.pitch),
-        vx: cmsToMps(e.vel[0]),
-        vy: cmsToMps(e.vel[1]),
-        vz: cmsToMps(e.vel[2]),
-        flags: e.flags,
-        model: e.model,
-      }
       const last = r.samples[r.samples.length - 1]
       if (last && t <= last.t) continue
+      // (the oldest sample object is reused once the ring is full)
+      const s: Sample = r.samples.length >= MAX_SAMPLES ? r.samples.shift()! : ({} as Sample)
+      s.t = t
+      s.x = cmToM(e.pos[0])
+      s.y = cmToM(e.pos[1])
+      s.z = cmToM(e.pos[2])
+      s.yaw = u16ToYaw(e.yaw)
+      s.pitch = i16ToPitch(e.pitch)
+      s.vx = cmsToMps(e.vel[0])
+      s.vy = cmsToMps(e.vel[1])
+      s.vz = cmsToMps(e.vel[2])
+      s.flags = e.flags
+      s.model = e.model
       r.samples.push(s)
-      if (r.samples.length > MAX_SAMPLES) r.samples.shift()
     }
     for (const id of removed) this.remove(id)
   }
@@ -124,76 +208,43 @@ export class RemotePlayers {
     const r = this.remotes.get(id)
     if (!r) return
     if (r.char) this.release(r)
-    r.root.removeFromParent()
-    ;(r.tag.material as THREE.SpriteMaterial).map?.dispose()
-    r.tag.material.dispose()
+    this.tags.free(r.tagSlot)
     this.remotes.delete(id)
+    for (let i = this.parked.length - 1; i >= 0; i--) if (this.parked[i].owner === id) this.parked.splice(i, 1)
   }
 
   clear(): void {
     for (const id of [...this.remotes.keys()]) this.remove(id)
     this.names.clear()
+    this.parked.length = 0
   }
 
   private add(id: number): Remote {
-    const root = new THREE.Group()
-    root.name = `remote-${id}`
-    const proxy = new THREE.Mesh(this.proxyGeo, this.proxyMat)
-    proxy.castShadow = true
-    root.add(proxy)
-    const tag = new THREE.Sprite(new THREE.SpriteMaterial({ depthWrite: false, transparent: true }))
-    tag.renderOrder = 10
-    root.add(tag)
-    this.root.add(root)
+    const bot = isBot(id)
+    const name = this.names.get(id) ?? (bot ? 'Bot' : `Player ${id}`)
     const r: Remote = {
-      id, samples: [], root, char: null, proxy, car: null, carModel: 0, tag, name: '', pos: new THREE.Vector3(), yaw: 0, pitch: 0,
-      speed: 0, vy: 0, flags: 0, model: 0, dist: Infinity, seen: false,
+      id, bot, samples: [], char: null, name, tagSlot: this.tags.alloc(), pos: new THREE.Vector3(), yaw: 0, pitch: 0,
+      speed: 0, vy: 0, flags: 0, model: 0, dist: Infinity, visible: false, lastCar: null, wasDriving: false,
     }
-    this.retag(r, this.names.get(id) ?? `Player ${id}`)
+    this.tags.write(r.tagSlot, name, bot)
     this.remotes.set(id, r)
     return r
-  }
-
-  /** Name tag: a canvas sprite in the front end's dusk-glass look. */
-  private retag(r: Remote, name: string): void {
-    r.name = name
-    const c = document.createElement('canvas')
-    const ctx = c.getContext('2d')!
-    const font = '700 34px system-ui, -apple-system, "Segoe UI", sans-serif'
-    ctx.font = font
-    const w = Math.min(512, Math.ceil(ctx.measureText(name).width) + 44)
-    c.width = w
-    c.height = 60
-    ctx.font = font
-    ctx.fillStyle = 'rgba(28,24,52,0.72)'
-    ctx.strokeStyle = 'rgba(255,214,170,0.45)'
-    ctx.lineWidth = 2
-    ctx.beginPath()
-    ctx.roundRect(2, 2, w - 4, 56, 28)
-    ctx.fill()
-    ctx.stroke()
-    ctx.fillStyle = '#fff4e3'
-    ctx.textBaseline = 'middle'
-    ctx.textAlign = 'center'
-    ctx.fillText(name, w / 2, 31)
-    const tex = new THREE.CanvasTexture(c)
-    tex.colorSpace = THREE.SRGBColorSpace
-    const m = r.tag.material as THREE.SpriteMaterial
-    m.map?.dispose()
-    m.map = tex
-    m.needsUpdate = true
-    r.tag.scale.set((w / 60) * 0.32, 0.32, 1)
   }
 
   private takeCharacter(r: Remote): void {
     const ch = this.charPool.pop() ?? (() => {
       const c = new CharacterModel(this.heroMaterial, { ...this.hero, scene: cloneSkinned(this.hero.scene) as THREE.Group })
       c.ground = (x, z) => this.ground(x, z)
+      // no sun / dynamic shadow (a crowd would double its vertex cost): a blob under the feet instead
+      c.root.traverse((o) => {
+        o.castShadow = false
+        o.layers.disable(DYN_LAYER)
+      })
       return c
     })()
     ch.yaw = r.yaw
     r.char = ch
-    r.root.add(ch.root)
+    this.root.add(ch.root)
   }
 
   private release(r: Remote): void {
@@ -203,58 +254,69 @@ export class RemotePlayers {
     r.char = null
   }
 
-  /** The car of catalogue model `model` (1-based), loaded once and shared. */
-  private carFor(model: number): Promise<{ body: THREE.BufferGeometry; glass: THREE.BufferGeometry; wheels: THREE.BufferGeometry } | null> {
-    const def = VEHICLES[model - 1]
-    if (!def) return Promise.resolve(null)
-    let p = this.cars.get(def.id)
-    if (!p) {
-      p = this.loadVehicle(def.id)
-        .then((vm) => {
-          const wheels = mergeGeometries(
-            vm.wheelPos.map(([x, y, z], i) => {
-              const g = vm.wheel.clone()
-              if (i % 2 === 1) g.rotateY(Math.PI) // right-side wheels face out
-              return g.translate(x, y, z)
-            }),
-          )
-          return wheels ? { body: vm.body, glass: vm.glass, wheels } : null
+  /** Catalogue model `model` (1-based; out of range wraps), loaded on first sight. */
+  private carSet(model: number): CarSet | null {
+    const set = this.carSets.get(model)
+    if (set) return set
+    if (this.carLoads.has(model)) return null
+    this.carLoads.add(model)
+    const def = VEHICLES[(model - 1) % VEHICLES.length]
+    void this.loadVehicle(def.id)
+      .then((vm) => {
+        const wheels = mergeGeometries(
+          vm.wheelPos.map(([x, y, z], i) => {
+            const g = vm.wheel.clone()
+            if (i % 2 === 1) g.rotateY(Math.PI) // right-side wheels face out
+            return g.translate(x, y, z)
+          }),
+        )
+        if (!wheels) return
+        vm.body.computeBoundingBox()
+        const bb = vm.body.boundingBox!
+        this.footprint.set(model, [(bb.max.x - bb.min.x) * 1.15, (bb.max.z - bb.min.z) * 1.1])
+        const mk = (g: THREE.BufferGeometry, m: THREE.Material, name: string, shadow: boolean) => {
+          const im = new THREE.InstancedMesh(g, m, CAP)
+          im.count = 0
+          im.visible = false
+          im.frustumCulled = false
+          im.castShadow = shadow
+          im.name = `remote-car-${def.id}-${name}`
+          this.root.add(im)
+          return im
+        }
+        // a textured model (the pickup) keeps its texture: one shared textured program for all of them
+        const bodyMat = vm.map ? (this.texMats.get(def.id) ?? this.texMats.set(def.id, stylize(new THREE.MeshLambertMaterial({ map: vm.map, vertexColors: true }), { key: 'remote-car', rim: 0.14, toon: 0.3 })).get(def.id)!) : this.carMat
+        this.carSets.set(model, {
+          body: mk(vm.body, bodyMat, 'body', true),
+          wheels: mk(wheels, this.carMat, 'wheels', true),
+          glass: mk(vm.glass, this.glassMat, 'glass', false),
+          mid: mk(midCar(vm), this.carMat, 'mid', false),
+          far: mk(lowPolyCar(vm), this.carMat, 'far', false),
+          near: 0,
+          midN: 0,
+          farN: 0,
         })
-        .catch(() => null)
-      this.cars.set(def.id, p)
-    }
-    return p
+      })
+      .catch(() => {})
+    return null
   }
 
-  private setCar(r: Remote, model: number): void {
-    if (r.carModel === model) return
-    r.carModel = model
-    if (r.car) {
-      r.car.removeFromParent()
-      r.car = null
-    }
-    if (!model || model === BIKE_MODEL) return
-    void this.carFor(model).then((geo) => {
-      if (!geo || r.carModel !== model || !this.remotes.has(r.id)) return
-      const g = new THREE.Group()
-      const body = new THREE.Mesh(geo.body, this.carMat)
-      const wheels = new THREE.Mesh(geo.wheels, this.carMat)
-      const glass = new THREE.Mesh(geo.glass, this.glassMat)
-      body.castShadow = wheels.castShadow = true
-      g.add(body, wheels, glass)
-      g.rotation.order = 'YXZ'
-      r.car = g
-      r.root.add(g)
-    })
+  /** Per tier: how many people on foot get the animated character. */
+  setQuality(maxCharacters: number, maxCars = this.maxCars): void {
+    this.maxCharacters = maxCharacters
+    this.maxCars = maxCars
   }
 
-  /** Per frame: interpolate at `serverNow − INTERP_MS`, place / animate. `eye` = the camera (LOD, tag scale). */
-  update(dt: number, serverNow: number, eye: THREE.Vector3): void {
+  /** Per frame: interpolate at `serverNow − INTERP_MS`, place / animate. `eye` = the camera (LOD, tags);
+   *  `viewH` = the drawing height in pixels (tag size). */
+  update(dt: number, serverNow: number, eye: THREE.Vector3, viewH = 720): void {
+    this.tags.viewH.value = viewH
     const t = serverNow - INTERP_MS
+    const now = performance.now()
     for (const r of this.remotes.values()) {
       const n = r.samples.length
       if (!n) {
-        r.root.visible = false
+        r.visible = false
         continue
       }
       let a = r.samples[0], b = a
@@ -279,49 +341,492 @@ export class RemotePlayers {
       r.flags = b.flags
       r.model = b.model
       r.dist = r.pos.distanceTo(eye)
-      r.root.visible = true
+      r.visible = !(r.flags & Flags.DEAD)
+      const driving = (r.flags & Flags.DRIVING) !== 0 && r.model !== BIKE_MODEL
+      // bots: on our ground (wheels / feet), pitched along it — where the world is loaded
+      if (r.bot && !(r.flags & (Flags.FLYING | Flags.BOAT | Flags.AIRBORNE)) && r.dist < 400) {
+        const g = this.loadedGround(r.pos.x, r.pos.z)
+        if (g !== null) {
+          r.pos.y = g
+          if (driving) {
+            const fx = -Math.sin(r.yaw) * 1.8, fz = -Math.cos(r.yaw) * 1.8
+            const gf = this.loadedGround(r.pos.x + fx, r.pos.z + fz), gb = this.loadedGround(r.pos.x - fx, r.pos.z - fz)
+            if (gf !== null && gb !== null) r.pitch = Math.atan2(gf - gb, 3.6)
+          }
+        }
+      }
+      // parked: got out of a car → it stays there
+      if (driving) {
+        const c = (r.lastCar ??= { model: 0, x: 0, y: 0, z: 0, yaw: 0, pitch: 0 })
+        c.model = r.model
+        c.x = r.pos.x
+        c.y = r.pos.y
+        c.z = r.pos.z
+        c.yaw = r.yaw
+        c.pitch = r.pitch
+        if (!r.wasDriving) this.unpark(r.id)
+      } else if (r.wasDriving && r.lastCar && r.lastCar.model) {
+        this.unpark(r.id)
+        this.parked.push({ owner: r.id, ...r.lastCar, until: now + PARK_MS })
+      }
+      r.wasDriving = driving
       // drop old samples (keep two before the render time)
       while (r.samples.length > 2 && r.samples[1].t < t - 500) r.samples.shift()
     }
-    // the nearest players on foot get the animated character, the rest a silhouette
-    const onFoot = [...this.remotes.values()].filter((r) => r.root.visible && (!(r.flags & Flags.DRIVING) || r.model === BIKE_MODEL))
-    onFoot.sort((x, y) => x.dist - y.dist)
-    const want = new Set(onFoot.slice(0, MAX_CHARACTERS))
-    for (const r of this.remotes.values()) if (r.char && !want.has(r)) this.release(r)
-    for (const r of want) if (!r.char) this.takeCharacter(r)
+    for (let i = this.parked.length - 1; i >= 0; i--) if (this.parked[i].until < now) this.parked.splice(i, 1)
 
-    for (const r of this.remotes.values()) {
-      if (!r.root.visible) continue
-      const driving = (r.flags & Flags.DRIVING) !== 0 && r.model !== BIKE_MODEL
-      this.setCar(r, driving ? r.model : 0)
-      if (r.car) {
-        r.car.visible = driving
-        r.car.position.copy(r.pos)
-        r.car.rotation.set(r.pitch, r.yaw, 0)
+    // the nearest people on foot get the animated character (re-picked 4× a second), the rest a silhouette
+    if ((this.pickClock -= dt) <= 0) {
+      this.pickClock = 0.25
+      this.onFoot.length = 0
+      for (const r of this.remotes.values()) if (r.visible && (!(r.flags & Flags.DRIVING) || r.model === BIKE_MODEL) && r.dist < 150) this.onFoot.push(r)
+      this.onFoot.sort((x, y) => x.dist - y.dist)
+      const keep = Math.min(this.onFoot.length, this.maxCharacters)
+      for (const r of this.remotes.values()) {
+        if (!r.char) continue
+        const at = this.onFoot.indexOf(r)
+        if (at < 0 || at >= keep) this.release(r)
       }
-      const dead = (r.flags & Flags.DEAD) !== 0
-      if (r.char) {
-        r.char.root.visible = !driving && !dead
-        if (!driving) r.char.animate(dt, r.pos, r.yaw, r.speed, (r.flags & Flags.AIRBORNE) === 0, false, 0, r.vy)
-      }
-      r.proxy.visible = !driving && !r.char && !dead
-      r.proxy.position.copy(r.pos)
-      // tag: over the head / roof, a little bigger with distance (readable, never huge)
-      r.tag.position.set(r.pos.x, r.pos.y + (driving ? 2.6 : 2.15), r.pos.z)
-      const s = 1 + Math.min(2, r.dist / 60)
-      const m = r.tag.material as THREE.SpriteMaterial
-      const w = m.map ? (m.map.image as HTMLCanvasElement).width / 60 : 4
-      r.tag.scale.set(w * 0.32 * s, 0.32 * s, 1)
-      r.tag.visible = r.dist < 400
+      for (let i = 0; i < keep; i++) if (!this.onFoot[i].char) this.takeCharacter(this.onFoot[i])
+      // the nearest cars (driven or parked) within CAR_NEAR get the full model
+      const cd = this.carDist
+      cd.length = 0
+      for (const r of this.remotes.values()) if (r.visible && r.flags & Flags.DRIVING && r.model !== BIKE_MODEL && r.dist < CAR_NEAR) cd.push({ id: r.id, d: r.dist })
+      this.parked.forEach((c, i) => {
+        const d = Math.hypot(c.x - eye.x, c.y - eye.y, c.z - eye.z)
+        if (d < CAR_NEAR) cd.push({ id: -1 - i, d })
+      })
+      cd.sort((a, b) => a.d - b.d)
+      this.fullCars.clear()
+      for (let i = 0; i < Math.min(cd.length, this.maxCars); i++) this.fullCars.add(cd[i].id)
     }
+
+    // ---- fill the batches
+    for (const s of this.carSets.values()) s.near = s.midN = s.farN = 0
+    let px = 0
+    this.blobN = 0
+    this.tags.begin()
+    for (const r of this.remotes.values()) {
+      const driving = (r.flags & Flags.DRIVING) !== 0 && r.model !== BIKE_MODEL
+      if (r.char) {
+        r.char.root.visible = r.visible && !driving
+        if (!driving && r.visible) {
+          r.char.animate(dt, r.pos, r.yaw, r.speed, (r.flags & Flags.AIRBORNE) === 0, false, 0, r.vy)
+          this.blob(r.pos.x, r.pos.y, r.pos.z, r.yaw, 0.8, 0.8)
+        }
+      }
+      if (!r.visible) continue
+      if (driving) this.putCar(r.model, r.pos.x, r.pos.y, r.pos.z, r.yaw, r.pitch, r.dist, this.fullCars.has(r.id))
+      else if (!r.char && px < CAP && r.dist < 400) {
+        _e.set(0, r.yaw, 0)
+        this.proxies.setMatrixAt(px++, _m.compose(r.pos, _q.setFromEuler(_e), _s))
+        this.blob(r.pos.x, r.pos.y, r.pos.z, r.yaw, 0.75, 0.75)
+      }
+      if (r.dist < (r.bot ? TAG_FAR_BOT : TAG_FAR)) this.tagged.push(r)
+    }
+    // tags over the heads / roofs: the nearest MAX_TAGS
+    if (this.tagged.length > MAX_TAGS) this.tagged.sort((a, b) => a.dist - b.dist)
+    for (let i = 0; i < Math.min(MAX_TAGS, this.tagged.length); i++) {
+      const r = this.tagged[i]
+      const driving = (r.flags & Flags.DRIVING) !== 0 && r.model !== BIKE_MODEL
+      this.tags.put(r.tagSlot, r.pos.x, r.pos.y + (driving ? 2.6 : 2.15), r.pos.z)
+    }
+    this.tagged.length = 0
+    this.parked.forEach((c, i) => {
+      _p.set(c.x, c.y, c.z)
+      this.putCar(c.model, c.x, c.y, c.z, c.yaw, c.pitch, _p.distanceTo(eye), this.fullCars.has(-1 - i))
+    })
+    this.blobs.count = this.blobN
+    this.blobs.visible = this.blobN > 0
+    if (this.blobN) this.blobs.instanceMatrix.needsUpdate = true
+    this.proxies.count = px
+    this.proxies.visible = px > 0
+    if (px) this.proxies.instanceMatrix.needsUpdate = true
+    for (const s of this.carSets.values()) {
+      for (const im of [s.body, s.wheels, s.glass]) {
+        im.count = s.near
+        im.visible = s.near > 0
+        if (s.near) im.instanceMatrix.needsUpdate = true
+      }
+      s.mid.count = s.midN
+      s.mid.visible = s.midN > 0
+      if (s.midN) s.mid.instanceMatrix.needsUpdate = true
+      s.far.count = s.farN
+      s.far.visible = s.farN > 0
+      if (s.farN) s.far.instanceMatrix.needsUpdate = true
+    }
+    this.tags.end()
+  }
+
+  private unpark(owner: number): void {
+    for (let i = this.parked.length - 1; i >= 0; i--) if (this.parked[i].owner === owner) this.parked.splice(i, 1)
+  }
+
+  private putCar(model: number, x: number, y: number, z: number, yaw: number, pitch: number, dist: number, full: boolean): void {
+    if (dist > CAR_FAR) return
+    const s = this.carSet(model)
+    if (!s) return
+    _e.set(pitch, yaw, 0)
+    _m.compose(_p.set(x, y, z), _q.setFromEuler(_e), _s)
+    if (full && dist < CAR_NEAR) {
+      if (s.near >= CAP) return
+      s.body.setMatrixAt(s.near, _m)
+      s.wheels.setMatrixAt(s.near, _m)
+      s.glass.setMatrixAt(s.near, _m)
+      s.near++
+    } else if (dist < CAR_MID) {
+      if (s.midN < CAP) s.mid.setMatrixAt(s.midN++, _m)
+      const f = this.footprint.get(model)
+      if (f && dist < 90) this.blob(x, y, z, yaw, f[0], f[1])
+    } else if (s.farN < CAP) s.far.setMatrixAt(s.farN++, _m)
+  }
+
+  private blob(x: number, y: number, z: number, yaw: number, w: number, l: number): void {
+    if (this.blobN >= CAP * 2) return
+    _e.set(0, yaw, 0)
+    _p.set(x, y + 0.04, z)
+    _sb.set(w / 1.1, 1, l / 1.1)
+    this.blobs.setMatrixAt(this.blobN++, _m.compose(_p, _q.setFromEuler(_e), _sb))
   }
 
   dispose(): void {
     this.clear()
     for (const c of this.charPool) c.dispose()
     this.charPool.length = 0
-    this.proxyGeo.dispose()
-    this.proxyMat.dispose()
+    for (const s of this.carSets.values()) {
+      s.wheels.geometry.dispose()
+      s.far.geometry.dispose()
+      s.mid.geometry.dispose()
+      for (const im of [s.body, s.wheels, s.glass, s.mid, s.far]) im.dispose()
+    }
+    this.proxies.geometry.dispose()
     this.glassMat.dispose()
+    for (const m of this.texMats.values()) m.dispose()
+    this.tags.dispose()
+  }
+}
+
+/**
+ * The FAR stand-in of a car (past CAR_NEAR m): its body's bounds as two boxes (body, cabin) and four wheel blocks,
+ * coloured from the model's own average colour — ~84 triangles, the same material (no new program).
+ */
+function lowPolyCar(vm: VehicleModel): THREE.BufferGeometry {
+  const body = vm.body
+  body.computeBoundingBox()
+  const bb = body.boundingBox!
+  const col = bakedColors(vm)
+  const avg = new THREE.Color(0.5, 0.5, 0.5)
+  if (col) {
+    let r = 0, g = 0, b = 0, n = 0
+    const step = Math.max(1, Math.floor(col.length / 3 / 400))
+    for (let i = 0; i < col.length / 3; i += step) {
+      r += col[i * 3]
+      g += col[i * 3 + 1]
+      b += col[i * 3 + 2]
+      n++
+    }
+    avg.setRGB(r / n, g / n, b / n)
+  }
+  const sx = bb.max.x - bb.min.x, sy = bb.max.y - bb.min.y, sz = bb.max.z - bb.min.z
+  const cx = (bb.max.x + bb.min.x) / 2, cz = (bb.max.z + bb.min.z) / 2
+  const base = bb.min.y + sy * 0.12
+  const lower = new THREE.BoxGeometry(sx, sy * 0.45, sz).translate(cx, base + sy * 0.225, cz)
+  const cabin = new THREE.BoxGeometry(sx * 0.86, sy * 0.4, sz * 0.5).translate(cx, base + sy * 0.65, cz + sz * 0.05)
+  const parts = [paint(lower, avg), paint(cabin, avg.clone().multiplyScalar(0.55))]
+  const wr = vm.wheelRadius
+  for (const [x, y, z] of vm.wheelPos) parts.push(paint(new THREE.BoxGeometry(wr * 0.8, wr * 2, wr * 2).translate(x, y, z), new THREE.Color(0.06, 0.06, 0.07)))
+  const g = mergeGeometries(parts)!
+  for (const p of parts) p.dispose()
+  return g
+}
+
+/** Per-vertex colour of the body with its texture (if any) baked in: vertex colour × the texel at its uv. */
+const baked = new WeakMap<VehicleModel, Float32Array>()
+function bakedColors(vm: VehicleModel): Float32Array {
+  const hit = baked.get(vm)
+  if (hit) return hit
+  const g = vm.body
+  const n = g.getAttribute('position').count
+  const out = new Float32Array(n * 3).fill(0.7)
+  const col = g.getAttribute('color'), uv = g.getAttribute('uv')
+  if (col) for (let i = 0; i < n; i++) (out[i * 3] = col.getX(i)), (out[i * 3 + 1] = col.getY(i)), (out[i * 3 + 2] = col.getZ(i))
+  const img = vm.map?.image as (CanvasImageSource & { width: number; height: number }) | undefined
+  if (img && uv && img.width) {
+    const W = Math.min(256, img.width), H = Math.min(256, img.height)
+    const c = document.createElement('canvas')
+    c.width = W
+    c.height = H
+    const ctx = c.getContext('2d', { willReadFrequently: true })!
+    ctx.drawImage(img, 0, 0, W, H)
+    const px = ctx.getImageData(0, 0, W, H).data
+    const flip = vm.map!.flipY
+    const lin = (v: number) => Math.pow(v / 255, 2.2)
+    for (let i = 0; i < n; i++) {
+      const u = ((uv.getX(i) % 1) + 1) % 1, v = ((uv.getY(i) % 1) + 1) % 1
+      const x = Math.min(W - 1, Math.floor(u * W)), y = Math.min(H - 1, Math.floor((flip ? 1 - v : v) * H))
+      const k = (y * W + x) * 4
+      out[i * 3] *= lin(px[k])
+      out[i * 3 + 1] *= lin(px[k + 1])
+      out[i * 3 + 2] *= lin(px[k + 2])
+    }
+  }
+  baked.set(vm, out)
+  return out
+}
+
+/**
+ * VERTEX CLUSTERING: vertices snapped to a `cell` grid (and to the facing of their normal — hard edges stay hard) are
+ * merged; triangles that collapse are dropped. ~5–8× fewer triangles on the car bodies at 2–3 cm/px, built once per
+ * model in a few ms. Keeps position / normal / color only.
+ */
+function cluster(pos: THREE.BufferAttribute | THREE.InterleavedBufferAttribute, nor: THREE.BufferAttribute | THREE.InterleavedBufferAttribute | undefined, col: Float32Array, index: ArrayLike<number> | null, cell: number): THREE.BufferGeometry {
+  const n = pos.count
+  const ids = new Int32Array(n)
+  const map = new Map<string, number>()
+  const P: number[] = [], N: number[] = [], C: number[] = [], W: number[] = []
+  for (let i = 0; i < n; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i)
+    let face = 0
+    if (nor) {
+      const ax = nor.getX(i), ay = nor.getY(i), az = nor.getZ(i)
+      const m = Math.max(Math.abs(ax), Math.abs(ay), Math.abs(az))
+      face = m === Math.abs(ax) ? (ax > 0 ? 1 : 2) : m === Math.abs(ay) ? (ay > 0 ? 3 : 4) : az > 0 ? 5 : 6
+    }
+    const key = `${Math.floor(x / cell)},${Math.floor(y / cell)},${Math.floor(z / cell)},${face}`
+    let id = map.get(key)
+    if (id === undefined) {
+      id = W.length
+      map.set(key, id)
+      P.push(0, 0, 0)
+      N.push(nor ? nor.getX(i) : 0, nor ? nor.getY(i) : 1, nor ? nor.getZ(i) : 0)
+      C.push(col[i * 3], col[i * 3 + 1], col[i * 3 + 2])
+      W.push(0)
+    }
+    P[id * 3] += x
+    P[id * 3 + 1] += y
+    P[id * 3 + 2] += z
+    W[id]++
+    ids[i] = id
+  }
+  for (let k = 0; k < W.length; k++) (P[k * 3] /= W[k]), (P[k * 3 + 1] /= W[k]), (P[k * 3 + 2] /= W[k])
+  const tris = index ? index.length : n
+  const I: number[] = []
+  for (let t = 0; t < tris; t += 3) {
+    const a = ids[index ? index[t] : t], b = ids[index ? index[t + 1] : t + 1], c = ids[index ? index[t + 2] : t + 2]
+    if (a !== b && b !== c && a !== c) I.push(a, b, c)
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3))
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3))
+  g.setAttribute('color', new THREE.Float32BufferAttribute(C, 3))
+  g.setIndex(I)
+  return g
+}
+
+/** The MID car: simplified body + glass (dark, opaque) + four 12-sided wheels, one geometry. */
+function midCar(vm: VehicleModel): THREE.BufferGeometry {
+  // coarser until the body is ≤ ~2 k triangles (the models range from 4 k to 22 k)
+  let cell = 0.12
+  let body = cluster(vm.body.getAttribute('position'), vm.body.getAttribute('normal'), bakedColors(vm), vm.body.index ? vm.body.index.array : null, cell)
+  for (let k = 0; k < 8 && body.index!.count / 3 > 2000; k++) {
+    body.dispose()
+    cell *= 1.3
+    body = cluster(vm.body.getAttribute('position'), vm.body.getAttribute('normal'), bakedColors(vm), vm.body.index ? vm.body.index.array : null, cell)
+  }
+  const gp = vm.glass.getAttribute('position')
+  const glass = cluster(gp, vm.glass.getAttribute('normal'), new Float32Array(gp.count * 3).fill(0.03), vm.glass.index ? vm.glass.index.array : null, 0.12)
+  const parts = [body, glass]
+  const wr = vm.wheelRadius, ww = vm.tyreHalfWidth * 2
+  for (const [x, y, z] of vm.wheelPos) parts.push(paint(new THREE.CylinderGeometry(wr, wr, ww, 12, 1).rotateZ(Math.PI / 2).translate(x, y, z), new THREE.Color(0.05, 0.05, 0.055)))
+  for (const p of parts) {
+    p.deleteAttribute('uv')
+    if (!p.index) p.setIndex([...Array(p.getAttribute('position').count).keys()])
+  }
+  const g = mergeGeometries(parts)!
+  for (const p of parts) p.dispose()
+  return g
+}
+
+/** A person far off (past the animated ones): legs, jacket, arms, head in the hero's colours — ~300 triangles. */
+function mannequin(): THREE.BufferGeometry {
+  const skin = new THREE.Color(0.55, 0.36, 0.26), jacket = new THREE.Color(0.2, 0.22, 0.12), trousers = new THREE.Color(0.06, 0.06, 0.07)
+  const parts = [
+    paint(new THREE.CapsuleGeometry(0.09, 0.62, 2, 6).translate(-0.11, 0.42, 0), trousers),
+    paint(new THREE.CapsuleGeometry(0.09, 0.62, 2, 6).translate(0.11, 0.42, 0), trousers),
+    paint(new THREE.CapsuleGeometry(0.21, 0.42, 2, 8).scale(1, 1, 0.7).translate(0, 1.12, 0), jacket),
+    paint(new THREE.CapsuleGeometry(0.065, 0.5, 2, 6).translate(-0.3, 1.08, 0), jacket),
+    paint(new THREE.CapsuleGeometry(0.065, 0.5, 2, 6).translate(0.3, 1.08, 0), jacket),
+    paint(new THREE.SphereGeometry(0.12, 8, 6).translate(0, 1.6, 0), skin),
+  ]
+  for (const p of parts) p.deleteAttribute('uv')
+  const g = mergeGeometries(parts)!
+  for (const p of parts) p.dispose()
+  return g
+}
+
+function paint(g: THREE.BufferGeometry, c: THREE.Color): THREE.BufferGeometry {
+  const n = g.getAttribute('position').count
+  const a = new Float32Array(n * 3)
+  for (let i = 0; i < n; i++) {
+    a[i * 3] = c.r
+    a[i * 3 + 1] = c.g
+    a[i * 3 + 2] = c.b
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(a, 3))
+  return g
+}
+
+/**
+ * NAME TAGS for everyone in ONE draw: each name is painted once into a slot of an atlas (canvas → texture); every
+ * visible tag is an instance of a camera-facing quad (position + slot). The front end's dusk-glass pill; bots get a
+ * lime edge.
+ */
+class TagLayer {
+  readonly mesh: THREE.Mesh
+  private static readonly W = 1024
+  private static readonly H = 1024
+  private static readonly SW = 256
+  private static readonly SH = 32
+  private readonly cols = TagLayer.W / TagLayer.SW
+  private readonly canvas = document.createElement('canvas')
+  private readonly ctx: CanvasRenderingContext2D
+  private readonly tex: THREE.CanvasTexture
+  private readonly freeSlots: number[] = []
+  private readonly widths: Float32Array
+  private readonly iPos: THREE.InstancedBufferAttribute
+  private readonly iSlot: THREE.InstancedBufferAttribute
+  private readonly geo: THREE.InstancedBufferGeometry
+  private n = 0
+  private dirty = false
+  /** View height in pixels (tags are sized on screen). */
+  readonly viewH = { value: 720 }
+
+  constructor() {
+    this.canvas.width = TagLayer.W
+    this.canvas.height = TagLayer.H
+    this.ctx = this.canvas.getContext('2d')!
+    const slots = this.cols * (TagLayer.H / TagLayer.SH)
+    for (let i = slots - 1; i >= 0; i--) this.freeSlots.push(i)
+    this.widths = new Float32Array(slots)
+    this.tex = new THREE.CanvasTexture(this.canvas)
+    this.tex.colorSpace = THREE.SRGBColorSpace
+    this.tex.generateMipmaps = false
+    this.tex.minFilter = THREE.LinearFilter
+    const base = new THREE.PlaneGeometry(1, 1)
+    this.geo = new THREE.InstancedBufferGeometry()
+    this.geo.index = base.index
+    this.geo.setAttribute('position', base.getAttribute('position'))
+    this.geo.setAttribute('uv', base.getAttribute('uv'))
+    this.iPos = new THREE.InstancedBufferAttribute(new Float32Array(CAP * 3), 3).setUsage(THREE.DynamicDrawUsage)
+    // per instance: the slot's uv corner (x, y) and the used width fraction
+    this.iSlot = new THREE.InstancedBufferAttribute(new Float32Array(CAP * 3), 3).setUsage(THREE.DynamicDrawUsage)
+    this.geo.setAttribute('iPos', this.iPos)
+    this.geo.setAttribute('iSlot', this.iSlot)
+    this.geo.instanceCount = 0
+    const mat = new THREE.ShaderMaterial({
+      name: 'NameTags',
+      transparent: true,
+      depthWrite: false,
+      uniforms: { uMap: { value: this.tex }, uSlot: { value: new THREE.Vector2(TagLayer.SW / TagLayer.W, TagLayer.SH / TagLayer.H) }, uViewH: this.viewH },
+      vertexShader: /* glsl */ `
+        attribute vec3 iPos; attribute vec3 iSlot;
+        uniform vec2 uSlot; uniform float uViewH;
+        varying vec2 vUv;
+        void main() {
+          vec4 clip = projectionMatrix * viewMatrix * vec4(iPos, 1.0);
+          // a size on SCREEN: ~20 px tall near, shrinking to 12 px far (× the view height / 720) — never huge up close
+          float px = clamp(500.0 / max(clip.w, 1.0), 12.0, 20.0) * uViewH / 720.0;
+          vec2 ndc = position.xy * vec2(iSlot.z * ${(TagLayer.SW / TagLayer.SH).toFixed(1)}, 1.0) * px * 2.0 / uViewH;
+          clip.xy += ndc * vec2(projectionMatrix[0][0] / projectionMatrix[1][1], 1.0) * clip.w; // (x: pixels → NDC across the width)
+          vUv = iSlot.xy + vec2(uv.x * iSlot.z, uv.y) * uSlot;
+          gl_Position = clip;
+        }`,
+      fragmentShader: /* glsl */ `
+        uniform sampler2D uMap;
+        varying vec2 vUv;
+        void main() {
+          vec4 c = texture2D(uMap, vUv);
+          if (c.a < 0.02) discard;
+          gl_FragColor = c;
+          #include <colorspace_fragment>
+        }`,
+    })
+    this.mesh = new THREE.Mesh(this.geo, mat)
+    this.mesh.frustumCulled = false
+    this.mesh.renderOrder = 10
+    this.mesh.visible = false
+    this.mesh.name = 'name-tags'
+  }
+
+  alloc(): number {
+    return this.freeSlots.pop() ?? 0
+  }
+
+  free(slot: number): void {
+    if (!this.freeSlots.includes(slot)) this.freeSlots.push(slot)
+  }
+
+  /** Paint `name` into its slot. */
+  write(slot: number, name: string, bot: boolean): void {
+    const x0 = (slot % this.cols) * TagLayer.SW, y0 = Math.floor(slot / this.cols) * TagLayer.SH
+    const g = this.ctx
+    g.clearRect(x0, y0, TagLayer.SW, TagLayer.SH)
+    g.font = '700 19px system-ui, -apple-system, "Segoe UI", sans-serif'
+    let label = name
+    while (label.length > 1 && g.measureText(label).width > TagLayer.SW - 30) label = label.slice(0, -1)
+    if (label !== name) label = label.slice(0, -1) + '…'
+    const w = Math.min(TagLayer.SW, Math.ceil(g.measureText(label).width) + 26)
+    g.fillStyle = 'rgba(28,24,52,0.72)'
+    g.strokeStyle = bot ? 'rgba(205,232,74,0.7)' : 'rgba(255,214,170,0.5)'
+    g.lineWidth = 1.5
+    g.beginPath()
+    g.roundRect(x0 + 1, y0 + 1, w - 2, TagLayer.SH - 2, (TagLayer.SH - 2) / 2)
+    g.fill()
+    g.stroke()
+    g.fillStyle = bot ? '#e9f5b8' : '#fff4e3'
+    g.textBaseline = 'middle'
+    g.textAlign = 'center'
+    g.fillText(label, x0 + w / 2, y0 + TagLayer.SH / 2 + 1)
+    this.widths[slot] = w / TagLayer.SW
+    this.dirty = true
+  }
+
+  begin(): void {
+    this.n = 0
+  }
+
+  put(slot: number, x: number, y: number, z: number): void {
+    if (this.n >= CAP) return
+    const i = this.n++
+    const P = this.iPos.array as Float32Array, S = this.iSlot.array as Float32Array
+    P[i * 3] = x
+    P[i * 3 + 1] = y
+    P[i * 3 + 2] = z
+    // (uv origin bottom-left: canvas rows count from the top; flipY uploads row 0 at v = 1)
+    S[i * 3] = ((slot % this.cols) * TagLayer.SW) / TagLayer.W
+    S[i * 3 + 1] = 1 - ((Math.floor(slot / this.cols) + 1) * TagLayer.SH) / TagLayer.H
+    S[i * 3 + 2] = this.widths[slot]
+  }
+
+  end(): void {
+    this.geo.instanceCount = this.n
+    this.mesh.visible = this.n > 0
+    if (this.n) {
+      this.iPos.clearUpdateRanges()
+      this.iSlot.clearUpdateRanges()
+      this.iPos.addUpdateRange(0, this.n * 3)
+      this.iSlot.addUpdateRange(0, this.n * 3)
+      this.iPos.needsUpdate = this.iSlot.needsUpdate = true
+    }
+    if (this.dirty) {
+      this.tex.needsUpdate = true
+      this.dirty = false
+    }
+  }
+
+  dispose(): void {
+    this.tex.dispose()
+    this.geo.dispose()
+    ;(this.mesh.material as THREE.Material).dispose()
   }
 }

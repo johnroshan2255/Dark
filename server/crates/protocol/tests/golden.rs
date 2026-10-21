@@ -157,6 +157,7 @@ fn server_samples() -> Vec<(&'static str, ServerMsg)> {
                 flags: room_flags::PRIVATE | room_flags::ROADKILL,
                 max_players: 64,
                 owner: 1,
+                bots: 24,
             }),
         ),
         (

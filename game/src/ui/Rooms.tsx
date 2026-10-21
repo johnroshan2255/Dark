@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } 
 import type { Game } from '../game/Game'
 import { useStore } from '../game/GameState'
 import { MAPS } from '../world/map/FixedMap'
-import { NO_PLAYER } from '../net/protocol'
+import { NO_PLAYER, isBot } from '../net/protocol'
 import type { RoomInfo } from '../net/NetClient'
 import { ACCENT, FONT, glass, label, LIME } from './theme'
 import { playMap } from './MapSelect'
@@ -98,6 +98,7 @@ export function RoomBrowser({ game, onJoined }: { game: Game; onJoined?: () => v
                   <div style={roomName}>{r.name}</div>
                   <div style={{ ...label, letterSpacing: 1.4, marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {worldLabel(r)}
+                    {r.bots ? ` · ${r.bots} bots` : ''}
                     {r.roadkill ? ' · Roadkill' : ''}
                   </div>
                 </div>
@@ -259,6 +260,9 @@ function RoomSetupModal({ game, onClose }: { game: Game; onClose: () => void }) 
         <Field label={`Players · ${setup.maxPlayers}`}>
           <input className="fe-range" type="range" min={2} max={100} value={setup.maxPlayers} onChange={(e) => game.setRoomSetup({ maxPlayers: Number(e.target.value) })} data-testid="setup-max" />
         </Field>
+        <Field label={`Bots · ${setup.bots}`} help="Computer players: they drive, race, sail, fly and wander like people do.">
+          <input className="fe-range" type="range" min={0} max={100} value={setup.bots} onChange={(e) => game.setRoomSetup({ bots: Number(e.target.value) })} data-testid="setup-bots" />
+        </Field>
         <Field label="Visibility" help={setup.private ? 'Only players with the code can join.' : 'Listed on everyone’s landing page.'}>
           <div className="fe-segs">
             <Seg on={!setup.private} onClick={() => game.setRoomSetup({ private: false })}>Public</Seg>
@@ -327,11 +331,13 @@ function RoomCard({ game, onClose }: { game: Game; onClose: () => void }) {
   if (!room || !edit) return null
   // the owner edits a draft; everyone else sees the live rules
   const draft = owner ? edit : rules(room)
-  const dirty = draft.name !== room.name || draft.private !== room.private || draft.max !== room.max_players || draft.roadkill !== room.roadkill || draft.flying !== room.flying
+  const humans = net.players.filter((p) => !isBot(p.id))
+  const bots = net.players.filter((p) => isBot(p.id))
+  const dirty = draft.name !== room.name || draft.private !== room.private || draft.max !== room.max_players || draft.roadkill !== room.roadkill || draft.flying !== room.flying || draft.bots !== (room.bots ?? 0)
   const apply = async () => {
     setMsg(null)
     try {
-      await game.net.configure({ name: draft.name, private: draft.private, max_players: draft.max, roadkill: draft.roadkill, flying: draft.flying })
+      await game.net.configure({ name: draft.name, private: draft.private, max_players: draft.max, roadkill: draft.roadkill, flying: draft.flying, bots: draft.bots })
       setMsg('Saved')
     } catch (e) {
       setMsg((e as Error).message)
@@ -352,9 +358,9 @@ function RoomCard({ game, onClose }: { game: Game; onClose: () => void }) {
         </div>
         <button style={chipBtn} onClick={copy}>{copied ? 'Copied ✓' : 'Copy'}</button>
       </div>
-      <div style={{ ...label, margin: '16px 0 8px' }}>{worldLabel(room)} · {net.players.length}/{room.max_players} players</div>
+      <div style={{ ...label, margin: '16px 0 8px' }}>{worldLabel(room)} · {humans.length}/{room.max_players} players{bots.length ? ` · ${bots.length} bots` : ''}</div>
       <div className="fe-room-players" data-testid="room-players">
-        {net.players.map((p) => (
+        {humans.map((p) => (
           <div key={p.id} className="fe-room-player">
             <span style={{ ...dot, background: p.id === net.me ? '#3aa6e8' : ACCENT }} />
             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -367,6 +373,16 @@ function RoomCard({ game, onClose }: { game: Game; onClose: () => void }) {
             )}
           </div>
         ))}
+        {bots.length > 0 && (
+          <div className="fe-room-player" title={bots.map((b) => b.name).join(', ')} data-testid="room-bot-row">
+            <span style={{ ...dot, background: LIME }} />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'rgba(255,244,227,0.8)' }}>
+              {bots.slice(0, 8).map((b) => b.name).join(', ')}
+              {bots.length > 8 ? ` +${bots.length - 8}` : ''}
+            </span>
+            <span style={{ ...ownerChip, color: LIME, borderColor: 'rgba(205,232,74,0.45)' }}>{bots.length} bots</span>
+          </div>
+        )}
       </div>
       <div style={{ ...label, margin: '18px 0 8px' }}>{owner ? 'Room settings' : 'Room rules'}</div>
       <div className="fe-form">
@@ -374,7 +390,10 @@ function RoomCard({ game, onClose }: { game: Game; onClose: () => void }) {
           <input className="fe-input" value={draft.name} disabled={!owner} maxLength={20} onChange={(e) => setDraft({ ...draft, name: e.target.value })} data-testid="room-name" />
         </Field>
         <Field label={`Players · ${draft.max}`}>
-          <input className="fe-range" type="range" min={Math.max(2, net.players.length)} max={100} value={draft.max} disabled={!owner} onChange={(e) => setDraft({ ...draft, max: Number(e.target.value) })} />
+          <input className="fe-range" type="range" min={Math.max(2, humans.length)} max={100} value={draft.max} disabled={!owner} onChange={(e) => setDraft({ ...draft, max: Number(e.target.value) })} />
+        </Field>
+        <Field label={`Bots · ${draft.bots}`}>
+          <input className="fe-range" type="range" min={0} max={100} value={draft.bots} disabled={!owner} onChange={(e) => setDraft({ ...draft, bots: Number(e.target.value) })} data-testid="room-bots" />
         </Field>
         <Field label="Visibility">
           <div className="fe-segs">
@@ -414,7 +433,7 @@ function RoomCard({ game, onClose }: { game: Game; onClose: () => void }) {
 
 // ---------------------------------------------------------------- small pieces
 
-const rules = (r: RoomInfo) => ({ name: r.name, private: r.private, max: r.max_players, roadkill: r.roadkill, flying: r.flying })
+const rules = (r: RoomInfo) => ({ name: r.name, private: r.private, max: r.max_players, roadkill: r.roadkill, flying: r.flying, bots: r.bots ?? 0 })
 
 function Field({ label: l, help, children }: { label: string; help?: string; children: ReactNode }) {
   return (
