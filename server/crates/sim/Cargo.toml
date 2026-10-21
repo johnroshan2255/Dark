@@ -1,0 +1,17 @@
+[package]
+name = "dark-sim"
+description = "DARK match rules: map heights, battle-royale zone, movement validation, interest management, damage. Pure (no I/O, no wall clock): the server drives it with explicit time."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dark-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

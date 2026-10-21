@@ -1,0 +1,7 @@
+# Match rules for load tests (DARK_MATCH_CONFIG=deploy/loadtest.toml): 100 seats, matches start 5 s after
+# 2 players are in, a 3 s countdown. Everything else as in production (dark_sim::MatchConfig::default()).
+max_players = 100
+min_players = 2
+lobby_s = 5.0
+countdown_s = 3.0
+end_linger_s = 10.0

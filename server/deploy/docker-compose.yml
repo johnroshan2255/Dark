@@ -1,0 +1,37 @@
+# One region on one machine: the game server behind Caddy (automatic HTTPS + WebSocket proxy).
+#   cp deploy/.env.example deploy/.env   # set DARK_DOMAIN, DARK_SECRET, DARK_ALLOWED_ORIGINS
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+# Clients use https://$DARK_DOMAIN for the API and wss://$DARK_DOMAIN/v1/ws for matches.
+services:
+  dark-server:
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    environment:
+      DARK_SECRET: ${DARK_SECRET:?set DARK_SECRET (openssl rand -hex 32)}
+      DARK_ALLOWED_ORIGINS: ${DARK_ALLOWED_ORIGINS:-}
+      DARK_PUBLIC_WS_URL: wss://${DARK_DOMAIN:?set DARK_DOMAIN}/v1/ws
+      DARK_TRUST_PROXY: "true"
+      DARK_REGION: ${DARK_REGION:-default}
+      DARK_MAX_MATCHES: ${DARK_MAX_MATCHES:-8}
+      DARK_DRAIN_SECS: ${DARK_DRAIN_SECS:-1200}
+    # give running matches time to finish on `docker compose down` / redeploys
+    stop_grace_period: 21m
+    expose: ["7350"]
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on: [dark-server]
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DARK_DOMAIN: ${DARK_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

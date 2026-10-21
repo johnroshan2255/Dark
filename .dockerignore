@@ -1,0 +1,7 @@
+# The server image (server/Dockerfile, built with the repo root as context) needs only the Rust workspace and the
+# maps it hosts. Everything else stays out of the build context.
+**
+!server/
+!game/public/maps/
+server/target/
+**/.DS_Store

@@ -1,0 +1,10 @@
+{$DARK_DOMAIN} {
+	encode zstd gzip
+	# Prometheus scrapes the server directly on the private network, not through the public site.
+	@metrics path /metrics
+	respond @metrics 404
+	# HTTP API and the game WebSocket (Caddy proxies upgrades natively).
+	reverse_proxy dark-server:7350 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

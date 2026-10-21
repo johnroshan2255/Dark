@@ -559,11 +559,17 @@ building mesh rebuilt, power-line spans of a broken post dropped), ≤ 48 physic
 thrown with the truck, which keeps (1 − loss) of its speed. Broken props are listed per chunk (`PhysicsWorld.broken`)
 and REBUILT when the chunk unloads (drive away and come back). Crash sound synthesized (`AudioSystem.crash`).
 
-## 7. Multiplayer (future, structure reserved)
+## 7. Multiplayer (2026-10-21: dedicated server in `../server/`, client not wired yet)
 
-Host-authoritative (one peer or a small Node relay). Clients send inputs; host simulates players/monsters and
-sends snapshots at 20 Hz; clients interpolate 100 ms in the past. World is **not** sent — only the seed and
-deltas (opened doors, looted items). Streaming on the host is the union of all players' rings.
+Battle-royale matches of up to 100 players on the fixed maps run on a dedicated, authoritative **Rust server**
+(`../server/README.md`). Over WebSocket, clients stream their own simulated pose at ~30 Hz. The server validates it
+against the map's heightfield (speed, teleport, ground, bounds), owns the match, zone, damage and eliminations, and
+sends each client the players near it (interest tiers, 30 / 15 / 5 Hz) to interpolate ~100 ms in the past. The world
+is **not** sent: the map id (or the seed) and deltas only.
+
+The wire format is `src/net/protocol.ts` (`npm run test:protocol` checks it against the server's golden vectors).
+Next: the net client, a remote-player pool, interpolation, and the zone in the HUD / minimap. The older 4-player
+peer-host notes in `skills/multiplayer` still apply to a co-op mode.
 
 ---
 
@@ -581,7 +587,8 @@ src/
   physics/        Rapier wrapper, colliders
   gameplay/       player/ bmx/ monsters/ flashlight/ interaction/ survival/
   input/          keyboard/mouse/pointer-lock
-  multiplayer/    networking/ interpolation/ state/
+  multiplayer/    networking/ interpolation/ state/ (reserved)
+  net/            protocol.ts — the server's wire format (../server/docs/PROTOCOL.md)
   assets/         models/ textures/ animations/ audio/  (optimized outputs only)
   debug/          PerformanceMonitor, CullingDebug, ChunkDebug, PhysicsDebug, DebugHud
 skills/           how-to docs per system (read before implementing)

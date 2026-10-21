@@ -5,6 +5,10 @@ description: Read before any networking, replication, or authority decision — 
 
 # Multiplayer (4-player co-op)
 
+> **2026-10-21:** battle-royale multiplayer (up to 100 players) runs on the dedicated Rust server in `../server/`
+> (README, `docs/PROTOCOL.md`); the client codec is `src/net/protocol.ts`. This skill's peer-host design is for a small
+> co-op mode; its interpolation / prediction / reconciliation sections apply to the server client too.
+
 ## 1. Purpose
 
 Up to 4 players share one world: same seed, same monsters, same time of day. Horror co-op tolerates ~100 ms of

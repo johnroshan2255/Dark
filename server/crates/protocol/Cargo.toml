@@ -1,0 +1,17 @@
+[package]
+name = "dark-protocol"
+description = "DARK wire protocol: compact little-endian binary messages shared by the server, bots and (mirrored in TypeScript) the game client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
