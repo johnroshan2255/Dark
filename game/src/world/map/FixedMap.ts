@@ -40,6 +40,15 @@ export const MAPS: MapInfo[] = [
     preview: '/maps/island/preview.jpg',
     minimap: '/maps/island/minimap.jpg',
   },
+  {
+    id: 'highlands',
+    name: 'The Highlands',
+    blurb: 'Green plateaus and sheer grey cliffs round a turquoise lake with a wooded isle, rivers in deep valleys, a lookout on the north-east peak and a winding ring road with bridges.',
+    areaKm2: 5.76,
+    regions: ['Pine forest', 'Plateaus', 'Lake', 'Rivers', 'Coast'],
+    preview: '/maps/highlands/preview.jpg',
+    minimap: '/maps/highlands/minimap.jpg',
+  },
 ]
 
 interface MapJson {
@@ -51,6 +60,10 @@ interface MapJson {
   grid: { n: number; step: number; min: number; range: number; origin: [number, number] }
   biomeGrid: { n: number; step: number; origin: [number, number] }
   spawn: [number, number, number]
+  /** The map's own colours (hex 'rrggbb'): ground (grass bright / dark, dirt, rock, cliff, sand) and water. */
+  palette?: Partial<Record<'grass' | 'grassDark' | 'dirt' | 'rock' | 'cliff' | 'sand' | 'water' | 'waterDeep' | 'flowers', string>>
+  /** 'conifer': the forest is spruce / fir / pine only (else the region's mix). */
+  trees?: 'conifer'
   roads: { name: string; class: string; halfWidth: number; closed: boolean; x: number[]; z: number[]; h: number[]; bridge: number[] }[]
 }
 
@@ -80,6 +93,12 @@ const ROAD_WIDTH_SCALE = 0.75
 const PALM_KEEP = 0.2
 const PALM_CELL = 4
 const _palmBw: [number, number] = [0, 0]
+/** 'rrggbb' → linear rgb. */
+function srgbHex(h: string): [number, number, number] {
+  const n = parseInt(h.replace('#', ''), 16)
+  const c = (v: number) => (v / 255 <= 0.04045 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4)
+  return [c((n >> 16) & 255), c((n >> 8) & 255), c(n & 255)]
+}
 const palmKey = (gx: number, gz: number) => (gx + 32768) * 65536 + (gz + 32768)
 const POOL_CELL = 120
 const POOL_P = 0.55
@@ -116,6 +135,10 @@ export class FixedMap {
   /** The map's prop placements (heights in map metres: add heightOffset) — MapProps draws the set pieces. */
   readonly props: MapProps
   readonly heightOffset: number
+  /** The map's colours (map.json `palette`), linear rgb — groundColor / the water / the dirt roads use them. */
+  readonly palette: Partial<Record<string, [number, number, number]>> = {}
+  /** Conifers only (map.json `trees: 'conifer'`). */
+  readonly conifers: boolean
   /** The roads' BRIDGES: each run of bridge samples with the bank sample before and after (deck centre line, world
    *  heights) and the deck half width — MapProps builds Dark's plank bridge along it. */
   readonly bridges: { xs: number[]; zs: number[]; ys: number[]; hw: number }[] = []
@@ -155,6 +178,8 @@ export class FixedMap {
     this.h = new Float32Array(raw.length)
     const k = g.range / 65535, off = g.min + meta.heightOffset
     for (let i = 0; i < raw.length; i++) this.h[i] = raw[i] * k + off
+    for (const [k, v] of Object.entries(meta.palette ?? {})) if (v) this.palette[k] = srgbHex(v)
+    this.conifers = meta.trees === 'conifer'
     this.bio = new Uint8Array(biome)
     this.bn = meta.biomeGrid.n
     this.bstep = meta.biomeGrid.step

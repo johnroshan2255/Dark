@@ -385,6 +385,13 @@ export class Game {
     this.envRoot.add(this.caves.group, this.destruction.mesh, this.drift.points, this.sky.mesh, this.bike.root, this.car.root, this.vehicleFx.points, this.rain.points, this.horizon.mesh, this.landmarks.group, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
     this.remotes = new RemotePlayers(this.materials.hero, models.hero, (id) => loadVehicle(id), this.materials.character, (x, z) => this.world.groundAt(x, z) ?? this.world.fields.height(x, z), (x, z) => this.world.groundAt(x, z))
     this.remotes.setQuality(this.quality.remoteCharacters, this.quality.remoteCars)
+    // a fixed map's own colours: its water and its dirt roads (the ground takes the rest: groundColor)
+    const pal = map?.palette
+    if (pal?.waterDeep) {
+      const w = pal.water ?? pal.waterDeep, d = pal.waterDeep
+      this.water.setDeep([w[0] * 0.55 + d[0] * 0.45, w[1] * 0.55 + d[1] * 0.45, w[2] * 0.55 + d[2] * 0.45], 0.42)
+    }
+    if (pal?.dirt) globalUniforms.uRoadSoil.value.set(pal.dirt[0] * 0.62, pal.dirt[1] * 0.6, pal.dirt[2] * 0.6, 1)
     this.envRoot.add(this.remotes.root)
     this.net = new NetClient(this)
     // Not in the water's mirror: the water itself, near-field grass, particles, the torch beam, debug helpers.

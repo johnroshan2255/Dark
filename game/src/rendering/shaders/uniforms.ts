@@ -61,6 +61,8 @@ export const globalUniforms = {
    * interleaved-gradient dither on both sides makes each pixel belong to exactly one LOD. x < 0 = off (legacy LOD).
    */
   uTreeLod: { value: new THREE.Vector4(-1, 0, 1e5, 1e5 + 1) }, // x < 0 = off (legacy chunk LOD)
+  /** A fixed map's own dirt-road colour (linear rgb; w = 1 on, 0 = the default earth) — map.json `palette.dirt`. */
+  uRoadSoil: { value: new THREE.Vector4(0.31, 0.225, 0.15, 0) },
   /**
    * AERIAL PERSPECTIVE (Genshin's distance "filter", stylize fog block): from x to y metres distant surfaces lose
    * saturation and contrast toward the haze (z = strength), so far detail reads as soft silhouettes long before the

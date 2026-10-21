@@ -303,6 +303,18 @@ on fixed maps the scatter grows ~10 % of the trees and ~4 % of the rocks there (
 of its rocks with boulders ≤ ~4.5 m. ROAD BEDS (2026-10-21, `scripts/blender/island/roads.py`, "routes go straight into walls"): the terrain grid IS the road surface on a map (the ribbon drapes it), and the export's beds had drifted off some centrelines — summit_west ran into the coast highway's cut wall (ground 12–40 m above the road), summit_road crossed lake_road 13 m higher with no bridge, and the desert rebuild stored its new roads in world heights (6–10 m steps where they met the old ones). The pass re-grades every road (ground under the centreline where it agrees with the graded heights, the graded heights where it is a wall / hole; ends snapped onto the road they join; grade ≤ the class's or the export's), trims ends that run alongside the road they join, starts summit_road at its crossing, and carves a flat bed (half width + 1 m) with ~51° cut / ~44° fill banks that open up within ~6 m so cliffs beyond stay cliffs. Road length off its bed by > 1 m or on a > 35 % pitch: 3.75 km → 32 m (one-sample junction / abutment spikes); 16.6 k grid cells moved > 0.5 m. Data only: 0 runtime cost. MAP CARD: `scripts/blender/island/map_preview.py` — a bird's-eye Eevee render in the bright palette (cel ramp with blue shade, the map's own trees as dot canopies / pines / snowy pines, turquoise sea + river, packed-dirt roads), tilted 43.5° so the island fills the card's ~1.38 : 1 box uncropped; 1100 × 798 JPEG 210 KB (was a 1.3 MB PNG hillshade). Cost on the island (ULTRA, M4, driving): 60 fps at 1080p and with
 a 4 × CPU throttle at phone resolution; ~150–190 draws, 0.35–0.65 M tris.
 
+THE HIGHLANDS (2026-10-21, `public/maps/highlands/`) is built from a concept sheet (heightmap panel + colour concept +
+palette) by `scripts/blender/highlands/build.py` (`blender -b --factory-startup --python … -- OUT=<dir> [GUIDE=<png>]
+[DEBUG=<dir>]`, numpy only): the panel's grey relief → terraced plateaus with cliffs (165 m peak), a hand-placed lake +
+isle and four meandering rivers from the concept, a noisy superellipse coast, roads routed by grade-costed A* on a 6 m
+grid (water crossed only as level bridges), ~6.6 k pine sites, camps / cabins / a summit tower. Then the island's
+`roads.py` (re-grade + beds) and `map_preview.py` (card + minimap) run on it unchanged. map.json carries two optional
+keys any map can use: `palette` (sRGB hex: grass, grassDark, water, waterDeep, dirt, rock, cliff, flowers, sand →
+`groundColor` paletteOf, the road soil `uRoadSoil`, the water body + a lower sky mirror `Water.setDeep(rgb, 0.42)`) and
+`trees: 'conifer'` (forest = spruce / fir / pine only, drawn as the stylized TIERED PINE of `treeFactory.tieredPine` —
+stacked faceted skirts in the palette greens, gentle hues, no region / autumn tint). Cost: data only plus the same
+tree draws (the tiered pine replaces the Blender conifers: fewer tris); ULTRA M4 60 fps, 46–104 draws, 0.32–0.47 M tris.
+
 ## 4. Rendering
 
 - `WebGLRenderer` created by R3F, configured in `src/rendering/renderer/configureRenderer.ts`:

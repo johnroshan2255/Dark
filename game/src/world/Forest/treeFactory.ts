@@ -347,6 +347,62 @@ function pine(level: number, rng: Rng): THREE.BufferGeometry {
   return twistedPine(level, rng, isGenshin() ? { ...LIYUE_PINE, branches: 6, dark: 0x1e5246, light: 0x7cc690, bark: 0x7a5640 } : LIYUE_PINE)
 }
 
+/**
+ * TIERED PINE (2026-10-21, the Highlands' reference: low-poly stylised pines): a straight brown trunk and 4–8 stacked
+ * SKIRTS, each a ring of faceted drooping petals (lime on top, mid green flanks, dark undersides), narrowing to a
+ * pointed top. Flat-shaded facets (face normals) — the crisp low-poly read of the reference. Conifer maps
+ * (map.json `trees: 'conifer'`) grow these in place of spruce / pine / fir (`createTreeLibrary({ tiered })`):
+ * same species ids, so the impostor atlas, tints and colliders are unchanged.
+ */
+interface TieredOpts { height: number; radius: number; bare: number; tiers: [number, number, number]; petals: [number, number, number]; light: number; mid: number; dark: number; trunk: number }
+function tieredPine(level: number, rng: Rng, o: TieredOpts): THREE.BufferGeometry {
+  const s = new Soup()
+  const H = o.height * rng.range(0.92, 1.08)
+  const light = srgb(o.light), mid = srgb(o.mid), dark = srgb(o.dark), bark = srgb(o.trunk)
+  solid(s, 0, o.bare + 1.2, 0.26, 0.17, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.7), bark, 0, SURFACE_UV.bark)
+  const tri = (a: V3, b: V3, c: V3, col: THREE.Color) => {
+    // face normal (flat shading), pointing out / up
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
+    let n: V3 = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+    const L = Math.hypot(n[0], n[1], n[2]) || 1
+    n = [n[0] / L, n[1] / L, n[2] / L]
+    s.vert(a, n, SOLID_UV, col); s.vert(b, n, SOLID_UV, col); s.vert(c, n, SOLID_UV, col)
+  }
+  const tiers = o.tiers[level], petals = o.petals[level]
+  const top = H, span = top - o.bare
+  for (let t = 0; t < tiers; t++) {
+    const k = t / tiers
+    const y = o.bare + span * k * 0.88
+    const r = o.radius * Math.pow(1 - k, 0.9) + 0.35
+    const h = span / tiers * 1.75
+    const apex: V3 = [0, Math.min(top, y + h), 0]
+    const rot = rng.next() * 6.28
+    const lit = light.clone().lerp(mid, 0.45 - 0.35 * k)
+    const flank = mid.clone().lerp(dark, 0.25 - 0.15 * k)
+    const under = dark.clone()
+    for (let i = 0; i < petals; i++) {
+      const a = rot + (i / petals) * Math.PI * 2
+      const d = Math.PI / petals
+      const rr = r * rng.range(0.9, 1.08)
+      const droop = rr * rng.range(0.32, 0.46)
+      // the petal: apex → left shoulder → pointed tip (drooping) → right shoulder
+      const L: V3 = [Math.cos(a - d) * rr * 0.72, y - droop * 0.2, Math.sin(a - d) * rr * 0.72]
+      const R: V3 = [Math.cos(a + d) * rr * 0.72, y - droop * 0.2, Math.sin(a + d) * rr * 0.72]
+      const T: V3 = [Math.cos(a) * rr, y - droop, Math.sin(a) * rr]
+      tri(apex, T, L, lit)
+      tri(apex, R, T, flank)
+      if (level < 2) {
+        // the underside: dark, up to the trunk just under the skirt (seen from below / the side in shade)
+        const core: V3 = [0, y + h * 0.18, 0]
+        tri(core, L, T, under)
+        tri(core, T, R, under)
+      }
+    }
+  }
+  return s.geometry('tieredpine')
+}
+const TIERED: TieredOpts = { height: 11, radius: 2.7, bare: 1.4, tiers: [7, 5, 3], petals: [9, 7, 5], light: 0xa8e063, mid: 0x5dbb4a, dark: 0x1b4a26, trunk: 0x8b5e3c }
+
 /** The previous pine (straight pole + pads), kept for reference / comparison shots. */
 export function polePine(level: number, rng: Rng): THREE.BufferGeometry {
   const s = new Soup()
@@ -500,7 +556,7 @@ export function registerTreeSpecies(def: SpeciesDef): void {
   else EXTRA_SPECIES.push(def)
 }
 
-export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } {
+export function createTreeLibrary(opts: { tiered?: boolean } = {}): { species: SpeciesDef[]; dispose(): void } {
   const build = (fn: (l: number, r: Rng) => THREE.BufferGeometry, seed: number, name: string) =>
     [0, 1, 2].map((l) => {
       const soup = fn(l, new Rng(seed + l))
@@ -540,6 +596,20 @@ export function createTreeLibrary(): { species: SpeciesDef[]; dispose(): void } 
     if (i >= 0) species[i].levels.forEach((g) => g.dispose())
     if (i >= 0) species[i] = extra
     else species.push(extra)
+  }
+  // Conifer maps: the tiered pines replace spruce / fir / pine (after the modelled ones: they win here)
+  if (opts.tiered) {
+    const tiered: [number, string, number, TieredOpts][] = [
+      [TreeSpecies.Spruce, 'spruce', 101, TIERED],
+      [TreeSpecies.Fir, 'fir', 303, { ...TIERED, height: 8.5, radius: 2.4, tiers: [6, 4, 3] }],
+      [TreeSpecies.Pine, 'pine', 404, { ...TIERED, height: 14, radius: 3.0, bare: 2.2, tiers: [8, 5, 3] }],
+    ]
+    for (const [id, name, seed, o] of tiered) {
+      const i = species.findIndex((s) => s.id === id)
+      if (i < 0) continue
+      if (!EXTRA_SPECIES.includes(species[i])) species[i].levels.forEach((g) => g.dispose())
+      species[i] = { id, name, levels: build((l, r) => tieredPine(l, r, o), seed, name), trunkRadius: 0.26, trunkHalfHeight: 3 }
+    }
   }
   // Per-tree LOD bands (uniforms.ts uTreeLod): level 0 = band 1 (near), level 1 = band 2 (mid), level 2 = band 3
   // (the legacy far mesh, never faded). `near1` = level 1's geometry tagged as the NEAR band — LOW's near trees.

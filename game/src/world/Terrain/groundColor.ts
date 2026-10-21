@@ -85,8 +85,31 @@ const sstep = (a: number, b: number, x: number) => {
 }
 
 /** @param slope 0 flat … 1 vertical (1 − normal.y) */
+/** A fixed map's own palette (map.json `palette`) laid over the bright one: built once per map. */
+const mapPalettes = new WeakMap<object, Palette>()
+function paletteOf(fields: WorldFields): Palette {
+  const base = PALETTES[fields.palette] ?? PALETTES[0]
+  const m = fields.map
+  if (!m || !m.palette.grass) return base
+  let p = mapPalettes.get(m)
+  if (!p) {
+    const c = m.palette as Record<string, RGB>
+    const mix = (a: RGB, b: RGB, t: number): RGB => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    const g = c.grass, gd = c.grassDark ?? g
+    p = {
+      ...base,
+      // meadow: the bright grass, its sunny (flower-warmed) and darker patches; forest floor: the dark grass
+      fresh: mix(g, gd, 0.25), olive: g, golden: c.flowers ? mix(g, c.flowers, 0.22) : g, ochre: c.dirt ? mix(g, c.dirt, 0.35) : base.ochre,
+      moss: gd, litter: mix(gd, [0.02, 0.05, 0.02], 0.25), alpine: mix(g, c.cliff ?? base.rock, 0.3),
+      earth: c.rock ?? base.earth, rock: c.cliff ?? base.rock, sand: c.sand ?? c.dirt ?? base.sand, forest: 0.6,
+    }
+    mapPalettes.set(m, p)
+  }
+  return p
+}
+
 export function groundColor(fields: WorldFields, x: number, z: number, h: number, slope: number, out: RGB): RGB {
-  const P = PALETTES[fields.palette] ?? PALETTES[0]
+  const P = paletteOf(fields)
   const m = fields.colorVariation(x * 0.25, z * 0.25)
   const p = fields.colorVariation(x * 0.8 + 311, z * 0.8 - 97)
   out[0] = P.fresh[0]; out[1] = P.fresh[1]; out[2] = P.fresh[2]

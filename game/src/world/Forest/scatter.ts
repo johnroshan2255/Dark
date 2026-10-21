@@ -110,6 +110,8 @@ export function oasisAt(fields: WorldFields, wx: number, wz: number, h: number):
 }
 
 function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: number): number {
+  // a conifer map (map.json trees: 'conifer'): spruce, pine and fir stands — the reference's tiered pines
+  if (fields.map?.conifers && fields.biome(wx, wz, _bw, h)[0] < 0.5) return r < 0.5 ? TreeSpecies.Spruce : r < 0.82 ? TreeSpecies.Pine : TreeSpecies.Fir
   if (oasisAt(fields, wx, wz, h) > 0.2) return r < 0.85 ? TreeSpecies.Palm : TreeSpecies.Cactus
   if (fields.map && (fields.map.poolRing(wx, wz) > 0.3 || fields.map.palmCell(Math.floor(wx / TREE_CELL), Math.floor(wz / TREE_CELL)))) return TreeSpecies.Palm // a desert pool's palms / the map's kept palms
   if (fields.beach(wx, wz, h) > 0.4) return TreeSpecies.Palm // fixed maps: the few beach trees are palms

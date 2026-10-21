@@ -20,6 +20,13 @@ export class Water {
   readonly mesh: THREE.Mesh
   private readonly material: THREE.ShaderMaterial
 
+  /** A fixed map's own water colour (linear rgb, map.json `palette.water / waterDeep`) and how much of the sky it
+   *  mirrors at most (the default 0.75; a turquoise lake ~0.42 — its colour reads, the mirror only at grazing angles). */
+  setDeep(rgb: readonly [number, number, number], reflMax = 0.75): void {
+    ;(this.material.uniforms.uDeep.value as THREE.Color).setRGB(rgb[0], rgb[1], rgb[2])
+    this.material.uniforms.uReflMax.value = reflMax
+  }
+
   constructor() {
     this.material = new THREE.ShaderMaterial({
       name: 'Water',
@@ -44,6 +51,7 @@ export class Water {
         uReflect: { value: null as THREE.Texture | null },
         uReflectMat: { value: new THREE.Matrix4() },
         uReflectOn: { value: 0 },
+        uReflMax: { value: 0.75 },
         uBiomeMap: globalUniforms.uBiomeMap,
         uBiomeRect: globalUniforms.uBiomeRect,
         uBiomeActive: globalUniforms.uBiomeActive,
@@ -59,7 +67,7 @@ export class Water {
         ${SKY_GLSL}
         ${MIST_GLSL}
         ${BIOME_GLSL}
-        uniform sampler2D uReflect; uniform mat4 uReflectMat; uniform float uReflectOn;
+        uniform sampler2D uReflect; uniform mat4 uReflectMat; uniform float uReflectOn, uReflMax;
         uniform float uTime, uRain; uniform vec2 uFog; uniform vec3 uDeep, uKeyColor, uKeyDir;
         varying vec3 vWorld;
         vec2 wave(vec2 p, float t) {
@@ -113,7 +121,7 @@ export class Water {
           // mirror of the sky / scene on top that only takes over at grazing angles.
           refl = mix(refl, vec3(dot(refl, vec3(0.3, 0.55, 0.15))), 0.25);
           // (their oasis river: a light sky-blue body ≈ sRGB 147,194,225, the sky's pale mirror at grazing angles)
-          vec3 col = mix(uDeep, refl, clamp(0.25 + fres * 0.85, 0.0, 0.75));
+          vec3 col = mix(uDeep, refl, clamp(0.25 + fres * 0.85, 0.0, uReflMax));
           #else
           vec3 col = mix(uDeep, refl * 0.92, clamp(0.3 + fres * 1.2, 0.0, 1.0));
           #endif

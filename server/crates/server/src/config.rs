@@ -25,7 +25,7 @@ pub struct Config {
     pub maps_dir: PathBuf,
 
     /// Maps this server hosts (comma separated). The first is the default for matchmaking.
-    #[arg(long, env = "DARK_MAPS", value_delimiter = ',', default_value = "island")]
+    #[arg(long, env = "DARK_MAPS", value_delimiter = ',', default_value = "island,highlands")]
     pub maps: Vec<String>,
 
     /// HMAC secret for session tokens and join tickets (≥ 32 bytes). Share it between servers of one deployment.

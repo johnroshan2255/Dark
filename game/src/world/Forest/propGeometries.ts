@@ -166,8 +166,8 @@ function makeRock(far: boolean): THREE.BufferGeometry {
   return g
 }
 
-export function createPropGeometries(): PropGeometries {
-  const lib = createTreeLibrary()
+export function createPropGeometries(opts: { tieredPines?: boolean } = {}): PropGeometries {
+  const lib = createTreeLibrary({ tiered: opts.tieredPines })
   const rock = makeRock(false)
   const rockFar = makeRock(true)
   const { fern, bush } = createUndergrowth()

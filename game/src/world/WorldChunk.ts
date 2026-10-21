@@ -139,7 +139,10 @@ function regionLeafTint(fields: WorldFields, x: number, z: number, h: number, ou
 // Resolved when a chunk is built (not at import: the art style is set after the modules load).
 const hueSet = () => (isOverland() ? OVER_HUES : isGenshin() ? GEN_HUES : GENSHIN_HUES)
 // Blender-modelled species carry final Genshin colours in every art style (SpeciesDef.modelled).
-const huesOf = (sp: SpeciesDef) => (sp.modelled ? GEN_HUES : hueSet())[sp.id] ?? hueSet()[0]
+// A palette map's TIERED pines (map.json `trees: 'conifer'`) carry its greens in their geometry: gentle variation only.
+const TIERED_HUES = [BASE, [0.92, 1.0, 1.0] as const, [1.06, 1.05, 0.94] as const, [0.86, 0.94, 0.92] as const]
+const tieredMap = (fields: WorldFields, id: number) => !!fields.map?.conifers && (id === TreeSpecies.Spruce || id === TreeSpecies.Fir || id === TreeSpecies.Pine)
+const huesOf = (sp: SpeciesDef, fields: WorldFields) => tieredMap(fields, sp.id) ? TIERED_HUES : (sp.modelled ? GEN_HUES : hueSet())[sp.id] ?? hueSet()[0]
 const farConiferHues = (sp?: SpeciesDef) =>
   sp?.modelled ? ([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) :
   isOverland() ? ([OVER_GREEN, OVER_DEEP, OVER_GREEN, OVER_LARCH] as const) : isGenshin() ? ([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) : ([TEAL, DEEP, FRESH, BRIGHT, LIME, ORANGE] as const)
@@ -153,14 +156,14 @@ export function speciesTreeAttrs(trees: Float32Array, origin: readonly [number, 
   const tint = (o: number, out: [number, number, number]) => {
     const sp = trees[o + 5]
     biomeTint(fields, origin, trees, o, FROST_TREE, sp >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
-    if (isBroadleaf(sp) || sp === TreeSpecies.Pine) regionLeafTint(fields, origin[0] + trees[o], origin[1] + trees[o + 2], trees[o + 1], out)
+    if ((isBroadleaf(sp) || sp === TreeSpecies.Pine) && !fields.map?.conifers) regionLeafTint(fields, origin[0] + trees[o], origin[1] + trees[o + 2], trees[o + 1], out)
   }
   const out: { sp: SpeciesDef; attrs: InstanceAttributes }[] = []
   for (const sp of species) {
     // Genshin broadleaves: more per-tree shape variety (width / height / lean) — with their lopsided crowns and random
     // rotation, neighbouring trees of one species read as different silhouettes (no extra geometry or draws).
     const spreadSp = isGenshin() && (isBroadleaf(sp.id) || sp.id === TreeSpecies.Maple || sp.id === TreeSpecies.Ancient)
-    const attrs = buildInstanceAttributes(trees, TREE_STRIDE, (o) => trees[o + 5] === sp.id, 0.16, spreadSp ? 0.34 : 0.22, huesOf(sp), origin, tint)
+    const attrs = buildInstanceAttributes(trees, TREE_STRIDE, (o) => trees[o + 5] === sp.id, 0.16, spreadSp ? 0.34 : 0.22, huesOf(sp, fields), origin, tint)
     if (attrs) out.push({ sp, attrs })
   }
   return out
@@ -346,7 +349,7 @@ export class WorldChunk implements Cullable, TerrainSource {
     const treeTint = (o: number, out: [number, number, number]) => {
       const sp = data.trees[o + 5]
       biomeTint(fields, this.origin, data.trees, o, FROST_TREE, sp >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
-      if (isBroadleaf(sp) || sp === TreeSpecies.Pine) regionLeafTint(fields, this.origin[0] + data.trees[o], this.origin[1] + data.trees[o + 2], data.trees[o + 1], out)
+      if ((isBroadleaf(sp) || sp === TreeSpecies.Pine) && !fields.map?.conifers) regionLeafTint(fields, this.origin[0] + data.trees[o], this.origin[1] + data.trees[o + 2], data.trees[o + 1], out)
     }
     const rockTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.rocks, o, SNOW_ROCK, fields.palette === 0 ? SAND_ROCK_OTH : SAND_ROCK, out)
     const perSpecies = speciesTreeAttrs(data.trees, this.origin, fields, geos.trees)
@@ -373,7 +376,7 @@ export class WorldChunk implements Cullable, TerrainSource {
       [only(TreeSpecies.Maple), byId(TreeSpecies.Maple)], [only(TreeSpecies.Ancient), byId(TreeSpecies.Ancient)], [only(TreeSpecies.Shroom), byId(TreeSpecies.Shroom)],
       ...[TreeSpecies.Oak, TreeSpecies.Slender, TreeSpecies.Golden, TreeSpecies.Curvy].map((id) => [only(id), byId(id)] as const)] as const
     for (const [filter, sp] of farSets) {
-      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === spruce.id ? farConiferHues(spruce) : huesOf(sp), this.origin, treeTint)
+      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === spruce.id && !fields.map?.conifers ? farConiferHues(spruce) : huesOf(sp, fields), this.origin, treeTint)
       if (!attrs) continue
       this.far.push({
         lod1: this.add(createInstancedMesh(sp.levels[1], mats.vegetation, attrs, `far.${sp.name}.lod1`)),

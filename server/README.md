@@ -113,7 +113,7 @@ Every flag has an environment variable (`dark-server --help`).
 | `DARK_PUBLIC_WS_URL` | from the `Host` header | e.g. `wss://eu1.example.com/v1/ws` |
 | `DARK_ALLOWED_ORIGINS` | any (warns) | the game's web origin(s) |
 | `DARK_TRUST_PROXY` | false | honour `X-Forwarded-For`/`-Proto` behind a proxy / load balancer |
-| `DARK_MAPS_DIR`, `DARK_MAPS` | `../game/public/maps`, `island` | maps hosted (`<id>/map.json`, `heights.bin`) |
+| `DARK_MAPS_DIR`, `DARK_MAPS` | `../game/public/maps`, `island,highlands` | maps hosted (`<id>/map.json`, `heights.bin`) |
 | `DARK_MAX_MATCHES` | 8 | concurrent matches per process |
 | `DARK_MAX_ROOMS` | 400 | concurrent rooms per process |
 | `DARK_MATCH_CONFIG` | — | TOML overriding match rules (`dark_sim::MatchConfig`: seats, timers, zone stages, limits, interest) |

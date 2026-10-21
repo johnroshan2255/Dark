@@ -100,6 +100,7 @@ def seg_cross(r, o):
 START_AT_CROSSING = {'summit_road': 'lake_road'}
 byname = {r['name']: r for r in meta['roads']}
 for nm, onm in START_AT_CROSSING.items():
+    if nm not in byname or onm not in byname: continue  # (the island's roads; other maps don't have them)
     ks = [k for k in seg_cross(byname[nm], byname[onm]) if k > 2]
     if ks: byname[nm] = cut_road(byname[nm], ks[0] + 1, None); print(nm, 'starts at its crossing with', onm, '(dropped', ks[0] + 1, 'samples)')
 

@@ -123,7 +123,7 @@ vec3 overlandPalette(vec3 c) {
  * (wind-carved ridges) as normal perturbations, plus sun GLINTS. World-space, faded with distance (no aliasing).
  */
 const TRAIL_GLSL = /* glsl */ `
-uniform sampler2D uTrailMap; uniform vec4 uTrailRect; uniform float uTrailOn, uSurfaceDetail;
+uniform sampler2D uTrailMap; uniform vec4 uTrailRect; uniform float uTrailOn, uSurfaceDetail; uniform vec4 uRoadSoil;
 float trailAt(vec2 xz) {
   if (uTrailOn < 0.5) return 0.0;
   vec2 uv = (xz - uTrailRect.xy) * uTrailRect.zw;
@@ -226,6 +226,7 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       uTrailRect: u.uTrailRect,
       uTrailOn: u.uTrailOn,
       uSurfaceDetail: u.uSurfaceDetail,
+      uRoadSoil: u.uRoadSoil,
       uNoiseTex: u.uNoiseTex,
       uBiomeActive: u.uBiomeActive,
       uTreeShade: u.uTreeShade,
@@ -637,7 +638,7 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
     float lat = max(0.0, e + (gravelT ? 2.3 : 1.35)); // from the centreline
     float s1 = st_noise(wp * 8.0), s3 = st_noise(wp * 0.7);
     float rut = 1.0 - smoothstep(0.12, 0.36, abs(lat - (gravelT ? 0.8 : 0.74)));
-    vec3 soil = gravelT ? vec3(0.36, 0.31, 0.25) : vec3(0.31, 0.225, 0.15);
+    vec3 soil = gravelT ? vec3(0.36, 0.31, 0.25) : (uRoadSoil.w > 0.5 ? uRoadSoil.rgb : vec3(0.31, 0.225, 0.15)); // (a map's own dirt)
     vec3 loose = soil * (0.8 + 0.3 * s1 + (fine ? 0.12 * st_noise(wp * 3.1) - 0.06 : 0.0));
     if (gravelT) {
       // Loose round pebbles (one hashed pebble per 0.2 m cell, ~40 % of cells), lit on top.

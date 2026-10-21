@@ -151,15 +151,18 @@ u = np.clip((XX + HALF) / FC - 0.5, 0, fn - 1.001); v_ = np.clip((ZZ + HALF) / F
 ci = u.astype(int); cj = v_.astype(int); fu = u - ci; fv = v_ - cj
 dens = cnt[cj, ci] * (1 - fu) * (1 - fv) + cnt[cj, ci + 1] * fu * (1 - fv) + cnt[cj + 1, ci] * (1 - fu) * fv + cnt[cj + 1, ci + 1] * fu * fv
 dens = np.clip(dens / 2.5, 0, 1)
-meadow = srgb(118, 168, 52) * (1 + 0.10 * n1[..., None]) + (srgb(170, 182, 60) - srgb(118, 168, 52)) * np.clip(n3 * 1.6, 0, 1)[..., None]
-floor_ = srgb(64, 110, 38)
+PAL = meta.get('palette') or {}
+hx = lambda k, d: srgb(*[int(PAL[k][i:i + 2], 16) for i in (0, 2, 4)]) if k in PAL else d
+G1, G2 = hx('grass', srgb(118, 168, 52)), hx('grassDark', srgb(64, 110, 38))
+meadow = G1 * (1 + 0.10 * n1[..., None]) + (hx('flowers', srgb(170, 182, 60)) * 0.5 + G1 * 0.5 - G1) * np.clip(n3 * 1.6, 0, 1)[..., None] * (0.35 if 'flowers' in PAL else 1)
+floor_ = G2
 forest = meadow + (floor_ - meadow) * (dens * 0.6)[..., None]
 dune = srgb(236, 150, 98) * (1 + 0.07 * n1[..., None] + 0.04 * n2[..., None])
 strata = (np.floor((sub + 2 * n2) / 5) % 2)[..., None]
 sandstone = srgb(196, 112, 74) * (1 - 0.12 * strata)
 snow = srgb(242, 246, 253) * (1 + 0.02 * n2[..., None])
 snowrock = srgb(126, 140, 172) * (1 + 0.08 * n1[..., None])
-granite = srgb(104, 112, 62)  # forest banks / cliffs: mossy earth (grey granite read as concrete along the river)
+granite = hx('cliff', srgb(104, 112, 62)) if PAL else srgb(104, 112, 62)  # forest banks / cliffs (a map's palette: its cliff grey)
 cliff = np.clip((slope - 0.9) / 0.6, 0, 1)[..., None]
 col = (forest * (1 - cliff) + granite * cliff) * fw[..., None]
 col += (dune * (1 - cliff) + sandstone * cliff) * dw[..., None]
@@ -172,7 +175,7 @@ depth = WATER - sub
 shore = sstep(4, 0, np.abs(sub - WATER))[..., None] * (~water)[..., None]
 rim = np.where((sw > ICE_SNOW)[..., None], srgb(176, 200, 222), srgb(205, 118, 78))  # wet sand / an icy shore in the snow
 col = col * (1 - 0.35 * shore) + rim * 0.35 * shore
-seaS, seaD = srgb(124, 214, 216), srgb(34, 128, 178)
+seaS, seaD = hx('water', srgb(124, 214, 216)), hx('waterDeep', srgb(34, 128, 178))
 wc = seaS + (seaD - seaS) * sstep(0.5, 14, depth)[..., None]
 wc = wc * (1 + 0.04 * n2[..., None])
 foam = sstep(1.2, 0.2, depth)[..., None]
@@ -214,7 +217,7 @@ for r in meta['roads']:
     h = sample(H, x, z)
     h = np.where(br, np.array(r['h'] + ([r['h'][0]] if r['closed'] else [])) + OFF, h)
     bb = BIO[np.clip(np.round((z + HALF) / bg['step']).astype(int), 0, BN - 1), np.clip(np.round((x + HALF) / bg['step']).astype(int), 0, BN - 1)]
-    c0 = srgb(150, 112, 78); cd = srgb(246, 196, 146); cs = srgb(196, 206, 226)
+    c0 = hx('dirt', srgb(150, 112, 78)); cd = srgb(246, 196, 146); cs = srgb(196, 206, 226)
     c = c0 * (1 - bb[:, :1] - bb[:, 1:]) + cd * bb[:, :1] + cs * bb[:, 1:]
     c = np.where(br[:, None], srgb(140, 92, 56), c)
     edge = c * 0.62
@@ -268,14 +271,19 @@ ALL = {t: placements(t) for t in ('pine', 'oak', 'birch', 'cherry', 'pine_snow',
 SNOWY = np.vstack([a[snowy(a)] for a in ALL.values() if len(a)] or [np.zeros((0, props['stride']))])
 # forest trees: mostly round dot canopies (the game's broadleaf look), some dark-teal conifers
 p = placements('pine'); p = p[~snowy(p)]; k = len(p); gy = ground(p); r_ = rng.uniform(0, 1, k)
-broad = r_ < 0.7
+broad = r_ < (0.0 if meta.get('trees') == 'conifer' else 0.7)
 sz = rng.uniform(4.0, 6.4, k)
 greens = np.array([srgb(52, 128, 40), srgb(84, 150, 42), srgb(126, 170, 46), srgb(40, 104, 54)])
 gc = greens[rng.integers(0, 4, k)] * rng.uniform(0.9, 1.1, (k, 1))
 pos = np.stack([p[:, 0], -p[:, 2], gy + sz * 1.6], 1)
 add((ICO_V, ICO_F), pos[broad], np.stack([sz, sz, sz * 0.85], 1)[broad], gc[broad])
 hc = rng.uniform(9, 14, k)
-add((CONE_V, CONE_F), np.stack([p[:, 0], -p[:, 2], gy + 1.5], 1)[~broad], np.stack([sz * 0.75, sz * 0.75, hc], 1)[~broad], np.repeat(srgb(30, 92, 84)[None], k, 0)[~broad])
+if meta.get('trees') == 'conifer':
+    # two stacked cones per pine: the dark skirt and a brighter top (the guide's tiered pines)
+    add((CONE_V, CONE_F), np.stack([p[:, 0], -p[:, 2], gy + 1.2], 1), np.stack([sz * 0.8, sz * 0.8, hc * 0.7], 1), np.repeat(hx('grassDark', srgb(30, 92, 84))[None] * 0.7, k, 0))
+    add((CONE_V, CONE_F), np.stack([p[:, 0], -p[:, 2], gy + 1.2 + hc * 0.38], 1), np.stack([sz * 0.55, sz * 0.55, hc * 0.62], 1), np.repeat(hx('grass', srgb(30, 92, 84))[None] * 0.8, k, 0))
+else:
+    add((CONE_V, CONE_F), np.stack([p[:, 0], -p[:, 2], gy + 1.5], 1)[~broad], np.stack([sz * 0.75, sz * 0.75, hc], 1)[~broad], np.repeat(srgb(30, 92, 84)[None], k, 0)[~broad])
 p = SNOWY; k = len(p); gy = ground(p); sz = rng.uniform(2.6, 4.0, k)
 add((CONE_V, CONE_F), np.stack([p[:, 0], -p[:, 2], gy + 1.2], 1), np.stack([sz, sz, sz * 3.2], 1), np.repeat(srgb(236, 244, 250)[None], k, 0) * rng.uniform(0.92, 1.0, (k, 1)))
 add((CONE_V, CONE_F), np.stack([p[:, 0], -p[:, 2], gy + 0.6], 1), np.stack([sz * 1.1, sz * 1.1, sz * 1.4], 1), np.repeat(srgb(38, 96, 96)[None], k, 0))
