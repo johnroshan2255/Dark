@@ -1,4 +1,5 @@
 import { CHUNK_SIZE } from '../constants'
+import { hashFloat } from '../noise/rng'
 import { RoadType, type NetRoad } from '../Road/RoadNetwork'
 
 /**
@@ -22,8 +23,10 @@ export interface MapInfo {
   /** Area (km²) and the regions it contains — shown on the map card. */
   areaKm2: number
   regions: string[]
-  /** Top-down preview image (north up). */
+  /** Bird's-eye preview image (north up, ~1.38 : 1 — the map card's box; scripts/blender/island/map_preview.py). */
   preview: string
+  /** Top-down map (north up, exactly the map's 2·half square) for the in-game minimap. */
+  minimap: string
 }
 
 /** Every playable map (the "Select map" screen). Add a folder in public/maps/ + an entry here. */
@@ -34,7 +37,8 @@ export const MAPS: MapInfo[] = [
     blurb: 'Snow peaks and a frozen lake, red-rock mesas with a cliff road, a slot canyon and dune switchbacks, a stunt park, forest trails, a canyon with waterfalls and a sunny coast.',
     areaKm2: 5.76,
     regions: ['Forest', 'Desert', 'Snowfield', 'Coast', 'Canyon'],
-    preview: '/maps/island/preview.png',
+    preview: '/maps/island/preview.jpg',
+    minimap: '/maps/island/minimap.jpg',
   },
 ]
 
@@ -63,6 +67,25 @@ const ROAD_STEP = 8
 /** The map's roads are drawn for a 4.5 m jeep; Dark's ribbon / ruts look right a bit narrower. */
 const ROAD_WIDTH_SCALE = 0.75
 
+/**
+ * DESERT POOLS (2026-10-21, "no bushes everywhere — group them round small pools"; refs: desert springs, seeps and
+ * tinajas — NPS — are the desert's green spots, grass and sedge at the pool edge, shrubs clustered round it, the
+ * open sand between nearly bare): ≤ 1 per POOL_CELL cell, in the cell's lowest flat hollow on open desert (no beach,
+ * off roads and set pieces), with POOL_P chance. Each is carved into the grid at load (flattened to its centre
+ * height, a bowl POOL_DEPTH deep — the chunks, physics and grass all see it), holds water POOL_SINK below the rim,
+ * and grows a ring of grass and bushes (`poolRing`, scatter / GrassField / groundColor) and a palm or two.
+ * Deterministic (hashed per cell). The water discs are MapProps'.
+ */
+/** Share of the map's palms kept (the scatter grows them as Dark's palms) and the tree cell they're keyed by (m). */
+const PALM_KEEP = 0.2
+const PALM_CELL = 4
+const palmKey = (gx: number, gz: number) => (gx + 32768) * 65536 + (gz + 32768)
+const POOL_CELL = 120
+const POOL_P = 0.55
+const POOL_DEPTH = 1.1
+const POOL_SINK = 0.35
+export interface Pool { x: number; z: number; /** water radius (m) */ r: number; /** water surface (world y) */ y: number }
+
 /** Sea-proximity grid cell (m) and reach (m) for beach(); sand under BEACH_TOP m that close to the sea is beach. */
 const SEA_CELL = 32
 const SEA_NEAR_R = 224
@@ -90,6 +113,17 @@ export class FixedMap {
   /** The map's prop placements (heights in map metres: add heightOffset) — MapProps draws the set pieces. */
   readonly props: MapProps
   readonly heightOffset: number
+  /** The roads' BRIDGES: each run of bridge samples with the bank sample before and after (deck centre line, world
+   *  heights) and the deck half width — MapProps builds Dark's plank bridge along it. */
+  readonly bridges: { xs: number[]; zs: number[]; ys: number[]; hw: number }[] = []
+  /** Desert pools (see POOL_CELL) and their lookup grid (cell index → pool index, −1 none). */
+  readonly pools: Pool[] = []
+  /** The map's PALMS kept (2026-10-21, "beach trees to 20 %"): a fifth of its palm placements (hashed), as 4 m
+   *  tree-cell keys — the scatter grows Dark's palm in each (scatter.treeAccept); MapProps no longer draws the map's
+   *  clay palms. */
+  private readonly palmCells = new Set<number>()
+  private readonly poolGrid: Int32Array
+  private readonly pn: number
   private readonly h: Float32Array
   private readonly n: number
   private readonly step: number
@@ -178,6 +212,128 @@ export class FixedMap {
       }
     }
     this.roads = meta.roads.map((r) => toNetRoad(r, meta.heightOffset))
+    for (const r of meta.roads) {
+      for (let i = 0; i < r.bridge.length; i++) {
+        if (!r.bridge[i] || (i > 0 && r.bridge[i - 1])) continue
+        let j = i
+        while (j + 1 < r.bridge.length && r.bridge[j + 1]) j++
+        const a = Math.max(0, i - 1), b = Math.min(r.x.length - 1, j + 1)
+        const idx = Array.from({ length: b - a + 1 }, (_, k) => a + k)
+        this.bridges.push({ xs: idx.map((k) => r.x[k]), zs: idx.map((k) => r.z[k]), ys: idx.map((k) => r.h[k] + meta.heightOffset), hw: r.halfWidth * ROAD_WIDTH_SCALE + 0.4 })
+      }
+    }
+    for (const types of Object.values(props.placements)) {
+      const a = types.palm
+      if (!a) continue
+      for (let o = 0; o < a.length; o += props.stride) {
+        if (hashFloat(5531, Math.round(a[o] * 10), Math.round(a[o + 2] * 10)) < PALM_KEEP) this.palmCells.add(palmKey(Math.floor(a[o] / PALM_CELL), Math.floor(a[o + 2] / PALM_CELL)))
+      }
+    }
+    this.pn = Math.ceil((2 * this.half) / POOL_CELL)
+    this.poolGrid = new Int32Array(this.pn * this.pn).fill(-1)
+    this.placePools(props)
+  }
+
+  /** Pick and carve the desert pools (see POOL_CELL). */
+  private placePools(props: MapProps): void {
+    const pieces: number[] = []
+    for (const types of Object.values(props.placements)) {
+      for (const [t, a] of Object.entries(types)) {
+        if (NATURE.has(t)) continue
+        for (let o = 0; o < a.length; o += props.stride) pieces.push(a[o], a[o + 2])
+      }
+    }
+    const bw: [number, number] = [0, 0]
+    const slope = (x: number, z: number) => Math.hypot(this.height(x + 3, z) - this.height(x - 3, z), this.height(x, z + 3) - this.height(x, z - 3)) / 6
+    for (let cj = 0; cj < this.pn; cj++) {
+      for (let ci = 0; ci < this.pn; ci++) {
+        if (hashFloat(9173, ci, cj, 1) > POOL_P) continue
+        let best: [number, number, number] | null = null
+        for (let k = 0; k < 10; k++) {
+          const x = -this.half + (ci + 0.15 + 0.7 * hashFloat(9173, ci, cj, 10 + k)) * POOL_CELL
+          const z = -this.half + (cj + 0.15 + 0.7 * hashFloat(9173, ci, cj, 30 + k)) * POOL_CELL
+          if (!this.inside(x, z, 40)) continue
+          const h = this.height(x, z)
+          if (h < 1 || this.biome(x, z, bw)[0] < 0.85 || this.beach(x, z, h) > 0.02 || slope(x, z) > 0.1) continue
+          if (this.onRoad(x, z, 16)) continue
+          let near = false
+          for (let p = 0; p < pieces.length && !near; p += 2) near = Math.hypot(pieces[p] - x, pieces[p + 1] - z) < 28
+          if (near) continue
+          if (!best || h < best[2]) best = [x, z, h] // the lowest flat spot: water gathers in hollows
+        }
+        if (!best) continue
+        const [x, z, h0] = best
+        const r = 2.6 + 2.6 * hashFloat(9173, ci, cj, 2)
+        this.pools.push({ x, z, r, y: h0 - POOL_SINK })
+        this.poolGrid[cj * this.pn + ci] = this.pools.length - 1
+        // carve: flatten toward the centre height out to rb + 4 m, then a smooth bowl of radius rb (the water's edge
+        // where the bowl is POOL_SINK deep: rb = r / √(1 − √(SINK / DEPTH)))
+        const rb = r / Math.sqrt(1 - Math.sqrt(POOL_SINK / POOL_DEPTH)), R = rb + 4
+        const i0 = Math.max(0, Math.floor((x - R - this.ox) / this.step)), i1 = Math.min(this.n - 1, Math.ceil((x + R - this.ox) / this.step))
+        const j0 = Math.max(0, Math.floor((z - R - this.oz) / this.step)), j1 = Math.min(this.n - 1, Math.ceil((z + R - this.oz) / this.step))
+        for (let j = j0; j <= j1; j++) {
+          for (let i = i0; i <= i1; i++) {
+            const d = Math.hypot(this.ox + i * this.step - x, this.oz + j * this.step - z)
+            if (d >= R) continue
+            const t = Math.min(1, (R - d) / 4), flat = t * t * (3 - 2 * t)
+            const k = j * this.n + i
+            let y = this.h[k] + (h0 - this.h[k]) * flat
+            if (d < rb) { const u = 1 - (d / rb) ** 2; y -= POOL_DEPTH * u * u }
+            this.h[k] = y
+          }
+        }
+      }
+    }
+  }
+
+  /** 0..1 at (x, z): the green ring round a desert pool (1 from its water's edge out ~6 m, fading by ~11 m); 0 in the
+   *  water and away from pools. */
+  poolRing(x: number, z: number): number {
+    const d = this.poolDist(x, z)
+    return d < 0.4 || d > 11 ? 0 : d < 6 ? 1 : 1 - (d - 6) / 5
+  }
+
+  /** Distance (m) from (x, z) to the nearest desert pool's water edge (< 0 in the water; Infinity: none near). */
+  poolDist(x: number, z: number): number {
+    if (!this.pools.length) return Infinity
+    const ci = Math.floor((x + this.half) / POOL_CELL), cj = Math.floor((z + this.half) / POOL_CELL)
+    let best = Infinity
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      const i = ci + di, j = cj + dj
+      if (i < 0 || j < 0 || i >= this.pn || j >= this.pn) continue
+      const pi = this.poolGrid[j * this.pn + i]
+      if (pi < 0) continue
+      const p = this.pools[pi]
+      best = Math.min(best, Math.hypot(x - p.x, z - p.z) - p.r)
+    }
+    return best
+  }
+
+  /** Does tree cell (gx, gz) (PALM_CELL m: the scatter's TREE_CELL) hold one of the map's kept palms? */
+  palmCell(gx: number, gz: number): boolean {
+    return this.palmCells.has(palmKey(gx, gz))
+  }
+
+  /** In a desert pool's water (x, z)? */
+  inPool(x: number, z: number): boolean {
+    const ci = Math.floor((x + this.half) / POOL_CELL), cj = Math.floor((z + this.half) / POOL_CELL)
+    if (ci < 0 || cj < 0 || ci >= this.pn || cj >= this.pn) return false
+    const pi = this.poolGrid[cj * this.pn + ci]
+    return pi >= 0 && Math.hypot(x - this.pools[pi].x, z - this.pools[pi].z) < this.pools[pi].r + 0.4
+  }
+
+  /** Is (x, z) within `margin` m of a road's drawn edge? (Linear in the map's road samples: for load-time checks.) */
+  onRoad(x: number, z: number, margin = 0): boolean {
+    for (const r of this.roads) {
+      const m = r.halfWidth + margin
+      if (x < r.minX - m || x > r.maxX + m || z < r.minZ - m || z > r.maxZ + m) continue
+      for (let i = 0; i < r.n - 1; i++) {
+        const ax = r.xs[i], az = r.zs[i], ex = r.xs[i + 1] - ax, ez = r.zs[i + 1] - az
+        const t = Math.max(0, Math.min(1, ((x - ax) * ex + (z - az) * ez) / Math.max(1e-6, ex * ex + ez * ez)))
+        if (Math.hypot(ax + ex * t - x, az + ez * t - z) < m) return true
+      }
+    }
+    return false
   }
 
   /** Terrain height (world y) at (x, z): bilinear on the grid; past the map edge it falls off to the sea floor. */

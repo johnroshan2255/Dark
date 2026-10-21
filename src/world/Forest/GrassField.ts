@@ -423,6 +423,13 @@ export class GrassField {
     // Genshin: a full carpet even near trees (its meadows never show bare soil between the blades).
     const floor = isGenshin() ? 0.72 : 0.45
     v = (floor + (1 - floor) * (1 - this.fields.forestDensity(x, z, h))) * bare
+    // Fixed maps: no stray tufts on the open desert / beach sand — the desert's grass grows round its pools
+    // (FixedMap.poolRing: refs — grass and sedge ring a desert spring's water).
+    const map = this.fields.map
+    if (map) {
+      const sand = this.fields.biome(x, z, _bw)[0]
+      if (sand > 0.01) v = v * (1 - sand) + sand * 0.85 * map.poolRing(x, z)
+    }
     // Bright autumn: no grass on the snow patches; remember the autumn weight for the tussock clumping.
     const au = _wn[Biome.Autumn]
     v *= 1 - this.fields.autumnSnow(x, z, au)

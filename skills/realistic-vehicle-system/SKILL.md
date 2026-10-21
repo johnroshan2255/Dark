@@ -466,7 +466,9 @@ YAW ONLY and g_t gravity in the contact plane. Cancelling the full patch velocit
 the body about its tyres every step and it walks — 1–7 cm per 6 s on 15°, even uphill; with travel + yaw: 0.0 cm.
 Full gain: Rapier's spring impulse has already acted in this step, any less creeps. **Hill-start assist:** for
 1.5 s after the hold lets go (still < 1.5 m/s), the static force may only push the way the car drives — it never
-rolls back before the clutch bites.
+rolls back before the clutch bites. With the OFF-ROAD ASSIST (`Drivetrain.steepHold`, 2026-10-21) the hold reaches
+further: full below 0.8 m/s, none above 4 m/s (it catches a car that started to slide back down a steep climb —
+with 0.8 m/s it free-rolled down the hill for good), and the hill-start window is 4 s below 3 m/s.
 
 **Outputs:** `rpm`, `gear` (−1 R, 0 N, 1…n; EV shows D), `selector`, `shifting`, `load`, `clutch`, `boost`, `regen`,
 `lowRange`, `locks`, and per wheel `ω`, `κ`, `α`, `Fz`, `surface`.
@@ -665,7 +667,8 @@ if (tyreW > 0.0) {
 
 Normals are computed before `begin_vertex`, so repeat the test in `beginnormal_vertex` to bend them.
 
-**Off-road assist** (gameplay, Settings, on by default; off = the real machine, which every realism test drives):
+**Off-road assist** (gameplay, Settings, on by default again since 2026-10-21 — settings v8 — "cars must climb up to
+70°, the tyres just spin"; off = the real machine, which every realism test drives):
 engine torque × 1.6 (× 2.2 on steep ground); on a slope over ~20° (contact normals) the part-time 4×4 goes into
 4H / a permanent one locks its centre, the axles lock, 1st is held below 50 km/h, TCS and launch control run
 whatever the aids, and a SLOPE LIMITER at the COM cancels the steeper part of the slope (uphill force + press into
@@ -769,6 +772,29 @@ animation, latched shut, or swinging free from the car's acceleration and the wi
   returns, each wheel's ω set to the ground speed and the box back in gear. The handoff is the same for every car;
   the only per-car boat data is the fitted hull. Tested: keel crawl ≤ 16 km/h with the hull out, drives off after.
 
+- **Body colliders vs the ground (2026-10-21, "the car gets stuck all the time"):** the car's EXACT body (its render
+  mesh as a trimesh, `Groups.VehicleMesh`) meets trees, rocks, props, debris, monsters, the bike and other cars — but
+  never a static TRIMESH: terrain, road ribbon (`Groups.TerrainMesh`), rock formations and map ramps / bridges
+  (`Groups.StaticMesh`, whose filter is `STATIC_MESH_FILTER`). Two hollow shells have no inside: a ground triangle
+  that slipped into the body over a crest, a ditch or a bridge lip was pushed on from both sides and clamped the car
+  (headless drive probe `scripts/drive-probe.mjs`: 255–2 300 mesh ⇄ ribbon contacts at every stall). The ground
+  meets the inset convex HULLS (`hulls.ts`, ≥ 2 cm inside the body, friction 0.15 so a car on its belly is pushed
+  off by its wheels) — convex ⇄ trimesh always resolves outward. The per-chunk trimesh copy of the heightfield
+  (`PhysicsWorld.vehicleGround`, 2 k tris / chunk, rebuilt on every chunk change) was only there for the body mesh
+  and is gone. Probe on The Island (15 runs, ~4 km, autopilot at 35 km/h on roads and straight off-road): body-on-
+  ground stalls 0 (was every stall); what's left is driving into a tree or rock (a wall).
+  **Respawn** (R / ⟲): the car is put down 0.5 m above the ground (`RESPAWN_DROP`) and drops onto its wheels — set
+  down exactly on the ground, a car stuck in a ditch or on a lip was put back into the same grip.
+  **Never keep a `Car` across a wreck**: `Game.respawnCar` swaps the car (async, after loading the model) and
+  disposes the old one; reading a disposed body makes Rapier panic (`RuntimeError: unreachable`), and a panic leaves
+  the world borrowed — every later Rapier call throws "recursive use of an object" and the physics is dead. Read
+  `game.car` each time (the drive probe once held it and froze the world that way).
+- **Cornering assist** (aids Full, `TruckSim.cornerAssist`, 2026-10-21 "at speed it only turns slowly"): from 25 km/h
+  (full at 50) the yaw rate is raised toward the key's turn up to 1.8 g on any ground but ice / slick snow (μ < 0.35:
+  1.8 × μ), the velocity follows the nose at up to the same, and ESC aims for the assist's target
+  (`Drivetrain.assistYaw`) — before, ESC saw the assisted turn as oversteer and braked it away. Full key at 95 km/h on
+  dirt: 64–69° in 2 s, 0° slip (was 46–53°); on the island's beach at 58 km/h: 89° in 2 s, speed kept (was 37° and
+  a spin). `scripts/handling-probe.mjs` measures it in the game.
 - **Damage (GTA-style, `gameplay/vehicle/Damage.ts`):** an impact = the chassis' velocity change over the last 4
   fixed steps (67 ms) with gravity added back, above 6 m/s (tyres, brakes and suspension never change it that fast;
   walls, trees, rocks and hard landings do) → damage ≈ 4 % per m/s over (≤ 45 % a hit, 0.3 s cooldown; a 12 m drop ≈

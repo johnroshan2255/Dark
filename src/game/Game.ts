@@ -278,7 +278,7 @@ export class Game {
     })
     this.world = new WorldManager(opts.seed, this.materials, physics, map)
     if (map) {
-      this.mapProps = new MapProps(map, physics)
+      this.mapProps = new MapProps(map, physics, this.materials)
       this.world.root.add(this.mapProps.root)
     }
     this.biomeMap = new BiomeMap(this.world.fields.biomes)
@@ -950,8 +950,6 @@ export class Game {
       .add({
         name: 'car',
         update: (dt) => {
-          // The car's exact body meets the terrain as a trimesh copy of the chunks around it (rebuilt on a chunk change).
-          if (this.car.sim.enabled) this.physics.vehicleGround(this.car.pos.x, this.car.pos.z)
           this.car.showDriver = this.cameraCtl.mode === 'tpp'
           this.car.wipers = Math.min(1, this.weather.rain * 1.6) // (wipers sweep with the rain)
           if (this.wreckClock > 0 && (this.wreckClock -= dt) <= 0) this.respawnCar()

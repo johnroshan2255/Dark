@@ -149,6 +149,17 @@ export function groundColor(fields: WorldFields, x: number, z: number, h: number
       if (wl < 14) lerp(d, OASIS_SCRUB, Math.min(1, (14 - wl) / 5) * sstep(0.55, 0.68, fields.colorVariation(x * 4 + 11, z * 4 - 7)) * 0.9)
       if (wl < 7) lerp(d, P.olive, Math.min(1, (7 - wl) / 4) * sstep(0.25, 0.6, m * 0.6 + fine * 0.4 + (7 - wl) / 14) * 0.85)
       if (wl < 0.8) lerp(d, OASIS_WET, Math.min(1, (0.8 - wl) / 0.8) * 0.7)
+      // Fixed maps: a DESERT POOL (FixedMap.pools) — green scrub and olive ground round it, patchy toward the edge
+      // of its ring, and dark wet sand at the water's edge.
+      if (fields.map) {
+        const pd = fields.map.poolDist(x, z)
+        if (pd < 12) {
+          const ring = pd < 6 ? 1 : 1 - (pd - 6) / 6
+          lerp(d, P.olive, ring * sstep(0.2, 0.55, m * 0.5 + fine * 0.5 + ring * 0.4) * 0.85)
+          lerp(d, OASIS_SCRUB, ring * sstep(0.5, 0.7, fields.colorVariation(x * 4 + 11, z * 4 - 7) + ring * 0.25) * 0.8)
+          if (pd < 1.6) lerp(d, OASIS_WET, Math.min(1, (1.6 - pd) / 1.2) * 0.8)
+        }
+      }
     } else if (wl < 1.5) lerp(d, PLAYA, Math.min(1, (1.5 - wl) / 1.5) * 0.85)
     lerp(out, d, w[0])
   }

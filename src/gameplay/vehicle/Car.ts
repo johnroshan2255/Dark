@@ -72,6 +72,8 @@ const BOAT_TIME = 2.2
  *  front-biased pressure to hold the fronts against the spinning rears' push, not so much that a modest engine can't
  *  turn the rear brakes (pickup and Żuk: rears spin, < 1 m of creep; tests/drivetrain.test.ts). */
 const BURN_BRAKE = 0.75
+/** Respawn: put down this high above the ground (m) and let it drop onto its wheels. */
+const RESPAWN_DROP = 0.5
 const CLUNKS = [0.3, 0.5, 0.72, 0.85, 0.96]
 
 export class Car {
@@ -633,8 +635,9 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
 
   /** Park at (x, z) on the solid ground (a cave's rock floor too); `nearY` = a height near there (e.g. the car's own
    *  before a swap) so the ground is found under a cave roof — else from above the uncarved hill. */
-  park(x: number, z: number, heading: number, nearY?: number): void {
-    this.sim.place(x, this.solid(x, z, nearY ?? this.fields.heightNoCave(x, z) + 1.4), z, heading)
+  /** @param drop height above the ground to let it fall from (m; 0 = standing on its wheels) */
+  park(x: number, z: number, heading: number, nearY?: number, drop = 0): void {
+    this.sim.place(x, this.solid(x, z, nearY ?? this.fields.heightNoCave(x, z) + 1.4) + drop, z, heading)
     this.readPose(this.curP, this.curQ)
     this.prevP.copy(this.curP)
     this.prevQ.copy(this.curQ)
@@ -644,8 +647,9 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
   /**
    * RESPAWN (R while driving / the ⟲ button): the car back on its wheels where it is — upright, still, on the
    * ground, same heading — for a car wedged on a rock, between trunks or on its roof. If its box there overlaps a
-   * trunk / rock / prop it takes the nearest clear spot within 9 m (rings of 3 m). Returns false for a wreck (the
-   * game brings a new car) or on the water.
+   * trunk / rock / prop it takes the nearest clear spot within 9 m (rings of 3 m). It is put down RESPAWN_DROP m
+   * above the ground and falls onto its wheels (set down exactly on the ground, a car stuck in a ditch or on a lip
+   * was put back into the same grip). Returns false for a wreck (the game brings a new car) or on the water.
    */
   respawnHere(): boolean {
     if (this.damage.wrecked) return false
@@ -663,12 +667,12 @@ float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.
         const y = this.solid(x, z, y0 + 2)
         const c = { x: x + cs * this.boxCz, y: y + this.boxCy + 0.2, z: z + cc * this.boxCz }
         if (this.physics.world.intersectionWithShape(c, q, box, undefined, filter, undefined, this.sim.body)) continue
-        this.park(x, z, h, y + 0.6)
+        this.park(x, z, h, y + 0.6, RESPAWN_DROP)
         this.sim.drivetrain?.reset()
         return true
       }
     }
-    this.park(x0, z0, h, y0 + 2) // boxed in all round: upright where it is
+    this.park(x0, z0, h, y0 + 2, RESPAWN_DROP) // boxed in all round: upright where it is
     return true
   }
   private respawnBox: InstanceType<PhysicsWorld['R']['Cuboid']> | null = null

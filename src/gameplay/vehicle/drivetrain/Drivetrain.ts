@@ -184,6 +184,13 @@ export class Drivetrain {
   absOn = false
   tcsOn = false
   escOn = false
+  /** The cornering assist's target yaw rate this step (rad/s, ch.yawRate's sign; 0 = not assisting — TruckSim):
+   *  ESC steers toward it instead of the tyres' own limit, or it brakes away the turn the assist adds. */
+  assistYaw = 0
+  /** Off-road assist (TruckSim): the brake hold catches a car already rolling back (≤ 4 m/s, real: 0.8) and the
+   *  hill-start assist keeps it from rolling back for 4 s of pulling away below 3 m/s (real: 1.5 s, 1.5 m/s) — a car
+   *  that slipped on a steep climb rolled down the hill for good (2026-10-21, "the tyres just spin, it stays there"). */
+  steepHold = false
   /** Gameplay torque multiplier (Settings → Off-road assist: 1.6 on the flat; TruckSim raises it on steep climbs)
    *  — 1 = the real machine. Scales the engine, the clutch's capacity and the converter together. */
   torqueBoost = 1
@@ -514,7 +521,7 @@ export class Drivetrain {
     // the static force only ever pushes the way it's driving, until the drive takes over.
     if (hold) this.hillStart = 0
     else this.hillStart += dt
-    const assist = !hold && this.hillStart < 1.5 && Math.abs(speed) < 1.5 && this.selector !== 'N'
+    const assist = !hold && this.hillStart < (this.steepHold ? 4 : 1.5) && Math.abs(speed) < (this.steepHold ? 3 : 1.5) && this.selector !== 'N'
     const dir = this.selector === 'R' ? -1 : 1
     // BOTH PEDALS (a brake-stand): a driven wheel the engine turns against its brake is FREE — its sliding tyre
     // pushes the car (Fx from the slip) and is no part of the static hold. The braked wheels that do hold react
@@ -543,7 +550,8 @@ export class Drivetrain {
       }
       if (wi.contact && wi.Fz > 0 && hold && !this.free[i]) {
         const v = Math.hypot(wi.vx, wi.vy)
-        const k = Math.min(1, Math.max(0, 1.25 - v / 0.64)) // full hold below 0.16 m/s, none above 0.8
+        // full hold below 0.16 m/s, none above 0.8 (steepHold: below 0.8, none above 4)
+        const k = Math.min(1, Math.max(0, 1.25 - v / (this.steepHold ? 3.2 : 0.64)))
         if (k > 0) {
           const mShare = sumFz > 0 ? (this.mass * wi.Fz) / sumFz : this.mass / n
           // All of the slope's pull and of the body's own travel (Rapier's spring impulse already acted this step).
@@ -1152,6 +1160,7 @@ export class Drivetrain {
     let rRef = (v * Math.tan(d)) / (L * (1 + 0.003 * v * v))
     const lim = (this.grips[0].mu * ch.g) / v
     rRef = Math.max(-lim, Math.min(lim, rRef))
+    if (this.assistYaw !== 0 && Math.abs(this.assistYaw) > Math.abs(rRef) && (rRef === 0 || Math.sign(this.assistYaw) === Math.sign(rRef))) rRef = this.assistYaw
     const err = ch.yawRate - rRef
     if (Math.abs(err) < 0.08) return
     const amt = Math.min(0.6, (Math.abs(err) - 0.08) * 2)

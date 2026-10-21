@@ -455,7 +455,7 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     const h = turned(t)
     let maxSlip = 0
     run(p, t, 2, { throttle: 0.5, steer: -1 }, () => { h.step(); maxSlip = Math.max(maxSlip, Math.atan2(Math.abs(t.lateral), Math.max(1, Math.abs(t.speed)))) })
-    check(`${id}: full key at 95 km/h on dirt turns (> 35° in 2 s, slide < 15°)`, deg(h.total()) > 35 && deg(maxSlip) < 15 && t.axesUp() > 0.8, `${deg(h.total()).toFixed(0)}°, slip ${deg(maxSlip).toFixed(0)}°`)
+    check(`${id}: full key at 95 km/h on dirt turns (> 55° in 2 s, slide < 15°)`, deg(h.total()) > 55 && deg(maxSlip) < 15 && t.axesUp() > 0.8, `${deg(h.total()).toFixed(0)}°, slip ${deg(maxSlip).toFixed(0)}°`)
     p.dispose()
   }
   // ---------------- body ----------------

@@ -62,6 +62,7 @@ function scatter(
       const scale = accept(wx, wz, r2, h)
       if (scale <= 0) continue
       if (layer !== Layer.Rocks && h < WorldFields.WATER + 0.9) continue // no trees/plants in water
+      if (fields.map?.inPool(wx, wz)) continue // nor in a desert pool (FixedMap.pools)
       // Cliffs are bare rock (crags clad them): nothing grows on slopes the crags start on (Formations/crags.ts).
       gridSlope(heights, lx, lz, _sg)
       if (_sg[0] * _sg[0] + _sg[1] * _sg[1] > CRAG_SLOPE0 * CRAG_SLOPE0) continue
@@ -110,6 +111,7 @@ export function oasisAt(fields: WorldFields, wx: number, wz: number, h: number):
 
 function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: number): number {
   if (oasisAt(fields, wx, wz, h) > 0.2) return r < 0.85 ? TreeSpecies.Palm : TreeSpecies.Cactus
+  if (fields.map && (fields.map.poolRing(wx, wz) > 0.3 || fields.map.palmCell(Math.floor(wx / TREE_CELL), Math.floor(wz / TREE_CELL)))) return TreeSpecies.Palm // a desert pool's palms / the map's kept palms
   if (fields.beach(wx, wz, h) > 0.4) return TreeSpecies.Palm // fixed maps: the few beach trees are palms
   const sp = pickBaseSpecies(fields, wx, wz, r, h)
   return sp === TreeSpecies.Birch ? broadleafStand(fields, wx, wz) : sp
@@ -160,39 +162,72 @@ function pickBaseSpecies(fields: WorldFields, wx: number, wz: number, r: number,
   return r < 0.45 ? TreeSpecies.Spruce : r < 0.7 ? TreeSpecies.Fir : r < 0.85 ? TreeSpecies.Birch : TreeSpecies.Pine
 }
 
+/** Road corridor kept open of trees (refer/roads hero: grassy verges, trees set back, a long view down the road). */
+const CLEAR_ROAD = WorldFields.ROAD_HALF_WIDTH + 9
+
+/** A tree at (wx, wz)? Its scale, or 0 (the tree layer's accept — also asked by beachTreeNear). */
+function treeAccept(fields: WorldFields, wx: number, wz: number, r: number, h: number): number {
+  const d = fields.roadDistance(wx, wz)
+  if (d < CLEAR_ROAD) return 0
+  if (nearBridge(fields, wx, wz, 4) || nearCamp(fields, wx, wz, 3)) return 0 // rope bridges / camps: clear
+  // Forest thickens with distance from the road (verge → treeline), instead of a wall at the kerb.
+  // Desert (Sumeru): mostly BARE sand and rock — cacti and Joshua trees only in scattered clumps (~1/4 of
+  // the ground), a lone one now and then between them (forestDensity is ~0 on sand).
+  const sand = fields.biome(wx, wz, _bw, h)[0]
+  const clump = Math.min(1, Math.max(0, (fields.colorVariation(wx * 0.5 + 91, wz * 0.5 - 37) - 0.62) * 5))
+  // Trees: 60 % of the grove density (the player asked for fewer — more open meadow between thinner groves).
+  // Fixed maps: the BEACH stays open — a tenth of the trees, and its low sand no longer counts as oasis palm
+  // groves (2026-10-21, "remove lot of rocks and trees from beach area").
+  // 2026-10-21 ("reduce beach trees to 20 %"): none of its own — only the map's kept palms (below), each with a
+  // bush clump round it (beachTreeNear).
+  const beach = fields.beach(wx, wz, h)
+  const density = Math.max(fields.forestDensity(wx, wz, h) * TREE_SHARE, sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - CLEAR_ROAD) / 45) * (fields.palette === 1 ? 0.55 : 1) * (1 - beach) // overland: big trees, spaced
+  // Fixed maps: a palm or two at each desert pool (FixedMap.poolRing; pickSpecies makes them palms).
+  if (fields.map) {
+    const ring = fields.map.poolRing(wx, wz)
+    if (ring > 0.5 && r < 0.035 * ring) return 0.9 + r * 8
+    // the map's kept palms (FixedMap.palmCell: a fifth of its palm sites) — the beach's only trees
+    if (fields.map.palmCell(Math.floor(wx / TREE_CELL), Math.floor(wz / TREE_CELL))) return 0.95 + r * 0.4
+  }
+  const oas = oasisAt(fields, wx, wz, h) * (1 - 0.9 * beach)
+  if (oas > 0.2) { // palm groves along the oasis water
+    const dp = 0.45 * oas
+    return r > dp ? 0 : 0.85 + (r / dp) * 0.4
+  }
+  if (r > density * 0.9) return 0
+  return 1.0 + (r / Math.max(density, 1e-3)) * 0.65 // tall framing trees (refs)
+}
+
+/**
+ * Distance (m) from (wx, wz) to the nearest BEACH tree within 5 m (Infinity: none) — the tree layer's own hashed
+ * cells recomputed (scatter: cell gx → x = (gx + 0.1 + 0.8·r0)·TREE_CELL), so a plant can grow in its clump without
+ * the trees being stored. (Beach trees: fixed maps' beach ≥ 0.4, ~4 neighbouring cells × a few field reads.)
+ */
+function beachTreeNear(fields: WorldFields, wx: number, wz: number): number {
+  let best = Infinity
+  const seed = fields.seed, L = Layer.Trees * 16
+  for (let gz = Math.floor((wz - 5) / TREE_CELL); gz <= Math.floor((wz + 5) / TREE_CELL); gz++) {
+    for (let gx = Math.floor((wx - 5) / TREE_CELL); gx <= Math.floor((wx + 5) / TREE_CELL); gx++) {
+      const x = (gx + 0.1 + 0.8 * hashFloat(seed, gx, gz, L)) * TREE_CELL, z = (gz + 0.1 + 0.8 * hashFloat(seed, gx, gz, L + 1)) * TREE_CELL
+      const d = Math.hypot(x - wx, z - wz)
+      if (d >= best || d > 5) continue
+      const h = fields.height(x, z)
+      if (h < WorldFields.WATER + 0.9 || fields.beach(x, z, h) < 0.4) continue
+      if (treeAccept(fields, x, z, hashFloat(seed, gx, gz, L + 2), h) > 0) best = d
+    }
+  }
+  return best
+}
+
 const _di = detailInfo()
 export function scatterForest(fields: WorldFields, cx: number, cz: number, heights: Float32Array, treesOnly = false) {
   const ctx: ScatterCtx = { fields, cx, cz, heights }
-  // Open road corridor (refer/roads hero): grassy verges, trees set back, a long view down the road.
-  const clearRoad = WorldFields.ROAD_HALF_WIDTH + 9
-
   const trees = scatter(
     ctx,
     TREE_CELL,
     Layer.Trees,
     TREE_STRIDE,
-    (wx, wz, r, h) => {
-      const d = fields.roadDistance(wx, wz)
-      if (d < clearRoad) return 0
-      if (nearBridge(fields, wx, wz, 4) || nearCamp(fields, wx, wz, 3)) return 0 // rope bridges / camps: clear
-      // Forest thickens with distance from the road (verge → treeline), instead of a wall at the kerb.
-      // Desert (Sumeru): mostly BARE sand and rock — cacti and Joshua trees only in scattered clumps (~1/4 of
-      // the ground), a lone one now and then between them (forestDensity is ~0 on sand).
-      const sand = fields.biome(wx, wz, _bw, h)[0]
-      const clump = Math.min(1, Math.max(0, (fields.colorVariation(wx * 0.5 + 91, wz * 0.5 - 37) - 0.62) * 5))
-      // Trees: 60 % of the grove density (the player asked for fewer — more open meadow between thinner groves).
-      // Fixed maps: the BEACH stays open — a tenth of the trees, and its low sand no longer counts as oasis palm
-      // groves (2026-10-21, "remove lot of rocks and trees from beach area").
-      const beach = fields.beach(wx, wz, h)
-      const density = Math.max(fields.forestDensity(wx, wz, h) * TREE_SHARE, sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - clearRoad) / 45) * (fields.palette === 1 ? 0.55 : 1) * (1 - 0.9 * beach) // overland: big trees, spaced
-      const oas = oasisAt(fields, wx, wz, h) * (1 - 0.9 * beach)
-      if (oas > 0.2) { // palm groves along the oasis water
-        const dp = 0.45 * oas
-        return r > dp ? 0 : 0.85 + (r / dp) * 0.4
-      }
-      if (r > density * 0.9) return 0
-      return 1.0 + (r / Math.max(density, 1e-3)) * 0.65 // tall framing trees (refs)
-    },
+    (wx, wz, r, h) => treeAccept(fields, wx, wz, r, h),
     (wx, wz, r, h) => pickSpecies(fields, wx, wz, r, h),
   )
 
@@ -233,8 +268,21 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     // SMALL bushes only, and ~40 % of the old count (the player asked for few, small ones): 0.45–0.8 scale
     // (was 0.7–1.6 — the big leafy mounds), a lighter verge band.
     const density = ((0.1 + fields.forestDensity(wx, wz, h) * 0.28 + Math.max(0, verge) * 1.1) * (1 - w[0] - w[1]) * 0.4 * Math.min(1.6, reg) + w[0] * (fields.palette === 0 ? 0.11 + 0.35 * oasisAt(fields, wx, wz, h) : 0.05)) * (fields.palette === 1 ? 0.45 : 1)
-    // Fixed maps: the beach keeps a third of its bushes (open sand by the sea).
-    const d2 = density * (1 - 0.65 * fields.beach(wx, wz, h))
+    let d2 = density
+    if (fields.map) {
+      // Fixed maps (2026-10-21, "too many bushes; group them"; refs: desert springs / seeps — shrubs and grass
+      // round the water, the sand between nearly bare — and palm coasts — sea-grape shrubs clumped under the palms):
+      // DESERT bushes only in the green ring round its pools; the BEACH none of its own, a clump round each of its
+      // few trees (1.3–4.5 m from the trunk).
+      const b = fields.beach(wx, wz, h)
+      const green = density - w[0] * (fields.palette === 0 ? 0.11 + 0.35 * oasisAt(fields, wx, wz, h) : 0.05) * (fields.palette === 1 ? 0.45 : 1)
+      d2 = Math.max(0, green) * (1 - b) + w[0] * (1 - b) * 0.4 * fields.map.poolRing(wx, wz)
+      if (b > 0.2) {
+        const t = beachTreeNear(fields, wx, wz)
+        // a dense clump under the palm, bigger bushes than the undergrowth (sea grape under coconut palms)
+        if (t > 1.2 && t < 4.8 && r < 0.85 * b) return 0.75 + (r / (0.85 * b)) * 0.45
+      }
+    }
     return r < d2 ? 0.45 + (r / Math.max(d2, 1e-3)) * 0.35 : 0
   })
 

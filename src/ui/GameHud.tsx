@@ -6,6 +6,7 @@ import { LOOKOUT_SEEN, PLACE_SEEN, REVEAL } from '../gameplay/explore/Discovery'
 import { LANDMARK_ICONS, landmarkName } from '../world/Landmarks/landmarks'
 import { BIOME_NAMES } from '../world/Biomes'
 import { isBright } from '../rendering/artStyle'
+import { Minimap } from './Minimap'
 
 const MAP_RANGE = 600 // m shown inside the compass ring; farther places sit on the rim
 const MAX_PLACES = 8
@@ -222,6 +223,7 @@ export function GameHud({ game }: { game: Game }) {
           </div>
         ))}
       </div>
+      <Minimap game={game} />
       {dead && (
         <div style={deathStyle}>
           <div style={{ fontSize: 42, letterSpacing: 8, fontWeight: 800 }}>YOU DIED</div>

@@ -275,13 +275,32 @@ placements per 16 m cell (cleared round set pieces), roads = its centrelines (`R
 generated, nothing exported); the main road and the river move to `MAP_FAR` and places / formations / landmarks are
 empty, so the pipeline downstream (chunks, road ribbon, scatter, grass, physics, car) runs unchanged. Set pieces
 (camps, stunt park, cabins, ramps, bridges, Bruno Simon's props) are `world/map/MapProps.ts`: instanced per 200 m
-tile, fixed colliders within 140 m (trimeshes in StaticMesh). Spawn / respawn / new-car points come from the map's
+tile, fixed colliders within 140 m (trimeshes in StaticMesh). DARK'S LOOK (2026-10-21, `world/map/mapPieces.ts`): the
+map's flat clay camp gear, cabins, fences, crates and barrels are drawn with the procedural world's place props (white
+canvas A-frame tents, campfire, chairs, picnic tables, crates, barrels, signposts, lamp posts, the A-frame cabin —
+painted surfaces via the atlas UV, one BatchedMesh, +1 program `mapprop-dark`); toy cars and flags are left out;
+solid pieces standing on a road bed are dropped (a pillar sat on dune_dome_switchbacks); the BRIDGES are Dark's plank
+suspension bridge built along each road's bridge samples (`FixedMap.bridges`, cliff-rock material like the procedural
+ones, a fixed trimesh each — the map's plank strip is not drawn). MINIMAP (`ui/Minimap.tsx`, fixed maps only): a
+round GTA-style map top-left under the party badge, turned with the camera, N on the rim, your car as a dot on foot —
+the map's top-down render (`MapInfo.minimap`, `map_preview.py TILT=0 FULL=1`, 240 KB JPEG) moved by one CSS
+transform per frame (no React renders). DESERT POOLS & BEACH (2026-10-21, "too many bushes — group them round
+small pools; beach: no bushes, trees to 20 %, bushes round the trees"; refs: desert springs / seeps / tinajas — grass
+and sedge at the water, shrubs clustered round it, the sand between nearly bare; palm coasts — sea grape under the
+palms): `FixedMap.pools` — ≤ 1 per 120 m cell (55 %), in the cell's lowest flat open-desert hollow off roads and set
+pieces, carved into the height grid at load (flattened, a 1.1 m bowl, water 0.35 m below the rim) — 29 on the island;
+the scatter grows bushes on the desert / beach sand ONLY in a pool's ring (`poolRing`, ~6–11 m) and round the beach
+trees (`beachTreeNear`: the tree layer's hashed cells recomputed — nothing stored), a palm or two per pool, grass
+round them (GrassField corners) and an olive / scrub ring with wet sand in the ground colour; the beach's trees are a
+fifth of the map's palm sites (`FixedMap.palmCell`, 38) grown as Dark's palm — the map's clay palms are not drawn.
+Water: one merged disc mesh for all pools (~800 tris, 1 draw, the clay props' program). Cost: 0 programs; draws in
+the desert 171 → 141–156 at a pool (fewer plant instances), pools +1. Spawn / respawn / new-car points come from the map's
 roads (`Game.roadPoint`). A map plays on ULTRA with Hold 60 unless the player chose a quality. The Island is exported
 by The-Land (`tools/blender/export_dark_map.py`); its DESERT was then rebuilt in place by
 `scripts/blender/island/desert.py` (2026-10-21: layered mesas, buttes, dunes, a slot canyon, three new roads — re-run
 it from the pre-rebuild files, see its header). `FixedMap.beach()` (low sand with the sea nearby) keeps the beach open:
 on fixed maps the scatter grows ~10 % of the trees and ~4 % of the rocks there (no oasis palm groves), the desert ~30 %
-of its rocks with boulders ≤ ~4.5 m. Cost on the island (ULTRA, M4, driving): 60 fps at 1080p and with
+of its rocks with boulders ≤ ~4.5 m. ROAD BEDS (2026-10-21, `scripts/blender/island/roads.py`, "routes go straight into walls"): the terrain grid IS the road surface on a map (the ribbon drapes it), and the export's beds had drifted off some centrelines — summit_west ran into the coast highway's cut wall (ground 12–40 m above the road), summit_road crossed lake_road 13 m higher with no bridge, and the desert rebuild stored its new roads in world heights (6–10 m steps where they met the old ones). The pass re-grades every road (ground under the centreline where it agrees with the graded heights, the graded heights where it is a wall / hole; ends snapped onto the road they join; grade ≤ the class's or the export's), trims ends that run alongside the road they join, starts summit_road at its crossing, and carves a flat bed (half width + 1 m) with ~51° cut / ~44° fill banks that open up within ~6 m so cliffs beyond stay cliffs. Road length off its bed by > 1 m or on a > 35 % pitch: 3.75 km → 32 m (one-sample junction / abutment spikes); 16.6 k grid cells moved > 0.5 m. Data only: 0 runtime cost. MAP CARD: `scripts/blender/island/map_preview.py` — a bird's-eye Eevee render in the bright palette (cel ramp with blue shade, the map's own trees as dot canopies / pines / snowy pines, turquoise sea + river, packed-dirt roads), tilted 43.5° so the island fills the card's ~1.38 : 1 box uncropped; 1100 × 798 JPEG 210 KB (was a 1.3 MB PNG hillshade). Cost on the island (ULTRA, M4, driving): 60 fps at 1080p and with
 a 4 × CPU throttle at phone resolution; ~150–190 draws, 0.35–0.65 M tris.
 
 ## 4. Rendering
@@ -340,7 +359,9 @@ a 4 × CPU throttle at phone resolution; ~150–190 draws, 0.35–0.65 M tris.
   friction 0); the car runs at real gravity (body gravity scale 9.81/20) with its spec mass, COM and inertia,
   per-axle springs from ride frequency, anti-roll bars and bump stops. Brakes with dynamic bias, EBD, ABS; TCS
   (brake + engine + launch control), ESC, counter-steer (Settings → Controls → Driving aids); static hold and
-  hill-start assist. The HUD shows tacho, gear and aid lamps; the engine sound follows the sim's rpm; wheel spin,
+  hill-start assist. The car's exact body mesh never meets a static TRIMESH (terrain, road ribbon, formations, map
+  ramps / bridges) — its convex hulls do; two hollow trimeshes clamped the car ("stuck all the time", 2026-10-21,
+  skills/realistic-vehicle-system). The HUD shows tacho, gear and aid lamps; the engine sound follows the sim's rpm; wheel spin,
   dust and brake / reverse lamps read the sim. Boat and flight hand Rapier back to the legacy setup. Measured:
   +0.015–0.04 ms CPU per physics step (Node, 4 wheels, 8 substeps), no allocation per step; no GPU change.
   `tests/drivetrain.test.ts` (56 checks over the 3 cars: 0–100 and top speed vs published, shifts, parking on
