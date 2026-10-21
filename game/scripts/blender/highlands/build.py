@@ -13,9 +13,11 @@
 #     island, the streams that fall into it from the west, north and east plateaus and the RIVER that leaves it to the
 #     south are carved below the water as gorges through the cliffs; the land falls to the sea round the coast.
 #  3. ROADS: a node graph read off the guide (spawn meadow, plateaus, the north gap, the summit, the cave, the east
-#     coast, the lake shores, the south bridge, the two loops) joined by a slope-aware A* on the new terrain (6 m
-#     cells: grade, cliffs and water cost; short water crossings become bridges) → winding, drivable roads. roads.py
-#     then grades them and carves their beds.
+#     coast, the lake shores, the south bridge, the two loops) joined by a slope-aware A* over the relief blurred ~20 m
+#     (6 m cells + the heading: a turn of ≤ one of 16 directions every 2 cells — hairpins wide enough for both beds;
+#     grade, cliffs and water cost; short water crossings become bridges) → winding, drivable roads. roads.py then
+#     grades them and carves their beds (2026-10-21: the first routing zig-zagged up the cliffs in 6 m steps — stacked
+#     switchback legs walled each other's beds — ARCHITECTURE.md "DRIVABLE ROADS"; check: scripts/drive-probe.mjs FULL=1).
 #  4. PROPS: pine placements by a forest mask (they set the forest density: Dark grows its own trees, rocks, plants),
 #     set pieces — a lookout on the summit, camps, cabins, a dock and boat on the lake, a windmill, signposts.
 #  5. map.json, heights.bin (Uint16, map units = world + 6), biome.bin (all forest: the bright green palette),
@@ -189,47 +191,74 @@ H = np.where(inside, H, WATER - 24)
 # ---------------------------------------------------------------- 3. roads
 RC = 6.0                                    # A* cell (m)
 idx = np.arange(0, N, int(RC / ST)); nr = len(idx)
-HR = H[np.ix_(idx, idx)]
-WR = HR < WATER + 0.6                         # water: crossed on a (low) bridge
+# routes over the relief BLURRED by SIG cells (~20 m): a terrace cliff reads as a ramp, so a road climbs it on a long
+# diagonal cut (roads.py carves it) instead of zig-zagging up the face in 6 m steps
+SIG = float(ARGS.get('SIG', 10))
+HS = blur(H, SIG)
+HR = HS[np.ix_(idx, idx)]
+WR = H[np.ix_(idx, idx)] < WATER + 0.6        # water: crossed on a (low) bridge
 HE = np.maximum(HR, WATER + 2.5)              # grades are measured to the deck over water
 xr = xs[idx]
 def cell(x, z): return int(round((z + HALF) / RC)), int(round((x + HALF) / RC))
-def astar(a, b, grade_max=0.17, hard=0.3):
-    """Cells a → b over HR: length × (1 + grade penalty) + water (bridges) — returns [(x, z)]."""
+# HEADING-AWARE A* (2026-10-21, "make every road drivable"): states are (cell, heading); each step turns at most one
+# of the 16 directions (≈ 22–27°) per cell, so a hairpin needs ≥ 7 cells round — its legs end up ≳ 4 cells apart and
+# each keeps its own bed (roads.py splits the ground between two legs closer than their beds: a wall across both).
+DIRS = sorted([(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0), (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414),
+               (2, 1, 2.236), (1, 2, 2.236), (-2, 1, 2.236), (-1, 2, 2.236), (2, -1, 2.236), (1, -2, 2.236), (-2, -1, 2.236), (-1, -2, 2.236)],
+              key=lambda d: math.atan2(d[0], d[1]))
+ND = len(DIRS)
+TURN = int(ARGS.get('TURN', 1))  # direction steps per turn
+TURN_EVERY = int(ARGS.get('TURN_EVERY', 2))  # cells between turns (2: hairpin legs ~50 m apart, not ~25)
+# Roads already routed (earlier legs, earlier roads), widened by NEAR_R cells: a new leg pays NEAR_PEN × its length
+# there — two roads 4–16 m apart at different heights wall each other's beds (the ring road out to the summit and
+# back, lake_east beside it), so they keep apart except within NEAR_END cells of the leg's own ends (junctions).
+NEAR_R, NEAR_PEN, NEAR_END = int(ARGS.get('NEAR_R', 3)), float(ARGS.get('NEAR_PEN', 4.0)), 5
+USED = np.zeros((nr, nr), bool)
+def mark_used(path):
+    for x, z in path:
+        j, i = cell(x, z)
+        USED[max(0, j - NEAR_R):j + NEAR_R + 1, max(0, i - NEAR_R):i + NEAR_R + 1] = True
+
+def astar_h(a, b, grade_max=0.17, hard=0.3, k0=None):
+    """(cell, heading) A* a → b; k0 = the heading arriving at a (None: any). Returns ([(x, z)], end heading)."""
     sj, si = cell(*a); gj, gi = cell(*b)
     INF = 1e18; cost = {}; came = {}
-    hq = [(0.0, sj, si)]; cost[(sj, si)] = 0.0
-    nbr = [(1, 0, 1), (-1, 0, 1), (0, 1, 1), (0, -1, 1), (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414),
-           (2, 1, 2.236), (1, 2, 2.236), (-2, 1, 2.236), (-1, 2, 2.236), (2, -1, 2.236), (1, -2, 2.236), (-2, -1, 2.236), (-1, -2, 2.236)]
-    it = 0
+    hq = []
+    for k in (range(ND) if k0 is None else [k0]):
+        cost[(sj, si, k, TURN_EVERY - 1)] = 0.0; heapq.heappush(hq, (0.0, sj, si, k, TURN_EVERY - 1))
+    end = None; it = 0
     while hq:
-        f, j, i = heapq.heappop(hq)
-        if (j, i) == (gj, gi): break
-        c0 = cost[(j, i)]
+        f, j, i, k, cd = heapq.heappop(hq)
+        if (j, i) == (gj, gi): end = (j, i, k, cd); break
+        c0 = cost[(j, i, k, cd)]
+        if f - math.hypot(j - gj, i - gi) * RC > c0 + 1e-6: continue  # stale
         it += 1
-        if it > 600000: break
+        if it > 4000000: break
         h0 = HE[j, i]
-        for dj, di, L in nbr:
+        for t in range(-TURN, TURN + 1):
+            if t and cd < TURN_EVERY - 1: continue  # (straight on until the next turn is allowed)
+            kk = (k + t) % ND
+            nd = 0 if t else min(cd + 1, TURN_EVERY - 1)
+            dj, di, L = DIRS[kk]
             nj, ni = j + dj, i + di
             if nj < 2 or ni < 2 or nj >= nr - 2 or ni >= nr - 2: continue
-            h1 = HE[nj, ni]
             run = L * RC
-            wetc = bool(WR[nj, ni])
-            gr = abs(h1 - h0) / run
+            gr = abs(HE[nj, ni] - h0) / run
             if gr > hard: continue
-            c = run * (1 + 22 * max(0.0, gr - 0.05) + 60 * max(0.0, gr - grade_max)) + (run * 40 if wetc else 0)
+            near = USED[nj, ni] and math.hypot(nj - sj, ni - si) > NEAR_END and math.hypot(nj - gj, ni - gi) > NEAR_END
+            c = run * (1 + 22 * max(0.0, gr - 0.05) + 60 * max(0.0, gr - grade_max) + 0.15 * abs(t) + (NEAR_PEN if near else 0)) + (run * 40 if WR[nj, ni] else 0)
             nc = c0 + c
-            if nc < cost.get((nj, ni), INF):
-                cost[(nj, ni)] = nc; came[(nj, ni)] = (j, i)
-                heapq.heappush(hq, (nc + math.hypot(nj - gj, ni - gi) * RC, nj, ni))
-    if (gj, gi) not in came:
-        # no way within the grade: a steeper climb (switchbacks the bed carving will smooth), else a straight line
-        if hard < 0.75: return astar(a, b, grade_max, hard + 0.15)
-        return [a, b]
-    path = [(gj, gi)]
+            if nc < cost.get((nj, ni, kk, nd), INF):
+                cost[(nj, ni, kk, nd)] = nc; came[(nj, ni, kk, nd)] = (j, i, k, cd)
+                heapq.heappush(hq, (nc + math.hypot(nj - gj, ni - gi) * RC, nj, ni, kk, nd))
+    if end is None:
+        if hard < float(ARGS.get('HARD', 0.45)): return astar_h(a, b, grade_max, hard + 0.05, k0)
+        if k0 is not None: return astar_h(a, b, grade_max, 0.3, None)
+        return [a, b], None
+    path = [end]
     while path[-1] in came: path.append(came[path[-1]])
     path.reverse()
-    return [(xr[i], xr[j]) for j, i in path]
+    return [(xr[i], xr[j]) for j, i, _, _ in path], end[2]
 
 def smooth(pts, it=3):
     p = np.array(pts, float)
@@ -243,7 +272,7 @@ def resample(p, step=4.0):
     t = np.arange(0, d[-1] + 1e-6, step)
     return np.stack([np.interp(t, d, p[:, 0]), np.interp(t, d, p[:, 1])], 1)
 
-def hsample(x, z):
+def hsample(x, z, H=H):
     fx = (x + HALF) / ST; fz = (z + HALF) / ST
     i = np.clip(fx.astype(int), 0, N - 2); j = np.clip(fz.astype(int), 0, N - 2); tx = fx - i; tz = fz - j
     return H[j, i] * (1 - tx) * (1 - tz) + H[j, i + 1] * tx * (1 - tz) + H[j + 1, i] * (1 - tx) * tz + H[j + 1, i + 1] * tx * tz
@@ -251,7 +280,7 @@ def hsample(x, z):
 NODES = {k: P(*p) for k, p in {
     'spawn': (100, 165), 'nw': (150, 70), 'n_mid': (265, 75), 'n_gap': (410, 100), 'summit': (530, 40), 'summit_e': (600, 72),
     'cave': (655, 100), 'e_plat': (712, 190), 'e_coast': (748, 262), 'se_loop': (668, 412), 's_bridge': (585, 382), 's_mid': (430, 392),
-    's_coast': (300, 398), 'sw': (122, 372), 'sw_loop': (112, 300), 'falls_w': (178, 212), 'lake_w': (228, 268), 'lake_n': (382, 240),
+    's_coast': (300, 398), 'sw': (122, 372), 'sw_loop': (112, 300), 'falls_w': (178, 212), 'lake_w': (232, 252), 'lake_n': (398, 230),
     'lake_e': (500, 286), 'centre': (462, 214),
 }.items()}
 ROUTES = [  # name, class, half width, nodes (closed = a loop)
@@ -265,14 +294,16 @@ ROUTES = [  # name, class, half width, nodes (closed = a loop)
 ]
 roads = []
 for name, cls, hw, nodes, closed in ROUTES:
-    pts = []
+    pts = []; kh = None  # (the heading carries on through each node)
     for a, b in zip(nodes[:-1], nodes[1:]):
-        leg = astar(NODES[a], NODES[b], 0.12 if cls == 'highway' else 0.17)
+        leg, kh = astar_h(NODES[a], NODES[b], 0.12 if cls == 'highway' else 0.17, k0=kh)
         pts.extend(leg if not pts else leg[1:])
+        mark_used(leg)
     p = resample(smooth(pts, 3), 4.0)
     if closed and np.hypot(*(p[0] - p[-1])) < 8: p = p[:-1]
-    y = hsample(p[:, 0], p[:, 1])
-    wv = (y < WATER + 0.8).astype(float)
+    # the graded heights follow the blurred relief (cut into the cliffs, filled over the dips); water from the real one
+    y = np.maximum(hsample(p[:, 0], p[:, 1], HS), WATER + 0.9)
+    wv = (hsample(p[:, 0], p[:, 1]) < WATER + 0.8).astype(float)
     br = np.zeros(len(p), int)
     # BRIDGES: every run over water / down a gorge wall, widened to the bank tops (where the ground stops falling
     # toward the gap), decked straight from top to top, ≥ 2.5 m over the water
@@ -338,17 +369,34 @@ def near_road_spot(node, off=14, side=1):
             dx, dz = px_[k2] - px_[k1], pz_[k2] - pz_[k1]; L = math.hypot(dx, dz) + 1e-9
             best = (d, px_[k] - dz / L * off * side, pz_[k] + dx / L * off * side, math.atan2(-dx, -dz))
     return best[1], best[2], best[3]
+def gap(x, z):
+    """Distance to the nearest road sample (every sample: the [::3] chords of road_dist cut the bends)."""
+    return min(float(np.min(np.hypot(np.array(r_['x']) - x, np.array(r_['z']) - z))) for r_ in roads)
+def clear_spot(node, off, side, clear):
+    """near_road_spot, but clear of EVERY road by `clear` m (a junction has roads on both sides): further out, the
+    other side."""
+    for o in (off, off + 6, off + 12, off + 20):
+        for sd in (side, -side):
+            x, z, yaw = near_road_spot(node, o, sd)
+            if gap(x, z) > clear: return x, z, yaw
+    # boxed in (a junction with roads all round): the nearest clear ground round the node, facing it
+    nx, nz = NODES[node]
+    for rad in range(20, 90, 8):
+        for k in range(16):
+            a = k * math.pi / 8; x, z = nx + math.cos(a) * rad, nz + math.sin(a) * rad
+            if gap(x, z) > clear and hsample(np.array([x]), np.array([z]))[0] > WATER + 1.5: return x, z, math.atan2(nx - x, nz - z)
+    return x, z, yaw
 def camp(node, side=1):
-    x, z, yaw = near_road_spot(node, 18, side)
+    x, z, yaw = clear_spot(node, 18, side, 20)  # (tents ring 6.5 m round the fire; roads.py may still move a junction)
     put('campfire', x, z, 0, 1)
     for k, t in enumerate(['tent_orange', 'tent_blue', 'picnic_table', 'crate', 'barrel']):
         a = k * 1.25 + 0.4
         put(t, x + math.cos(a) * 6.5, z + math.sin(a) * 6.5, a + math.pi, 1)
 camp('lake_n', 1); camp('sw_loop', -1); camp('e_plat', 1)
 for node, side in (('spawn', 1), ('se_loop', -1), ('s_mid', 1)):
-    x, z, yaw = near_road_spot(node, 16, side); put('cabin', x, z, yaw, 1)
-sx, sz = NODES['summit']; put('water_tower', sx, sz, 0.4, 1.2); put('flag', sx + 4, sz + 3, 0, 1)
-x, z, yaw = near_road_spot('nw', 26, 1); put('windmill', x, z, yaw, 1)
+    x, z, yaw = clear_spot(node, 16, side, 10); put('cabin', x, z, yaw, 1)
+sx, sz, _ = clear_spot('summit', 10, 1, 8); put('water_tower', sx, sz, 0.4, 1.2); put('flag', sx + 4, sz + 3, 0, 1)
+x, z, yaw = clear_spot('nw', 26, 1, 12); put('windmill', x, z, yaw, 1)
 for node in ('n_gap', 'lake_w', 's_bridge', 'centre', 'cave'):
     x, z, yaw = near_road_spot(node, 7, 1); put('signpost', x, z, yaw, 1)
 # a dock on the lake's north shore (its end over the water) and a boat at it

@@ -189,12 +189,52 @@ for q in R:
             d, _ = nearest_on(o, q['x'][end], q['z'][end])
             if d < o['hw'] + 3 and (best is None or (o['rank'], -d) > (best[0]['rank'], -best[1])): best = (o, d)
         if best: JOIN[(q['name'], end)] = best[0]
+# At-grade CROSSINGS (2026-10-22, the Highlands' lake_east over the ring road 2.2 m lower: a step across both): the
+# road graded later (lower class) takes the other's height on the two samples round the crossing. Bridges pass over.
+ORDER = sorted(R, key=lambda q: -q['rank'])
+CROSS = {}
+for a_, q in enumerate(ORDER):
+    for o in ORDER[:a_]:
+        for k in seg_cross(q, o):
+            if q['br'][k] or q['br'][min(k + 1, len(q['br']) - 1)]: continue
+            if nearest_on(o, q['x'][k], q['z'][k])[0] > o['hw'] + 3: continue
+            CROSS.setdefault(q['name'], []).append((k, o))
+for nm, cs in CROSS.items(): print(nm, 'crosses', ', '.join(sorted({o['name'] for _, o in cs})), f'({len(cs)}×): levelled to them')
+# NEAR PASSES (the Highlands' ring road past its own other leg 6 m away, 1 m higher: a step at the kerb): samples of a
+# road closer than both half widths to another road — or to a stretch of itself > NEAR_GAP m away along it — take
+# that road's height, so the two beds merge into one flat one.
+NEAR_GAP = 80.0
+def arclen(q):
+    return np.r_[0, np.cumsum(np.hypot(np.diff(q['x']), np.diff(q['z'])))]
+NEARP = {}
+for a_, q in enumerate(ORDER):
+    sq = arclen(q)
+    for o in ORDER[:a_ + 1]:
+        lim = q['hw'] + o['hw']
+        so = arclen(o)
+        for k in range(len(q['x'])):
+            if q['br'][k]: continue
+            d = np.hypot(o['x'] - q['x'][k], o['z'] - q['z'][k])
+            if o is q:
+                gap = np.abs(so - sq[k])
+                if q['closed']: gap = np.minimum(gap, so[-1] - gap)
+                d = np.where(gap > NEAR_GAP, d, np.inf)
+                if np.argmin(d) > k: continue  # (the earlier pass is the reference)
+            j = int(np.argmin(d))
+            if d[j] < lim and not o['br'][j]: NEARP.setdefault(q['name'], []).append((k, o, j))
+for nm, ps in NEARP.items(): print(nm, 'passes close to', ', '.join(sorted({o['name'] for _, o, _ in ps})), f'({len(ps)} samples): levelled to them')
 for sweep in range(3):
-    for q in sorted(R, key=lambda q: -q['rank']):
+    for q in ORDER:
         fixed = {}
         for end in (0, len(q['x']) - 1):
             o = JOIN.get((q['name'], end))
             if o is not None: fixed[end] = nearest_on(o, q['x'][end], q['z'][end])[1]
+        for k, o in CROSS.get(q['name'], []):
+            if o['br'][int(np.argmin(np.hypot(o['x'] - q['x'][k], o['z'] - q['z'][k])))]: continue  # o bridges over q
+            for kk in (k, (k + 1) % len(q['x'])):
+                if kk not in fixed: fixed[kk] = nearest_on(o, q['x'][kk], q['z'][kk])[1]
+        for k, o, j in NEARP.get(q['name'], []):
+            if k not in fixed: fixed[k] = float(o['h'][j])
         for i in np.nonzero(q['br'])[0]: fixed[int(i)] = q['href'][i]
         q['h'] = grade(q['p'], q['ds'], q['gmax'], fixed, q['closed'])
 

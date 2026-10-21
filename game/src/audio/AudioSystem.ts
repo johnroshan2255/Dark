@@ -216,6 +216,8 @@ export class AudioSystem {
   private set(name: SoundName, gain: number, rate = 1, pan = 0, tau = 0.08): void {
     const l = this.loops.get(name)
     if (!l || !this.ctx) return
+    // (a NaN from the car — one bad physics step — must not throw here: it would stop the whole game update)
+    if (!Number.isFinite(gain) || !Number.isFinite(rate) || !Number.isFinite(pan)) return
     const t = this.ctx.currentTime
     l.gain.gain.setTargetAtTime(Math.max(0, gain), t, tau)
     l.src.playbackRate.setTargetAtTime(Math.max(0.1, rate), t, tau)
@@ -271,6 +273,7 @@ export class AudioSystem {
       const s = c.sim
       const target = (s.electric ? 0.05 : 0.18) + 0.82 * clamp01(s.rpm)
       this.rpm += (target - this.rpm) * Math.min(1, f.dt * 25)
+      if (!Number.isFinite(this.rpm)) this.rpm = 0 // (else one NaN rpm would stick for good)
       const load = clamp01(s.load)
       const a = att(c.distance)
       const drive = sstep(0.12, 0.4, this.rpm)

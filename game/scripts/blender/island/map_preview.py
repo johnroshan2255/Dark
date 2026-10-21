@@ -214,6 +214,9 @@ for r in meta['roads']:
     br = np.array(r['bridge'] + ([r['bridge'][0]] if r['closed'] else []), bool)
     dx = np.gradient(x); dz = np.gradient(z); L = np.hypot(dx, dz) + 1e-9; nx_, nz_ = -dz / L, dx / L
     hw = r['halfWidth'] * (1.15 if r['class'] == 'highway' else 1.0)
+    # the MINIMAP (FULL): routes you can read at a glance — ~2.2× wider, a light centre and a dark edge (a game map's
+    # roads), not the card's dirt ribbon that vanishes into the grass and the terrace edges
+    if FULL: hw *= float(ARGS.get('ROADW', 2.2))
     h = sample(H, x, z)
     h = np.where(br, np.array(r['h'] + ([r['h'][0]] if r['closed'] else [])) + OFF, h)
     bb = BIO[np.clip(np.round((z + HALF) / bg['step']).astype(int), 0, BN - 1), np.clip(np.round((x + HALF) / bg['step']).astype(int), 0, BN - 1)]
@@ -221,6 +224,10 @@ for r in meta['roads']:
     c = c0 * (1 - bb[:, :1] - bb[:, 1:]) + cd * bb[:, :1] + cs * bb[:, 1:]
     c = np.where(br[:, None], srgb(140, 92, 56), c)
     edge = c * 0.62
+    if FULL:
+        light = np.where(bb[:, 1:] > 0.5, srgb(214, 166, 112)[None], srgb(250, 236, 200)[None])  # (warm tan on snow)
+        c = np.where(br[:, None], srgb(176, 118, 70), light)
+        edge = np.repeat(srgb(84, 58, 38)[None], len(x), 0)
     # 4 strips across: edge | centre | centre | edge
     offs = np.array([-1.0, -0.72, 0.72, 1.0]) * hw
     m = len(x)

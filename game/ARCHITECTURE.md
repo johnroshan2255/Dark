@@ -314,6 +314,16 @@ keys any map can use: `palette` (sRGB hex: grass, grassDark, water, waterDeep, d
 `trees: 'conifer'` (forest = spruce / fir / pine only, drawn as the stylized TIERED PINE of `treeFactory.tieredPine` —
 stacked faceted skirts in the palette greens, gentle hues, no region / autumn tint). Cost: data only plus the same
 tree draws (the tiered pine replaces the Blender conifers: fewer tris); ULTRA M4 60 fps, 46–104 draws, 0.32–0.47 M tris.
+DRIVABLE ROADS (2026-10-22, "some roads can't be driven"): the first routing zig-zagged up the terrace cliffs in 6 m A*
+steps — switchback legs a few metres apart at different heights, so `roads.py` split the ground between them into a
+wall across both beds (64 stretches > 30 % grade / > 35 % cross tilt / > 0.6 m steps). `build.py` now routes over the
+relief blurred ~20 m (a cliff is climbed on a long diagonal cut), with the HEADING in the A* state (≤ one of 16
+directions per turn, a turn every 2 cells: hairpin legs ~50 m apart), a cost for running within ~18 m of a road
+already routed (the ring road out to the summit and back), junction nodes moved off the stream mouths (a road began
+mid-bridge) and set pieces placed clear of every road. `roads.py` levels AT-GRADE CROSSINGS (the later / lower-class
+road takes the other's height round the crossing). Checked by driving every road (`scripts/drive-probe.mjs FULL=1`).
+On the Island the stuck spots were the export's stunt ramps / log ramps, two rock pillars and a pole standing ON the
+road centre lines: removed from props.json (the ramps on stunt_spur / jump_spur / pump_spur stay — that's their job).
 
 ## 4. Rendering
 
@@ -606,8 +616,11 @@ room pill (toolbar / under the minimap on touch) opens the room card: code, play
   local pose at 30 Hz (`Game.localPose`: the car's when driving) and applies `Welcome` spawns / `Correction`s
   (`netRelocate` / `netCorrect`). Roster, room and status go to `store.net` (low frequency), never per-frame state.
 - `net/RemotePlayers.ts`: others drawn ~100 ms in the past (interpolated, ≤ 200 ms extrapolation), built for a crowd
-  (draws don't grow with players): cars instanced per model in three LODs — the full model for the nearest
-  `remoteCars` within 35 m, a simplified one (vertex-clustered ≤ 2 k-triangle body, texture baked into colours,
+  (draws don't grow with players): cars in three LODs — the nearest `remoteCars` within 35 m drawn EXACTLY like
+  the player's car (`net/RemoteCar.ts`, pooled per model: Car's shared `truckMaterial`, cabin, doors, brakes,
+  dampers, lamps from LIGHTS / BRAKING / reversing, jets when FLYING, the hull when BOAT; wheels roll with the
+  forward speed and the fronts steer by the turn rate, atan(wheelbase · yaw rate / speed); ~12–15 draws each), then
+  instanced per model: a simplified one (vertex-clustered ≤ 2 k-triangle body, texture baked into colours,
   12-sided wheels) to 110 m, boxes to 900 m; a car stays PARKED where its driver got out; the nearest
   `remoteCharacters` on foot animated (1 skinned draw each, no sun / dynamic shadow), the rest instanced
   low-poly people; blob shadows under both (1 draw); all name tags in 1 draw (atlas, nearest 10). Phones cap the
@@ -654,6 +667,9 @@ URL options: `?seed=<n|text>` (default: random per game) · `?tier=low|medium|hi
 
 Headless verification: `npm run dev`, then `npm run shot -- <outdir> <shots.json>` (`scripts/shoot.mjs`, local Google
 Chrome via puppeteer-core) teleports/drives/times the scene per shot, screenshots it and prints fps + GPU/CPU ms per tier.
+Road check: `MAP=<id> FULL=1 HEADLESS=0 TIER= node scripts/drive-probe.mjs <outdir>` — an autopilot drives every road
+of a map end to end (offline), logging each STUCK / thrown-OFF spot (position, wheel contacts, what the body touches)
+and the fps every second (spots below FPS_LOW). HEADLESS=0 is a visible window that keeps full speed unfocused.
 
 ## 9. Debug keys
 
