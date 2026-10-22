@@ -13,9 +13,13 @@
 //! | hang out | goes to a player nearby: follows them in the car, or parks and walks up to them |
 //! | afk | stops for a while |
 //!
-//! Movement is kinematic (no physics on the server): road driving on the road graph (`nav`), point steering with
-//! terrain checks elsewhere (slope, water — the car turns into a boat in the water and back on land), stuck
-//! detection → respawn on the nearest road. Bots far from every human update at a quarter rate and are RECYCLED
+//! Movement: on a MAP room with server physics ([`crate::physics::RoomPhysics`]) a bot in a car DRIVES the game's
+//! car model (`dark_vehicle`): the AI below plans as before — lane, speed, the car in front, junctions, overtakes —
+//! but its plan is only a target point and a speed for a driver ([`dark_vehicle::control`]); the physics moves the
+//! car, and the bot's pose and road progress are read back from it (it can be blocked, pushed, run off the road).
+//! Boats, flights and walking stay kinematic. Without physics (endless rooms, tests) all movement is kinematic:
+//! road driving on the road graph (`nav`), point steering with terrain checks elsewhere (slope, water — the car
+//! turns into a boat in the water and back on land), stuck detection → respawn on the nearest road. Bots far from every human update at a quarter rate and are RECYCLED
 //! next to the humans when nobody is near them (GTA population management). The endless world: the server knows
 //! its road and river exactly (`noise::Endless`) but not the terrain off them — bots stay near the road and the
 //! clients set their feet / wheels on their own ground.
@@ -23,9 +27,13 @@
 use crate::map::MapData;
 use crate::nav::{Nav, OnEdge};
 use crate::noise::{Endless, RIVER_HALF_WIDTH, WATER};
+use crate::physics::RoomPhysics;
 use crate::rng::Rng;
 use crate::validate::Pose;
 use dark_protocol::{BOT_ID_BASE, flags};
+use dark_vehicle::Truck;
+use dark_vehicle::control::{Intent, drive as drive_to};
+use dark_vehicle::truck::Controls;
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::PI;
 use std::sync::Arc;
@@ -228,6 +236,13 @@ pub struct Bot {
     boost: bool,
     /// Convoy / hang-out: the index into the leader's trail being chased.
     cursor: u64,
+    /// Server physics: the bot's car (in the room's world), the AI's plan for it this tick (target point, speed),
+    /// a placement the car must follow (spawn / respawn), and the body's pitch and velocity for the pose.
+    car: Option<Truck>,
+    plan: Option<([f32; 2], f32)>,
+    placed: bool,
+    pitch: f32,
+    vel: [f32; 3],
 }
 
 impl Bot {
@@ -296,6 +311,10 @@ pub struct Bots {
     /// Scratch: vehicles near each bot (rebuilt per tick).
     cells: crate::fasthash::FastMap<(i32, i32), Vec<usize>>,
     seen: Vec<Seen>,
+    /// Cars drive in the room's physics (a map room with [`RoomPhysics`]); false = kinematic.
+    physics: bool,
+    /// Cars of bots that left, to take out of the physics world.
+    dead_cars: Vec<Truck>,
 }
 
 const CELL: f32 = 48.0;
@@ -318,7 +337,14 @@ impl Bots {
             recycle_ms: 0,
             cells: crate::fasthash::FastMap::default(),
             seen: Vec::new(),
+            physics: false,
+            dead_cars: Vec::new(),
         }
+    }
+
+    /// Drive the cars through the room's physics ([`Bots::drive_cars`] / [`Bots::after_physics`] each tick).
+    pub fn use_physics(&mut self, on: bool) {
+        self.physics = on && matches!(self.world, World::Map { .. });
     }
 
     /// How many bots the room wants, and whether its rules allow flying.
@@ -392,9 +418,22 @@ impl Bots {
             }
             let step = b.lod.min(0.5);
             b.lod = 0.0;
+            // physics: the AI plans from where the car really is; its kinematic step becomes the plan, and the
+            // bot stays where the car is (the car moves in drive_cars)
+            let real = (b.car.is_some() && b.mode == Mode::Car).then_some((b.x, b.y, b.z, b.yaw, b.speed));
+            b.plan = None;
             self.think(i, step, now);
             self.drive(i, step, now);
-            self.write_pose(i, step);
+            let b = &mut self.bots[i];
+            if let Some((x, y, z, yaw, speed)) = real
+                && !b.placed
+                && b.mode == Mode::Car
+            {
+                (b.x, b.y, b.z, b.yaw, b.speed) = (x, y, z, yaw, speed);
+            }
+            if !self.physics || b.mode != Mode::Car {
+                self.write_pose(i, step);
+            }
         }
     }
 
@@ -402,7 +441,10 @@ impl Bots {
 
     fn population(&mut self, now: u64, humans: &[[f32; 2]], events: &mut Vec<BotEvent>) {
         while self.bots.len() > self.target {
-            let b = self.bots.pop().expect("non-empty");
+            let mut b = self.bots.pop().expect("non-empty");
+            if let Some(c) = b.car.take() {
+                self.dead_cars.push(c);
+            }
             self.trails.remove(&b.id);
             events.push(BotEvent::Left(b.id));
         }
@@ -450,6 +492,11 @@ impl Bots {
                 braking: false,
                 boost: false,
                 cursor: 0,
+                car: None,
+                plan: None,
+                placed: false,
+                pitch: 0.0,
+                vel: [0.0; 3],
             };
             let dist = 120.0 + self.rng.f32() * 500.0;
             self.place_on_road(&mut b, anchor, dist);
@@ -528,6 +575,7 @@ impl Bots {
         self.snap_to_road(b);
         b.show_yaw = b.yaw;
         b.prog = ([b.x, b.z], 0.0);
+        b.placed = true;
     }
 
     /// GTA-style: a bot nobody is near (and isn't racing / following) reappears on a road near the humans.
@@ -588,6 +636,11 @@ impl Bot {
             braking: false,
             boost: false,
             cursor: 0,
+            car: None,
+            plan: None,
+            placed: false,
+            pitch: 0.0,
+            vel: [0.0; 3],
         }
     }
 }
@@ -1356,6 +1409,178 @@ impl Bots {
         b.yaw = yaw_of(dx, dz);
     }
 
+    /// The lane `d` m ahead on the road (x, z), following the planned way at the next node.
+    fn lane_point_ahead(&self, r: &OnRoad, d: f32) -> [f32; 2] {
+        match (&self.world, r.lane) {
+            (World::Map { nav, .. }, Lane::Edge(on)) => {
+                let len = nav.edges[on.edge].len();
+                let p = if on.t + d <= len {
+                    nav.at(OnEdge { t: on.t + d, ..on })
+                } else if let Some((e, fwd)) = r.route.front().copied().or(r.next) {
+                    nav.at(OnEdge {
+                        edge: e,
+                        forward: fwd,
+                        t: (on.t + d - len).min(nav.edges[e].len()),
+                    })
+                } else {
+                    nav.at(OnEdge { t: len, ..on })
+                };
+                [p.x - p.dz * r.lat, p.z + p.dx * r.lat]
+            }
+            (World::Endless(e), Lane::Endless { z, dir }) => {
+                let zz = z + (dir * d) as f64;
+                let slope = ((e.road_x(zz + 1.0) - e.road_x(zz - 1.0)) * 0.5) as f32;
+                let l = (1.0 + slope * slope).sqrt();
+                let (dx, dz) = (slope * dir / l, dir / l);
+                [e.road_x(zz) as f32 - dz * r.lat, zz as f32 + dx * r.lat]
+            }
+            _ => [0.0, 0.0],
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_bad(&self, ph: &RoomPhysics) -> Option<u16> {
+        self.bots.iter().find_map(|b| {
+            let c = b.car.as_ref()?;
+            let bad =
+                c.vc.wheels()
+                    .iter()
+                    .any(|w| !w.suspension_rest_length.is_finite() || !w.raycast_info().suspension_length.is_finite())
+                    || !ph.world.pw.bodies[c.body].linvel().is_finite();
+            bad.then_some(b.id)
+        })
+    }
+
+    /// Server physics, each physics step: every bot's car gets its driver's controls (from the AI's plan) and steps.
+    /// Cars appear on demand, follow placements (spawn / respawn / back from a boat or a flight), stand parked while
+    /// their bot walks, and leave the world while it sails or flies (those stay kinematic).
+    pub fn drive_cars(&mut self, ph: &mut RoomPhysics, dt: f32) {
+        if !self.physics {
+            return;
+        }
+        for c in self.dead_cars.drain(..) {
+            ph.bury(c);
+        }
+        ph.sweep();
+        for b in self.bots.iter_mut() {
+            let parked_car = if b.mode == Mode::Foot { b.parked } else { None };
+            if b.mode != Mode::Car && parked_car.is_none() {
+                if let Some(c) = b.car.as_mut() {
+                    c.set_enabled(&mut ph.world, false);
+                }
+                continue;
+            }
+            let (px, pz, pyaw) = parked_car.map_or((b.x, b.z, b.yaw), |c| (c[0], c[1], c[2]));
+            match b.car.as_mut() {
+                None => {
+                    let y = ph.ground(px, pz);
+                    b.car = Some(ph.new_car(b.model, px, y, pz, pyaw));
+                }
+                Some(c) if b.placed || !c.enabled => {
+                    c.set_enabled(&mut ph.world, true);
+                    let y = ph.ground(px, pz) as f64;
+                    c.place(&mut ph.world, px as f64, y, pz as f64, pyaw as f64, 0.0);
+                }
+                Some(_) => {}
+            }
+            b.placed = false;
+            let car = b.car.as_mut().expect("just made");
+            let pos = car.position(&ph.world);
+            let heading = car.heading(&ph.world);
+            car.controls = match (b.mode, b.plan) {
+                (Mode::Car, Some((t, v))) => drive_to(
+                    &Intent {
+                        target: [t[0] as f64, t[1] as f64],
+                        speed: v as f64,
+                        boost: b.boost,
+                    },
+                    pos[0],
+                    pos[2],
+                    heading,
+                    car.speed,
+                ),
+                // nobody at the wheel / nothing planned: brake, then park (brakes locked)
+                _ => Controls {
+                    throttle: if car.speed.abs() > 1.5 { -1.0 } else { 0.0 },
+                    parked: car.speed.abs() <= 1.5,
+                    ..Default::default()
+                },
+            };
+            if car.controls.parked && ph.world.pw.bodies[car.body].is_sleeping() {
+                continue; // a parked car at rest costs nothing
+            }
+            car.step(&mut ph.world, dt as f64);
+            let ground = ph.ground(pos[0] as f32, pos[2] as f32) as f64;
+            car.keep_above(&mut ph.world, ground);
+        }
+    }
+
+    /// Server physics, after the tick's physics steps: each driving bot is where its car is — pose, speed, road
+    /// progress (or off the road, thrown there) — and a car that doesn't move although its driver wants to is stuck.
+    pub fn after_physics(&mut self, ph: &RoomPhysics, dt: f32, now: u64) {
+        if !self.physics {
+            return;
+        }
+        for i in 0..self.bots.len() {
+            let b = &mut self.bots[i];
+            let Some(c) = b.car.as_ref() else { continue };
+            if b.mode != Mode::Car {
+                continue;
+            }
+            let p = c.position(&ph.world);
+            let ax = c.axes(&ph.world);
+            let v = ph.world.pw.bodies[c.body].linvel();
+            (b.x, b.y, b.z) = (p[0] as f32, p[1] as f32, p[2] as f32);
+            b.yaw = (-ax.f[0]).atan2(-ax.f[2]) as f32;
+            b.show_yaw = b.yaw;
+            b.speed = c.speed as f32;
+            b.pitch = ax.f[1].clamp(-1.0, 1.0).asin() as f32;
+            b.vel = [v.x, v.y, v.z];
+            b.braking = c.drivetrain.braking || c.controls.parked;
+            let wants = b.plan.is_some_and(|p| p.1 > 1.0);
+            // road progress follows the car (the plan advanced it by the AI's own speed)
+            if let Some(r) = b.road.as_ref() {
+                let r = r.clone();
+                let lane = self.reproject(&self.bots[i], &r);
+                let b = &mut self.bots[i];
+                match lane {
+                    Some(l) => b.road.as_mut().expect("on a road").lane = l,
+                    None => {
+                        // thrown off the road: drive back to it
+                        b.road = None;
+                        b.path.clear();
+                    }
+                }
+            }
+            self.progress_check(i, dt, now, wants);
+            self.write_pose(i, dt);
+        }
+    }
+
+    /// Where on its lane the car really is: the nearest point of its edge within ±15 m of the AI's progress; None =
+    /// more than 10 m off the road.
+    fn reproject(&self, b: &Bot, r: &OnRoad) -> Option<Lane> {
+        let (World::Map { nav, .. }, Lane::Edge(on)) = (&self.world, r.lane) else {
+            return Some(r.lane);
+        };
+        let len = nav.edges[on.edge].len();
+        let mut best = (f32::INFINITY, on.t);
+        let mut t = (on.t - 15.0).max(0.0);
+        while t <= (on.t + 15.0).min(len) {
+            let p = nav.at(OnEdge { t, ..on });
+            let d = (p.x - b.x).powi(2) + (p.z - b.z).powi(2);
+            if d < best.0 {
+                best = (d, t);
+            }
+            t += 1.0;
+        }
+        let half = nav.roads[nav.edges[on.edge].road].half_width;
+        if best.0.sqrt() > half + 10.0 {
+            return None;
+        }
+        Some(Lane::Edge(OnEdge { t: best.1, ..on }))
+    }
+
     /// Direction of travel `d` m ahead on the road (following the planned way at the next node).
     fn ahead_dir(&self, r: &OnRoad, d: f32) -> (f32, f32) {
         match (&self.world, r.lane) {
@@ -1783,6 +2008,19 @@ impl Bots {
             bb.show_yaw = wrap(bb.yaw + PI * 0.9);
         }
         self.bots[i] = bb;
+        if self.physics {
+            // the driver's target: the lane ahead of the plan; its speed: where the AI's acceleration is taking it
+            // over the next ~1.2 s (an IDM stop → 0 → brakes)
+            let look = 4.0 + speed.abs() * 0.6;
+            let r = self.bots[i].road.as_ref().expect("on a road");
+            let target = self.lane_point_ahead(r, look);
+            let want = if v0 < 0.1 {
+                0.0
+            } else {
+                (speed + acc * 1.2).clamp(0.0, v0)
+            };
+            self.bots[i].plan = Some((target, want));
+        }
     }
 
     /// Point steering toward `target` at up to `want` m/s in the bot's current mode, with terrain checks and the
@@ -1824,6 +2062,11 @@ impl Bots {
                     desired = wrap(yaw + 0.8);
                 }
             }
+        }
+        if self.physics && mode == Mode::Car {
+            let (fx, fz) = dir_of(desired);
+            let look = (speed * 1.2).clamp(6.0, 16.0);
+            self.bots[i].plan = Some(([x + fx * look, z + fz * look], v_want));
         }
         // turn: people turn on the spot, vehicles by their turning circle
         let max_turn = match mode {
@@ -2013,6 +2256,13 @@ impl Bots {
 
     /// No progress for a while although it wants to move → "R": back on the nearest road.
     fn stuck_check(&mut self, i: usize, dt: f32, now: u64, moving: bool) {
+        if self.physics && self.bots[i].mode == Mode::Car && self.bots[i].car.is_some() {
+            return; // a physical car: checked where it really is (after_physics)
+        }
+        self.progress_check(i, dt, now, moving);
+    }
+
+    fn progress_check(&mut self, i: usize, dt: f32, now: u64, moving: bool) {
         let b = &mut self.bots[i];
         if !moving || b.mode == Mode::Air {
             b.prog = ([b.x, b.z], 0.0);
@@ -2061,9 +2311,11 @@ impl Bots {
             wrap(b.show_yaw + e.clamp(-rate * dt, rate * dt))
         };
         let (fx, fz) = dir_of(b.yaw);
+        let physical = b.car.is_some() && b.mode == Mode::Car;
         let pitch = match b.mode {
             Mode::Air => (b.vy / b.speed.max(5.0)).atan(),
             Mode::Boat => (b.speed * 0.012).min(0.12),
+            Mode::Car if physical => b.pitch,
             _ => 0.0,
         };
         let mut fl = 0u8;
@@ -2097,7 +2349,11 @@ impl Bots {
         }
         b.pose = Pose {
             pos: [b.x, b.y, b.z],
-            vel: [fx * b.speed, if b.mode == Mode::Air { b.vy } else { 0.0 }, fz * b.speed],
+            vel: if physical {
+                b.vel
+            } else {
+                [fx * b.speed, if b.mode == Mode::Air { b.vy } else { 0.0 }, fz * b.speed]
+            },
             yaw: b.show_yaw,
             pitch,
             flags: fl,

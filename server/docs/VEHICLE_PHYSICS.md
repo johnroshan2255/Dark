@@ -97,7 +97,7 @@ game/
 |---|---|---|---|
 | A | this audit + plan | written, reviewed | **done** |
 | B | `dark-vehicle`: tyre + drivetrain port, one authoritative car on a heightfield | Drivetrain step-by-step matches TS golden; full car trajectory (accelerate, brake, turn) matches TS within tolerance; suspension over bumps, stable on slopes, two-car collision tests; benchmark 1 / 10 / 100 cars on the island heightfield recorded here | **done** (§6) |
-| C | bots drive the physical car | road following under physics (no teleports), 100-bot room benchmark (ms per tick, per vehicle, ray/solver split) | — |
+| C | bots drive the physical car | road following under physics (no teleports), 100-bot room benchmark (ms per tick, per vehicle, ray/solver split) | **done** (§7) |
 | D | human inputs authoritative (protocol v4) | input validation, collisions bot ⇄ human ⇄ human on the server, join / leave / late join | — |
 | E | client prediction + reconciliation + remote interpolation | headless drive with injected latency / loss: corrections measured, steering responsive | — |
 | F | profiling + impairment tests + docs | multi-room benchmark, overload strategy, limitations listed | — |
@@ -150,3 +150,51 @@ cloud vCPU (expect 2–3× an M4 core) before setting rooms per core.
 **Not ported yet:** arcade handling, flying (hover), boat, BMX, on foot; the exact body trimesh + dents; the real
 cars' convex hulls (needs the browser export, Stage D); the world's trees / rocks / props / road ribbon / pools
 (server terrain is the heightfield only until the collider export).
+
+## 7. Stage C results (measured 2026-10-22, Apple M4, release build)
+
+**How bots drive now** (map rooms; `MatchConfig.vehicle_physics`, default on): the bot AI (`sim/src/bots.rs`) plans
+exactly as before — lanes, bend speeds, IDM car-following, overtakes, junctions, races, convoys — but in a car its
+kinematic step is only a PLAN: a target point (the lane ~4 m + 0.6 s ahead, or the terrain-checked heading off-road)
+and a speed (where the AI's acceleration takes it over ~1.2 s). `dark_vehicle::control::drive` turns that into the
+player's controls (stick steer, one-axis throttle/brake, park), the game's car model moves the car (60 Hz, 2 steps per
+30 Hz tick, `Match::step_bots`), and the bot's pose, speed and road progress are READ BACK (`Bots::after_physics`:
+re-projected onto its road edge; > 10 m off the road = thrown off → it drives back). A car that doesn't move while its
+driver wants to for 6 s respawns on the road (the game's "R"). Spawns / respawns / landing from a flight or a boat
+place the car. Walking, boats and flights stay kinematic (the car waits parked, or leaves the world while it sails /
+flies). Endless-world rooms stay fully kinematic (no server terrain).
+
+**The world** (`sim/src/physics.rs`, `MapPhysics` built once per map and shared by every room on it): the map's 2 m
+height grid as one Rapier heightfield with the ice floor where water is frozen (the game's `solidHeight`), bridge
+decks along the roads' bridge samples, and the tyre-surface sampler (water → ice, roads → packed dirt, else the map's
+desert → sand / snow → snow / rest → grass; dry). Cars are the game's three, exported from the running game
+(`game/scripts/export-vehicles.mjs` → `crates/vehicle/data/vehicles.json`: measured dims, 29–53 convex body hulls,
+the catalogue's stock setup, the spec resolved against the model), with the game's default driving settings (aids
+Full, off-road assist on). Collision shapes mirror the client's groups: the hulls meet the ground (friction 0.15), a
+second copy stands in for the client's exact body mesh against other cars (0.35), each set ONE compound collider.
+
+**Fixed on the way:** a bot's new car stepped before Rapier's first world step had mass 0 → NaN velocities on its
+first step under throttle + steer (`Truck::configure` now has Rapier compute the mass at once; the room test asserts
+every car state is finite every tick).
+
+**Cost of the real cars** (`bench_vehicle_physics`, 100 cars on the island, per 30 Hz tick):
+
+| collision setup | per tick | of 33 ms |
+|---|---|---|
+| frame boxes (golden traces' car) | 2.6 ms | 8 % |
+| 2 × 53 separate hull colliders (as the client builds them) | 31 ms | 94 % |
+| hulls as 2 compound colliders | 16 ms | 49 % |
+| + no continuous collision (CCD) — **chosen** | **3.1 ms** | **9 %** |
+
+Profiled with `sample`: Rapier 0.36 sweeps every "fast" dynamic body for CCD — one moving more than half its
+thinnest collider piece per step, i.e. a car of thin hull pieces above walking pace — and recomputes every convex
+piece's mass properties per sweep (+32 µs per car per step). The server world has CCD off (`World::new`): a car
+(≤ 60 m/s, ≤ 1 m per step) can't tunnel the heightfield (speculative contacts); there are no thin static obstacles on
+the server yet. Revisit when trees / posts are added (CCD with simple proxy shapes, or Rapier fixing the per-sweep
+mass computation). The client keeps CCD for its one car.
+
+**A room with 100 bots** (`cargo test --release -p dark-sim bench_physics_room -- --ignored --nocapture`, one person
+at the island's start, 90 s): 100 cars in the physics; **3.9 ms per tick (11.7 % of 33 ms), worst 9 ms**; driving
+bots average 11.1 m/s, 93 % of driving samples on a road, the deepest a body dipped into the ground 0.6 m (a hard
+landing's suspension), cars on the 53 m high forest_far bridge deck stay on it; ~0.5 km covered per bot. CI runs the
+20-bot version (`bots_drive_physical_cars_on_the_island`): 20 cars, 14 m/s, 96 % on a road, 1 respawn in 40 s.

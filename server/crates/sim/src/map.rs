@@ -110,11 +110,15 @@ pub struct MapData {
     pub roads: Vec<RoadLine>,
     /// Snow weight 0..255 per biome cell (biome.bin's second channel; empty = no biome file), its grid.
     snow: Vec<u8>,
+    /// Desert weight 0..255 per biome cell (biome.bin's first channel).
+    desert: Vec<u8>,
     bn: usize,
     bstep: f32,
     borigin: [f32; 2],
     /// Bot navigation (road graph, water), built on first use.
     pub(crate) nav: std::sync::OnceLock<std::sync::Arc<crate::nav::Nav>>,
+    /// Vehicle physics shared by every room on this map (terrain shape, bridges, surfaces), built on first use.
+    pub(crate) physics: std::sync::OnceLock<std::sync::Arc<crate::physics::MapPhysics>>,
 }
 
 impl MapData {
@@ -140,6 +144,7 @@ impl MapData {
             && b.len() == m.bn * m.bn * 2
         {
             m.snow = b.chunks_exact(2).map(|c| c[1]).collect();
+            m.desert = b.chunks_exact(2).map(|c| c[0]).collect();
         }
         Ok(m)
     }
@@ -152,6 +157,16 @@ impl MapData {
         let i = (((x - self.borigin[0]) / self.bstep).round().max(0.0) as usize).min(self.bn - 1);
         let j = (((z - self.borigin[1]) / self.bstep).round().max(0.0) as usize).min(self.bn - 1);
         self.snow[j * self.bn + i] as f32 / 255.0
+    }
+
+    /// Desert weight 0..1 at (x, z) (nearest biome cell, like `snow`).
+    pub fn desert(&self, x: f32, z: f32) -> f32 {
+        if self.desert.is_empty() {
+            return 0.0;
+        }
+        let i = (((x - self.borigin[0]) / self.bstep).round().max(0.0) as usize).min(self.bn - 1);
+        let j = (((z - self.borigin[1]) / self.bstep).round().max(0.0) as usize).min(self.bn - 1);
+        self.desert[j * self.bn + i] as f32 / 255.0
     }
 
     /// Water at (x, z) is frozen (ice to stand / drive on).
@@ -230,10 +245,12 @@ impl MapData {
             road_points,
             roads,
             snow: Vec::new(),
+            desert: Vec::new(),
             bn: meta.biome_grid.as_ref().map_or(0, |b| b.n),
             bstep: meta.biome_grid.as_ref().map_or(1.0, |b| b.step),
             borigin: meta.biome_grid.as_ref().map_or([0.0; 2], |b| b.origin),
             nav: std::sync::OnceLock::new(),
+            physics: std::sync::OnceLock::new(),
         })
     }
 
@@ -334,10 +351,12 @@ impl MapData {
                 .collect(),
             roads: Vec::new(),
             snow: Vec::new(),
+            desert: Vec::new(),
             bn: 0,
             bstep: 1.0,
             borigin: [0.0; 2],
             nav: std::sync::OnceLock::new(),
+            physics: std::sync::OnceLock::new(),
         }
     }
 }

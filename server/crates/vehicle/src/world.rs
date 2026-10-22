@@ -43,6 +43,13 @@ impl World {
         let mut pw = PhysicsWorld::new();
         pw.gravity = Vector::new(0.0, -GRAVITY, 0.0);
         pw.integration_parameters.dt = FIXED_DT;
+        // NO CONTINUOUS COLLISION (the client has it): Rapier 0.36 sweeps every "fast" dynamic body — one moving more
+        // than half its thinnest piece per step, i.e. any car with thin hull pieces above walking pace — and
+        // recomputes each convex piece's mass properties per sweep: +32 µs per car per step (3.1 → ~19 ms per 30 Hz
+        // tick for 100 cars, measured). Without it a car (≤ 60 m/s: ≤ 1 m per step) can't tunnel the server's
+        // terrain (a heightfield + speculative contacts); thin obstacles (posts, trunks) don't exist on the server
+        // yet — revisit with them (see docs/VEHICLE_PHYSICS.md).
+        pw.integration_parameters.max_ccd_substeps = 0;
         Self { pw }
     }
 
@@ -69,10 +76,26 @@ impl World {
         self.pw.colliders.insert_with_parent(c, body, &mut self.pw.bodies)
     }
 
-    /// A height grid as one Rapier heightfield (terrain group, friction 0.9 like the game's ground). `heights` is
-    /// row-major `[iz * n + ix]` (the map's `heights.bin` order), `step` m between samples, the grid's corner at
-    /// `origin` (x, z).
-    pub fn add_heightfield(&mut self, n: usize, step: f32, origin: [f32; 2], heights: &[f32]) -> ColliderHandle {
+    /// A static box with explicit collision groups (bridge decks, set pieces).
+    pub fn add_static_box(
+        &mut self,
+        half: Vector,
+        at: Vector,
+        rot: Rotation,
+        groups: InteractionGroups,
+    ) -> ColliderHandle {
+        let body = self.pw.bodies.insert(RigidBodyBuilder::fixed());
+        let c = ColliderBuilder::cuboid(half.x, half.y, half.z)
+            .position(Pose::from_parts(at, rot))
+            .friction(0.8)
+            .collision_groups(groups);
+        self.pw.colliders.insert_with_parent(c, body, &mut self.pw.bodies)
+    }
+
+    /// A height grid as a Rapier heightfield shape (shareable between worlds: one per map, not per room) and where
+    /// its collider goes. `heights` is row-major `[iz * n + ix]` (the map's `heights.bin` order), `step` m between
+    /// samples, the grid's corner at `origin` (x, z).
+    pub fn heightfield_shape(n: usize, step: f32, origin: [f32; 2], heights: &[f32]) -> (SharedShape, Vector) {
         // Rapier: rows run along Z, columns along X, centred on the collider (Array2 is column-major).
         let mut data = vec![0.0; n * n];
         for iz in 0..n {
@@ -81,12 +104,24 @@ impl World {
             }
         }
         let size = step * (n - 1) as f32;
-        let hf = ColliderBuilder::heightfield(Array2::new(n, n, data), Vector::new(size, 1.0, size))
-            .translation(Vector::new(origin[0] + size / 2.0, 0.0, origin[1] + size / 2.0))
+        let shape = SharedShape::heightfield(Array2::new(n, n, data), Vector::new(size, 1.0, size));
+        (shape, Vector::new(origin[0] + size / 2.0, 0.0, origin[1] + size / 2.0))
+    }
+
+    /// The terrain (terrain group, friction 0.9 like the game's ground).
+    pub fn add_terrain(&mut self, shape: SharedShape, at: Vector) -> ColliderHandle {
+        let hf = ColliderBuilder::new(shape)
+            .translation(at)
             .friction(0.9)
-            .collision_groups(group(groups::TERRAIN, 0xffff));
+            .collision_groups(group(groups::TERRAIN, 0xffff & !groups::VEHICLE_MESH));
         let body = self.pw.bodies.insert(RigidBodyBuilder::fixed());
         self.pw.colliders.insert_with_parent(hf, body, &mut self.pw.bodies)
+    }
+
+    /// A height grid as this world's own heightfield (tests; rooms share one shape per map via `add_terrain`).
+    pub fn add_heightfield(&mut self, n: usize, step: f32, origin: [f32; 2], heights: &[f32]) -> ColliderHandle {
+        let (shape, at) = Self::heightfield_shape(n, step, origin, heights);
+        self.add_terrain(shape, at)
     }
 
     /// First hit of a ray (time of impact along `dir`), ignoring `skip`'s colliders.

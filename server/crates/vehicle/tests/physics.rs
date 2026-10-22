@@ -257,3 +257,43 @@ fn drives_over_a_heightfield() {
     assert!(hi < 2.0, "flew off the hills ({hi:.2} m)");
     assert!(speed(&w, &t) > 5.0);
 }
+
+#[test]
+fn the_games_cars_load_and_drive() {
+    let cars = dark_vehicle::cars();
+    assert_eq!(
+        cars.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        ["pickup", "gwagen", "zuk"]
+    );
+    for def in cars {
+        assert!(
+            def.dims.hulls.as_ref().is_some_and(|h| h.len() > 10),
+            "{}: no hulls",
+            def.id
+        );
+        let mut w = World::new();
+        w.add_ground_box(2000.0);
+        let mut t = Truck::new(&mut w, def, None);
+        t.drivetrain.aids = dark_vehicle::spec::AidLevel::Full;
+        t.offroad_assist = true;
+        t.place(&mut w, 0.0, 0.0, 0.0, 0.0, 0.0);
+        run(&mut w, &mut [&mut t], 1.0, |_, _| {});
+        let y0 = t.position(&w)[1];
+        t.controls = Controls {
+            throttle: 1.0,
+            ..Default::default()
+        };
+        run(&mut w, &mut [&mut t], 5.0, |_, _| {});
+        let p = t.position(&w);
+        println!(
+            "{}: settled at y {y0:.3}, after 5 s full throttle z {:.1} at {:.1} m/s, up {:.3}",
+            def.id,
+            p[2],
+            speed(&w, &t),
+            up(&w, &t)
+        );
+        assert!(y0.abs() < 0.2, "{}: rests at y {y0:.2} (hulls in the ground?)", def.id);
+        assert!(speed(&w, &t) > 12.0, "{}", def.id);
+        assert!(up(&w, &t) > 0.98, "{}", def.id);
+    }
+}

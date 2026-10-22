@@ -5,6 +5,7 @@ use crate::bots::{BotEvent, Bots, Seen, World};
 use crate::fasthash::FastSet;
 use crate::interest::{self, Grid, InterestConfig};
 use crate::map::MapData;
+use crate::physics::RoomPhysics;
 use crate::rng::Rng;
 use crate::validate::{self, Ctx, Limits, Pose, Reject};
 use crate::zone::{self, Stage, ZoneState};
@@ -40,6 +41,10 @@ pub struct MatchConfig {
     pub end_linger_s: f32,
     /// Simulation / snapshot ticks per second.
     pub tick_hz: u32,
+    /// Server vehicle physics on map rooms (docs/VEHICLE_PHYSICS.md): bots drive the game's car model.
+    pub vehicle_physics: bool,
+    /// Physics steps per second (the game's fixed step: 60). Several per tick.
+    pub physics_hz: u32,
     /// Minimum distance between start points (m).
     pub spawn_spacing_m: f32,
     pub limits: Limits,
@@ -65,6 +70,8 @@ impl Default for MatchConfig {
             countdown_s: 10.0,
             end_linger_s: 20.0,
             tick_hz: 30,
+            vehicle_physics: true,
+            physics_hz: 60,
             spawn_spacing_m: 60.0,
             limits: Limits::default(),
             interest: InterestConfig::default(),
@@ -148,6 +155,9 @@ pub struct Match {
     w: Writer,
     /// Rooms: the server-run bots.
     bots: Option<Bots>,
+    /// Map rooms: the vehicle physics world (docs/VEHICLE_PHYSICS.md), and the time not yet stepped (s).
+    physics: Option<RoomPhysics>,
+    phys_acc: f32,
     bot_events: Vec<BotEvent>,
     seen: Vec<Seen>,
     /// Snapshot scratch (reused every tick: no allocation per player but the packet itself).
@@ -190,6 +200,11 @@ impl Match {
         } else {
             Phase::Lobby
         };
+        // vehicle physics: map rooms (an endless world's terrain is only in the clients)
+        let physics = match (&map, &room) {
+            (Some(m), Some(_)) if cfg.vehicle_physics => Some(RoomPhysics::new(m.clone())),
+            _ => None,
+        };
         let bots = room.as_ref().map(|r| {
             let world = match &map {
                 Some(m) => World::for_map(m.clone()),
@@ -197,10 +212,13 @@ impl Match {
             };
             let mut b = Bots::new(world, id ^ seed as u64);
             b.configure(r.bots as usize, r.flags & room_flags::FLYING != 0);
+            b.use_physics(physics.is_some());
             b
         });
         Self {
             bots,
+            physics,
+            phys_acc: 0.0,
             bot_events: Vec::new(),
             seen: Vec::new(),
             snap_ids: Vec::new(),
@@ -253,6 +271,11 @@ impl Match {
         self.players.values().filter(|p| p.bot).count()
     }
     /// What the bots have been doing (metrics).
+    /// Vehicles in the room's physics world (0 without server physics).
+    pub fn physics_vehicles(&self) -> usize {
+        self.physics.as_ref().map_or(0, |p| p.vehicles)
+    }
+
     pub fn bot_stats(&self) -> Option<crate::bots::BotStats> {
         self.bots.as_ref().map(|b| b.stats)
     }
@@ -340,6 +363,16 @@ impl Match {
             true,
         ))
     }
+    #[cfg(test)]
+    pub(crate) fn first_bad_bot(&self) -> Option<u16> {
+        self.bots.as_ref()?.first_bad(self.physics.as_ref()?)
+    }
+
+    /// A player's (or bot's) current pose.
+    pub fn pose_of(&self, id: u16) -> Option<Pose> {
+        self.players.get(&id).map(|p| p.pose)
+    }
+
     pub fn players(&self) -> impl Iterator<Item = PlayerView> + '_ {
         self.players.iter().map(|(&id, p)| PlayerView {
             id,
@@ -605,6 +638,24 @@ impl Match {
         }
         self.bot_events.clear();
         bots.step(dt, self.now_ms, &self.seen, &mut self.bot_events);
+        // the cars move: fixed physics steps (the game's 1/60 s), the bots read back where they are
+        if let Some(ph) = self.physics.as_mut() {
+            let h = 1.0 / self.cfg.physics_hz.max(1) as f32;
+            self.phys_acc = (self.phys_acc + dt).min(h * 8.0);
+            while self.phys_acc >= h {
+                bots.drive_cars(ph, h);
+                ph.world.step();
+                self.phys_acc -= h;
+            }
+            ph.vehicles = ph
+                .world
+                .pw
+                .bodies
+                .iter()
+                .filter(|(_, b)| b.is_dynamic() && b.is_enabled())
+                .count();
+            bots.after_physics(ph, dt, self.now_ms);
+        }
         for ev in self.bot_events.drain(..) {
             match ev {
                 BotEvent::Joined(id, name) => {

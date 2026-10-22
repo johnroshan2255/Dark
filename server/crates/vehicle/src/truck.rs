@@ -198,12 +198,32 @@ impl Truck {
         let mut colliders = Vec::new();
         match &d.hulls {
             Some(hulls) if !hulls.is_empty() => {
-                for hull in hulls {
-                    let pts: Vec<Vector> = hull.chunks_exact(3).map(|c| Vector::new(c[0], c[1], c[2])).collect();
-                    if let Some(b) = ColliderBuilder::convex_hull(&pts) {
-                        let c = b.density(0.0).friction(0.35).restitution(0.05).collision_groups(veh);
-                        colliders.push(pw.colliders.insert_with_parent(c, body, &mut pw.bodies));
-                    }
+                // The game's car: its convex HULLS meet only the ground (terrain, formations, ramps; friction 0.15)
+                // and its exact body MESH (Groups.VehicleMesh) meets everything else — other cars, props, debris. The
+                // server has no mesh: a second copy of the hulls stands in for it, in the mesh's groups, so every
+                // contact pairs up as on the client. Each set is ONE compound collider (the same convex pieces): 53
+                // separate colliders each paired with the map-wide heightfield cost ~25× the solver time per car.
+                let parts: Vec<(Pose, SharedShape)> = hulls
+                    .iter()
+                    .filter_map(|h| {
+                        let pts: Vec<Vector> = h.chunks_exact(3).map(|c| Vector::new(c[0], c[1], c[2])).collect();
+                        SharedShape::convex_hull(&pts).map(|s| (Pose::IDENTITY, s))
+                    })
+                    .collect();
+                let compound = SharedShape::compound(parts);
+                let ground = group(groups::VEHICLE, groups::TERRAIN | groups::STATIC_MESH);
+                let body_mesh = group(
+                    groups::VEHICLE_MESH,
+                    0xffff & !groups::PLAYER & !groups::TERRAIN & !groups::TERRAIN_MESH & !groups::STATIC_MESH,
+                );
+                for (g, friction) in [(ground, 0.15), (body_mesh, 0.35)] {
+                    let shape = compound.clone();
+                    let c = ColliderBuilder::new(shape)
+                        .density(0.0)
+                        .friction(friction)
+                        .restitution(0.05)
+                        .collision_groups(g);
+                    colliders.push(pw.colliders.insert_with_parent(c, body, &mut pw.bodies));
                 }
             }
             _ => {
@@ -323,6 +343,9 @@ impl Truck {
             ),
         );
         pw.bodies[self.body].set_additional_mass_properties(props, true);
+        // (Rapier applies mass changes at its next world step: a car stepped before that — a bot's new car
+        // under throttle and steering — had mass 0 and its first tyre impulses came out NaN)
+        pw.bodies[self.body].recompute_mass_properties_from_colliders(&pw.colliders);
         let f_scale = (self.tune.suspension / self.reference.suspension).max(0.3).sqrt();
         d.grip_scale = self.tune.grip / self.reference.grip;
         d.power_scale = self.tune.power / self.reference.power;
@@ -469,6 +492,14 @@ impl Truck {
             rim += self.drivetrain.omega[i] * self.drivetrain.r.axles[i >> 1].radius;
         }
         self.wheel_speed = rim / 4.0;
+    }
+
+    /// Take the body out of the simulation (false) or put it back (the game's `enabled`).
+    pub fn set_enabled(&mut self, world: &mut World, on: bool) {
+        if self.enabled != on {
+            self.enabled = on;
+            world.pw.bodies[self.body].set_enabled(on);
+        }
     }
 
     /// Streaming guard (the game's `keepAbove`): never below the ground.
