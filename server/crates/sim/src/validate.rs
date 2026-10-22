@@ -50,6 +50,8 @@ pub struct Pose {
     pub vel: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// + = right side down (server-simulated cars; client poses carry none).
+    pub roll: f32,
     pub flags: u8,
     pub model: u8,
 }

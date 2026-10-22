@@ -6,7 +6,7 @@
  * Full table: `server/docs/PROTOCOL.md`.
  */
 
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 export const MAX_PACKET = 16 * 1024
 export const MAX_SNAPSHOT_ENTITIES = 96
 /** "Nobody" (e.g. the zone as a killer). */
@@ -20,7 +20,14 @@ export const NO_SPAWN = -2147483648
 export const Flags = { DRIVING: 1, BOAT: 2, AIRBORNE: 4, DEAD: 8, BOOST: 16, LIGHTS: 32, BRAKING: 64, FLYING: 128 } as const
 export const Action = { RespawnVehicle: 1, Ready: 2, Spectate: 3 } as const
 export const Phase = { Lobby: 0, Countdown: 1, Running: 2, Ended: 3, FreeRoam: 4 } as const
-export const RoomFlags = { PRIVATE: 1, ROADKILL: 2, FLYING: 4 } as const
+/** PHYSICS (server-set): the server simulates the cars (a map room) — drive with `input`, not poses. */
+export const RoomFlags = { PRIVATE: 1, ROADKILL: 2, FLYING: 4, PHYSICS: 8 } as const
+/** `InputFrame.buttons` bits. */
+export const Buttons = { HANDBRAKE: 1, BOOST: 2, BRAKE: 4, LIGHTS: 8, SHIFT_UP: 16, SHIFT_DOWN: 32, LOW_RANGE: 64, LOCKERS: 128 } as const
+/** `input.opts`: aids in the low two bits (0 off · 1 std · 2 full), OFFROAD assist, MANUAL gearbox. */
+export const DriveOpts = { AIDS_MASK: 3, OFFROAD: 4, MANUAL: 8 } as const
+/** Most input frames one `input` packet carries. */
+export const MAX_INPUT_FRAMES = 8
 export const Cause = { Zone: 1, Roadkill: 2, Disconnect: 3 } as const
 export const Kick = {
   BadTicket: 1, VersionMismatch: 2, MatchFull: 3, MatchOver: 4, Cheating: 5, Flooding: 6, Malformed: 7, Timeout: 8, ServerShutdown: 9, Duplicate: 10, Kicked: 11,
@@ -50,7 +57,35 @@ export interface EntityState {
   pos: V3
   yaw: number
   pitch: number
+  /** + = right side down (int16 over ±π/2, like pitch). */
+  roll: number
   vel: V3
+}
+
+/** One physics step (1/60 s) of a driver's controls. steer / throttle −127…127, footBrake 0…255, lift −127…127. */
+export interface InputFrame {
+  steer: number
+  throttle: number
+  footBrake: number
+  buttons: number
+  lift: number
+}
+
+/** The authoritative state of the player's own server-simulated car. */
+export interface VehicleState {
+  tick: number
+  serverTime: number
+  /** The last input frame applied (the state is the car after it). */
+  ack: number
+  /** cm, quaternion × 32767 (x y z w), cm/s, mrad/s. */
+  pos: V3
+  rot: [number, number, number, number]
+  vel: V3
+  angvel: V3
+  gear: number
+  /** Engine speed and wheel spins, rad/s × 10. */
+  engine: number
+  omega: [number, number, number, number]
 }
 
 export interface Zone {
@@ -83,6 +118,8 @@ export type ClientMsg =
   | { t: 'ping'; clientTime: number }
   | { t: 'action'; kind: number; target: number }
   | { t: 'leave' }
+  | { t: 'input'; seq: number; opts: number; frames: InputFrame[] }
+  | { t: 'vehicle'; enter: boolean; model: number; pos: V3; yaw: number }
 
 export type ServerMsg =
   | { t: 'welcome'; protocol: number; playerId: number; matchId: bigint; tickRate: number; map: string; seed: number; spawn: V3; yaw: number; serverTime: number }
@@ -97,11 +134,12 @@ export type ServerMsg =
   | { t: 'pong'; clientTime: number; serverTime: number }
   | { t: 'kick'; reason: number; message: string }
   | { t: 'room'; room: RoomSettings }
+  | { t: 'vehicleState'; state: VehicleState }
 
-const C = { HELLO: 0x01, STATE: 0x02, PING: 0x03, ACTION: 0x04, LEAVE: 0x05 } as const
+const C = { HELLO: 0x01, STATE: 0x02, PING: 0x03, ACTION: 0x04, LEAVE: 0x05, INPUT: 0x06, VEHICLE: 0x07 } as const
 const S = {
   WELCOME: 0x81, SNAPSHOT: 0x82, PLAYER_JOINED: 0x83, PLAYER_LEFT: 0x84, PHASE: 0x85, ZONE: 0x86, ELIMINATED: 0x87, MATCH_END: 0x88,
-  CORRECTION: 0x89, PONG: 0x8a, KICK: 0x8b, ROOM: 0x8c,
+  CORRECTION: 0x89, PONG: 0x8a, KICK: 0x8b, ROOM: 0x8c, VEHICLE: 0x8d,
 } as const
 
 export class ProtocolError extends Error {}
@@ -137,6 +175,7 @@ class Writer {
     this.view = new DataView(b.buffer)
   }
   u8(v: number) { this.room(1); this.view.setUint8(this.n, v); this.n += 1 }
+  i8(v: number) { this.room(1); this.view.setInt8(this.n, v); this.n += 1 }
   u16(v: number) { this.room(2); this.view.setUint16(this.n, v, true); this.n += 2 }
   i16(v: number) { this.room(2); this.view.setInt16(this.n, v, true); this.n += 2 }
   u32(v: number) { this.room(4); this.view.setUint32(this.n, v >>> 0, true); this.n += 4 }
@@ -168,6 +207,7 @@ class Reader {
   constructor(private buf: Uint8Array) { this.view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength) }
   private need(k: number) { if (this.at + k > this.buf.length) throw new ProtocolError(`truncated at ${this.at}`) }
   u8() { this.need(1); return this.view.getUint8(this.at++) }
+  i8() { this.need(1); return this.view.getInt8(this.at++) }
   u16() { this.need(2); const v = this.view.getUint16(this.at, true); this.at += 2; return v }
   i16() { this.need(2); const v = this.view.getInt16(this.at, true); this.at += 2; return v }
   u32() { this.need(4); const v = this.view.getUint32(this.at, true); this.at += 4; return v }
@@ -202,6 +242,18 @@ export function encodeClient(m: ClientMsg): Uint8Array<ArrayBuffer> {
     case 'ping': w.u8(C.PING); w.u32(m.clientTime); break
     case 'action': w.u8(C.ACTION); w.u8(m.kind); w.u16(m.target); break
     case 'leave': w.u8(C.LEAVE); break
+    case 'input': {
+      w.u8(C.INPUT); w.u32(m.seq); w.u8(m.opts)
+      const fs = m.frames.slice(-MAX_INPUT_FRAMES)
+      w.u8(fs.length)
+      for (const f of fs) { w.i8(f.steer); w.i8(f.throttle); w.u8(f.footBrake); w.u8(f.buttons); w.i8(f.lift) }
+      break
+    }
+    case 'vehicle':
+      w.u8(C.VEHICLE); w.u8(m.enter ? 1 : 0); w.u8(m.model)
+      for (const v of m.pos) w.i32(v)
+      w.u16(m.yaw)
+      break
   }
   return w.done()
 }
@@ -218,6 +270,15 @@ export function decodeClient(buf: Uint8Array): ClientMsg {
     case C.PING: m = { t: 'ping', clientTime: r.u32() }; break
     case C.ACTION: m = { t: 'action', kind: r.u8(), target: r.u16() }; break
     case C.LEAVE: m = { t: 'leave' }; break
+    case C.INPUT: {
+      const seq = r.u32(), opts = r.u8(), n = r.u8()
+      if (n === 0 || n > MAX_INPUT_FRAMES) throw new ProtocolError('bad input frame count')
+      const frames: InputFrame[] = []
+      for (let i = 0; i < n; i++) frames.push({ steer: r.i8(), throttle: r.i8(), footBrake: r.u8(), buttons: r.u8(), lift: r.i8() })
+      m = { t: 'input', seq, opts, frames }
+      break
+    }
+    case C.VEHICLE: m = { t: 'vehicle', enter: r.u8() !== 0, model: r.u8(), pos: r.v3i32(), yaw: r.u16() }; break
     default: throw new ProtocolError(`unknown client kind 0x${k.toString(16)}`)
   }
   r.finish()
@@ -240,7 +301,7 @@ export function encodeServer(m: ServerMsg): Uint8Array<ArrayBuffer> {
       for (const e of es) {
         w.u16(e.id); w.u8(e.flags); w.u8(e.model)
         for (const v of e.pos) w.i32(v)
-        w.u16(e.yaw); w.i16(e.pitch)
+        w.u16(e.yaw); w.i16(e.pitch); w.i16(e.roll)
         for (const v of e.vel) w.i16(v)
       }
       const rm = m.removed.slice(0, 255)
@@ -267,6 +328,17 @@ export function encodeServer(m: ServerMsg): Uint8Array<ArrayBuffer> {
     case 'pong': w.u8(S.PONG); w.u32(m.clientTime); w.u32(m.serverTime); break
     case 'kick': w.u8(S.KICK); w.u8(m.reason); w.str(m.message); break
     case 'room': w.u8(S.ROOM); w.str(m.room.code); w.str(m.room.name); w.u8(m.room.flags); w.u16(m.room.maxPlayers); w.u16(m.room.owner); w.u8(m.room.bots); break
+    case 'vehicleState': {
+      const v = m.state
+      w.u8(S.VEHICLE); w.u32(v.tick); w.u32(v.serverTime); w.u32(v.ack)
+      for (const x of v.pos) w.i32(x)
+      for (const x of v.rot) w.i16(x)
+      for (const x of v.vel) w.i16(x)
+      for (const x of v.angvel) w.i16(x)
+      w.i8(v.gear); w.u16(v.engine)
+      for (const x of v.omega) w.i16(x)
+      break
+    }
   }
   return w.done()
 }
@@ -286,7 +358,7 @@ export function decodeServer(buf: Uint8Array): ServerMsg {
       const n = r.u8()
       if (n > MAX_SNAPSHOT_ENTITIES) throw new ProtocolError('too many entities')
       const entities: EntityState[] = []
-      for (let i = 0; i < n; i++) entities.push({ id: r.u16(), flags: r.u8(), model: r.u8(), pos: r.v3i32(), yaw: r.u16(), pitch: r.i16(), vel: r.v3i16() })
+      for (let i = 0; i < n; i++) entities.push({ id: r.u16(), flags: r.u8(), model: r.u8(), pos: r.v3i32(), yaw: r.u16(), pitch: r.i16(), roll: r.i16(), vel: r.v3i16() })
       const removed: number[] = []
       for (let i = r.u8(); i > 0; i--) removed.push(r.u16())
       m = { t: 'snapshot', tick, serverTime, ackSeq, hp, alive, entities, removed }
@@ -304,6 +376,15 @@ export function decodeServer(buf: Uint8Array): ServerMsg {
     case S.PONG: m = { t: 'pong', clientTime: r.u32(), serverTime: r.u32() }; break
     case S.KICK: m = { t: 'kick', reason: r.u8(), message: r.str() }; break
     case S.ROOM: m = { t: 'room', room: { code: r.str(), name: r.str(), flags: r.u8(), maxPlayers: r.u16(), owner: r.u16(), bots: r.u8() } }; break
+    case S.VEHICLE:
+      m = {
+        t: 'vehicleState',
+        state: {
+          tick: r.u32(), serverTime: r.u32(), ack: r.u32(), pos: r.v3i32(), rot: [r.i16(), r.i16(), r.i16(), r.i16()], vel: r.v3i16(), angvel: r.v3i16(),
+          gear: r.i8(), engine: r.u16(), omega: [r.i16(), r.i16(), r.i16(), r.i16()],
+        },
+      }
+      break
     default: throw new ProtocolError(`unknown server kind 0x${k.toString(16)}`)
   }
   r.finish()

@@ -5,7 +5,7 @@ use crate::bots::{BotEvent, Bots, Seen, World};
 use crate::fasthash::FastSet;
 use crate::interest::{self, Grid, InterestConfig};
 use crate::map::MapData;
-use crate::physics::RoomPhysics;
+use crate::physics::{HumanCar, RoomPhysics};
 use crate::rng::Rng;
 use crate::validate::{self, Ctx, Limits, Pose, Reject};
 use crate::zone::{self, Stage, ZoneState};
@@ -146,6 +146,8 @@ struct Player {
     spectate: Option<u16>,
     /// A server-run bot (no connection: no snapshots, no states).
     bot: bool,
+    /// Stage D: the car the server simulates for this person (map rooms with physics).
+    car: Option<HumanCar>,
 }
 
 pub struct Match {
@@ -189,12 +191,39 @@ pub struct Match {
     ents: Vec<EntityState>,
 }
 
+/// A server-simulated car's pose for the snapshots (the driver's pose while they drive it).
+fn car_pose(car: &dark_vehicle::Truck, world: &dark_vehicle::World, model: u8) -> Pose {
+    let t = car.position(world);
+    let ax = car.axes(world);
+    let v = world.pw.bodies[car.body].linvel();
+    let mut fl = flags::DRIVING | flags::LIGHTS;
+    if car.drivetrain.braking {
+        fl |= flags::BRAKING;
+    }
+    if car.controls.boost {
+        fl |= flags::BOOST;
+    }
+    if car.wheels.iter().all(|w| !w.contact) {
+        fl |= flags::AIRBORNE;
+    }
+    Pose {
+        pos: [t[0] as f32, t[1] as f32, t[2] as f32],
+        vel: [v.x, v.y, v.z],
+        yaw: (-ax.f[0]).atan2(-ax.f[2]) as f32,
+        pitch: ax.f[1].clamp(-1.0, 1.0).asin() as f32,
+        roll: (-ax.r[1]).atan2(ax.u[1]) as f32,
+        flags: fl,
+        model,
+    }
+}
+
 fn pose_from(s: &State) -> Pose {
     Pose {
         pos: [cm_to_m(s.pos[0]), cm_to_m(s.pos[1]), cm_to_m(s.pos[2])],
         vel: [cms_to_mps(s.vel[0]), cms_to_mps(s.vel[1]), cms_to_mps(s.vel[2])],
         yaw: u16_to_yaw(s.yaw),
         pitch: i16_to_pitch(s.pitch),
+        roll: 0.0,
         flags: s.flags,
         model: s.model,
     }
@@ -236,6 +265,12 @@ impl Match {
             b.configure(r.bots as usize, r.flags & room_flags::FLYING != 0);
             b.use_physics(physics.is_some());
             b
+        });
+        let room = room.map(|mut r| {
+            if physics.is_some() {
+                r.flags |= room_flags::PHYSICS;
+            }
+            r
         });
         Self {
             bots,
@@ -342,6 +377,8 @@ impl Match {
         r.owner = cur.owner;
         r.max_players = r.max_players.clamp(1, 100);
         r.bots = r.bots.min(100);
+        // (server-set: whether this room simulates the cars)
+        r.flags = (r.flags & !room_flags::PHYSICS) | if self.physics.is_some() { room_flags::PHYSICS } else { 0 };
         self.cfg.max_players = r.max_players as usize;
         if let Some(b) = self.bots.as_mut() {
             b.configure(r.bots as usize, r.flags & room_flags::FLYING != 0);
@@ -481,6 +518,7 @@ impl Match {
                 known: FastSet::default(),
                 spectate: None,
                 bot: false,
+                car: None,
             },
         );
         self.out.push(Out::All(ServerMsg::PlayerJoined {
@@ -515,7 +553,12 @@ impl Match {
         if self.phase == Phase::Running && p.alive {
             self.eliminate(id, NO_PLAYER, Cause::Disconnect);
         }
-        self.players.remove(&id);
+        if let Some(p) = self.players.remove(&id)
+            && let (Some(c), Some(ph)) = (p.car, self.physics.as_mut())
+        {
+            ph.bury(c.car);
+            ph.sweep();
+        }
         for p in self.players.values_mut() {
             p.known.remove(&id);
         }
@@ -536,6 +579,11 @@ impl Match {
         let flying_ok = self.room_flag(room_flags::FLYING);
         let (map, lim, kick_at) = (self.map.as_deref(), &self.cfg.limits, self.cfg.violation_kick);
         let Some(p) = self.players.get_mut(&id) else { return };
+        // driving a server-simulated car: the server says where it is (its inputs move it), never the client
+        if p.car.as_ref().is_some_and(|c| c.driving) {
+            p.last_seq = p.last_seq.max(s.seq);
+            return;
+        }
         // spectators don't move; old / duplicate states and states from before a correction are ignored
         if !p.alive || s.epoch != p.epoch || s.seq <= p.last_seq && p.last_seq != 0 {
             return;
@@ -579,6 +627,73 @@ impl Match {
                     self.out.push(Out::Kick(id, KickReason::Cheating, r.as_str()));
                 }
             }
+        }
+    }
+
+    /// A driver's input frames (their server-simulated car's controls).
+    pub fn on_input(&mut self, id: u16, input: &Input) {
+        if let Some(hc) = self.players.get_mut(&id).and_then(|p| p.car.as_mut())
+            && hc.driving
+        {
+            hc.push(input);
+        }
+    }
+
+    /// Into / out of the server-simulated car. Getting in: back into their own car if it is the one they mean, else a
+    /// car of that model where they say it stands — if that is by them and on the ground; otherwise where the server
+    /// has them (never somewhere a client chose freely). Getting out: it stays, parked.
+    pub fn on_vehicle(&mut self, id: u16, v: &VehicleMsg) {
+        let Some(ph) = self.physics.as_mut() else { return };
+        let Some(p) = self.players.get_mut(&id) else { return };
+        if p.bot || !p.alive {
+            return;
+        }
+        if !v.enter {
+            if let Some(hc) = p.car.as_mut() {
+                hc.driving = false;
+            }
+            return;
+        }
+        let model = v.model.clamp(1, crate::bots::CAR_MODELS);
+        let claim = [cm_to_m(v.pos[0]), cm_to_m(v.pos[1]), cm_to_m(v.pos[2])];
+        let flat = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        if let Some(hc) = p.car.as_mut()
+            && hc.model == model
+        {
+            let at = hc.car.position(&ph.world);
+            if flat([at[0] as f32, at[1] as f32, at[2] as f32], claim) < 25.0 {
+                hc.driving = true;
+                return;
+            }
+        }
+        let ok = claim.iter().all(|c| c.is_finite())
+            && (!p.has_pose || flat(claim, p.pose.pos) < 15.0)
+            && (claim[1] - ph.ground(claim[0], claim[2])).abs() < 4.0;
+        let (x, z, yaw) = if ok {
+            (claim[0], claim[2], u16_to_yaw(v.yaw))
+        } else {
+            (p.pose.pos[0], p.pose.pos[2], p.pose.yaw)
+        };
+        if let Some(old) = p.car.take() {
+            ph.bury(old.car);
+            ph.sweep();
+        }
+        let y = ph.ground(x, z);
+        p.car = Some(HumanCar::new(ph.new_car(model, x, y, z, yaw), model));
+    }
+
+    /// The drivers' own car states (latest-only, one per driver per tick), encoded.
+    pub fn vehicle_states(&mut self, out: &mut Vec<(u16, Vec<u8>)>) {
+        let Some(ph) = self.physics.as_ref() else { return };
+        let server_time = self.now_ms.min(u32::MAX as u64) as u32;
+        for (&id, p) in &self.players {
+            let Some(hc) = p.car.as_ref() else { continue };
+            if !hc.driving {
+                continue;
+            }
+            self.w.clear();
+            ServerMsg::Vehicle(hc.state(&ph.world, self.tick, server_time)).encode(&mut self.w);
+            out.push((id, self.w.buf.clone()));
         }
     }
 
@@ -633,7 +748,7 @@ impl Match {
                 }
             }
             Phase::FreeRoam => {
-                self.step_bots(dt);
+                self.step_room(dt);
                 if self.room_flag(room_flags::ROADKILL) {
                     self.roadkill();
                 }
@@ -657,32 +772,47 @@ impl Match {
         self.rebuild_grid();
     }
 
-    /// Rooms: the bots think and move; joins / leaves become roster packets.
-    fn step_bots(&mut self, dt: f32) {
-        let Some(bots) = self.bots.as_mut() else { return };
-        self.seen.clear();
-        for (&id, p) in &self.players {
-            if p.has_pose && p.alive {
-                self.seen.push(Seen {
-                    id,
-                    pose: p.pose,
-                    bot: p.bot,
-                });
-            }
-        }
-        self.bot_events.clear();
+    /// Rooms: the bots think, every car moves (the bots' and the people's, in one physics world), poses are read back;
+    /// bot joins / leaves become roster packets.
+    fn step_room(&mut self, dt: f32) {
         let clock = |c: &Option<Clock>| c.as_ref().map_or(0, |f| f());
         let mut prof = TickProfile::default();
-        let t0 = clock(&self.clock);
-        bots.step(dt, self.now_ms, &self.seen, &mut self.bot_events);
-        prof.ai_us = (clock(&self.clock) - t0) as f64 / 1e3;
-        // the cars move: fixed physics steps (the game's 1/60 s), the bots read back where they are
+        self.bot_events.clear();
+        if let Some(bots) = self.bots.as_mut() {
+            self.seen.clear();
+            for (&id, p) in &self.players {
+                if p.has_pose && p.alive {
+                    self.seen.push(Seen {
+                        id,
+                        pose: p.pose,
+                        bot: p.bot,
+                    });
+                }
+            }
+            let t0 = clock(&self.clock);
+            bots.step(dt, self.now_ms, &self.seen, &mut self.bot_events);
+            prof.ai_us = (clock(&self.clock) - t0) as f64 / 1e3;
+        }
+        // the cars move: fixed physics steps (the game's 1/60 s); bots and drivers read back where they are
         if let Some(ph) = self.physics.as_mut() {
             let h = 1.0 / self.cfg.physics_hz.max(1) as f32;
             self.phys_acc = (self.phys_acc + dt).min(h * 8.0);
             while self.phys_acc >= h {
                 let a = clock(&self.clock);
-                bots.drive_cars(ph, h);
+                if let Some(bots) = self.bots.as_mut() {
+                    bots.drive_cars(ph, h);
+                }
+                for p in self.players.values_mut() {
+                    let Some(hc) = p.car.as_mut() else { continue };
+                    hc.car.controls = hc.next_controls();
+                    if hc.car.controls.parked && ph.world.pw.bodies[hc.car.body].is_sleeping() {
+                        continue;
+                    }
+                    hc.car.step(&mut ph.world, h as f64);
+                    let t = hc.car.position(&ph.world);
+                    let ground = ph.ground(t[0] as f32, t[2] as f32) as f64;
+                    hc.car.keep_above(&mut ph.world, ground);
+                }
                 let b = clock(&self.clock);
                 ph.world.step();
                 let c = clock(&self.clock);
@@ -699,12 +829,26 @@ impl Match {
                 .filter(|(_, b)| b.is_dynamic() && b.is_enabled())
                 .count();
             prof.vehicles = ph.vehicles as u32;
-            (prof.built, prof.set_down) = bots.take_car_events();
-            let a = clock(&self.clock);
-            bots.after_physics(ph, dt, self.now_ms);
-            prof.ai_us += (clock(&self.clock) - a) as f64 / 1e3;
+            if let Some(bots) = self.bots.as_mut() {
+                (prof.built, prof.set_down) = bots.take_car_events();
+                let a = clock(&self.clock);
+                bots.after_physics(ph, dt, self.now_ms);
+                prof.ai_us += (clock(&self.clock) - a) as f64 / 1e3;
+            }
+            // a driver is where their car is
+            let now = self.now_ms;
+            for p in self.players.values_mut() {
+                let Some(hc) = p.car.as_ref() else { continue };
+                if !hc.driving || !p.alive {
+                    continue;
+                }
+                p.pose = car_pose(&hc.car, &ph.world, hc.model);
+                p.has_pose = true;
+                p.last_accept_ms = now;
+            }
         }
         self.profile = prof;
+        let Some(bots) = self.bots.as_mut() else { return };
         for ev in self.bot_events.drain(..) {
             match ev {
                 BotEvent::Joined(id, name) => {
@@ -727,6 +871,7 @@ impl Match {
                             known: FastSet::default(),
                             spectate: None,
                             bot: true,
+                            car: None,
                         },
                     );
                     self.out.push(Out::All(ServerMsg::PlayerJoined { id, name }));
@@ -976,6 +1121,7 @@ impl Match {
                         pos: [m_to_cm(q.pose.pos[0]), m_to_cm(q.pose.pos[1]), m_to_cm(q.pose.pos[2])],
                         yaw: yaw_to_u16(q.pose.yaw),
                         pitch: pitch_to_i16(q.pose.pitch),
+                        roll: pitch_to_i16(q.pose.roll),
                         vel: [
                             mps_to_cms(q.pose.vel[0]),
                             mps_to_cms(q.pose.vel[1]),

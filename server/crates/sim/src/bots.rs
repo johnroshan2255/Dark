@@ -242,6 +242,7 @@ pub struct Bot {
     plan: Option<([f32; 2], f32)>,
     placed: bool,
     pitch: f32,
+    roll: f32,
     vel: [f32; 3],
 }
 
@@ -508,6 +509,7 @@ impl Bots {
                 plan: None,
                 placed: false,
                 pitch: 0.0,
+                roll: 0.0,
                 vel: [0.0; 3],
             };
             let dist = 120.0 + self.rng.f32() * 500.0;
@@ -652,6 +654,7 @@ impl Bot {
             plan: None,
             placed: false,
             pitch: 0.0,
+            roll: 0.0,
             vel: [0.0; 3],
         }
     }
@@ -1549,6 +1552,7 @@ impl Bots {
             b.show_yaw = b.yaw;
             b.speed = c.speed as f32;
             b.pitch = ax.f[1].clamp(-1.0, 1.0).asin() as f32;
+            b.roll = (-ax.r[1]).atan2(ax.u[1]) as f32;
             b.vel = [v.x, v.y, v.z];
             b.braking = c.drivetrain.braking || c.controls.parked;
             let wants = b.plan.is_some_and(|p| p.1 > 1.0);
@@ -2370,6 +2374,7 @@ impl Bots {
             },
             yaw: b.show_yaw,
             pitch,
+            roll: if physical { b.roll } else { 0.0 },
             flags: fl,
             model,
         };

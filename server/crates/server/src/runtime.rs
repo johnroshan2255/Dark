@@ -38,6 +38,8 @@ pub enum Outgoing {
 pub struct Conn {
     pub tx: mpsc::Sender<Outgoing>,
     pub snap: watch::Sender<Bytes>,
+    /// The player's own server-simulated car state (latest-only).
+    pub veh: watch::Sender<Bytes>,
 }
 
 pub enum Cmd {
@@ -277,6 +279,13 @@ impl Runtime {
                 c.snap.send_replace(Bytes::from(b));
             }
         }
+        self.game.vehicle_states(&mut self.snaps);
+        for (pid, b) in self.snaps.drain(..) {
+            if let Some(c) = self.conns.get(&pid) {
+                bytes += b.len() as u64;
+                c.veh.send_replace(Bytes::from(b));
+            }
+        }
         metrics::counter!(m::SNAPSHOT_BYTES).increment(bytes);
         let info = &self.info;
         info.players.store(self.game.player_count(), Ordering::Relaxed);
@@ -334,6 +343,8 @@ impl Runtime {
             },
             Cmd::Msg { pid, msg } => match msg {
                 ClientMsg::State(s) => self.game.on_state(pid, &s),
+                ClientMsg::Input(i) => self.game.on_input(pid, &i),
+                ClientMsg::Vehicle(v) => self.game.on_vehicle(pid, &v),
                 ClientMsg::Action { kind, target } => self.game.on_action(pid, kind, target),
                 ClientMsg::Leave => self.drop_player(pid),
                 ClientMsg::Hello { .. } | ClientMsg::Ping { .. } => {}

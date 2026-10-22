@@ -38,6 +38,38 @@ fn client_samples() -> Vec<(&'static str, ClientMsg)> {
             },
         ),
         ("leave", ClientMsg::Leave),
+        (
+            "input",
+            ClientMsg::Input(Input {
+                seq: 4_000_000_123,
+                opts: 2 | drive_opts::OFFROAD,
+                frames: vec![
+                    InputFrame {
+                        steer: -127,
+                        throttle: 127,
+                        foot_brake: 0,
+                        buttons: buttons::BOOST | buttons::LIGHTS,
+                        lift: 0,
+                    },
+                    InputFrame {
+                        steer: 64,
+                        throttle: -100,
+                        foot_brake: 255,
+                        buttons: buttons::HANDBRAKE | buttons::BRAKE,
+                        lift: -127,
+                    },
+                ],
+            }),
+        ),
+        (
+            "vehicle",
+            ClientMsg::Vehicle(VehicleMsg {
+                enter: true,
+                model: 2,
+                pos: [-55_500, 3_620, 120_001],
+                yaw: 12_345,
+            }),
+        ),
     ]
 }
 
@@ -73,6 +105,7 @@ fn server_samples() -> Vec<(&'static str, ServerMsg)> {
                         pos: [1, -2, 3],
                         yaw: 65_535,
                         pitch: 32_767,
+                        roll: -5_000,
                         vel: [-1, 0, 1],
                     },
                     EntityState {
@@ -82,6 +115,7 @@ fn server_samples() -> Vec<(&'static str, ServerMsg)> {
                         pos: [i32::MIN, 0, i32::MAX],
                         yaw: 0,
                         pitch: -32_767,
+                        roll: 32_767,
                         vel: [i16::MIN, i16::MAX, 0],
                     },
                 ],
@@ -154,10 +188,25 @@ fn server_samples() -> Vec<(&'static str, ServerMsg)> {
             ServerMsg::Room(RoomSettings {
                 code: "K7QX2M".into(),
                 name: "Asha's world".into(),
-                flags: room_flags::PRIVATE | room_flags::ROADKILL,
+                flags: room_flags::PRIVATE | room_flags::ROADKILL | room_flags::PHYSICS,
                 max_players: 64,
                 owner: 1,
                 bots: 24,
+            }),
+        ),
+        (
+            "vehicle_state",
+            ServerMsg::Vehicle(VehicleState {
+                tick: 7_001,
+                server_time: 233_366,
+                ack: 4_000_000_120,
+                pos: [-55_480, 3_611, 119_402],
+                rot: [-120, 23_170, 95, 23_170],
+                vel: [-35, -12, -1_840],
+                angvel: [4, -310, 12],
+                gear: -1,
+                engine: 5_861,
+                omega: [-468, -470, i16::MIN, i16::MAX],
             }),
         ),
         (

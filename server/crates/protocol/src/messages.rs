@@ -30,6 +30,72 @@ pub const C_STATE: u8 = 0x02;
 pub const C_PING: u8 = 0x03;
 pub const C_ACTION: u8 = 0x04;
 pub const C_LEAVE: u8 = 0x05;
+pub const C_INPUT: u8 = 0x06;
+pub const C_VEHICLE: u8 = 0x07;
+
+/// Most input frames one [`Input`] packet carries (the newest last).
+pub const MAX_INPUT_FRAMES: usize = 8;
+
+/// `InputFrame.buttons` bits.
+pub mod buttons {
+    /// The handbrake (Space).
+    pub const HANDBRAKE: u8 = 1 << 0;
+    /// Boost / nitrous (Shift).
+    pub const BOOST: u8 = 1 << 1;
+    /// The brake key is down (S / stick back) — arcade drift taps, the brake lamps.
+    pub const BRAKE: u8 = 1 << 2;
+    /// Lights on.
+    pub const LIGHTS: u8 = 1 << 3;
+    /// One-shot events (the frame the key went down): manual gear up / down, low range, the lockers.
+    pub const SHIFT_UP: u8 = 1 << 4;
+    pub const SHIFT_DOWN: u8 = 1 << 5;
+    pub const LOW_RANGE: u8 = 1 << 6;
+    pub const LOCKERS: u8 = 1 << 7;
+}
+
+/// `Input.opts` bits: the driver's settings (Settings → Controls) the car model runs with.
+pub mod drive_opts {
+    /// Driving aids: 0 off · 1 std · 2 full (the game's 'auto' = full).
+    pub const AIDS_MASK: u8 = 0b11;
+    /// Off-road assist on.
+    pub const OFFROAD: u8 = 1 << 2;
+    /// Manual gearbox.
+    pub const MANUAL: u8 = 1 << 3;
+}
+
+/// A driver's controls for ONE physics step (the game's fixed 1/60 s) — what the server's car model runs on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputFrame {
+    /// Stick steer −127 … 127 (+ = right) and the one-axis throttle −127 … 127 (+ = gas, − = brake / reverse).
+    pub steer: i8,
+    pub throttle: i8,
+    /// Foot brake held together with the gas, 0 … 255.
+    pub foot_brake: u8,
+    /// [`buttons`] bits.
+    pub buttons: u8,
+    /// Air suspension up / down −127 … 127.
+    pub lift: i8,
+}
+
+/// The newest input frames (oldest first; the last is frame `seq`). Sent ~30 Hz with the last few frames again, so a
+/// lost packet loses no input; the server applies each frame once, in order, one per physics step.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Input {
+    pub seq: u32,
+    /// [`drive_opts`] bits.
+    pub opts: u8,
+    pub frames: Vec<InputFrame>,
+}
+
+/// Getting into (`enter`) or out of the server-simulated car: the car of wire `model` standing at `pos` facing `yaw`
+/// (the server checks it is where the player is).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VehicleMsg {
+    pub enter: bool,
+    pub model: u8,
+    pub pos: [i32; 3],
+    pub yaw: u16,
+}
 
 /// The client's simulated pose this frame (sent at the client's tick, ~30 Hz). The server validates it
 /// (speed, teleport, ground, map bounds) and either accepts it or answers with a [`ServerMsg::Correction`].
@@ -93,6 +159,10 @@ pub enum ClientMsg {
     },
     /// Leaving voluntarily (the server keeps no seat).
     Leave,
+    /// Driving a server-simulated car: the controls, frame by frame.
+    Input(Input),
+    /// Into / out of the server-simulated car.
+    Vehicle(VehicleMsg),
 }
 
 impl ClientMsg {
@@ -129,6 +199,29 @@ impl ClientMsg {
                 w.u16(*target);
             }
             Self::Leave => w.u8(C_LEAVE),
+            Self::Input(i) => {
+                w.u8(C_INPUT);
+                w.u32(i.seq);
+                w.u8(i.opts);
+                let n = i.frames.len().min(MAX_INPUT_FRAMES);
+                w.u8(n as u8);
+                for f in &i.frames[i.frames.len() - n..] {
+                    w.i8(f.steer);
+                    w.i8(f.throttle);
+                    w.u8(f.foot_brake);
+                    w.u8(f.buttons);
+                    w.i8(f.lift);
+                }
+            }
+            Self::Vehicle(v) => {
+                w.u8(C_VEHICLE);
+                w.u8(v.enter as u8);
+                w.u8(v.model);
+                for p in v.pos {
+                    w.i32(p);
+                }
+                w.u16(v.yaw);
+            }
         }
     }
 
@@ -160,6 +253,35 @@ impl ClientMsg {
                 target: r.u16()?,
             },
             C_LEAVE => Self::Leave,
+            C_INPUT => {
+                let seq = r.u32()?;
+                let opts = r.u8()?;
+                let n = r.u8()? as usize;
+                if n == 0 || n > MAX_INPUT_FRAMES {
+                    return Err(DecodeError::TooMany {
+                        what: "input frames",
+                        count: n,
+                        max: MAX_INPUT_FRAMES,
+                    });
+                }
+                let mut frames = Vec::with_capacity(n);
+                for _ in 0..n {
+                    frames.push(InputFrame {
+                        steer: r.i8()?,
+                        throttle: r.i8()?,
+                        foot_brake: r.u8()?,
+                        buttons: r.u8()?,
+                        lift: r.i8()?,
+                    });
+                }
+                Self::Input(Input { seq, opts, frames })
+            }
+            C_VEHICLE => Self::Vehicle(VehicleMsg {
+                enter: r.u8()? != 0,
+                model: r.u8()?,
+                pos: [r.i32()?, r.i32()?, r.i32()?],
+                yaw: r.u16()?,
+            }),
             k => return Err(DecodeError::UnknownKind(k)),
         };
         r.finish()?;
@@ -187,6 +309,26 @@ pub const S_CORRECTION: u8 = 0x89;
 pub const S_PONG: u8 = 0x8a;
 pub const S_KICK: u8 = 0x8b;
 pub const S_ROOM: u8 = 0x8c;
+pub const S_VEHICLE: u8 = 0x8d;
+
+/// The authoritative state of the player's own server-simulated car (sent to its driver every tick): what the client
+/// reconciles its prediction against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VehicleState {
+    pub tick: u32,
+    pub server_time: u32,
+    /// The last [`Input`] frame applied (the state is the car AFTER it).
+    pub ack: u32,
+    /// Position (cm), rotation (quaternion x, y, z, w × 32767), velocity (cm/s), angular velocity (mrad/s).
+    pub pos: [i32; 3],
+    pub rot: [i16; 4],
+    pub vel: [i16; 3],
+    pub angvel: [i16; 3],
+    /// Gear (−1 reverse, 0 neutral, 1…), engine speed (rad/s × 10), wheel spin per wheel (rad/s × 10).
+    pub gear: i8,
+    pub engine: u16,
+    pub omega: [i16; 4],
+}
 
 /// Match phases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,6 +366,8 @@ pub mod room_flags {
     pub const ROADKILL: u8 = 1 << 1;
     /// Flying vehicles allowed (else a FLYING state is rejected).
     pub const FLYING: u8 = 1 << 2;
+    /// The server simulates the cars (a map room): drive with [`super::Input`], not poses (server-set).
+    pub const PHYSICS: u8 = 1 << 3;
 }
 
 /// A room's settings as clients see them.
@@ -303,7 +447,7 @@ impl KickReason {
     }
 }
 
-/// One remote entity in a snapshot (26 bytes on the wire).
+/// One remote entity in a snapshot (28 bytes on the wire).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EntityState {
     pub id: u16,
@@ -312,6 +456,8 @@ pub struct EntityState {
     pub pos: [i32; 3],
     pub yaw: u16,
     pub pitch: i16,
+    /// Roll (+ = right side down), like pitch: ±32 767 = ±π/2. Server-simulated cars lean and bank.
+    pub roll: i16,
     pub vel: [i16; 3],
 }
 
@@ -401,6 +547,8 @@ pub enum ServerMsg {
     },
     /// The room's settings (on join and whenever the owner changes them).
     Room(RoomSettings),
+    /// The player's own server-simulated car.
+    Vehicle(VehicleState),
 }
 
 impl ServerMsg {
@@ -530,6 +678,29 @@ impl ServerMsg {
                 w.u16(r.owner);
                 w.u8(r.bots);
             }
+            Self::Vehicle(v) => {
+                w.u8(S_VEHICLE);
+                w.u32(v.tick);
+                w.u32(v.server_time);
+                w.u32(v.ack);
+                for x in v.pos {
+                    w.i32(x);
+                }
+                for x in v.rot {
+                    w.i16(x);
+                }
+                for x in v.vel {
+                    w.i16(x);
+                }
+                for x in v.angvel {
+                    w.i16(x);
+                }
+                w.i8(v.gear);
+                w.u16(v.engine);
+                for x in v.omega {
+                    w.i16(x);
+                }
+            }
         }
     }
 
@@ -636,6 +807,18 @@ impl ServerMsg {
                 owner: r.u16()?,
                 bots: r.u8()?,
             }),
+            S_VEHICLE => Self::Vehicle(VehicleState {
+                tick: r.u32()?,
+                server_time: r.u32()?,
+                ack: r.u32()?,
+                pos: [r.i32()?, r.i32()?, r.i32()?],
+                rot: [r.i16()?, r.i16()?, r.i16()?, r.i16()?],
+                vel: [r.i16()?, r.i16()?, r.i16()?],
+                angvel: [r.i16()?, r.i16()?, r.i16()?],
+                gear: r.i8()?,
+                engine: r.u16()?,
+                omega: [r.i16()?, r.i16()?, r.i16()?, r.i16()?],
+            }),
             k => return Err(DecodeError::UnknownKind(k)),
         };
         r.finish()?;
@@ -658,6 +841,7 @@ fn encode_entity(w: &mut Writer, e: &EntityState) {
     }
     w.u16(e.yaw);
     w.i16(e.pitch);
+    w.i16(e.roll);
     for v in e.vel {
         w.i16(v);
     }
@@ -671,9 +855,10 @@ fn decode_entity(r: &mut Reader) -> Result<EntityState, DecodeError> {
         pos: [r.i32()?, r.i32()?, r.i32()?],
         yaw: r.u16()?,
         pitch: r.i16()?,
+        roll: r.i16()?,
         vel: [r.i16()?, r.i16()?, r.i16()?],
     })
 }
 
 /// Bytes one [`EntityState`] takes on the wire.
-pub const ENTITY_BYTES: usize = 26;
+pub const ENTITY_BYTES: usize = 28;

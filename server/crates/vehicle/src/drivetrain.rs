@@ -446,6 +446,67 @@ impl Drivetrain {
         )
     }
 
+    // ---------------- driver actions ----------------
+
+    /// Manual mode: one gear up / down (refused if it would over-rev: `refused`).
+    pub fn shift_up(&mut self) {
+        self.request_shift(1);
+    }
+    pub fn shift_down(&mut self) {
+        self.request_shift(-1);
+    }
+    fn request_shift(&mut self, d: i32) {
+        let n = self.r.gearbox.ratios.len() as i32;
+        if !self.stepped() || self.selector != Selector::D || self.shifting {
+            return;
+        }
+        let to = self.gear + d;
+        if to < 1 || to > n {
+            return;
+        }
+        let w_out = (self.carrier_speed() * self.ratio_of(to)).abs();
+        if w_out > self.r.power.w_redline * 1.02 {
+            self.refused = true;
+            return;
+        }
+        self.begin_shift(to);
+    }
+
+    /// Low range (only ≤ 8 km/h; part-time 4WD engages 4H with it). False = refused.
+    pub fn toggle_low(&mut self, speed: f64) -> bool {
+        if self.r.drive.low <= 1.0 || speed.abs() > 2.3 {
+            return false;
+        }
+        self.low_range = !self.low_range;
+        if self.low_range
+            && (self.r.drive.layout == Layout::PartTime4wd || self.r.drive.lockers.contains(&Locker::Centre))
+        {
+            self.locks.centre = true;
+        }
+        true
+    }
+
+    /// Cycle the lockers the car has: none → centre → + rear → + front → none.
+    pub fn cycle_lockers(&mut self) {
+        let order: Vec<Locker> = [Locker::Centre, Locker::Rear, Locker::Front]
+            .into_iter()
+            .filter(|l| self.r.drive.lockers.contains(l))
+            .collect();
+        if order.is_empty() {
+            return;
+        }
+        self.auto4h = false;
+        self.auto_locked = false;
+        if let Some(&next) = order.iter().find(|l| !self.locks.has(**l)) {
+            self.locks.set(next, true);
+        } else {
+            self.locks = Locks::default();
+            if self.low_range && self.r.drive.layout == Layout::PartTime4wd {
+                self.low_range = false;
+            }
+        }
+    }
+
     /// Engine speed (rpm).
     pub fn rpm(&self) -> f64 {
         self.we * 30.0 / std::f64::consts::PI

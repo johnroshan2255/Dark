@@ -3,7 +3,10 @@
 
 use crate::map::MapData;
 use crate::noise::WATER;
+use dark_protocol::{Input, InputFrame, VehicleState, buttons, drive_opts, m_to_cm, mps_to_cms};
 use dark_vehicle::rapier3d::prelude::{Rotation, SharedShape, Vector};
+use dark_vehicle::spec::AidLevel;
+use dark_vehicle::truck::Controls;
 use dark_vehicle::tyre::{SurfaceMix, surf};
 use dark_vehicle::world::{group, groups};
 use dark_vehicle::{Truck, World};
@@ -192,6 +195,167 @@ impl RoomPhysics {
     /// The solid ground (terrain or ice) under (x, z) — the streaming guard's floor.
     pub fn ground(&self, x: f32, z: f32) -> f32 {
         self.map.surface(x, z)
+    }
+}
+
+/// A person's server-simulated car (stage D): the server owns its state; the driver's [`Input`] frames are its
+/// controls, applied in order, one per physics step. Never a pose from the client.
+pub struct HumanCar {
+    pub car: Truck,
+    /// Wire model (catalogue index + 1).
+    pub model: u8,
+    /// Seated and driving (inputs apply); false = parked where the driver got out.
+    pub driving: bool,
+    /// The driver's settings (`Input.opts`).
+    pub opts: u8,
+    /// Frames not yet applied (seq, frame), oldest first.
+    queue: std::collections::VecDeque<(u32, InputFrame)>,
+    /// Highest frame seq queued or applied (frames at or below it are duplicates / stale).
+    high: u32,
+    /// The last frame applied, and its seq (acked in `VehicleState`).
+    last: InputFrame,
+    pub ack: u32,
+    /// Physics steps without a fresh frame (the last one repeats ≤ STARVE_REPEAT, then the controls go neutral).
+    starved: u32,
+    /// Frames dropped (lost in transit beyond the redundancy, or trimmed when the client ran ahead) — metrics.
+    pub lost: u64,
+}
+
+/// Steps a missing frame is covered by repeating the last one (0.25 s at 60 Hz).
+const STARVE_REPEAT: u32 = 15;
+/// More frames waiting than this: the client is ahead (a burst after a stall) — the oldest are skipped.
+const QUEUE_MAX: usize = 6;
+
+impl HumanCar {
+    pub fn new(car: Truck, model: u8) -> Self {
+        Self {
+            car,
+            model,
+            driving: true,
+            opts: 2 | drive_opts::OFFROAD,
+            queue: Default::default(),
+            high: 0,
+            last: InputFrame::default(),
+            ack: 0,
+            starved: 0,
+            lost: 0,
+        }
+    }
+
+    /// Queue an input packet's frames: in order, duplicates (the redundant copies) and stale ones dropped.
+    pub fn push(&mut self, input: &Input) {
+        self.opts = input.opts;
+        let n = input.frames.len() as i64;
+        for (k, f) in input.frames.iter().enumerate() {
+            // (frames are numbered from 1; a first packet's redundant copies can reach below that)
+            let seq = input.seq as i64 - (n - 1 - k as i64);
+            if seq < 1 || seq > u32::MAX as i64 || seq as u32 <= self.high {
+                continue;
+            }
+            let seq = seq as u32;
+            if self.high != 0 && seq > self.high + 1 {
+                self.lost += (seq - self.high - 1) as u64; // (gone: beyond the redundancy)
+            }
+            self.high = seq;
+            self.queue.push_back((seq, *f));
+        }
+        while self.queue.len() > 16 {
+            self.queue.pop_front();
+            self.lost += 1;
+        }
+    }
+
+    /// The controls for the next physics step (the driver's next frame; parked when nobody is in it).
+    pub fn next_controls(&mut self) -> Controls {
+        if !self.driving {
+            let rolling = self.car.speed.abs() > 1.5;
+            return Controls {
+                throttle: if rolling { -1.0 } else { 0.0 },
+                parked: !rolling,
+                ..Default::default()
+            };
+        }
+        while self.queue.len() > QUEUE_MAX {
+            let (seq, f) = self.queue.pop_front().expect("non-empty");
+            (self.ack, self.last) = (seq, f);
+            self.lost += 1;
+        }
+        let f = match self.queue.pop_front() {
+            Some((seq, f)) => {
+                self.starved = 0;
+                self.ack = seq;
+                self.last = f;
+                f
+            }
+            None => {
+                self.starved += 1;
+                if self.starved <= STARVE_REPEAT {
+                    // (one-shot buttons don't repeat)
+                    InputFrame {
+                        buttons: self.last.buttons & 0x0f,
+                        ..self.last
+                    }
+                } else {
+                    InputFrame::default()
+                }
+            }
+        };
+        let d = &mut self.car.drivetrain;
+        d.aids = match self.opts & drive_opts::AIDS_MASK {
+            0 => AidLevel::Off,
+            1 => AidLevel::Std,
+            _ => AidLevel::Full,
+        };
+        d.manual = self.opts & drive_opts::MANUAL != 0 && d.stepped();
+        self.car.offroad_assist = self.opts & drive_opts::OFFROAD != 0;
+        if f.buttons & buttons::SHIFT_UP != 0 && d.manual {
+            d.shift_up();
+        }
+        if f.buttons & buttons::SHIFT_DOWN != 0 && d.manual {
+            d.shift_down();
+        }
+        if f.buttons & buttons::LOW_RANGE != 0 {
+            let v = self.car.speed;
+            self.car.drivetrain.toggle_low(v);
+        }
+        if f.buttons & buttons::LOCKERS != 0 {
+            self.car.drivetrain.cycle_lockers();
+        }
+        Controls {
+            parked: false,
+            throttle: (f.throttle as f64 / 127.0).clamp(-1.0, 1.0),
+            steer: (f.steer as f64 / 127.0).clamp(-1.0, 1.0),
+            handbrake: f.buttons & buttons::HANDBRAKE != 0,
+            boost: f.buttons & buttons::BOOST != 0,
+            brake: f.buttons & buttons::BRAKE != 0,
+            foot_brake: f.foot_brake as f64 / 255.0,
+            lift: (f.lift as f64 / 127.0).clamp(-1.0, 1.0),
+        }
+    }
+
+    /// The wire state for the driver (after this tick's physics).
+    pub fn state(&self, world: &World, tick: u32, server_time: u32) -> VehicleState {
+        let b = &world.pw.bodies[self.car.body];
+        let (t, q, v, w) = (b.translation(), b.rotation(), b.linvel(), b.angvel());
+        let qi = |x: f32| (x * 32767.0).round().clamp(-32767.0, 32767.0) as i16;
+        let mr = |x: f32| (x * 1000.0).round().clamp(-32768.0, 32767.0) as i16;
+        let d = &self.car.drivetrain;
+        VehicleState {
+            tick,
+            server_time,
+            ack: self.ack,
+            pos: [m_to_cm(t.x), m_to_cm(t.y), m_to_cm(t.z)],
+            rot: [qi(q.x), qi(q.y), qi(q.z), qi(q.w)],
+            vel: [mps_to_cms(v.x), mps_to_cms(v.y), mps_to_cms(v.z)],
+            angvel: [mr(w.x), mr(w.y), mr(w.z)],
+            gear: d.gear.clamp(-128, 127) as i8,
+            engine: (d.we * 10.0).round().clamp(0.0, 65535.0) as u16,
+            omega: std::array::from_fn(|i| {
+                (d.omega.get(i).copied().unwrap_or(0.0) * 10.0)
+                    .round()
+                    .clamp(-32768.0, 32767.0) as i16
+            }),
+        }
     }
 }
 
@@ -583,6 +747,328 @@ mod rooms {
             r.tick_us,
             r.worst_tick_us,
             r.tick_us / 333.3
+        );
+    }
+}
+
+#[cfg(test)]
+mod human_cars {
+    use super::*;
+    use crate::game::{Match, MatchConfig, Mode};
+    use dark_protocol::*;
+    use dark_vehicle::control::{Intent, drive};
+    use std::path::Path;
+
+    fn island() -> Option<Arc<MapData>> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../game/public/maps/island");
+        dir.exists().then(|| Arc::new(MapData::load(&dir).unwrap()))
+    }
+
+    /// A room on the island (no bots) with player 1 standing on a road, its spawn (x, y, z, yaw).
+    fn room(map: &Arc<MapData>) -> (Match, [f32; 4]) {
+        let room = RoomSettings {
+            code: "DRIVE1".into(),
+            name: "d".into(),
+            flags: 0,
+            max_players: 8,
+            owner: 1,
+            bots: 0,
+        };
+        let cfg = MatchConfig {
+            mode: Mode::FreeRoam,
+            ..Default::default()
+        };
+        let mut m = Match::new(3, 7, Some(map.clone()), cfg, Some(room), 0);
+        m.join(1, "driver").unwrap();
+        // a long straight-ish stretch of road
+        let r = map.roads.iter().max_by_key(|r| r.pts.len()).unwrap();
+        let (a, b) = (r.pts[20], r.pts[21]);
+        let yaw = (-(b[0] - a[0])).atan2(-(b[2] - a[2]));
+        let at = [a[0], map.height(a[0], a[2]), a[2], yaw];
+        // (from the room's start to the road: one move the server allows, like the game's respawn "R")
+        m.on_state(
+            1,
+            &state(
+                1,
+                [map.lobby[0], map.height(map.lobby[0], map.lobby[1]), map.lobby[1], 0.0],
+                0,
+            ),
+        );
+        m.step(33);
+        m.on_action(1, ActionKind::RespawnVehicle, 0);
+        m.on_state(1, &state(2, at, 0));
+        m.step(66);
+        let p = m.pose_of(1).unwrap().pos;
+        assert!(
+            (p[0] - at[0]).abs() < 0.1 && (p[2] - at[2]).abs() < 0.1,
+            "the player is not at the road: {p:?}"
+        );
+        (m, at)
+    }
+
+    fn state(seq: u32, at: [f32; 4], model: u8) -> State {
+        State {
+            seq,
+            client_time: 0,
+            epoch: 0,
+            flags: if model > 0 { flags::DRIVING } else { 0 },
+            model,
+            pos: [m_to_cm(at[0]), m_to_cm(at[1]), m_to_cm(at[2])],
+            yaw: yaw_to_u16(at[3]),
+            pitch: 0,
+            vel: [0, 0, 0],
+        }
+    }
+
+    fn enter(m: &mut Match, at: [f32; 4]) {
+        m.on_vehicle(
+            1,
+            &VehicleMsg {
+                enter: true,
+                model: 1,
+                pos: [m_to_cm(at[0]), m_to_cm(at[1]), m_to_cm(at[2])],
+                yaw: yaw_to_u16(at[3]),
+            },
+        );
+    }
+
+    /// Ticks at 30 Hz sending two 60 Hz frames per tick (with the previous two again: redundancy); returns the last
+    /// VehicleState.
+    fn drive_for(m: &mut Match, secs: f32, seq: &mut u32, frame: InputFrame) -> Option<VehicleState> {
+        let mut last = None;
+        let mut out = Vec::new();
+        let mut now = 33 * 2;
+        for _ in 0..(secs * 30.0) as usize {
+            *seq += 2;
+            let frames = vec![frame; 4];
+            m.on_input(
+                1,
+                &Input {
+                    seq: *seq,
+                    opts: 2 | drive_opts::OFFROAD,
+                    frames,
+                },
+            );
+            now += 33;
+            m.step(now);
+            m.drain().for_each(drop);
+            out.clear();
+            m.vehicle_states(&mut out);
+            for (id, b) in out.drain(..) {
+                assert_eq!(id, 1);
+                if let Ok(ServerMsg::Vehicle(v)) = ServerMsg::decode(&b) {
+                    last = Some(v);
+                }
+            }
+        }
+        last
+    }
+
+    fn gas() -> InputFrame {
+        InputFrame {
+            throttle: 127,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_drivers_inputs_move_their_server_car() {
+        let Some(map) = island() else { return };
+        let (mut m, at) = room(&map);
+        enter(&mut m, at);
+        let mut seq = 0;
+        let v = drive_for(&mut m, 5.0, &mut seq, gas()).expect("vehicle states for the driver");
+        let p = m.pose_of(1).unwrap();
+        let moved = ((p.pos[0] - at[0]).powi(2) + (p.pos[2] - at[2]).powi(2)).sqrt();
+        println!(
+            "5 s full throttle: moved {moved:.1} m, ack {} of {seq}, speed {:.1} m/s",
+            v.ack,
+            (p.vel[0].powi(2) + p.vel[2].powi(2)).sqrt()
+        );
+        assert!(moved > 25.0, "the car barely moved ({moved:.1} m)");
+        assert!(p.flags & flags::DRIVING != 0 && p.model == 1);
+        // every frame applied once, in order: the ack trails the newest frame by at most the jitter buffer
+        assert!(v.ack + 8 >= seq && v.ack <= seq, "ack {} vs sent {seq}", v.ack);
+        let car = [cm_to_m(v.pos[0]), cm_to_m(v.pos[1]), cm_to_m(v.pos[2])];
+        assert!(
+            (car[0] - p.pos[0]).abs() < 0.02 && (car[2] - p.pos[2]).abs() < 0.02,
+            "pose and vehicle state agree"
+        );
+    }
+
+    #[test]
+    fn duplicate_and_old_inputs_apply_once() {
+        let Some(map) = island() else { return };
+        let (mut m, at) = room(&map);
+        enter(&mut m, at);
+        let mut seq = 0;
+        drive_for(&mut m, 1.0, &mut seq, gas());
+        let before = m.pose_of(1).unwrap().pos;
+        // the same packet five times, and an old one: nothing new to apply → the car rolls on its last frame only
+        let pkt = Input {
+            seq,
+            opts: 2,
+            frames: vec![gas(); 8],
+        };
+        for _ in 0..5 {
+            m.on_input(1, &pkt);
+        }
+        m.on_input(
+            1,
+            &Input {
+                seq: seq - 20,
+                opts: 2,
+                frames: vec![
+                    InputFrame {
+                        throttle: -127,
+                        ..Default::default()
+                    };
+                    8
+                ],
+            },
+        );
+        let mut out = Vec::new();
+        m.step(10_000);
+        m.vehicle_states(&mut out);
+        let v = match ServerMsg::decode(&out[0].1) {
+            Ok(ServerMsg::Vehicle(v)) => v,
+            other => panic!("{other:?}"),
+        };
+        assert!(v.ack <= seq, "ack {} beyond the newest frame {seq}", v.ack);
+        let after = m.pose_of(1).unwrap().pos;
+        let d = ((after[0] - before[0]).powi(2) + (after[2] - before[2]).powi(2)).sqrt();
+        assert!(d < 3.0, "replayed packets moved the car {d:.1} m in one tick");
+    }
+
+    #[test]
+    fn a_client_cannot_place_its_car() {
+        let Some(map) = island() else { return };
+        let (mut m, at) = room(&map);
+        enter(&mut m, at);
+        let mut seq = 0;
+        drive_for(&mut m, 1.0, &mut seq, InputFrame::default());
+        // poses 200 m away while driving: ignored
+        let far = [at[0] + 200.0, at[1], at[2], at[3]];
+        for k in 0..30 {
+            m.on_state(1, &state(1000 + k, far, 1));
+        }
+        drive_for(&mut m, 0.5, &mut seq, InputFrame::default());
+        let p = m.pose_of(1).unwrap();
+        assert!(
+            (p.pos[0] - at[0]).abs() < 5.0,
+            "a client pose moved the server car to x {}",
+            p.pos[0]
+        );
+        // getting in "200 m away": the car appears where the server has the player instead
+        m.on_vehicle(
+            1,
+            &VehicleMsg {
+                enter: false,
+                model: 1,
+                pos: [0; 3],
+                yaw: 0,
+            },
+        );
+        m.on_vehicle(
+            1,
+            &VehicleMsg {
+                enter: true,
+                model: 2,
+                pos: [m_to_cm(far[0]), m_to_cm(far[1]), m_to_cm(far[2])],
+                yaw: 0,
+            },
+        );
+        drive_for(&mut m, 0.3, &mut seq, InputFrame::default());
+        let p = m.pose_of(1).unwrap();
+        assert!(
+            (p.pos[0] - at[0]).abs() < 8.0,
+            "the car was created where the client said: x {}",
+            p.pos[0]
+        );
+        assert_eq!(p.model, 2);
+    }
+
+    #[test]
+    fn without_inputs_the_car_coasts_to_a_stop() {
+        let Some(map) = island() else { return };
+        let (mut m, at) = room(&map);
+        enter(&mut m, at);
+        let mut seq = 0;
+        drive_for(&mut m, 3.0, &mut seq, gas());
+        let v0 = m.pose_of(1).unwrap().vel;
+        // the client goes silent for 6 s
+        let mut now = 100_000;
+        for _ in 0..180 {
+            now += 33;
+            m.step(now);
+            m.drain().for_each(drop);
+        }
+        let v1 = m.pose_of(1).unwrap().vel;
+        let (s0, s1) = (
+            (v0[0].powi(2) + v0[2].powi(2)).sqrt(),
+            (v1[0].powi(2) + v1[2].powi(2)).sqrt(),
+        );
+        println!("silent client: {s0:.1} → {s1:.1} m/s");
+        assert!(
+            s1 < s0 * 0.5,
+            "a car without inputs kept its gas on ({s0:.1} → {s1:.1} m/s)"
+        );
+        let _ = at;
+    }
+
+    #[test]
+    fn leaving_takes_the_car_out() {
+        let Some(map) = island() else { return };
+        let (mut m, at) = room(&map);
+        enter(&mut m, at);
+        let mut seq = 0;
+        drive_for(&mut m, 0.5, &mut seq, gas());
+        assert_eq!(m.physics_vehicles(), 1);
+        m.leave(1);
+        m.step(200_000);
+        assert_eq!(m.physics_vehicles(), 0, "the car stayed after its driver left");
+    }
+
+    /// A bot-driven car and a person's car in the same room world: the bot runs into the parked human car and pushes it.
+    #[test]
+    fn a_bot_car_hits_a_human_car() {
+        let Some(map) = island() else { return };
+        let mut ph = RoomPhysics::new(map.clone());
+        let r = map.roads.iter().max_by_key(|r| r.pts.len()).unwrap();
+        let (a, b) = (r.pts[30], r.pts[31]);
+        let yaw = (-(b[0] - a[0])).atan2(-(b[2] - a[2]));
+        let mut human = HumanCar::new(ph.new_car(1, a[0], map.height(a[0], a[2]), a[2], yaw), 1);
+        human.driving = false; // parked
+        let (fx, fz) = (-yaw.sin(), -yaw.cos());
+        let (bx, bz) = (a[0] - fx * 40.0, a[2] - fz * 40.0);
+        let mut bot = ph.new_car(2, bx, map.height(bx, bz), bz, yaw);
+        let h0 = human.car.position(&ph.world);
+        let mut pushed = 0.0f64;
+        for _ in 0..(8 * 60) {
+            human.car.controls = human.next_controls();
+            human.car.step(&mut ph.world, 1.0 / 60.0);
+            let p = bot.position(&ph.world);
+            let target = human.car.position(&ph.world);
+            bot.controls = drive(
+                &Intent {
+                    target: [target[0], target[2]],
+                    speed: 12.0,
+                    boost: false,
+                },
+                p[0],
+                p[2],
+                bot.heading(&ph.world),
+                bot.speed,
+            );
+            bot.step(&mut ph.world, 1.0 / 60.0);
+            ph.world.step();
+            let h = human.car.position(&ph.world);
+            pushed = pushed.max(((h[0] - h0[0]).powi(2) + (h[2] - h0[2]).powi(2)).sqrt());
+        }
+        println!("bot rammed the parked human car: it moved {pushed:.1} m");
+        assert!(
+            pushed > 1.0,
+            "the human car was not pushed ({pushed:.2} m) — no contact?"
         );
     }
 }

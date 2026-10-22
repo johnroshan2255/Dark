@@ -105,6 +105,8 @@ async fn session(app: Arc<App>, mut socket: WebSocket) {
     let pid = t.pid;
     let (tx, mut rx) = mpsc::channel::<Outgoing>(RELIABLE_DEPTH);
     let (snap_tx, mut snap_rx) = watch::channel(Bytes::new());
+    // (the driver's own car state: latest-only like snapshots)
+    let (veh_tx, mut veh_rx) = watch::channel(Bytes::new());
     let (reply_tx, reply_rx) = oneshot::channel();
     if handle
         .tx
@@ -114,6 +116,7 @@ async fn session(app: Arc<App>, mut socket: WebSocket) {
             conn: Conn {
                 tx: tx.clone(),
                 snap: snap_tx,
+                veh: veh_tx,
             },
             reply: reply_tx,
         })
@@ -153,6 +156,11 @@ async fn session(app: Arc<App>, mut socket: WebSocket) {
                 c = snap_rx.changed() => {
                     if c.is_err() { break }
                     let b = snap_rx.borrow_and_update().clone();
+                    if !b.is_empty() && sink.send(Message::Binary(b)).await.is_err() { break }
+                }
+                c = veh_rx.changed() => {
+                    if c.is_err() { break }
+                    let b = veh_rx.borrow_and_update().clone();
                     if !b.is_empty() && sink.send(Message::Binary(b)).await.is_err() { break }
                 }
                 _ = ping.tick() => if sink.send(Message::Ping(Bytes::new())).await.is_err() { break },
@@ -222,6 +230,8 @@ async fn session(app: Arc<App>, mut socket: WebSocket) {
             ClientMsg::Action { .. } => "action",
             ClientMsg::Leave => "leave",
             ClientMsg::Hello { .. } => "hello",
+            ClientMsg::Input(_) => "input",
+            ClientMsg::Vehicle(_) => "vehicle",
         };
         metrics::counter!(m::PACKETS_IN, "kind" => kind).increment(1);
         match msg {

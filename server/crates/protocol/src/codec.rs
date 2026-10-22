@@ -56,6 +56,9 @@ impl<'a> Reader<'a> {
     pub fn u8(&mut self) -> Result<u8, DecodeError> {
         Ok(self.take(1)?[0])
     }
+    pub fn i8(&mut self) -> Result<i8, DecodeError> {
+        Ok(self.take(1)?[0] as i8)
+    }
     pub fn u16(&mut self) -> Result<u16, DecodeError> {
         let b = self.take(2)?;
         Ok(u16::from_le_bytes([b[0], b[1]]))
@@ -120,6 +123,9 @@ impl Writer {
     }
     pub fn u8(&mut self, v: u8) {
         self.buf.push(v);
+    }
+    pub fn i8(&mut self, v: i8) {
+        self.buf.push(v as u8);
     }
     pub fn u16(&mut self, v: u16) {
         self.buf.extend_from_slice(&v.to_le_bytes());
