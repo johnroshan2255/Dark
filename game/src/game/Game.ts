@@ -4,7 +4,7 @@ import * as THREE from 'three'
 import { CaveSystem } from '../gameplay/caves/CaveSystem'
 import { MOUTH_X } from '../world/Formations/caves'
 import { ART, groundPalette, isGenshin, isOverland } from '../rendering/artStyle'
-import { downscaleTexture, loadModels, loadVehicle, type GameModels, type TruckModel } from '../assets/loadModels'
+import { downscaleTexture, loadHeroTowClips, loadModels, loadVehicle, type GameModels, type TruckModel } from '../assets/loadModels'
 import { tuningFor, vehicleDef, type VehicleTuning } from '../gameplay/vehicle/catalogue'
 import { CHUNK_SIZE } from '../world/constants'
 import { ChunkDebug } from '../debug/ChunkDebug'
@@ -398,6 +398,8 @@ export class Game {
     if (pal?.dirt) globalUniforms.uRoadSoil.value.set(pal.dirt[0] * 0.62, pal.dirt[1] * 0.6, pal.dirt[2] * 0.6, 1)
     this.envRoot.add(this.remotes.root)
     this.tow = new TowSystem(this)
+    // (the tow gestures: loaded after the start — nothing needs them before someone takes a hook)
+    void loadHeroTowClips().then((c) => (this.character.addClips(c), this.remotes.addClips(c))).catch(() => {})
     this.envRoot.add(this.tow.root)
     this.net = new NetClient(this)
     // (after Destruction's: every fixed step's predicted car state for the server-simulated car)

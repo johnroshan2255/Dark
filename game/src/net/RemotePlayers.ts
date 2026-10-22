@@ -249,6 +249,7 @@ export class RemotePlayers {
     const ch = this.charPool.pop() ?? (() => {
       const c = new CharacterModel(this.heroMaterial, { ...this.hero, scene: cloneSkinned(this.hero.scene) as THREE.Group })
       c.ground = (x, z) => this.ground(x, z)
+      if (this.towClips) c.addClips(this.towClips)
       // no sun / dynamic shadow (a crowd would double its vertex cost): a blob under the feet instead
       c.root.traverse((o) => {
         o.castShadow = false
@@ -317,6 +318,25 @@ export class RemotePlayers {
   }
 
   // ---------------------------------------------------------------- tow ropes (gameplay/tow/TowSystem)
+
+  private towClips: THREE.AnimationClip[] | null = null
+  /** The hero's tow clips (loaded after the start): every remote character, now and later, gets them. */
+  addClips(clips: THREE.AnimationClip[]): void {
+    this.towClips = clips
+    for (const r of this.remotes.values()) r.char?.addClips(clips)
+    for (const c of this.charPool) c.addClips(clips)
+  }
+
+  /** Who holds a tow hook (their right arm held out). */
+  setCarrying(ids: Set<number>): void {
+    for (const r of this.remotes.values()) if (r.char) r.char.carrying = ids.has(r.id)
+  }
+
+  /** `id`'s character (drawn in full), or null — TowSystem plays its gestures / carrying on it. */
+  characterOf(id: number): CharacterModel | null {
+    return this.remotes.get(id)?.char ?? null
+  }
+
 
   /** The car `id` drives — or its parked car (`id` = the owner): model, pose. */
   private towCar(id: number): { model: number; x: number; y: number; z: number; yaw: number; pitch: number; roll: number; key: number } | null {

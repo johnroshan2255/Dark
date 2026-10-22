@@ -22,8 +22,17 @@ import { HOOK_REACH, ROPE_MAX, ropeTension, winchIn, type End } from './rope'
  * DRAWN: each rope as ROPE_SEGS instanced cylinder segments sagging with its slack; the hook at its far end is the
  * car's own hook part moved there (Car / RemoteCar `placeHook`), so no new material or program.
  * Cost: per rope per fixed step a few flops; per frame ROPE_SEGS matrices; one draw for every rope.
- * (The animations — reaching for the hook, the throw over a branch — come with Mixamo clips: TODO.)
+ * ANIMATED (Mixamo clips, scripts/blender/hero/hero_clips_add.py): taking a hook / hanging it on a car's hook = a crouch
+ * and a right-hand grab low (`hook_low`); tying it to a tree = a reach out at chest height (`hook_reach`); carrying it
+ * = the right arm held out (`hook_carry`). Every character — ours and the remote ones — plays them when the room's
+ * ropes change (so others see it too); the hook is drawn where it was until the hand gets there (GESTURE).
  */
+/** Per rope change: the clip, its pace, where to cut it (fraction), and when the hand reaches the hook (s). */
+const GESTURE = {
+  take: { clip: 'hook_low', speed: 1.6, end: 0.72, at: 1.0 },
+  hangCar: { clip: 'hook_low', speed: 1.6, end: 0.72, at: 1.0 },
+  hangFixed: { clip: 'hook_reach', speed: 1.3, end: 0.62, at: 0.78 },
+} as const
 const ROPE_SEGS = 18
 const MAX_DRAWN = 16
 const ROPE_RADIUS = 0.016
@@ -65,6 +74,9 @@ export class TowSystem {
   /** The chosen target of the current action (set with `action`). */
   private target: { site?: RopeEnd; rope?: LocalRope; point?: THREE.Vector3 } = {}
   private winching = false
+  /** Rope id → its kind and holder as last seen, and (until `until`, ms) where the hook is still drawn: on the car
+   *  (being taken) or in the holder's hand (being hung). */
+  private readonly seen = new Map<number, { kind: number; who: number; until: number; from: 'car' | 'hand' }>()
   /** The car whose hook we carried at the last server update (-1 none). */
   private lastCarried = -1
 
@@ -358,13 +370,44 @@ export class TowSystem {
   private farPoint(r: LocalRope, out: THREE.Vector3): THREE.Vector3 | null {
     if (r.kind === RopeKind.FIXED) return out.set(cmToM(r.pos[0]), cmToM(r.pos[1]), cmToM(r.pos[2]))
     if (r.kind === RopeKind.CAR) return this.point({ car: r.who, end: endOf(r.end2) }, 'eye', out)
-    if (r.who === this.me) return this.game.character.handPosition(out)
-    return this.game.remotes.handWorld(r.who, out)
+    return this.handOf(r.who, out)
+  }
+
+  private handOf(who: number, out: THREE.Vector3): THREE.Vector3 | null {
+    if (who === this.me) return this.game.character.handPosition(out)
+    return this.game.remotes.handWorld(who, out)
+  }
+
+  /** Rope changes → the gestures (whoever did it) and how long the hook stays drawn where it was. */
+  private animate(): void {
+    const now = performance.now(), me = this.me
+    const ids = new Set<number>()
+    const holders = new Set<number>()
+    for (const r of this.ropes) {
+      ids.add(r.id)
+      if (r.kind === RopeKind.HAND) holders.add(r.who)
+      const s = this.seen.get(r.id)
+      if (s && s.kind === r.kind) continue
+      // new in a hand: taken; hand → tree / hook: hung
+      const kind = !s ? (r.kind === RopeKind.HAND ? 'take' : null) : s.kind === RopeKind.HAND ? (r.kind === RopeKind.CAR ? 'hangCar' : 'hangFixed') : null
+      const actor = kind === 'take' ? r.who : s?.who ?? -1
+      if (kind) {
+        const gst = GESTURE[kind]
+        const ch = actor === me ? this.game.character : this.game.remotes.characterOf(actor)
+        const played = ch?.playGesture(gst.clip, gst.speed, gst.end) ?? false
+        this.seen.set(r.id, { kind: r.kind, who: r.kind === RopeKind.HAND ? r.who : actor, until: played ? now + gst.at * 1000 : 0, from: kind === 'take' ? 'car' : 'hand' })
+      } else this.seen.set(r.id, { kind: r.kind, who: r.who, until: 0, from: 'car' })
+    }
+    for (const id of [...this.seen.keys()]) if (!ids.has(id)) this.seen.delete(id)
+    // carrying: the right arm held out while a hook is in that hand
+    this.game.character.carrying = holders.has(me)
+    this.game.remotes.setCarrying(holders)
   }
 
   /** Per frame: the prompt, the lines, the hooks at their far ends. */
   update(): void {
     this.choose()
+    this.animate()
     const hookAction = this.action
     if (this.game.store.get().hookAction !== hookAction) this.game.store.set({ hookAction })
     // every hook back on its car first; the ones out are moved below
@@ -375,7 +418,10 @@ export class TowSystem {
     for (const r of this.ropes) {
       const site = { car: r.car, end: endOf(r.end) }
       const a = this.point(site, 'fairlead', _a)
-      const b = this.farPoint(r, _b)
+      // (mid-gesture: the hook still on the car / in the hand until the hand gets there)
+      const sn = this.seen.get(r.id)
+      const pending = sn && performance.now() < sn.until
+      const b = !pending ? this.farPoint(r, _b) : sn.from === 'car' ? this.point(site, 'eye', _b) : this.handOf(sn.who, _b)
       if (!a || !b) continue
       // the hook at the far end, hanging (its eye up), turned along the line
       _d.subVectors(b, a).setY(0)

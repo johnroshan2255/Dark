@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import heroUrl from './models/characters/hero.lod0.glb?url'
+import heroTowUrl from './models/characters/hero_tow_clips.glb?url'
 import hullUrl from './models/vehicles/boat_hull.lod0.glb?url'
 import { vehicleDef, type VehicleDef } from '../gameplay/vehicle/catalogue'
 import { bodyHulls, triangles } from '../gameplay/vehicle/hulls'
@@ -343,6 +344,13 @@ export async function loadModels(onProgress?: (f: number) => void, vehicleId = '
     if (m.isSkinnedMesh && !map) map = (m.material as THREE.MeshStandardMaterial).map
   })
   return { hero: { scene: h.scene, clips: h.animations, map }, truck: t }
+}
+
+/** The hero's TOW clips (scripts/blender/hero/hero_clips_add.py: Mixamo, retargeted onto its rig, ~0.4 MB) — loaded
+ *  after the game starts (nothing needs them before someone takes a hook). */
+let towClips: Promise<THREE.AnimationClip[]> | null = null
+export function loadHeroTowClips(): Promise<THREE.AnimationClip[]> {
+  return (towClips ??= new GLTFLoader().loadAsync(heroTowUrl).then((g) => g.animations))
 }
 
 /** Every mesh in world space. `name` includes the parent's (a multi-material node is a Group of primitives);
