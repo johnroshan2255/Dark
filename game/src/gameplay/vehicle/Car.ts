@@ -1601,6 +1601,10 @@ varying vec3 vGlassN; varying vec3 vGlassV;`)
   diffuseColor.a = clamp(diffuseColor.a + 0.45 * g * g * g, 0.0, 0.8); }
 #include <opaque_fragment>`)
   }
+  // One pass for both sides: a transparent DoubleSide material is otherwise drawn back faces then front, three
+  // flipping `side` + needsUpdate around each draw (a program re-resolve per pane, twice a frame). The tint is one
+  // colour, so the two blends commute — the same picture either order.
+  m.forceSinglePass = true
   m.customProgramCacheKey = () => 'car-glass2'
   m.name = 'lib/carGlass'
   return (_glass = m)

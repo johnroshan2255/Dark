@@ -78,7 +78,9 @@ export class Cockpit {
     for (const part of truck.controls) {
       const pivot = new THREE.Object3D()
       pivot.position.set(...part.pivot)
-      const mesh = new THREE.Mesh(part.geo, material)
+      // (a 1-instance InstancedMesh, like the body: the truck material's one instanced program — a plain Mesh on it
+      //  made three switch programs at every draw between the two kinds)
+      const mesh = new THREE.InstancedMesh(part.geo, material, 1)
       mesh.name = part.kind
       mesh.castShadow = false
       pivot.add(mesh)

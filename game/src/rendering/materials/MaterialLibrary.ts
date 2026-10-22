@@ -96,6 +96,19 @@ function billboardable(m: THREE.MeshLambertMaterial): THREE.MeshLambertMaterial 
  * to one point (zero-area triangles, never rasterised). Only in the INSTANCED program (the same material draws the
  * merged cliff meshes in 'bright', which have neither attribute). 2 ALU per vertex.
  */
+/**
+ * The same material as its own object (shared textures and uniforms, the same shader hooks → the same programs): for
+ * meshes of another kind than the original's (plain vs instanced). three re-resolves a material's program at every
+ * draw that switches between kinds; two objects keep one program each.
+ */
+function twin<M extends THREE.Material>(m: M): M {
+  const t = m.clone() as M
+  t.onBeforeCompile = m.onBeforeCompile
+  t.customProgramCacheKey = m.customProgramCacheKey
+  t.name = m.name
+  return t
+}
+
 function rockVariants<M extends THREE.Material>(m: M): M {
   const prev = m.onBeforeCompile.bind(m)
   m.onBeforeCompile = (shader, renderer) => {
@@ -187,7 +200,7 @@ export class MaterialLibrary {
    * flat facets read as a toy). One extra program, no extra draws (the formation mesh just uses it).
    */
   readonly cliffRock = isOverland() || isBright()
-    ? this.rock
+    ? twin(this.rock)
     : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', treeShade: true, rim: 0.25, surface: SURFACE.stone, cliffStone: true, toon: 0.6, cullFade: true, wet: true, biomeCover: 'rock', erosion: true })
   /** Grass layers (GrassField): near (dense, curved blades), mid (dense, flat blades) and far (sparse, wide) — same
    *  program, own bands. */
@@ -200,6 +213,10 @@ export class MaterialLibrary {
   readonly grassFar = stylize(createGrassMaterial(this.grassFarU.band, this.grassFarU.thin), { key: 'grass', treeShade: 'vertex', rim: 0.2, cheapFog: true, wet: true })
   /** Vertex-coloured props (BMX, car extras, debris). */
   readonly character = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'character', rim: 0.6 })
+  /** The character look on instanced meshes (twins: one mesh kind per material object, see `twin`): the remote
+   *  silhouettes and remote cars (no instance colours), the debris (instance colours). */
+  readonly characterInstanced = twin(this.character)
+  readonly debris = twin(this.character)
   /** The player (hero.lod0.glb): skinned, its albedo as `map` (set by Game once the model has loaded). */
   readonly hero = stylize(new THREE.MeshLambertMaterial(), { key: 'hero', treeShade: true, rim: 0.6 })
   /**
@@ -278,7 +295,7 @@ export class MaterialLibrary {
   }
 
   all(): THREE.Material[] {
-    return [this.roadDetail, this.terrain, this.vegetation, this.landmark, this.rock, ...(this.cliffRock === this.rock ? [] : [this.cliffRock]), this.grass, this.grassMid, this.grassFar, this.character, this.hero, this.lampGlow]
+    return [this.roadDetail, this.terrain, this.vegetation, this.landmark, this.rock, ...(this.cliffRock === this.rock ? [] : [this.cliffRock]), this.grass, this.grassMid, this.grassFar, this.character, this.characterInstanced, this.debris, this.hero, this.lampGlow]
   }
 
   dispose(): void {

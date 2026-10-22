@@ -3,6 +3,7 @@ import type { QualitySettings } from '../quality/QualityTiers'
 import { configureSunShadow, followShadow, SHADOW_LIGHT_DISTANCE } from '../shadows/ShadowFollow'
 import type { TimeOfDay } from './TimeOfDay'
 import { globalUniforms } from '../shaders/uniforms'
+import { DYN_LAYER } from '../shadows/DynamicShadow'
 import { isGenshin } from '../artStyle'
 
 /**
@@ -58,6 +59,10 @@ export class LightingSystem {
     this.flashlight.shadow.bias = -0.0008
     this.flashlight.shadow.normalBias = 0.03
     this.root.add(this.sun, this.sun.target, this.hemi, this.flashlight, this.flashlight.target)
+    // Every pass that draws the main scene must collect the same lights: the dynamic-shadow pass's camera sees only
+    // DYN_LAYER, and with no lights there three's light state flipped 3 → 0 → 3 lights each frame — every lit
+    // material re-resolved its program twice a frame (~0.6 ms on a 4×-throttled phone CPU, measured 2026-10-22).
+    for (const l of [this.sun, this.hemi, this.flashlight]) l.layers.enable(DYN_LAYER)
   }
 
   /**

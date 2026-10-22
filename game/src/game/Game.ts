@@ -326,7 +326,7 @@ export class Game {
     this.car.driveSettings(this.settings.gearbox, this.settings.aids, this.input.touch, this.settings.offroadAssist)
     this.car.autoAccel = this.settings.autoAccelerate
     this.wireCar()
-    this.destruction = new Destruction(physics, this.materials.character)
+    this.destruction = new Destruction(physics, this.materials.debris)
     this.destruction.vehicle = {
       body: () => (this.car.driving ? this.car.sim.body : null),
       mass: () => this.car.tune.mass,
@@ -383,7 +383,7 @@ export class Game {
     this.physicsDebug = new PhysicsDebug(physics)
     this.envRoot.name = 'environment'
     this.envRoot.add(this.caves.group, this.destruction.mesh, this.drift.points, this.sky.mesh, this.bike.root, this.car.root, this.vehicleFx.points, this.rain.points, this.horizon.mesh, this.landmarks.group, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
-    this.remotes = new RemotePlayers(this.materials.hero, models.hero, (id) => loadVehicle(id), this.materials.character, (x, z) => this.world.groundAt(x, z) ?? this.world.fields.height(x, z), (x, z) => this.world.groundAt(x, z))
+    this.remotes = new RemotePlayers(this.materials.hero, models.hero, (id) => loadVehicle(id), this.materials.characterInstanced, (x, z) => this.world.groundAt(x, z) ?? this.world.fields.height(x, z), (x, z) => this.world.groundAt(x, z))
     this.remotes.setQuality(this.quality.remoteCharacters, this.quality.remoteCars)
     // a fixed map's own colours: its water and its dirt roads (the ground takes the rest: groundColor)
     const pal = map?.palette
