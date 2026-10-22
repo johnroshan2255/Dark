@@ -265,3 +265,9 @@ deterministic, the same world) into `MapPhysics`, then re-measure — and move c
 
 **Still client-side (validated poses, v1):** walking, the BMX, boats, flights, arcade handling, endless-world rooms;
 garage tuning (the server runs the stock setup); weather wetness (server ground is dry).
+
+**Overload / idle (2026-10-22).** A room with nobody in it pauses its physics (its bots are frozen without people
+anyway; an empty room lingers 2 minutes): 4.5 ms → 2 µs per tick for 100 parked bot cars. A late tick catches up at
+most 4 physics steps (`MAX_PHYSICS_STEPS`, the client's cap too); the rest of the time is dropped — before, one slow
+tick made the next run 8 steps (a 297 ms tick was logged with several 100-bot test rooms left running on the same
+laptop as the browser).

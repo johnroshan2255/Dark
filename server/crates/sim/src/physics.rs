@@ -1108,3 +1108,83 @@ mod human_cars {
         );
     }
 }
+
+#[cfg(test)]
+mod empty_room {
+    use crate::game::{Match, MatchConfig, Mode};
+    use crate::map::MapData;
+    use dark_protocol::*;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// A room's bots after the last person left: `cargo test --release -p dark-sim empty_room -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bots_after_everyone_left() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../game/public/maps/island");
+        let map = Arc::new(MapData::load(&dir).unwrap());
+        let room = RoomSettings {
+            code: "EMPTY1".into(),
+            name: "e".into(),
+            flags: 0,
+            max_players: 100,
+            owner: 1,
+            bots: 100,
+        };
+        let mut m = Match::new(
+            5,
+            7,
+            Some(map.clone()),
+            MatchConfig {
+                mode: Mode::FreeRoam,
+                ..Default::default()
+            },
+            Some(room),
+            0,
+        );
+        m.join(1, "h").unwrap();
+        let (lx, lz) = (map.lobby[0], map.lobby[1]);
+        let mut now = 0;
+        for phase in 0..2 {
+            let (mut worst, mut sum, mut n) = (0.0f64, 0.0, 0);
+            for t in 0..900u32 {
+                now += 33;
+                if phase == 0 {
+                    let y = map.height(lx, lz);
+                    m.on_state(
+                        1,
+                        &State {
+                            seq: t + 1,
+                            client_time: 0,
+                            epoch: 0,
+                            flags: 0,
+                            model: 0,
+                            pos: [m_to_cm(lx), m_to_cm(y), m_to_cm(lz)],
+                            yaw: 0,
+                            pitch: 0,
+                            vel: [0; 3],
+                        },
+                    );
+                }
+                let t0 = std::time::Instant::now();
+                m.step(now);
+                let us = t0.elapsed().as_secs_f64() * 1e6;
+                m.drain().for_each(drop);
+                (worst, sum, n) = (worst.max(us), sum + us, n + 1);
+                if let Some(id) = m.first_bad_bot() {
+                    panic!("phase {phase} tick {t}: bot {id} not finite");
+                }
+            }
+            println!(
+                "{}: mean {:.0} µs, worst {:.0} µs, vehicles {}",
+                if phase == 0 { "with a person" } else { "after they left" },
+                sum / n as f64,
+                worst,
+                m.physics_vehicles()
+            );
+            if phase == 0 {
+                m.leave(1);
+            }
+        }
+    }
+}

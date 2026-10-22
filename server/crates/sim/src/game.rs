@@ -112,6 +112,9 @@ pub struct TickProfile {
     pub set_down: u32,
 }
 
+/// Most physics steps one tick runs (catching up after a late tick); the client's own cap (PhysicsWorld) is the same.
+const MAX_PHYSICS_STEPS: u32 = 4;
+
 /// A monotonic clock in nanoseconds (the server's; tests leave it unset).
 pub type Clock = Box<dyn Fn() -> u64 + Send>;
 
@@ -342,7 +345,14 @@ impl Match {
 
     /// Vehicles in the room's physics world (0 without server physics).
     pub fn physics_vehicles(&self) -> usize {
-        self.physics.as_ref().map_or(0, |p| p.vehicles)
+        self.physics.as_ref().map_or(0, |p| {
+            p.world
+                .pw
+                .bodies
+                .iter()
+                .filter(|(_, b)| b.is_dynamic() && b.is_enabled())
+                .count()
+        })
     }
 
     pub fn bot_stats(&self) -> Option<crate::bots::BotStats> {
@@ -811,10 +821,14 @@ impl Match {
             bots.step(dt, self.now_ms, &self.seen, &mut self.bot_events);
             prof.ai_us = (clock(&self.clock) - t0) as f64 / 1e3;
         }
-        // the cars move: fixed physics steps (the game's 1/60 s); bots and drivers read back where they are
-        if let Some(ph) = self.physics.as_mut() {
+        // the cars move: fixed physics steps (the game's 1/60 s); bots and drivers read back where they are.
+        // OVERLOAD / IDLE: nobody in the room → the world pauses (the bots don't move without people anyway, and an
+        // empty room lingers 2 min); behind schedule → at most MAX_PHYSICS_STEPS per tick, the rest of the time is
+        // dropped (a moment of slow motion, never a spiral of ever longer catch-up ticks).
+        let anyone = self.players.values().any(|p| !p.bot);
+        if let Some(ph) = self.physics.as_mut().filter(|_| anyone) {
             let h = 1.0 / self.cfg.physics_hz.max(1) as f32;
-            self.phys_acc = (self.phys_acc + dt).min(h * 8.0);
+            self.phys_acc = (self.phys_acc + dt).min(h * MAX_PHYSICS_STEPS as f32);
             while self.phys_acc >= h {
                 let a = clock(&self.clock);
                 if let Some(bots) = self.bots.as_mut() {
