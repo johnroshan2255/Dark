@@ -116,12 +116,14 @@ pub fn hook_pts(model: u8, end: u8) -> Option<([f64; 3], [f64; 3])> {
 
 /// One fixed step of the lines: tension from where the ends are and how fast they part, impulses at the fairlead /
 /// far end, the winch on ropes out of a winching driver's car. `end_of(car, end)` finds a car end in the world.
+/// The cars a taut line pulls this step go into `pulled` (a car nobody drives then rolls in neutral: TOWED).
 pub fn step(
     ropes: &mut [Rope],
     world: &mut World,
     end_of: &dyn Fn(u16, u8) -> Option<CarEnd>,
     winching: &[u16],
     dt: f32,
+    pulled: &mut Vec<u16>,
 ) {
     for r in ropes.iter_mut() {
         let b_end = match r.far {
@@ -154,6 +156,10 @@ pub fn step(
         }
         if t <= 0.0 {
             continue;
+        }
+        pulled.push(r.car);
+        if let Far::Car(c, _) = r.far {
+            pulled.push(c);
         }
         let j = u * (t * dt);
         world.pw.bodies[a.body].apply_impulse_at_point(j, pa, true);

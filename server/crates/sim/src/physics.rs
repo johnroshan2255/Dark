@@ -420,6 +420,7 @@ impl HumanCar {
         }
         Controls {
             parked: false,
+            neutral: false,
             throttle: (f.throttle as f64 / 127.0).clamp(-1.0, 1.0),
             steer: (f.steer as f64 / 127.0).clamp(-1.0, 1.0),
             handbrake: f.buttons & buttons::HANDBRAKE != 0,
@@ -1332,6 +1333,17 @@ mod human_cars {
     /// front hook, gets back in and drives off — player 1's car comes along.
     #[test]
     fn one_players_car_tows_anothers() {
+        tow_test(false);
+    }
+
+    /// The same with player 1 OUT of their car (parked, brakes locked — player 1 hooks it on themselves, player 2
+    /// tows): the taut line puts it in neutral, brakes off, and it rolls along like a towed car does.
+    #[test]
+    fn a_parked_car_rolls_free_when_towed() {
+        tow_test(true);
+    }
+
+    fn tow_test(parked: bool) {
         use crate::tow::hook_pts;
         let Some(map) = island() else { return };
         let (mut m, at) = room(&map);
@@ -1406,6 +1418,11 @@ mod human_cars {
         tick(&mut m, 30, false);
         let a_car = m.pose_of(1).unwrap();
         let b_car = m.pose_of(2).unwrap();
+        let a_body = m.car_of(1).unwrap().0;
+        let a_pos = |m: &Match| {
+            let t = m.physics.as_ref().unwrap().world.pw.bodies[a_body].translation();
+            [t.x, t.y, t.z]
+        };
         m.on_vehicle(
             2,
             &VehicleMsg {
@@ -1479,16 +1496,342 @@ mod human_cars {
                 yaw: yaw_to_u16(b_car.yaw),
             },
         );
-        let a0 = m.pose_of(1).unwrap().pos;
+        if parked {
+            // player 1 gets out and stands aside: their car is parked (brakes locked) — and stays hooked
+            m.on_vehicle(
+                1,
+                &VehicleMsg {
+                    enter: false,
+                    model: 1,
+                    pos: [0; 3],
+                    yaw: 0,
+                },
+            );
+            tick(&mut m, 30, false);
+            assert!(m.car_of(1).is_some_and(|c| !c.2), "player 1's car parked");
+        }
+        let a0 = a_pos(&m);
         tick(&mut m, 30 * 6, true);
-        let (a1, b1) = (m.pose_of(1).unwrap().pos, m.pose_of(2).unwrap().pos);
+        let (a1, b1) = (a_pos(&m), m.pose_of(2).unwrap().pos);
         let moved = |p: [f32; 3], q: [f32; 3]| (q[0] - p[0]) * fx + (q[2] - p[2]) * fz;
         println!(
-            "towing car moved {:.1} m, towed car {:.1} m forward",
+            "parked {parked}: towing car moved {:.1} m, towed car {:.1} m forward",
             moved(b_car.pos, b1),
             moved(a0, a1)
         );
-        assert!(moved(a0, a1) > 3.0, "player 1's car was towed: {:.2} m", moved(a0, a1));
+        // (parked with its brakes locked it was dragged only ~7 m in these 6 s; rolling free in neutral it keeps up)
+        let want = if parked { 20.0 } else { 3.0 };
+        assert!(moved(a0, a1) > want, "player 1's car was towed: {:.2} m", moved(a0, a1));
+    }
+
+    /// CARS COLLIDE: player 2's car stands on the road 12 m ahead of player 1's; player 1 drives into it at full
+    /// throttle — the cars meet (player 1 stops against it instead of passing through; the parked car is shoved).
+    #[test]
+    fn a_car_driven_into_another_hits_it() {
+        let Some(map) = island() else { return };
+        let (mut m, at) = room(&map);
+        let (s, c) = at[3].sin_cos();
+        let (fx, fz) = (-s, -c);
+        let b0 = [
+            at[0] + fx * 12.0,
+            map.height(at[0] + fx * 12.0, at[2] + fz * 12.0),
+            at[2] + fz * 12.0,
+            at[3],
+        ];
+        m.join(2, "parked").unwrap();
+        m.on_state(
+            2,
+            &State {
+                seq: 1,
+                ..state(
+                    1,
+                    [map.lobby[0], map.height(map.lobby[0], map.lobby[1]), map.lobby[1], 0.0],
+                    0,
+                )
+            },
+        );
+        m.step(99);
+        m.on_action(2, ActionKind::RespawnVehicle, 0);
+        m.on_state(
+            2,
+            &State {
+                epoch: 1,
+                ..state(2, b0, 0)
+            },
+        );
+        m.step(132);
+        m.on_vehicle(
+            2,
+            &VehicleMsg {
+                enter: true,
+                model: 2,
+                pos: [m_to_cm(b0[0]), m_to_cm(b0[1]), m_to_cm(b0[2])],
+                yaw: yaw_to_u16(b0[3]),
+            },
+        );
+        m.on_vehicle(
+            2,
+            &VehicleMsg {
+                enter: false,
+                model: 2,
+                pos: [0; 3],
+                yaw: 0,
+            },
+        );
+        enter(&mut m, at);
+        let b_body = m.car_of(2).unwrap().0;
+        let b_pos = |m: &Match| {
+            let t = m.physics.as_ref().unwrap().world.pw.bodies[b_body].translation();
+            (t.x - at[0]) * fx + (t.z - at[2]) * fz
+        };
+        let b_start = b_pos(&m);
+        let mut seq = 0;
+        drive_for(&mut m, 5.0, &mut seq, gas());
+        let a = m.pose_of(1).unwrap().pos;
+        let a_along = (a[0] - at[0]) * fx + (a[2] - at[2]) * fz;
+        let b_along = b_pos(&m);
+        println!("car 1 at {a_along:.1} m, car 2 from {b_start:.1} to {b_along:.1} m");
+        assert!(
+            a_along < b_along,
+            "car 1 drove through car 2 ({a_along:.1} vs {b_along:.1})"
+        );
+        // (it ran into it — a car length short — and shoved the parked car, brakes locked, along a little)
+        assert!(a_along > b_start - 6.0, "car 1 reached car 2 ({a_along:.1} m)");
+        assert!(
+            b_along > b_start + 0.3,
+            "car 2 was hit and shoved ({b_start:.1} → {b_along:.1})"
+        );
+    }
+
+    /// A BOT DOESN'T RAM A STOPPED CAR: a room with one bot (rooms are deterministic by seed); a first run records where
+    /// the bot drives 3 s on; a second run parks player 1's car across the road there just before it comes — the bot
+    /// brakes and goes round without touching it.
+    #[test]
+    fn a_bot_stops_for_a_car_across_its_lane() {
+        let Some(map) = island() else { return };
+        let new_room = || {
+            let room = RoomSettings {
+                code: "BOTCAR".into(),
+                name: "b".into(),
+                flags: 0,
+                max_players: 8,
+                owner: 1,
+                bots: 1,
+            };
+            let cfg = MatchConfig {
+                mode: Mode::FreeRoam,
+                ..Default::default()
+            };
+            let mut m = Match::new(3, 7, Some(map.clone()), cfg, Some(room), 0);
+            m.join(1, "p").unwrap();
+            let lobby = [map.lobby[0], map.height(map.lobby[0], map.lobby[1]), map.lobby[1], 0.0];
+            m.on_state(1, &state(1, lobby, 0));
+            m
+        };
+        let bot = BOT_ID_BASE;
+        let run = |m: &mut Match, from: u64, ticks: u64| {
+            for k in 1..=ticks {
+                m.step(from + k * 33);
+                m.drain().for_each(drop);
+            }
+            from + ticks * 33
+        };
+        // first run: the bot cruising, then where it is 3 s later
+        let mut a = new_room();
+        let now = run(&mut a, 0, 30 * 20);
+        let p0 = a.pose_of(bot).expect("the bot");
+        assert!(
+            p0.flags & flags::DRIVING != 0 && hspeed(&p0) > 4.0,
+            "the bot is driving ({:.1} m/s)",
+            hspeed(&p0)
+        );
+        run(&mut a, now, 90);
+        let spot = a.pose_of(bot).unwrap();
+        // second run: the same room to the same moment, then a car parked across the road at that spot
+        let mut b = new_room();
+        let t1 = run(&mut b, 0, 30 * 20);
+        assert_eq!(b.pose_of(bot).unwrap().pos, p0.pos, "rooms replay the same");
+        let at = [
+            spot.pos[0],
+            map.height(spot.pos[0], spot.pos[2]),
+            spot.pos[2],
+            spot.yaw + std::f32::consts::FRAC_PI_2,
+        ];
+        b.on_action(1, ActionKind::RespawnVehicle, 0);
+        b.on_state(1, &state(2, at, 0));
+        let t2 = run(&mut b, t1, 1);
+        enter(&mut b, at);
+        b.on_vehicle(
+            1,
+            &VehicleMsg {
+                enter: false,
+                model: 1,
+                pos: [0; 3],
+                yaw: 0,
+            },
+        );
+        let car = b.car_of(1).unwrap().0;
+        let car_pos = |m: &Match| {
+            let t = m.physics.as_ref().unwrap().world.pw.bodies[car].translation();
+            [t.x, t.z]
+        };
+        let c0 = car_pos(&b);
+        let mut closest = f32::INFINITY;
+        let mut t = t2;
+        for _ in 0..30 * 10 {
+            t = run(&mut b, t, 1);
+            let p = b.pose_of(bot).unwrap().pos;
+            closest = closest.min((p[0] - c0[0]).hypot(p[2] - c0[1]));
+        }
+        let c1 = car_pos(&b);
+        let shoved = (c1[0] - c0[0]).hypot(c1[1] - c0[1]);
+        println!("bot came within {closest:.1} m of the parked car; the car moved {shoved:.2} m");
+        assert!(closest < 25.0, "the bot came up to the car ({closest:.1} m)");
+        assert!(shoved < 0.05, "the bot ran into the parked car ({shoved:.2} m)");
+    }
+
+    fn hspeed(p: &crate::validate::Pose) -> f32 {
+        p.vel[0].hypot(p.vel[2])
+    }
+
+    /// THE FULL ROOM, SERVER PHYSICS: 60 players each driving their own server-simulated car (inputs, like the game)
+    /// and 40 bots on the island (BENCH_DRIVERS / BENCH_BOTS to change); µs per tick, where it goes, bytes per player.
+    /// `cargo test --release -p dark-sim bench_full_physics_room -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_full_physics_room() {
+        let Some(map) = island() else { return };
+        let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let (drivers, bots) = (env("BENCH_DRIVERS", 60), env("BENCH_BOTS", 40));
+        let room = RoomSettings {
+            code: "BENCH2".into(),
+            name: "b".into(),
+            flags: room_flags::ROADKILL,
+            max_players: 100,
+            owner: 1,
+            bots: bots as u8,
+        };
+        let cfg = MatchConfig {
+            mode: Mode::FreeRoam,
+            max_players: 100,
+            ..Default::default()
+        };
+        let mut m = Match::new(3, 7, Some(map.clone()), cfg, Some(room), 0);
+        let t0 = std::time::Instant::now();
+        m.set_clock(Box::new(move || t0.elapsed().as_nanos() as u64));
+        // spawn points: every 40 m along the roads
+        let mut spots = Vec::new();
+        'roads: for r in &map.roads {
+            let mut acc = 0.0;
+            for w in r.pts.windows(2) {
+                acc += (w[1][0] - w[0][0]).hypot(w[1][2] - w[0][2]);
+                if acc > 40.0 {
+                    acc = 0.0;
+                    let yaw = (-(w[1][0] - w[0][0])).atan2(-(w[1][2] - w[0][2]));
+                    spots.push([w[0][0], map.height(w[0][0], w[0][2]), w[0][2], yaw]);
+                    if spots.len() == drivers {
+                        break 'roads;
+                    }
+                }
+            }
+        }
+        let lobby = [map.lobby[0], map.height(map.lobby[0], map.lobby[1]), map.lobby[1], 0.0];
+        for id in 1..=drivers as u16 {
+            m.join(id, &format!("p{id}")).unwrap();
+            m.on_state(id, &state(1, lobby, 0));
+        }
+        m.step(33);
+        for (i, at) in spots.iter().enumerate() {
+            let id = i as u16 + 1;
+            m.on_action(id, ActionKind::RespawnVehicle, 0);
+            m.on_state(id, &state(2, *at, 0));
+        }
+        m.step(66);
+        for (i, at) in spots.iter().enumerate() {
+            m.on_vehicle(
+                i as u16 + 1,
+                &VehicleMsg {
+                    enter: true,
+                    model: 1 + (i % 3) as u8,
+                    pos: [m_to_cm(at[0]), m_to_cm(at[1]), m_to_cm(at[2])],
+                    yaw: yaw_to_u16(at[3]),
+                },
+            );
+        }
+        let (mut now, mut seq) = (66u64, 0u32);
+        let (mut step_t, mut snap_t, mut bytes, mut worst) = (0f64, 0f64, 0usize, 0f64);
+        let (mut cars, mut solver, mut ai, mut steps) = (0f64, 0f64, 0f64, 0u32);
+        let mut snaps = Vec::new();
+        let mut start: Vec<[f32; 3]> = Vec::new();
+        let ticks = 30 * 40;
+        let warm = 150;
+        for t in 0..ticks {
+            seq += 2;
+            for id in 1..=spots.len() as u16 {
+                // full throttle, weaving (every car moving: contacts, tyre rays, drivetrains all busy)
+                let frame = InputFrame {
+                    throttle: 127,
+                    steer: ((t as f32 * 0.03 + id as f32).sin() * 18.0) as i8,
+                    ..Default::default()
+                };
+                m.on_input(
+                    id,
+                    &Input {
+                        seq,
+                        opts: 2 | drive_opts::OFFROAD,
+                        frames: vec![frame; 4],
+                    },
+                );
+            }
+            now += 33;
+            let a = std::time::Instant::now();
+            m.step(now);
+            let b = std::time::Instant::now();
+            m.snapshots(&mut snaps);
+            let c = std::time::Instant::now();
+            m.drain().for_each(drop);
+            let mut vs = Vec::new();
+            m.vehicle_states(&mut vs);
+            if t == warm {
+                start = (1..=spots.len() as u16)
+                    .map(|id| m.pose_of(id).map_or([0.0; 3], |p| p.pos))
+                    .collect();
+            }
+            if t >= warm {
+                step_t += (b - a).as_secs_f64();
+                snap_t += (c - b).as_secs_f64();
+                worst = worst.max((c - a).as_secs_f64());
+                bytes += snaps.iter().map(|s| s.1.len()).sum::<usize>() + vs.iter().map(|v| v.1.len()).sum::<usize>();
+                let p = m.profile();
+                (cars, solver, ai, steps) = (cars + p.cars_us, solver + p.solver_us, ai + p.ai_us, steps + p.steps);
+            }
+        }
+        let n = (ticks - warm) as f64;
+        eprintln!(
+            "{} drivers + {} bots, {} vehicles in physics: step {:.0} µs (cars {:.0} + solver {:.0} + bot AI {:.0}, {:.2}              physics steps/tick) + snapshots {:.0} µs = {:.0} µs per tick (worst {:.0} µs, budget 33 333); {:.1} KB/s              per player",
+            spots.len(),
+            m.bot_count(),
+            m.physics_vehicles(),
+            step_t / n * 1e6,
+            cars / n,
+            solver / n,
+            ai / n,
+            steps as f64 / n,
+            snap_t / n * 1e6,
+            (step_t + snap_t) / n * 1e6,
+            worst * 1e6,
+            bytes as f64 / n * 30.0 / spots.len() as f64 / 1024.0
+        );
+        // (driven the whole time: covered real distance — not stuck on a tree at the first bend)
+        let moving = (1..=spots.len() as u16)
+            .filter(|&id| {
+                let (a, p) = (start[id as usize - 1], m.pose_of(id).unwrap().pos);
+                (p[0] - a[0]).hypot(p[2] - a[2]) > 30.0
+            })
+            .count();
+        eprintln!("{moving} of {} drivers covered > 30 m", spots.len());
+        // (full throttle, no driver AI: some end up against a tree — they cost the same; the rest must really drive)
+        assert!(moving > spots.len() / 4, "the drivers' cars are simulated and moving");
     }
 }
 
@@ -1582,22 +1925,30 @@ mod statics {
     /// boulders and set pieces (cast in the game's scratch world) give the same first hit here.
     #[test]
     fn statics_match_the_game() {
+        // (each map's trunks and boulders: well over this many)
+        for (id, min_solid) in [("island", 40_000), ("highlands", 15_000), ("zhangjiajie", 20_000)] {
+            statics_match(id, min_solid);
+        }
+    }
+
+    fn statics_match(id: &str, min_solid: usize) {
         let base = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let dir = base.join("../../../game/public/maps/island");
+        let dir = base.join("../../../game/public/maps").join(id);
         if !dir.join("statics.bin").exists() {
             return;
         }
         let map = MapData::load(&dir).unwrap();
         let st = map.statics.as_ref().unwrap();
         let golden: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(base.join("golden/statics-probe-island.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(base.join(format!("golden/statics-probe-{id}.json"))).unwrap())
+                .unwrap();
         assert_eq!(
             golden["seed"].as_u64(),
             Some(st.seed as u64),
             "statics.bin and its probes come from one export"
         );
         let solid = st.items.iter().filter(|s| !s.breakable).count();
-        assert!(solid > 40_000, "the island's trunks and boulders ({solid})");
+        assert!(solid > min_solid, "{id}: the trunks and boulders ({solid})");
         let ph = MapPhysics::get(&map);
         let mut w = ph.world();
         w.step(); // (scene queries see colliders from the first step on)
@@ -1613,16 +1964,16 @@ mod statics {
             let ray = Ray::new(Vector::new(v[0], v[1], v[2]), Vector::new(v[3], v[4], v[5]));
             let toi = w.pw.cast_ray(&ray, 12.0, true, filter).map_or(-1.0, |(_, t)| t);
             let err = (toi - v[6]).abs();
-            assert!(err < 2e-3, "probe {n}: server {toi}, game {}", v[6]);
+            assert!(err < 2e-3, "{id} probe {n}: server {toi}, game {}", v[6]);
             worst = worst.max(err);
             n += 1;
             hits += usize::from(toi >= 0.0);
         }
-        assert!(n > 300, "{n} probes");
+        assert!(n > 300, "{id}: {n} probes");
         assert!(
             hits > n * 3 / 4,
             "{hits} of {n} probes hit (the export's rays must see its colliders)"
         );
-        println!("{n} probes, worst {:.2} mm", worst * 1000.0);
+        println!("{id}: {n} probes, worst {:.2} mm", worst * 1000.0);
     }
 }

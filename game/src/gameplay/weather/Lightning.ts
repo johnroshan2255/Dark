@@ -15,13 +15,19 @@ import type { Health } from '../survival/Health'
  *    (random timing and strength per strike — no two look the same). Branch tips fade.
  *  - Light: the flash lights the CLOUDS around the bolt from inside (sky shader, directional) and gives the
  *    ground a short red-violet burst via the hemisphere light — no full-screen colour wash.
- *  - Thunder: AudioSystem, delayed by distance / 343 m/s.
- * Danger: ~15% of strikes land 2–9 m from the player. ≤ 3.5 m: 45 damage + knockdown; ≤ 9 m: 12 + stagger.
+ *  - DISTANCE like a real storm: most strikes 0.25–1.5 km off (a few 100–250 m), the bolt sized with its distance
+ *    (taller, wider: a far one still reads), its light on the world weaker the farther it is.
+ *  - Thunder: AudioSystem — the flash first, the sound distance / 343 m/s later (a strike 1 km off: ~3 s), duller and
+ *    quieter with distance, panned to where it struck.
+ * Danger (only when `harmful`: night ghosts on / the nightmare): ~15% of strikes land 2–9 m from the player.
+ * ≤ 3.5 m: 45 damage + knockdown; ≤ 9 m: 12 + stagger.
  * Cost: 1 draw for < 0.6 s per strike; a few hundred triangles.
  */
 export class Lightning {
   readonly mesh: THREE.Mesh
   enabled = true
+  /** Strikes may land by the player and hurt (night ghosts on / the nightmare); off = weather only. */
+  harmful = false
   /** Current flash intensity 0..~1.2 (lighting, sky and grading read this). */
   flash = 0
   /** World direction from the camera to the bolt's upper channel (sky lights clouds around it). */
@@ -36,6 +42,8 @@ export class Lightning {
   /** Re-strike times and strengths for the current strike. */
   private pulses: [number, number][] = []
   private readonly top = new THREE.Vector3()
+  /** The current strike's light on the world: 1 close by, ~0.35 at 1.5 km. */
+  private reach = 1
 
   constructor(
     private readonly fields: WorldFields,
@@ -95,7 +103,7 @@ export class Lightning {
     const reveal = Math.min(1, t / 0.07)
     let f = reveal < 1 ? 0.12 * reveal : 0
     for (const [t0, s] of this.pulses) if (t >= t0) f = Math.max(f, s * Math.exp(-(t - t0) * 16))
-    this.flash = f
+    this.flash = f * this.reach
     const u = this.material.uniforms
     u.uReveal.value = reveal
     u.uIntensity.value = reveal < 1 ? 0.5 : Math.min(1.2, f * 1.3)
@@ -114,7 +122,7 @@ export class Lightning {
     this.timer -= dt
     if (this.timer <= 0) {
       this.timer = nightmare > 0.5 ? 5 + this.rng.next() * 10 : stormOnly ? 18 + this.rng.next() * 32 : 15 + this.rng.next() * 30
-      this.strike(!stormOnly && this.rng.next() < 0.15, camera) // storm strikes never target the player
+      this.strike(this.harmful && !stormOnly && this.rng.next() < 0.15, camera) // storm strikes never target the player
     }
   }
 
@@ -122,14 +130,17 @@ export class Lightning {
   strike(near: boolean, camera: THREE.Camera): void {
     const p = this.player.renderPosition
     const a = this.rng.next() * Math.PI * 2
-    const d = near ? 2 + this.rng.next() * 7 : 25 + this.rng.next() * 120
+    // (a real storm: mostly far — the flash, then seconds later the thunder; now and then a close one)
+    const r = this.rng.next()
+    const d = near ? 2 + this.rng.next() * 7 : r < 0.2 ? 100 + this.rng.next() * 150 : 250 + this.rng.next() * 1250
     const x = p.x + Math.cos(a) * d
     const z = p.z + Math.sin(a) * d
     const ground = new THREE.Vector3(x, this.fields.height(x, z), z)
     this.lastStrike.copy(ground)
     this.lastDistance = d
     this.strikes++
-    this.build(ground, camera.position)
+    this.reach = Math.min(1, Math.max(0.35, 1 - (d - 100) / 2000))
+    this.build(ground, camera.position, Math.max(1, (d / 150) ** 0.75))
     this.boltDir.copy(this.top).sub(camera.position).normalize()
     this.age = 0
     // Return stroke at 70 ms, then 1–3 re-strikes with random gaps/strengths.
@@ -140,7 +151,10 @@ export class Lightning {
       t += 0.06 + this.rng.next() * 0.16
       this.pulses.push([t, 0.45 + this.rng.next() * 0.5])
     }
-    this.audio.thunder(d)
+    // (left / right of the view: where the thunder comes from)
+    _v.subVectors(ground, camera.position).setY(0).normalize()
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion).setY(0).normalize()
+    this.audio.thunder(d, _v.dot(right))
     if (!this.health.dead) {
       _v.subVectors(p, ground)
       _v.y = 0
@@ -158,8 +172,9 @@ export class Lightning {
     }
   }
 
-  private build(ground: THREE.Vector3, cam: THREE.Vector3): void {
-    const top = this.top.set(ground.x + this.rng.range(-25, 25), ground.y + 170, ground.z + this.rng.range(-25, 25))
+  /** @param k size: 1 for a strike ~150 m off, more farther away (a real bolt is hundreds of metres tall). */
+  private build(ground: THREE.Vector3, cam: THREE.Vector3, k = 1): void {
+    const top = this.top.set(ground.x + this.rng.range(-25, 25) * k, ground.y + 170 * k, ground.z + this.rng.range(-25, 25) * k)
     const rng = this.rng
     // Midpoint displacement, perpendicular jitter (lightning zig-zags sideways far more than vertically).
     const channel = (a: THREE.Vector3, b: THREE.Vector3, depth: number, amp: number): THREE.Vector3[] => {
@@ -178,8 +193,8 @@ export class Lightning {
       return pts
     }
     type Strand = { p: THREE.Vector3[]; w: number; s: number; a0: number; a1: number }
-    const main = channel(top, ground, 7, 22)
-    const strands: Strand[] = [{ p: main, w: 3.2, s: 1, a0: 0, a1: 1 }]
+    const main = channel(top, ground, 7, 22 * k)
+    const strands: Strand[] = [{ p: main, w: 3.2 * k, s: 1, a0: 0, a1: 1 }]
     const fork = (from: Strand, count: number, len: number, w: number, s: number, depth: number) => {
       for (let b = 0; b < count; b++) {
         const i = 4 + Math.floor(rng.next() * (from.p.length * 0.75))
@@ -192,7 +207,7 @@ export class Lightning {
         if (depth > 0) fork(st, 2, len * 0.45, w * 0.6, s * 0.7, depth - 1)
       }
     }
-    fork(strands[0], 4 + Math.floor(rng.next() * 3), 45, 1.8, 0.6, 1)
+    fork(strands[0], 4 + Math.floor(rng.next() * 3), 45 * k, 1.8 * k, 0.6, 1)
 
     const pos: number[] = [], across: number[] = [], along: number[] = [], strength: number[] = []
     const side = new THREE.Vector3(), dir = new THREE.Vector3(), toCam = new THREE.Vector3()

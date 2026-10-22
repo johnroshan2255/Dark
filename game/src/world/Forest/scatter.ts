@@ -63,6 +63,7 @@ function scatter(
       if (scale <= 0) continue
       if (layer !== Layer.Rocks && h < WorldFields.WATER + 0.9) continue // no trees/plants in water
       if (fields.map?.inPool(wx, wz)) continue // nor in a desert pool (FixedMap.pools)
+      if (fields.map?.inPillar(wx, wz, layer === Layer.Trees ? 2 : 0.5)) continue // nor inside a sandstone pillar (FixedMap.pillars)
       // Cliffs are bare rock (crags clad them): nothing grows on slopes the crags start on (Formations/crags.ts).
       gridSlope(heights, lx, lz, _sg)
       if (_sg[0] * _sg[0] + _sg[1] * _sg[1] > CRAG_SLOPE0 * CRAG_SLOPE0) continue

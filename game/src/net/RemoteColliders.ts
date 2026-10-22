@@ -13,8 +13,10 @@ import { group, Groups, type PhysicsWorld } from '../physics/PhysicsWorld'
  * round trip + the server's jitter buffer later); each box is the remote's newest snapshot extrapolated along its
  * velocity to that time. MOTION: a box never jumps (a jumping box hits like a hammer): its velocity is the remote's
  * plus a pull toward the target (≤ CATCH_UP m/s), and it is placed outright only where it can't land on us. SIZE: the
- * model's body bounds as one box. GROUPS: a Vehicle member that meets only vehicles' body colliders (our car's exact
- * mesh), not the ground or people.
+ * model's body bounds as one box. GROUPS: a Vehicle member that meets vehicles' body colliders (our car's exact mesh)
+ * and the player (on foot you can't walk through someone's car), not the ground. PARKED cars (a driver who got out, a
+ * bot gone for a walk) stand in too, still — the server's car is there and solid. Driving, the boxes are timed for our
+ * predicted car; on foot, for now.
  * Cost: ≤ MAX dynamic boxes (one velocity set per frame each).
  */
 const MAX = 8
@@ -75,7 +77,7 @@ export class RemoteColliders {
           R.RigidBodyDesc.dynamic().setGravityScale(0).lockRotations().setLinearDamping(0).setCanSleep(false).enabledTranslations(true, false, true),
         )
         const collider = this.physics.world.createCollider(
-          R.ColliderDesc.cuboid(...c.half).setMass(MASS).setCollisionGroups(group(Groups.Vehicle, Groups.Vehicle | Groups.VehicleMesh)).setFriction(0.35),
+          R.ColliderDesc.cuboid(...c.half).setMass(MASS).setCollisionGroups(group(Groups.Vehicle, Groups.Vehicle | Groups.VehicleMesh | Groups.Player)).setFriction(0.35),
           body,
         )
         s = this.slots[i] = { body, collider, id: -1, half: [...c.half] }
@@ -92,7 +94,9 @@ export class RemoteColliders {
       const fresh = !s.body.isEnabled() || s.id !== c.id
       const at = s.body.translation()
       const gap = Math.hypot(tx - at.x, tz - at.z)
-      if ((fresh || gap > JUMP) && Math.hypot(tx - near.x, tz - near.z) > CLEAR) {
+      // (a standing car only has to be clear of us by its own size; a moving one by CLEAR)
+      const clear = Math.hypot(c.vx, c.vz) < 0.1 ? Math.hypot(c.half[0], c.half[2]) + 1 : CLEAR
+      if ((fresh || gap > JUMP) && Math.hypot(tx - near.x, tz - near.z) > clear) {
         // (placed outright: a new car in this slot, or far off — never on top of us)
         s.body.setEnabled(true)
         s.body.setTranslation({ x: tx, y: ty, z: tz }, true)

@@ -50,6 +50,9 @@ export class PlayerController {
   tumbleYaw = 0
   /** Seconds since the last mouse / touch look input (bike camera auto-follow). */
   lookIdle = 99
+  /** A hands-on action (taking / hanging a tow hook): walk to `to` first (feet, world; at most `t` s more), then
+   *  stand still `hold` s more while the hands work. No move input meanwhile. */
+  readonly busy = { to: null as THREE.Vector3 | null, t: 0, hold: 0, d: Infinity, walked: 0 }
 
   private readonly body: RAPIER.RigidBody
   readonly collider: RAPIER.Collider
@@ -57,6 +60,8 @@ export class PlayerController {
   private readonly mouse = { x: 0, y: 0 }
   private readonly wish = new THREE.Vector3()
   private jumpQueued = false
+  /** The controller pushes dynamic bodies it walks into (off while busy at a car). */
+  private shoves = true
 
   constructor(
     physics: PhysicsWorld,
@@ -157,6 +162,26 @@ export class PlayerController {
     this.wish.set(strafe * cy - fwd * sy, 0, -strafe * sy - fwd * cy)
     if (this.wish.lengthSq() > 1) this.wish.normalize()
     this.wish.multiplyScalar(speed)
+    const b = this.busy
+    if (b.to) {
+      // a couple of steps up to the hook (slowing into place), then stop
+      const dx = b.to.x - this.curr.x, dz = b.to.z - this.curr.z, d = Math.hypot(dx, dz)
+      b.t -= dt
+      b.walked += dt
+      // (stopped short: something in the way — a spare wheel, a bumper: that's close enough)
+      const stuck = b.walked > 0.3 && b.d - d < 0.004
+      b.d = d
+      if (d < 0.06 || b.t <= 0 || stuck || locked) b.to = null
+      else this.wish.set(dx, 0, dz).multiplyScalar(Math.min(2.2, d * 6) / d)
+    }
+    // stepping up to a car's hook doesn't shove the car
+    const shove = !b.to && b.hold <= 0
+    if (shove !== this.shoves) this.controller.setApplyImpulsesToDynamicBodies((this.shoves = shove))
+    if (!b.to && b.hold > 0) {
+      b.hold -= dt
+      this.wish.set(0, 0, 0)
+      this.jumpQueued = false
+    }
 
     if (this.tumbling) {
       // Roll with the slide; once nearly stopped, finish the turn and come to rest ON THE BACK — the forward-roll
@@ -211,6 +236,8 @@ export class PlayerController {
     this.curr.copy(p)
     this.prev.copy(p)
     this.velocity.set(0, 0, 0)
+    this.busy.to = null
+    this.busy.hold = 0
   }
 
   get horizontalSpeed(): number {

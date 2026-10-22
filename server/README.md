@@ -113,7 +113,7 @@ Every flag has an environment variable (`dark-server --help`).
 | `DARK_PUBLIC_WS_URL` | from the `Host` header | e.g. `wss://eu1.example.com/v1/ws` |
 | `DARK_ALLOWED_ORIGINS` | any (warns) | the game's web origin(s) |
 | `DARK_TRUST_PROXY` | false | honour `X-Forwarded-For`/`-Proto` behind a proxy / load balancer |
-| `DARK_MAPS_DIR`, `DARK_MAPS` | `../game/public/maps`, `island,highlands` | maps hosted (`<id>/map.json`, `heights.bin`) |
+| `DARK_MAPS_DIR`, `DARK_MAPS` | `../game/public/maps`, `island,highlands,zhangjiajie` | maps hosted (`<id>/map.json`, `heights.bin`) |
 | `DARK_MAX_MATCHES` | 8 | concurrent matches per process |
 | `DARK_MAX_ROOMS` | 400 | concurrent rooms per process |
 | `DARK_MATCH_CONFIG` | — | TOML overriding match rules (`dark_sim::MatchConfig`: seats, timers, zone stages, limits, interest) |
@@ -141,6 +141,16 @@ RTT figures say nothing about the internet):
 
 Server egress is about 0.9 MB/s per 100-player match. Plan on one match per core with headroom on cloud vCPUs, and
 measure there (`dark_tick_seconds`, `dark_tick_overruns_total`).
+
+**Map rooms with server physics** (every driven car simulated here) cost far more than pose-validated matches:
+`cargo test --release -p dark-sim bench_full_physics_room -- --ignored --nocapture` — 60 players driving + 40 bots
+on the island, Ryzen 7 7435HS: **8.4 ms per tick** (cars 5.4 ms, Rapier solver 2.3 ms, snapshots 0.5 ms), ~37 KB/s
+down per player. Most of a car's step is its tyre-envelope ground rays: players' cars cast them every step (the
+client predicts them identically); bots' cars every 2nd–8th step by distance to people (`Truck::envelope_every`).
+Many rooms at once (separate processes, ticking flat out): 8 rooms 11.7 ms average / 17 ms worst; 12 rooms 14.4 / 31.
+A room ticking at 30 Hz needs ~¼ of a core — plan **~2 full rooms per vCPU** and watch `dark_tick_overruns_total`.
+`cargo run -- --dev` builds dependencies optimised (`[profile.dev.package."*"]`): unoptimised Rapier took ~20 ms of
+every 33 ms tick and stalled bots and players.
 
 ## Operating it
 

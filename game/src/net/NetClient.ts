@@ -201,6 +201,8 @@ export class NetClient {
       if (init.auth) headers.authorization = `Bearer ${await this.token()}`
       const r = await fetch(SERVER_URL + path, { ...init, headers, signal: ctl.signal })
       if (r.status === 204) return undefined as T
+      // a session the server no longer accepts (it restarted with a new key): sign in afresh, once
+      if (r.status === 401 && init.auth && this.dropSession()) return this.api<T>(path, init)
       const body = (await r.json().catch(() => ({}))) as { error?: string; message?: string }
       if (!r.ok) throw new NetError(body.error ?? String(r.status), body.message ?? r.statusText)
       return body as T
@@ -209,6 +211,17 @@ export class NetClient {
       throw new NetError('unreachable', 'Multiplayer server unreachable')
     } finally {
       clearTimeout(timer)
+    }
+  }
+
+  /** Forget the cached guest session; true if there was one. */
+  private dropSession(): boolean {
+    try {
+      if (!localStorage.getItem(SESSION_KEY)) return false
+      localStorage.removeItem(SESSION_KEY)
+      return true
+    } catch {
+      return false // (private mode: nothing cached)
     }
   }
 
@@ -476,11 +489,13 @@ export class NetClient {
       ws.send(encodeClient({ t: 'ping', clientTime: Math.floor(now) >>> 0 }))
     }
     this.vehicle.update(this.physicsRoom)
-    // the remote cars our predicted car can hit: where they will be when the server runs our current frame
-    // (half a round trip from now, plus its 3-frame jitter buffer)
+    // the remote cars we can hit: driving, where they will be when the server runs our current frame (half a round
+    // trip from now, plus its 3-frame jitter buffer); on foot, where they are now
     const sNow = this.serverNow()
-    if (this.vehicle.active && sNow !== null) {
-      this.colliders.update(this.game.remotes.carPoses(this.carPoses), this.game.car.pos, sNow + this.rtt / 2 + 50, dt)
+    if (this.physicsRoom && sNow !== null) {
+      const driving = this.vehicle.active
+      const near = driving ? this.game.car.pos : this.game.player.curr
+      this.colliders.update(this.game.remotes.carPoses(this.carPoses), near, driving ? sNow + this.rtt / 2 + 50 : sNow, dt)
     } else this.colliders.clear()
     this.sendAcc += dt
     if (this.sendAcc < 1 / SEND_HZ) return

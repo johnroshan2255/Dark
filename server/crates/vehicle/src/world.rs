@@ -156,6 +156,22 @@ impl World {
             .map(|(_, t)| t)
     }
 
+    /// First collider a ray hits — distance and the body it belongs to (None: a fixed collider without one) — ignoring
+    /// `skip`'s colliders.
+    pub fn cast_ray_body(
+        &self,
+        origin: Vector,
+        dir: Vector,
+        max: f32,
+        groups: InteractionGroups,
+        skip: RigidBodyHandle,
+    ) -> Option<(f32, Option<RigidBodyHandle>)> {
+        let filter = QueryFilter::new().groups(groups).exclude_rigid_body(skip);
+        self.pw
+            .cast_ray(&Ray::new(origin, dir), max, true, filter)
+            .map(|(h, t)| (t, self.pw.colliders.get(h).and_then(|c| c.parent())))
+    }
+
     /// First surface a ray crosses — distance, normal, the collider's member groups — ignoring `skip`'s colliders
     /// (hollow shapes: a ray from inside or against one meets its far side, not a hit at 0).
     pub fn cast_ray_normal(

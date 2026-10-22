@@ -41,7 +41,20 @@ export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, 
   const heights = new Float32Array(n * n)
   const colors = new Float32Array(n * n * 3)
   const canopyOut = new Float32Array(n * n * 4)
-  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) heights[j * n + i] = fields.heightNoCave(cx + off[i], cz + off[j])
+  // (a fixed map: the mean of five points across the vertex's cell — a point sample in a 26 m river channel pulled a
+  // whole 60 m horizon cell under the water: a lake along the valley that isn't there; Zhangjiajie, 2026-10-23)
+  const box = !!fields.map
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const x = cx + off[i], z = cz + off[j]
+      if (!box) {
+        heights[j * n + i] = fields.heightNoCave(x, z)
+        continue
+      }
+      const dx = (off[Math.min(n - 1, i + 1)] - off[Math.max(0, i - 1)]) / 6, dz = (off[Math.min(n - 1, j + 1)] - off[Math.max(0, j - 1)]) / 6
+      heights[j * n + i] = (fields.heightNoCave(x, z) + fields.heightNoCave(x + dx, z) + fields.heightNoCave(x - dx, z) + fields.heightNoCave(x, z + dz) + fields.heightNoCave(x, z - dz)) / 5
+    }
+  }
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
       const k = j * n + i

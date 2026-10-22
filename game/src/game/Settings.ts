@@ -45,8 +45,9 @@ export interface Settings {
   painterly: boolean
   /** Force the painterly filter on tiers where it defaults off (LOW). */
   painterlyForce: boolean
-  /** Monsters and storms in monster time (off = exploration mode). */
-  monsters: boolean
+  /** Night ghosts: the monsters come out at night. OFF by default (the nightmare brings them whatever this says);
+   *  renamed from `monsters` so saves holding its old default (on) reset. Storms come either way (weather). */
+  nightGhosts: boolean
   /** All sound on/off (one toggle), and the warm theme music on/off. */
   sound: boolean
   music: boolean
@@ -74,7 +75,7 @@ export const DEFAULT_SETTINGS: Settings = {
   filmGrain: true,
   painterly: false,
   painterlyForce: false,
-  monsters: true,
+  nightGhosts: false,
   sound: true,
   music: true,
   garage: { vehicle: DEFAULT_VEHICLE, tuning: {} },

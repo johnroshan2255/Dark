@@ -336,6 +336,18 @@ for t, c in SP.items():
     if not k: continue
     gy = ground(p); s = 6.0 if t in ('stunt_loop', 'lift_station', 'cabin', 'shack', 'water_tower', 'windmill') else 3.2
     add((box_v, box_f), np.stack([p[:, 0], -p[:, 2], gy], 1), np.stack([s, s, s * 0.9] * np.ones((k, 1)), 1).reshape(k, 3), np.repeat(c[None], k, 0))
+# sandstone PILLARS (map.json `pillars`: Zhangjiajie — the game draws them as meshes, world/map/PillarField.ts): an
+# eight-sided tapering column in the palette's rock tones and a green cap on top
+PIL = np.array(meta.get('pillars', []), float).reshape(-1, 7)
+if len(PIL):
+    a_ = np.linspace(0, 2 * math.pi, 8, endpoint=False)
+    col_v = np.vstack([np.stack([np.cos(a_), np.sin(a_), np.zeros(8)], 1), np.stack([np.cos(a_) * 0.82, np.sin(a_) * 0.82, np.ones(8)], 1), [[0, 0, 1]]])
+    col_f = np.array([f for k in range(8) for f in ([k, (k + 1) % 8, 8 + (k + 1) % 8], [k, 8 + (k + 1) % 8, 8 + k], [8 + k, 8 + (k + 1) % 8, 16])])
+    k = len(PIL); t_ = rng.uniform(0, 1, (k, 1))
+    rock_c = hx('rock', srgb(130, 116, 101)) * (1 - t_) + hx('cliff', srgb(164, 149, 128)) * t_
+    add((col_v, col_f), np.stack([PIL[:, 0], -PIL[:, 2], PIL[:, 1]], 1), np.stack([PIL[:, 3], PIL[:, 3], PIL[:, 4]], 1), rock_c * 0.85)
+    add((ICO_V, ICO_F), np.stack([PIL[:, 0], -PIL[:, 2], PIL[:, 1] + PIL[:, 4]], 1), np.stack([PIL[:, 3] * 0.95, PIL[:, 3] * 0.95, PIL[:, 3] * 0.35 + 2], 1),
+        np.repeat(hx('grass', srgb(68, 108, 65))[None], k, 0) * rng.uniform(0.75, 1.05, (k, 1)))
 mesh_obj('trees', np.vstack(TREES['v']), np.concatenate(TREES['f']), 3, np.vstack(TREES['c']), FOL, smooth=False)
 
 # ---------------------------------------------------------------- light, world, camera

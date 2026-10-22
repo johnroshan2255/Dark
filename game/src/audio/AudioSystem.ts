@@ -9,6 +9,10 @@ import boostUrl from '../assets/audio/car/boost_wind.mp3?url'
 import freewheelUrl from '../assets/audio/bike/freewheel.mp3?url'
 import rollUrl from '../assets/audio/bike/roll.mp3?url'
 import rainUrl from '../assets/audio/ambience/rain.mp3?url'
+import thunderCloseUrl from '../assets/audio/ambience/thunder_close.mp3?url'
+import thunderMid1Url from '../assets/audio/ambience/thunder_mid1.mp3?url'
+import thunderMid2Url from '../assets/audio/ambience/thunder_mid2.mp3?url'
+import thunderFarUrl from '../assets/audio/ambience/thunder_far.mp3?url'
 import step0 from '../assets/audio/steps/step0.mp3?url'
 import step1 from '../assets/audio/steps/step1.mp3?url'
 import step2 from '../assets/audio/steps/step2.mp3?url'
@@ -21,8 +25,8 @@ import step8 from '../assets/audio/steps/step8.mp3?url'
 import step9 from '../assets/audio/steps/step9.mp3?url'
 
 /**
- * SOUND. Recorded CC0 sounds (src/assets/audio, credits ASSET_LIST.md) + a few synthesized effects (thunder,
- * monster, hurt). Mixer: master (the Settings "Sound" toggle mutes everything) → music bus (Settings "Theme
+ * SOUND. Recorded CC0 sounds (src/assets/audio, credits ASSET_LIST.md) + a few synthesized effects (monster,
+ * hurt). THUNDER: four field recordings (a sharp close clap, two mid, a long far roll), chosen by distance. Mixer: master (the Settings "Sound" toggle mutes everything) → music bus (Settings "Theme
  * music") + effects bus. Continuous sounds are PERSISTENT LOOPS whose gain / pitch / pan follow the game every
  * frame (`frame()`): engine (two layers + simulated gears), boost rush, tyre skid, bike freewheel + rolling,
  * rain, theme. One-shots: doors, engine start / stop, footsteps (`footstep()`, timed to stride length by Game).
@@ -33,6 +37,7 @@ import step9 from '../assets/audio/steps/step9.mp3?url'
 const SOUNDS = {
   music: musicUrl, engineDrive: engineDriveUrl, engineIdle: engineIdleUrl, engineStart: engineStartUrl, engineStop: engineStopUrl,
   door: doorUrl, skid: skidUrl, boost: boostUrl, freewheel: freewheelUrl, roll: rollUrl, rain: rainUrl,
+  thunderClose: thunderCloseUrl, thunderMid1: thunderMid1Url, thunderMid2: thunderMid2Url, thunderFar: thunderFarUrl,
   step0, step1, step2, step3, step4, step5, step6, step7, step8, step9,
 } as const
 type SoundName = keyof typeof SOUNDS
@@ -189,6 +194,7 @@ export class AudioSystem {
           const buf = await ctx.decodeAudioData(await res.arrayBuffer())
           this.buffers.set(name, buf)
           if (LOOPS.includes(name)) this.startLoop(name, buf)
+          if (name.startsWith('thunder')) this.thunderLevel.set(name, loudest(buf))
         } catch (e) {
           console.warn(`audio: ${name} failed to load`, e)
         }
@@ -385,39 +391,58 @@ export class AudioSystem {
     return s
   }
 
-  /** @param distance metres — sets delay (speed of sound), loudness and how much crack survives. */
-  thunder(distance: number): void {
+  /** Each thunder recording's loudest half second (RMS), measured on load: the clips are levelled by it. */
+  private readonly thunderLevel = new Map<SoundName, number>()
+  private lastThunder: SoundName | null = null
+
+  /**
+   * THUNDER, as in a real storm: the flash was seen at once; the sound arrives distance / 343 m/s later (1 km ≈ 3 s).
+   * Close (< 250 m): the sharp clap, loud and bright. Farther: a mid or the long rolling recording, quieter (≈ 1/d^0.6)
+   * and duller — the air takes the highs (low-pass from ~12 kHz close to ~1.7 kHz at 1.5 km). A little pitch
+   * variety, never the same clip twice running; panned to where it struck.
+   * @param distance metres to the strike   @param pan −1 left … 1 right of the view
+   */
+  thunder(distance: number, pan = 0): void {
     const ctx = this.ctx
-    if (!ctx || !this.master || ctx.state !== 'running') return
-    const delay = Math.min(6, distance / 343)
-    const near = Math.max(0, 1 - distance / 120)
-    const t = ctx.currentTime + delay
-    // Crack (near strikes only): bright, short.
-    if (near > 0.2) {
-      const src = this.noiseSource(ctx, delay)
-      const hp = ctx.createBiquadFilter()
-      hp.type = 'highpass'
-      hp.frequency.value = 900
-      const g = ctx.createGain()
-      g.gain.setValueAtTime(0, t)
-      g.gain.linearRampToValueAtTime(1.6 * near, t + 0.01)
-      g.gain.exponentialRampToValueAtTime(0.001, t + 0.35)
-      src.connect(hp).connect(g).connect(this.sfx!)
-      src.stop(t + 0.4)
-    }
-    // Rumble.
-    const src = this.noiseSource(ctx, delay)
+    if (!ctx || !this.sfx || ctx.state !== 'running') return
+    const pick: SoundName[] = distance < 250 ? ['thunderClose'] : distance < 900 ? ['thunderMid1', 'thunderMid2'] : ['thunderFar', 'thunderMid2']
+    let name = pick[Math.floor(Math.random() * pick.length)]
+    if (name === this.lastThunder && pick.length > 1) name = pick.find((n) => n !== name)!
+    const buf = this.buffers.get(name)
+    if (!buf) return
+    this.lastThunder = name
+    const t = ctx.currentTime + distance / 343
+    const src = ctx.createBufferSource()
+    src.buffer = buf
+    src.playbackRate.value = 0.92 + Math.random() * 0.14
     const lp = ctx.createBiquadFilter()
     lp.type = 'lowpass'
-    lp.frequency.value = 180 + 500 * near
+    lp.frequency.value = 300 + 12000 * Math.exp(-distance / 700)
     const g = ctx.createGain()
-    const vol = 0.35 + 0.9 * near
+    const level = 0.32 / Math.max(1e-3, this.thunderLevel.get(name) ?? 0.32)
+    g.gain.value = level * Math.min(1.3, (60 / Math.max(60, distance)) ** 0.6 * 1.3)
+    const p = ctx.createStereoPanner()
+    p.pan.value = Math.max(-1, Math.min(1, pan)) * Math.min(0.8, 0.3 + distance / 1500)
+    src.connect(lp).connect(g).connect(p).connect(this.sfx)
+    src.start(t)
+  }
+
+  /** A heavy footfall `distance` m away: a short low thump (a strider's stride). */
+  thud(distance: number): void {
+    const ctx = this.ctx
+    if (!ctx || !this.sfx || ctx.state !== 'running') return
+    const t = ctx.currentTime + distance / 343
+    const o = ctx.createOscillator()
+    o.type = 'sine'
+    o.frequency.setValueAtTime(70, t)
+    o.frequency.exponentialRampToValueAtTime(38, t + 0.25)
+    const g = ctx.createGain()
     g.gain.setValueAtTime(0, t)
-    g.gain.linearRampToValueAtTime(vol, t + 0.08 + (1 - near) * 0.4)
-    g.gain.setValueAtTime(vol * 0.7, t + 0.8)
-    g.gain.exponentialRampToValueAtTime(0.001, t + 3.5 + (1 - near) * 1.5)
-    src.connect(lp).connect(g).connect(this.sfx!)
-    src.stop(t + 5.5)
+    g.gain.linearRampToValueAtTime(0.9 * Math.max(0.15, 1 - distance / 40), t + 0.01)
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.35)
+    o.connect(g).connect(this.sfx)
+    o.start(t)
+    o.stop(t + 0.4)
   }
 
   /** Low distorted growl (hunt start) or short screech (attack). */
@@ -527,4 +552,16 @@ export class AudioSystem {
     osc.start(t)
     osc.stop(t + 0.32)
   }
+}
+
+/** The RMS of a sound's loudest half second (all channels). */
+function loudest(buf: AudioBuffer): number {
+  const ch = buf.getChannelData(0), win = Math.max(1, Math.floor(buf.sampleRate * 0.5))
+  let sum = 0, best = 0
+  for (let i = 0; i < ch.length; i++) {
+    sum += ch[i] * ch[i]
+    if (i >= win) sum -= ch[i - win] * ch[i - win]
+    if (i >= win - 1) best = Math.max(best, sum)
+  }
+  return Math.sqrt(best / win)
 }

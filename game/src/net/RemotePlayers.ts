@@ -314,6 +314,11 @@ export class RemotePlayers {
       if (!b) continue
       out.push({ id: r.id, t: s.t, x: s.x, y: s.y + b[3], z: s.z, yaw: s.yaw, vx: s.vx, vy: s.vy, vz: s.vz, half: [b[0], b[1], b[2]] })
     }
+    // parked cars stand still where their drivers left them (id −1 − owner, like their drawn cars)
+    for (const c of this.parked) {
+      const b = this.bodyBox.get(c.model)
+      if (b) out.push({ id: -1 - c.owner, t: 0, x: c.x, y: c.y + b[3], z: c.z, yaw: c.yaw, vx: 0, vy: 0, vz: 0, half: [b[0], b[1], b[2]] })
+    }
     return out
   }
 
@@ -362,6 +367,12 @@ export class RemotePlayers {
   }
 
   /** Whose cars (drivers / parked owners) are within `r` m of `p`. */
+  /** `id` is at the wheel of a car (a bot or a player) now. */
+  isDriving(id: number): boolean {
+    const q = this.remotes.get(id)
+    return !!q && (q.flags & Flags.DRIVING) !== 0 && q.model !== BIKE_MODEL
+  }
+
   carIdsNear(p: THREE.Vector3, r: number): number[] {
     const out: number[] = []
     for (const q of this.remotes.values()) if (q.flags & Flags.DRIVING && q.model !== BIKE_MODEL && Math.hypot(q.pos.x - p.x, q.pos.z - p.z) < r) out.push(q.id)

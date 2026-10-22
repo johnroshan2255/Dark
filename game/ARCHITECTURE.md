@@ -329,6 +329,32 @@ road takes the other's height round the crossing). Checked by driving every road
 On the Island the stuck spots were the export's stunt ramps / log ramps, two rock pillars and a pole standing ON the
 road centre lines: removed from props.json (the ramps on stunt_spur / jump_spur / pump_spur stay — that's their job).
 
+ZHANGJIAJIE & WULINGYUAN (2026-10-23, `public/maps/zhangjiajie/`) — a forest of sandstone PILLARS, built by
+`scripts/blender/zhangjiajie/build.py` from the user's height-map render (`heightmap.png`, 1024 px) and design atlas
+(`atlas.png`: colour concept, palette, drivable routes). The render is shaded and tilted, not a DEM, so it is read for
+its STRUCTURE: mesas = bright smooth areas (the edge tables), rivers = the darkest path between hand-picked points
+(main river N → SW, its NE branch), the rest pillar forest with its brightness → pillar height; the legend, watermark
+and streaky bottom band are filled by mirroring the relief above them. Heights at game scale (the render's 1300 m
+would be a wall on a 2.4 km map): valley floors ≈ 0–30 m rising from the rivers, mesas ≈ 140–175 m with ragged sheer
+cliffs, pillars 16–215 m. Roads are the Highlands' heading-aware A* over the base relief (before the pillars): a 6.7 km
+scenic loop, a cross road and a valley road through the middle (river crossings → bridges) and the MESA ROAD — a ramp
+cut into the north-west mesa's flank as a ravine, climbed in switchbacks to the lookout (Tianmen's bends). Then the
+island's `roads.py` and `map_preview.py` (pillars drawn as columns with green caps when map.json has them). Palette =
+the atlas swatches (vegetation greens, sandstone, soil, river blues); `trees: 'conifer'`.
+PILLARS AS MESHES (`world/map/PillarField.ts`, map.json `pillars`: x, base y, z, radius, height, rotation, variant ×
+~1.6 k): first stamped into the height grid, they turned into cones beyond LOD0 (the terrain is 2 m only near the
+player, 4–8 m to ~250 m, ~58 m on the horizon) and the skyline into soft pyramids. Now the grid holds only their
+talus mounds and each pillar is an instance — 5 silhouettes (column, spire, two tiers with a wooded ledge, bulging
+crown, leaning) × 3 LODs (~900 / ~220 / ~80 tris; 150 / 430 m; none past the tier's view distance), fluted, stepped
+grey / tan strata, water streaks, a crown of green canopy lumps and shrubs on the ledges, all vertex colours from the
+palette, on a stylized Lambert WITHOUT the boulders' cull fade (+1 program, ≤ 15 draws for every pillar). Re-binned
+into the LODs every 10 m of movement. Physics: a fixed cylinder per pillar (Static: car, player, camera, the tow's
+anchors — a strap goes round a pillar at the tie height; exported to statics.bin so the server's cars and bots meet
+them). Nothing grows inside one (`FixedMap.inPillar`, scatter). The horizon mesh averages five points per vertex on
+fixed maps (a point sample in the 26 m river channel flooded a 60 m horizon cell: a lake that wasn't there). The pale
+haze over the far valley floors is the height mist, not water. Cost (ULTRA, start, desktop): 113 draws, 0.77 M tris,
+GPU ≈ 5.5 ms.
+
 ## 4. Rendering
 
 - `WebGLRenderer` created by R3F, configured in `src/rendering/renderer/configureRenderer.ts`:

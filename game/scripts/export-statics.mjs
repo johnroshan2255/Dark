@@ -34,6 +34,8 @@ const res = await page.evaluate(async () => {
   const real = mp.physics
   mp.physics = pw
   try { for (const t of mp.tiles) mp.colliders(t) } finally { mp.physics = real }
+  // the sandstone pillars (a pillar map: world/map/PillarField.ts) — a cylinder each
+  g.pillars?.addColliders(pw)
 
   const T = R.ShapeType
   const recs = []

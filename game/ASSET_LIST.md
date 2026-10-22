@@ -96,4 +96,5 @@ The in-game credits screen (when there is one) must list these too.
 | Bicycle freewheel | `bike/freewheel.mp3` | https://bigsoundbank.com/detail-0140-bicycle-rear-wheel.html | Joseph Sardin (BigSoundBank) | CC0 | 14 s loop |
 | Bicycle rolling | `bike/roll.mp3` | https://bigsoundbank.com/bike-on-a-road-mtb-s1282.html | Joseph Sardin (BigSoundBank) | CC0 | 14 s loop |
 | Rain | `ambience/rain.mp3` | https://opengameart.org/content/rain-loopable | Ylmir | CC0 | 24 s loop crossfaded |
+| Thunder: close clap, two mid claps, far roll | `ambience/thunder_close.mp3`, `thunder_mid1.mp3`, `thunder_mid2.mp3`, `thunder_far.mp3` | https://bigsoundbank.com/thunder-2-s3113.html, …/thunder-3-s3114.html, …/thunder-6-s3179.html, …/thunder-s2718.html | Joseph Sardin & Axeline T. (BigSoundBank) | CC0 | as downloaded (MP3); levelled at runtime (loudest 0.5 s RMS), distance low-pass + delay in AudioSystem |
 | Footsteps (10) | `steps/step0–9.mp3` | https://kenney.nl/assets/rpg-audio | Kenney | CC0 | levelled |

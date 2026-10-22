@@ -118,7 +118,11 @@ pub struct Seen {
 /// cabin) — or, on the drivable meshes (bridges, the loop, quarter-pipes: STATIC_MESH), a wall-like face, not a deck it
 /// drives up (normals steeper than WALL_NY) — within its braking reach sends it round: the first clear
 /// lateral offset of AVOID_OFFSETS (not over a drop), kept for AVOID_S s; none clear, it closes in slowly, stops STOP_AT m short and
-/// looks again (the stuck check respawns it). Returns the plan to drive (target, speed). Cost: ≤ 7 rays per car per look.
+/// looks again (the stuck check respawns it). Returns the plan to drive (target, speed).
+/// CARS are obstacles too: any car body ahead (three rays across the bonnet's width) that isn't driving on with us —
+/// a parked car, one stopped across the road, an oncoming one in our lane, a person's car anywhere — is braked for and
+/// gone round like a trunk; a car moving our way is the car-following's (`leader`, IDM), not this.
+/// Cost: ≤ 3 + 7 × 2 rays per car per look.
 #[allow(clippy::too_many_arguments)]
 fn avoid_obstacles(
     world: &dark_vehicle::World,
@@ -136,6 +140,8 @@ fn avoid_obstacles(
     const AVOID_S: f32 = 1.5;
     const WALL_NY: f32 = 0.6;
     const STOP_AT: f32 = 4.0;
+    /// Braking it plans with (m/s²): looks far enough ahead to stop from its speed, and caps its speed to stop in time.
+    const BRAKE: f32 = 5.0;
     const BUMPER_Y: f32 = 0.8;
     const MAX_DROP: f32 = 1.5;
     const AVOID_OFFSETS: [f32; 6] = [3.5, -3.5, 6.0, -6.0, 9.0, -9.0];
@@ -155,21 +161,42 @@ fn avoid_obstacles(
     let speed = car.speed.abs() as f32;
     if *look_t <= 0.0 && avoid.1 <= 0.0 && v > 0.5 {
         *look_t = LOOK_EVERY;
-        let reach = (6.0 + speed * 1.2).min(30.0);
+        let reach = (6.0 + speed * 1.2 + speed * speed / (2.0 * BRAKE)).min(60.0);
         // (the body's origin is at its wheels' contact: look from bumper height, over the bridge planks' edges)
         let from = Vector::new(pos[0] as f32, pos[1] as f32 + BUMPER_Y, pos[2] as f32);
         let solid = group(0xffff, groups::STATIC);
-        // a wall within `len` along (dx, dz) from `from`?
+        let cars = group(0xffff, groups::VEHICLE);
+        // a wall — or a car not driving on with us — within `len` along (dx, dz) from `o`?
+        let wall_from = |o: Vector, dx: f32, dz: f32, len: f32| {
+            let l = (dx * dx + dz * dz).sqrt().max(1e-3);
+            let dir = Vector::new(dx / l, 0.0, dz / l);
+            let w = world
+                .cast_ray_normal(o, dir, len, solid, car.body)
+                .filter(|&(_, n, member)| member & groups::STATIC_MESH == 0 || n.y < WALL_NY)
+                .map(|(d, _, _)| d);
+            let c = world.cast_ray_body(o, dir, len, cars, car.body).and_then(|(d, b)| {
+                let v = b.map_or(Vector::ZERO, |b| world.pw.bodies[b].linvel());
+                // (moving on ahead of us at a fair pace: following it is the IDM's job)
+                (v.x * dir.x + v.z * dir.z < (speed * 0.6).max(2.0)).then_some(d)
+            });
+            match (w, c) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
+        };
+        // along (dx, dz): the middle and both sides of the car (a ray down the middle slips past a car's end)
         let wall = |dx: f32, dz: f32, len: f32| {
             let l = (dx * dx + dz * dz).sqrt().max(1e-3);
-            world
-                .cast_ray_normal(from, Vector::new(dx / l, 0.0, dz / l), len, solid, car.body)
-                .filter(|&(_, n, member)| member & groups::STATIC_MESH == 0 || n.y < WALL_NY)
-                .map(|(d, _, _)| d)
+            let (sx, sz) = (-dz / l, dx / l);
+            [0.0f32, 1.1, -1.1]
+                .iter()
+                .filter_map(|&s| wall_from(from + Vector::new(sx * s, 0.0, sz * s), dx, dz, len))
+                .reduce(f32::min)
         };
-        if let Some(d) = wall(fx, fz, reach) {
+        let ahead = wall(fx, fz, reach);
+        if let Some(d) = ahead {
             // blocked: close in slowly (stopping STOP_AT m short) and look again — unless a side is clear
-            *avoid = (0.0, LOOK_EVERY * 2.0, ((d - STOP_AT) * 0.8).max(0.0));
+            *avoid = (0.0, LOOK_EVERY * 2.0, (2.0 * BRAKE * (d - STOP_AT).max(0.0)).sqrt());
             for off in AVOID_OFFSETS {
                 let (dx, dz) = (fx * reach + rx * off, fz * reach + rz * off);
                 // (never round it over a drop: a bridge's side, a cliff)
@@ -180,7 +207,8 @@ fn avoid_obstacles(
                     continue;
                 }
                 if wall(dx, dz, (dx * dx + dz * dz).sqrt()).is_none() {
-                    *avoid = (off, AVOID_S, 8.0);
+                    // (held until past it: its distance and a car length more at the go-round speed)
+                    *avoid = (off, ((d + 8.0) / 8.0).max(AVOID_S), 8.0);
                     break;
                 }
             }
@@ -318,6 +346,8 @@ pub struct Bot {
     /// Stuck watch: where it was and when.
     prog: ([f32; 2], f32),
     lod: f32,
+    /// Distance to the nearest person (m): how much detail its car's physics gets (`envelope_every`).
+    near: f32,
     braking: bool,
     boost: bool,
     /// Convoy / hang-out: the index into the leader's trail being chased.
@@ -336,6 +366,8 @@ pub struct Bot {
     look_t: f32,
     /// A tow rope is on its car (sim/tow.rs): it waits, brakes on, until it is taken off.
     held: bool,
+    /// A taut line is pulling its car (TOWED, game.rs): it waits in neutral, brakes off, and is pulled along.
+    towed: bool,
 }
 
 impl Bot {
@@ -517,6 +549,7 @@ impl Bots {
                 .sqrt();
             // far from everyone: a quarter of the ticks (it still moves the same distance)
             let b = &mut self.bots[i];
+            b.near = near;
             b.lod += dt;
             if near > 1000.0 && b.lod < 0.12 {
                 continue;
@@ -594,6 +627,7 @@ impl Bots {
                 parked: None,
                 prog: ([anchor[0], anchor[1]], 0.0),
                 lod: 0.0,
+                near: f32::INFINITY,
                 braking: false,
                 boost: false,
                 cursor: 0,
@@ -606,6 +640,7 @@ impl Bots {
                 avoid: (0.0, 0.0, 0.0),
                 look_t: 0.0,
                 held: false,
+                towed: false,
             };
             let dist = 120.0 + self.rng.f32() * 500.0;
             self.place_on_road(&mut b, anchor, dist);
@@ -742,6 +777,7 @@ impl Bot {
             parked: None,
             prog: ([0.0, 0.0], 0.0),
             lod: 0.0,
+            near: f32::INFINITY,
             braking: false,
             boost: false,
             cursor: 0,
@@ -754,6 +790,7 @@ impl Bot {
             avoid: (0.0, 0.0, 0.0),
             look_t: 0.0,
             held: false,
+            towed: false,
         }
     }
 }
@@ -1185,7 +1222,8 @@ impl Bots {
             0 => {
                 let b = &self.bots[i];
                 let pulled = b.road.as_ref().is_none_or(|r| (r.lat - r.lat_to).abs() < 0.3);
-                if b.speed < 0.3 && pulled {
+                // (not while a rope is on the car: a parked car's moves aren't sent — it waits at the wheel)
+                if b.speed < 0.3 && pulled && !b.held {
                     let b = &mut self.bots[i];
                     b.parked = Some([b.x, b.z, b.yaw]);
                     b.mode = Mode::Foot;
@@ -1574,17 +1612,25 @@ impl Bots {
     /// Server physics, each physics step: every bot's car gets its driver's controls (from the AI's plan) and steps.
     /// Cars appear on demand, follow placements (spawn / respawn / back from a boat or a flight), stand parked while
     /// their bot walks, and leave the world while it sails or flies (those stay kinematic).
-    /// The body and wire model of bot `id`'s car (driving it, or parked by it), for a tow rope.
-    pub fn car_body(&self, id: u16) -> Option<(dark_vehicle::rapier3d::prelude::RigidBodyHandle, u8)> {
+    /// The body and wire model of bot `id`'s car (driving it, or parked by it), for a tow rope, and whether the bot is
+    /// at the wheel (a parked car's moves aren't sent to anyone: only a car with its bot in it takes a new rope).
+    pub fn car_body(&self, id: u16) -> Option<(dark_vehicle::rapier3d::prelude::RigidBodyHandle, u8, bool)> {
         let b = self.bots.iter().find(|b| b.id == id)?;
         let c = b.car.as_ref()?;
-        (b.mode == Mode::Car || b.parked.is_some()).then_some((c.body, b.model))
+        (b.mode == Mode::Car || b.parked.is_some()).then_some((c.body, b.model, b.mode == Mode::Car))
     }
 
     /// The bots whose cars have a tow rope on them wait (brakes on) — the rest drive on.
     pub fn hold_cars(&mut self, ids: &[u16]) {
         for b in &mut self.bots {
             b.held = ids.contains(&b.id);
+        }
+    }
+
+    /// The bots whose cars a taut tow line is pulling roll in neutral (brakes off) to be towed.
+    pub fn tow_cars(&mut self, ids: &[u16]) {
+        for b in &mut self.bots {
+            b.towed = ids.contains(&b.id);
         }
     }
 
@@ -1627,6 +1673,15 @@ impl Bots {
             }
             b.placed = false;
             let car = b.car.as_mut().expect("just made");
+            // nobody predicts a bot's car: its tyres feel the ground every 2nd step up close, rarer farther off (the
+            // ground rays are most of a car's step; a held bump is invisible beyond a few metres)
+            car.envelope_every = if b.near < 60.0 {
+                2
+            } else if b.near < 300.0 {
+                4
+            } else {
+                8
+            };
             let pos = car.position(&ph.world);
             let heading = car.heading(&ph.world);
             let plan = match (b.mode, b.plan) {
@@ -1659,6 +1714,11 @@ impl Bots {
                     heading,
                     car.speed,
                 ),
+                // being towed: neutral, brakes off — the line pulls it along
+                _ if b.towed => Controls {
+                    neutral: true,
+                    ..Default::default()
+                },
                 // nobody at the wheel / nothing planned: brake, then park (brakes locked)
                 _ => Controls {
                     throttle: if car.speed.abs() > 1.5 { -1.0 } else { 0.0 },
@@ -1781,7 +1841,9 @@ impl Bots {
         }
     }
 
-    /// Nearest thing ahead in my lane within `range`: (gap m, its speed along my heading). People count (speed 0).
+    /// Nearest thing ahead in my lane within `range`: (gap m, its speed along my heading). People count (speed 0); so
+    /// does a car stopped or crawling in my path whichever way it points (across the road, facing me) — its length
+    /// across my lane widens the path it blocks.
     fn leader(&self, b: &Bot, range: f32) -> Option<(f32, f32)> {
         let (fx, fz) = b.fwd();
         let mut best: Option<(f32, f32)> = None;
@@ -1804,8 +1866,15 @@ impl Bots {
                     let driving = s.pose.flags & flags::DRIVING != 0;
                     let (ofx, ofz) = dir_of(s.pose.yaw);
                     let same_way = ofx * fx + ofz * fz > 0.3;
-                    // vehicles going my way in my lane; anyone on foot in my path; (oncoming traffic is the other lane)
-                    let hit = if driving { same_way && lat < 2.3 } else { lat < 2.0 };
+                    // vehicles going my way in my lane; a stopped / crawling one in my path any way round; anyone on foot
+                    // in my path (oncoming traffic is the other lane)
+                    let across = (ofx * fz - ofz * fx).abs();
+                    let stopped = hspeed(&s.pose) < 2.0;
+                    let hit = if driving {
+                        (same_way && lat < 2.3) || (stopped && lat < 2.3 + 2.2 * across)
+                    } else {
+                        lat < 2.0
+                    };
                     if !hit || (s.pose.pos[1] - b.y).abs() > 6.0 {
                         continue;
                     }
@@ -2341,7 +2410,7 @@ impl Bots {
             if self.bots[i].mode != Mode::Foot {
                 if d < 14.0 || self.bots[i].mode == Mode::Car && d < 20.0 && self.bots[i].speed < 1.0 {
                     let b = &mut self.bots[i];
-                    if b.mode == Mode::Car {
+                    if b.mode == Mode::Car && !b.held {
                         b.parked = Some([b.x, b.z, b.yaw]);
                         b.mode = Mode::Foot;
                         b.road = None;

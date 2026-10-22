@@ -138,8 +138,8 @@ export function SettingsPanel({ game }: { game: Game }) {
       </>
     ) : (
       <>
-        <Row label="Monsters & storms">
-          <Seg value={st.monsters} onChange={(v) => set({ monsters: v })} opts={[{ label: 'On', value: true }, { label: 'Off (explore)', value: false }]} />
+        <Row label="Night ghosts">
+          <Seg value={st.nightGhosts} onChange={(v) => set({ nightGhosts: v })} opts={[{ label: 'On', value: true }, { label: 'Off', value: false }]} />
         </Row>
         <Row label="Day length">
           <Seg value={st.dayLength} onChange={(v) => set({ dayLength: v })} opts={[{ label: 'Paused', value: 0 }, { label: '6 min', value: 6 }, { label: '24 min', value: 24 }, { label: '60 min', value: 60 }]} />

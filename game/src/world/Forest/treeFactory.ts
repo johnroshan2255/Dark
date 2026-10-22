@@ -556,6 +556,46 @@ export function registerTreeSpecies(def: SpeciesDef): void {
   else EXTRA_SPECIES.push(def)
 }
 
+/**
+ * The drawn trunk's radius (model units, unscaled) `y` up a Blender-modelled species' trunk: the LOD0 mesh cut by
+ * that horizontal plane (within 3 × the collider radius of the axis), the outermost cut in each of 16 directions, the
+ * median of those — a root fin or a low branch on a few sides doesn't count. Null for code-built species (or nothing
+ * there). Cached per species and 5 cm of height; a triangle scan the first time (tow straps).
+ */
+export function trunkGirth(id: number, y: number, colliderR: number): number | null {
+  const def = EXTRA_SPECIES.find((s) => s.id === id)
+  if (!def) return null
+  const key = id * 1000 + Math.round(y * 20)
+  let r = GIRTH.get(key)
+  if (r === undefined) {
+    const geo = def.levels[0], p = geo.getAttribute('position'), idx = geo.index
+    const n = idx ? idx.count : p.count
+    const sector = new Float32Array(16)
+    const v = (k: number) => (idx ? idx.getX(k) : k)
+    const cut = (a: number, b: number) => {
+      const ya = p.getY(a) - y, yb = p.getY(b) - y
+      if ((ya > 0) === (yb > 0)) return
+      const t = ya / (ya - yb)
+      const x = p.getX(a) + (p.getX(b) - p.getX(a)) * t, z = p.getZ(a) + (p.getZ(b) - p.getZ(a)) * t
+      const h = Math.hypot(x, z)
+      if (h > colliderR * 3) return
+      const k = Math.floor((Math.atan2(z, x) / (Math.PI * 2) + 1) * 16) % 16
+      if (h > sector[k]) sector[k] = h
+    }
+    for (let i = 0; i + 2 < n; i += 3) {
+      const a = v(i), b = v(i + 1), c = v(i + 2)
+      cut(a, b)
+      cut(b, c)
+      cut(c, a)
+    }
+    const filled = [...sector].filter((v) => v > 0).sort((a, b) => a - b)
+    r = filled.length >= 8 ? filled[filled.length >> 1] : 0
+    GIRTH.set(key, r)
+  }
+  return r > 0 ? r : null
+}
+const GIRTH = new Map<number, number>()
+
 export function createTreeLibrary(opts: { tiered?: boolean } = {}): { species: SpeciesDef[]; dispose(): void } {
   const build = (fn: (l: number, r: Rng) => THREE.BufferGeometry, seed: number, name: string) =>
     [0, 1, 2].map((l) => {

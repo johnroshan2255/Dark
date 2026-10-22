@@ -155,12 +155,13 @@ export class CharacterModel {
   /** Get-up clip: its hips end this far (root space, xz) from the rest — subtracted so the body stands up on the spot. */
   private readonly getUpEnd = new THREE.Vector3()
   /** TOW GESTURES (hero_tow_clips.glb, added when loaded: `addClips`): a one-shot clip over the whole body — taking a
-   *  hook off a bumper, hanging it on a tree / hook — faded in and out over the locomotion; and CARRYING (a hook in
-   *  the right hand): that arm held in the carry clip's pose while the legs walk on. */
+   *  hook off a bumper, hanging it on a tree strap / another car's hook — faded in and out over the locomotion. With
+   *  a REACH target the body turns to face it and the right hand is pulled onto it (arm IK) around the clip's grab
+   *  moment, so the hand really meets the hook whatever its height. CARRYING (a hook in the right hand): that arm
+   *  hangs by the side a little behind the hip, the line trailing back, while the legs walk on (arm IK). */
   private readonly extra = new Map<string, THREE.AnimationAction>()
-  private gesture: { a: THREE.AnimationAction; t: number; speed: number; end: number } | null = null
+  private gesture: { parts: { a: THREE.AnimationAction; scale: number; end: number; w: number }[]; real: number; len: number; reach: { target: THREE.Vector3; at: number } | null } | null = null
   private gestureW = 0
-  private carryPose: [THREE.Bone, THREE.Quaternion][] | null = null
   private carryK = 0
   /** A hook in the right hand (TowSystem). */
   carrying = false
@@ -337,9 +338,9 @@ export class CharacterModel {
       a.setEffectiveWeight(w)
     }
     for (const a of this.extra.values()) {
-      const on = this.gesture?.a === a && g > 1e-3
-      a.enabled = on
-      a.setEffectiveWeight(on ? g : 0)
+      const w = (this.gesture?.parts.find((p) => p.a === a)?.w ?? 0) * g
+      a.enabled = w > 1e-3
+      a.setEffectiveWeight(w)
     }
   }
 
@@ -350,18 +351,7 @@ export class CharacterModel {
       if (this.extra.has(src.name)) continue
       const c = src.clone()
       c.tracks = c.tracks.filter((t) => t.name.endsWith('.quaternion') || t.name === hipsTrack)
-      if (c.name === 'hook_carry') {
-        // the right arm's pose a third into the cycle (a hand held out low, not swinging)
-        const at = c.duration / 3
-        this.carryPose = []
-        for (const t of c.tracks) {
-          const bone = [...this.mx.values()].find((b) => t.name === b.name + '.quaternion')
-          if (!bone || !/Right(Arm|ForeArm|Hand)/.test(bone.name)) continue
-          const v = (t as unknown as { createInterpolant(): THREE.Interpolant }).createInterpolant().evaluate(at) as Float32Array
-          this.carryPose.push([bone, new THREE.Quaternion(v[0], v[1], v[2], v[3])])
-        }
-        continue
-      }
+      if (c.name === 'hook_carry') continue // (a two-handed box walk: the hook is held by the side instead — HOLD)
       const a = this.mixer.clipAction(c)
       a.setLoop(THREE.LoopOnce, 1)
       a.clampWhenFinished = true
@@ -373,17 +363,20 @@ export class CharacterModel {
     }
   }
 
-  /** Play a tow gesture once (`speed` × the clip's pace, cut off at `end` of its length). False = not loaded. */
-  playGesture(name: string, speed = 1, end = 1): boolean {
-    const a = this.extra.get(name)
-    if (!a) return false
-    this.gesture = { a, t: 0, speed, end: a.getClip().duration * end }
-    return true
-  }
-
-  /** Seconds into the gesture playing now (-1: none). */
-  get gestureTime(): number {
-    return this.gesture ? this.gesture.t : -1
+  /**
+   * Play a tow gesture once: the clips `parts` blended by their weights `w`, each time-warped so its grab moment
+   * (`grab`, clip s) lands `at` s in, and cut off at its `end` (clip s) — a crouch and a standing reach mixed for a
+   * hook in between. With `reach`, face `target` (world; followed live — the caller keeps it on the hook) and put the
+   * right hand on it at `at`. Returns its length (s); 0 = not loaded.
+   */
+  playGesture(parts: { name: string; grab: number; end: number; w: number }[], at: number, reach?: THREE.Vector3): number {
+    const ps = parts.filter((p) => p.w > 1e-3 && this.extra.has(p.name))
+    if (!ps.length) return 0
+    const sum = ps.reduce((s, p) => s + p.w, 0)
+    const list = ps.map((p) => ({ a: this.extra.get(p.name)!, scale: p.grab / at, end: p.end, w: p.w / sum }))
+    const len = list.reduce((s, p) => s + p.w * (p.end / p.scale), 0)
+    this.gesture = { parts: list, real: 0, len, reach: reach ? { target: reach, at } : null }
+    return len
   }
   private loopTime(c: Clip, phase: number): number {
     const L = LOCO[c as Loco]
@@ -397,6 +390,9 @@ export class CharacterModel {
    */
   animate(dt: number, pos: THREE.Vector3, targetYaw: number, speed: number, grounded: boolean, aiming: boolean, aimPitch: number, vy = 0, knock = 0, tumble: { angle: number; yaw: number } | null = null): void {
     this.unscale()
+    // a reaching gesture faces what it reaches for
+    const rt = this.gesture?.reach?.target
+    if (rt && Math.hypot(rt.x - pos.x, rt.z - pos.z) > 0.15) targetYaw = Math.atan2(-(rt.x - pos.x), -(rt.z - pos.z))
     let d = targetYaw - this.yaw
     d = Math.atan2(Math.sin(d), Math.cos(d))
     this.yaw += d * (1 - Math.exp(-12 * dt))
@@ -547,10 +543,10 @@ export class CharacterModel {
     // a tow gesture over it all: in over 0.15 s, out over the last 0.25 s (and at once in the air / knocked down)
     const gs = this.gesture
     if (gs) {
-      gs.t += dt * gs.speed
-      gs.a.time = Math.min(gs.t, gs.end)
-      const left = gs.end - gs.t
-      const want = airborne || knock > 0.001 ? 0 : Math.min(1, gs.t / 0.15, Math.max(0, left) / 0.25)
+      gs.real += dt
+      for (const p of gs.parts) p.a.time = Math.min(gs.real * p.scale, p.end)
+      const left = gs.len - gs.real
+      const want = airborne || knock > 0.001 ? 0 : Math.min(1, gs.real / 0.15, Math.max(0, left) / 0.25)
       this.gestureW = want
       if (left <= 0) this.gesture = null
     } else this.gestureW = 0
@@ -571,10 +567,24 @@ export class CharacterModel {
     if (this.land > 0 && this.landT < 0) hp.y -= 0.12 * Math.sin((this.land / 0.22) * Math.PI) // short-hop squash
     this.setHips(hp)
     if (groundIK && this.ground) this.feetOnGround(pos)
-    // Carrying a hook: the right arm held out in the carry clip's pose (not during a gesture: it has its own arm).
-    this.carryK += ((this.carrying && this.carryPose ? 1 : 0) - this.carryK) * (1 - Math.exp(-8 * dt))
-    const ck = this.carryK * (1 - this.gestureW)
-    if (ck > 0.01 && this.carryPose) for (const [b, q] of this.carryPose) (b.quaternion.slerp(q, ck), b.updateMatrixWorld(true))
+    // Carrying a hook: the right hand by the side, a little behind the hip (not during a gesture: it has its own arm).
+    this.carryK += ((this.carrying ? 1 : 0) - this.carryK) * (1 - Math.exp(-8 * dt))
+    const ck = this.carryK * (1 - this.gestureW) * (knock > 0.001 ? 0 : 1)
+    if (ck > 0.01) {
+      this.root.worldToLocal(this.mx.get('RightArm')!.getWorldPosition(_hv)).add(HOLD)
+      this.handTo(this.root.localToWorld(_hv), ck)
+    }
+    // Reaching gesture: the palm onto the target around the grab moment (in over 0.45 s, held, out as it pulls back).
+    if (gs?.reach && this.gestureW > 0.01) {
+      const at = gs.reach.at, t = gs.real
+      const w = smooth(at - 0.45, at, t) * (1 - smooth(at + 0.15, at + 0.6, t)) * this.gestureW
+      if (w > 0.01) {
+        const m = this.mx.get('RightHandMiddle1'), h = this.mx.get('RightHand')!
+        _hv2.copy(gs.reach.target)
+        if (m) _hv2.sub(m.getWorldPosition(_hv)).add(h.getWorldPosition(_hv))
+        this.handTo(_hv2, w)
+      }
+    }
     // Flashlight: the right arm points along the view.
     this.aimK += ((aiming ? 1 : 0) - this.aimK) * (1 - Math.exp(-10 * dt))
     if (this.aimK > 0.01 && knock <= 0.001) this.aimArm(aimPitch)
@@ -652,6 +662,12 @@ export class CharacterModel {
     end.parent!.getWorldQuaternion(_q).invert()
     end.quaternion.copy(_q.multiply(_qe))
     end.updateMatrixWorld(true)
+  }
+
+  /** The right wrist toward `target` (world) by `k`: arm IK, the elbow in its clip bend plane. */
+  private handTo(target: THREE.Vector3, k: number): void {
+    this.mx.get('RightHand')!.getWorldPosition(_hv3)
+    this.legIK('RightArm', 'RightForeArm', 'RightHand', _hv3.lerp(target, k))
   }
 
   /** Rotate a bone (world) by the rotation taking `from` onto `to`, scaled by k. */
@@ -960,6 +976,9 @@ const _bb = new THREE.Vector3(), _e2 = new THREE.Vector3(), _dir = new THREE.Vec
 const _a2 = new THREE.Vector3(), _b2 = new THREE.Vector3(), _c2 = new THREE.Vector3(), _ta = new THREE.Vector3(), _tb = new THREE.Vector3()
 const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _q3 = new THREE.Quaternion(), _qa = new THREE.Quaternion()
 const _qe = new THREE.Quaternion(), _qI = new THREE.Quaternion()
+const _hv = new THREE.Vector3(), _hv2 = new THREE.Vector3(), _hv3 = new THREE.Vector3()
+/** Carrying a hook: the wrist from the right shoulder (root space: +X right, +Z back) — arm down, a little back. */
+const HOLD = new THREE.Vector3(0.07, -0.43, 0.1)
 const _up = new THREE.Vector3(0, 1, 0)
 const _tgt = new Map<THREE.Bone, THREE.Quaternion>()
 const _wq = new Map<THREE.Bone, THREE.Quaternion>()

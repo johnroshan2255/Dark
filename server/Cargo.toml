@@ -26,6 +26,15 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# `cargo run -p dark-server -- --dev` simulates every room's cars and bots (Rapier): unoptimised, a room's physics
+# step took ~20 ms of the 33 ms tick and ticks overran — bots and remote players stalled and jumped. Dependencies
+# fully optimised, our crates lightly (still debuggable, overflow checks on).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

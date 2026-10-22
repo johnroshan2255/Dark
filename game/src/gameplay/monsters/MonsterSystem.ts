@@ -353,7 +353,7 @@ export class MonsterSystem {
             _w.normalize()
             this.player.applyImpulse(_w.x * 9, 5, _w.z * 9, 1.4)
           }
-          if (d < 40) this.audio.thunder(d * 4) // heavy thud
+          if (d < 40) this.audio.thud(d) // heavy thud
         }
       } else if (!anyMoving) {
         this.footTarget(s, i, _v)

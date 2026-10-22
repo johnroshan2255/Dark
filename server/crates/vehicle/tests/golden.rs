@@ -221,6 +221,7 @@ fn drivetrain_replays_the_game_step_for_step() {
                 handbrake: i.din.handbrake,
                 boost: i.din.boost,
                 parked: i.din.parked,
+                neutral: false,
                 brake: i.din.brake,
             };
             let ch = ChassisIn {
@@ -323,6 +324,7 @@ fn run_car(g: &Golden) -> (f64, f64, f64) {
         let c = &s.ctl;
         t.controls = Controls {
             parked: c.parked,
+            neutral: false,
             throttle: c.throttle,
             steer: c.steer,
             handbrake: c.handbrake,

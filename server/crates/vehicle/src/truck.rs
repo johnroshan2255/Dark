@@ -35,6 +35,8 @@ fn ground_groups() -> InteractionGroups {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Controls {
     pub parked: bool,
+    /// Neutral, brakes off (`DriverInput::neutral`).
+    pub neutral: bool,
     pub throttle: f64,
     pub steer: f64,
     pub handbrake: bool,
@@ -143,6 +145,10 @@ pub struct Truck {
     pub wheel_slip: [f64; 4],
     pub ride: f64,
     pub ride_target: f64,
+    /// TYRE ENVELOPE LOD: the 18 ground rays per wheel (`tyre_envelope`, about 70 % of a car's step) are cast every
+    /// this many steps, the result held in between. 1 = every step (default: a driven car must match the game's own
+    /// prediction step for step); the server sets more for cars nobody predicts — bots, by distance to people.
+    pub envelope_every: u8,
     dims: TruckDims,
     reference: TruckTune,
     colliders: Vec<ColliderHandle>,
@@ -151,6 +157,9 @@ pub struct Truck {
     rest_w: [f64; 4],
     sag_w: [f64; 4],
     bump_w: [f64; 4],
+    /// The tyre envelope as last cast (held between casts: `envelope_every`) and the steps until the next cast.
+    env_h: [f64; 4],
+    env_k: u8,
     travel_w: [f64; 4],
     k_bump: [f64; 4],
     bump_at: [f64; 4],
@@ -295,6 +304,9 @@ impl Truck {
             rest_w: [rest; 4],
             sag_w: [sag; 4],
             bump_w: [0.0; 4],
+            env_h: [0.0; 4],
+            env_k: 0,
+            envelope_every: 1,
             travel_w: [0.0; 4],
             k_bump: [0.0; 4],
             bump_at: [0.0; 4],
@@ -532,6 +544,8 @@ impl Truck {
     /// Before the raycast update: the wheels' steering, ground roughness through the tyre envelope.
     fn drive_real(&mut self, world: &World, dt: f64) {
         let ax = self.axes(world);
+        let cast = self.env_k == 0;
+        self.env_k = (self.env_k + 1) % self.envelope_every.max(1);
         for i in 0..4 {
             let dst = self.drivetrain.steer[i];
             self.vc.wheels_mut()[i].steering = (-dst) as f32;
@@ -542,7 +556,10 @@ impl Truck {
                 ax.f[1] * cd + ax.r[1] * sd,
                 ax.f[2] * cd + ax.r[2] * sd,
             ];
-            let h = self.tyre_envelope(world, i, p, hd, ax.u).min(self.bump_w[i] + 3.0 * dt);
+            if cast {
+                self.env_h[i] = self.tyre_envelope(world, i, p, hd, ax.u);
+            }
+            let h = self.env_h[i].min(self.bump_w[i] + 3.0 * dt);
             self.bump_w[i] = h;
             self.vc.wheels_mut()[i].suspension_rest_length = (self.rest_w[i] + self.ride + h) as f32;
         }
@@ -813,6 +830,7 @@ impl Truck {
             handbrake: c.handbrake,
             boost: c.boost,
             parked: c.parked,
+            neutral: c.neutral,
             brake: c.foot_brake,
         };
         let assisting = d.aids == AidLevel::Full && contacts >= 3 && u[1] > 0.6 && !c.handbrake;

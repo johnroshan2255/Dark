@@ -1,5 +1,6 @@
 import { loadFixedMap, setActiveMap, type FixedMap } from '../world/map/FixedMap'
 import { MapProps } from '../world/map/MapProps'
+import { PillarField } from '../world/map/PillarField'
 import * as THREE from 'three'
 import { CaveSystem } from '../gameplay/caves/CaveSystem'
 import { MOUTH_X } from '../world/Formations/caves'
@@ -236,6 +237,8 @@ export class Game {
 
   /** A fixed map's set pieces (camps, stunt park, cabins…; null in the endless world). */
   private mapProps: MapProps | null = null
+  /** A pillar map's sandstone columns (world/map/PillarField.ts). */
+  readonly pillars: PillarField | null = null
 
   private constructor(opts: GameOptions, physics: PhysicsWorld, private readonly models: GameModels, readonly map: FixedMap | null = null) {
     this.physics = physics
@@ -293,6 +296,10 @@ export class Game {
     if (map) {
       this.mapProps = new MapProps(map, physics, this.materials)
       this.world.root.add(this.mapProps.root)
+      if (map.pillars.length) {
+        ;(this as { pillars: PillarField | null }).pillars = new PillarField(map, physics)
+        this.world.root.add(this.pillars!.root)
+      }
     }
     this.biomeMap = new BiomeMap(this.world.fields.biomes)
 
@@ -371,7 +378,7 @@ export class Game {
     this.monsters = new MonsterSystem(this.world.fields, this.player, this.health, this.audio)
     this.monsters.solid = (x, z, nearY) => this.physics.groundBelow(x, z, nearY + 0.6, this.world.fields.surface(x, z))
     this.lightning = new Lightning(this.world.fields, this.player, this.health, this.audio)
-    this.monsters.enabled = this.lightning.enabled = this.settings.monsters
+    this.applyNightGhosts()
     this.audio.setEnabled(this.settings.sound)
     this.audio.setMusic(this.settings.music)
     this.health.onDamage = (e) => {
@@ -495,10 +502,19 @@ export class Game {
     this.tod.toggleDayNight()
   }
 
+  /** Night ghosts come out when the setting is on — and always in the nightmare; storms strike either way, but only
+   *  hurt (a strike by the player) when the ghosts are out. */
+  private applyNightGhosts(): void {
+    const on = this.settings.nightGhosts || this.tod.nightmareTarget > 0.5
+    this.monsters.enabled = on
+    this.lightning.harmful = on
+  }
+
   toggleNightmare(): void {
     const on = this.tod.nightmareTarget < 0.5
     this.tod.setNightmare(on)
     this.store.set({ nightmare: on })
+    this.applyNightGhosts()
   }
 
   toggleCamera(): void {
@@ -635,7 +651,7 @@ export class Game {
     this.car.autoAccel = this.settings.autoAccelerate
     this.audio.setEnabled(this.settings.sound)
     this.audio.setMusic(this.settings.music)
-    this.monsters.enabled = this.lightning.enabled = this.settings.monsters
+    this.applyNightGhosts()
     this.tod.dayLengthMinutes = this.settings.dayLength
     this.player.sensitivity = 0.0022 * this.settings.lookSensitivity
   }
@@ -1032,6 +1048,7 @@ export class Game {
           this.ahead.copy(v).multiplyScalar(1.5).add(p.renderPosition)
           this.world.update(p.renderPosition, this.cullingDebug.cullCamera(this.camera), this.ahead)
           this.mapProps?.update(p.renderPosition)
+          this.pillars?.update(p.renderPosition, this.quality.viewDistance * 1.05)
           {
             const q = this.quality
             this.landmarks.update(dt, p.renderPosition.x, p.renderPosition.z, q.landmarkRange, q.sunShadowExtent * 1.5, q.shadows && q.objectShadows)
@@ -1734,6 +1751,7 @@ export class Game {
 
   dispose(): void {
     this.mapProps?.dispose()
+    this.pillars?.dispose()
     window.removeEventListener('touchstart', this.onFirstTouch)
     this.world.dispose()
     this.treeShadows.dispose()

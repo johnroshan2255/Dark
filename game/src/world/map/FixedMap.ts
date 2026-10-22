@@ -49,6 +49,15 @@ export const MAPS: MapInfo[] = [
     preview: '/maps/highlands/preview.jpg',
     minimap: '/maps/highlands/minimap.jpg',
   },
+  {
+    id: 'zhangjiajie',
+    name: 'Zhangjiajie & Wulingyuan',
+    blurb: 'A forest of sheer sandstone pillars crowned with pines, flat-topped mesas, a river winding through the gorges, a scenic loop with bridges and a switchback road up to a mesa-top lookout.',
+    areaKm2: 5.76,
+    regions: ['Pillar forest', 'Mesas', 'River gorges', 'Switchbacks'],
+    preview: '/maps/zhangjiajie/preview.jpg',
+    minimap: '/maps/zhangjiajie/minimap.jpg',
+  },
 ]
 
 interface MapJson {
@@ -65,7 +74,15 @@ interface MapJson {
   /** 'conifer': the forest is spruce / fir / pine only (else the region's mix). */
   trees?: 'conifer'
   roads: { name: string; class: string; halfWidth: number; closed: boolean; x: number[]; z: number[]; h: number[]; bridge: number[] }[]
+  /** Sandstone PILLARS (Zhangjiajie): [x, base y (world), z, radius, height, rotation, variant] per pillar, flat. */
+  pillars?: number[]
 }
+
+/** Values per pillar in map.json `pillars` / FixedMap.pillars, and the lookup grid's cell (m: > the widest pillar). */
+export const PILLAR_STRIDE = 7
+const PILLAR_CELL = 40
+/** A pillar's outer reach as a share of its radius (its flutes stand out to ~1.28 r). */
+export const PILLAR_REACH = 1.3
 
 /** Below this the sea floor lies outside the map (m, before nothing: final world height). */
 const SEA_FLOOR = -30
@@ -148,6 +165,12 @@ export class FixedMap {
   readonly bridges: { xs: number[]; zs: number[]; ys: number[]; hw: number }[] = []
   /** Desert pools (see POOL_CELL) and their lookup grid (cell index → pool index, −1 none). */
   readonly pools: Pool[] = []
+  /** SANDSTONE PILLARS (map.json `pillars`): PILLAR_STRIDE values each — x, base y (world), z, radius, height, rotation,
+   *  variant. Drawn and collided by world/map/PillarField.ts; the ground grid holds only their talus mounds, so the
+   *  terrain's coarse LODs and the horizon lose nothing (a 20 m column in an 8 m grid is a cone). Nothing grows
+   *  inside one (`inPillar`, scatter). */
+  readonly pillars: Float32Array
+  private readonly pillarGrid = new Map<number, number[]>()
   /** The map's PALMS kept (2026-10-21, "beach trees to 20 %"): a fifth of its palm placements (hashed), as 4 m
    *  tree-cell keys — the scatter grows Dark's palm in each (scatter.treeAccept); MapProps no longer draws the map's
    *  clay palms. */
@@ -185,6 +208,13 @@ export class FixedMap {
     for (let i = 0; i < raw.length; i++) this.h[i] = raw[i] * k + off
     for (const [k, v] of Object.entries(meta.palette ?? {})) if (v) this.palette[k] = srgbHex(v)
     this.conifers = meta.trees === 'conifer'
+    this.pillars = new Float32Array(meta.pillars ?? [])
+    for (let i = 0; i < this.pillars.length; i += PILLAR_STRIDE) {
+      const k = this.pillarKey(Math.floor((this.pillars[i] + this.half) / PILLAR_CELL), Math.floor((this.pillars[i + 2] + this.half) / PILLAR_CELL))
+      let list = this.pillarGrid.get(k)
+      if (!list) this.pillarGrid.set(k, (list = []))
+      list.push(i)
+    }
     this.bio = new Uint8Array(biome)
     this.bn = meta.biomeGrid.n
     this.bstep = meta.biomeGrid.step
@@ -355,6 +385,28 @@ export class FixedMap {
   }
 
   /** In a desert pool's water (x, z)? */
+  private pillarKey(ci: number, cj: number): number {
+    return (ci + 1024) * 4096 + (cj + 1024)
+  }
+
+  /** Is (x, z) inside a sandstone pillar (its fluted outline + `pad` m)? */
+  inPillar(x: number, z: number, pad = 0): boolean {
+    if (!this.pillars.length) return false
+    const ci = Math.floor((x + this.half) / PILLAR_CELL), cj = Math.floor((z + this.half) / PILLAR_CELL)
+    for (let dj = -1; dj <= 1; dj++) {
+      for (let di = -1; di <= 1; di++) {
+        const list = this.pillarGrid.get(this.pillarKey(ci + di, cj + dj))
+        if (!list) continue
+        for (const i of list) {
+          const p = this.pillars, r = p[i + 3] * PILLAR_REACH + pad
+          const dx = x - p[i], dz = z - p[i + 2]
+          if (dx * dx + dz * dz < r * r) return true
+        }
+      }
+    }
+    return false
+  }
+
   inPool(x: number, z: number): boolean {
     const ci = Math.floor((x + this.half) / POOL_CELL), cj = Math.floor((z + this.half) / POOL_CELL)
     if (ci < 0 || cj < 0 || ci >= this.pn || cj >= this.pn) return false

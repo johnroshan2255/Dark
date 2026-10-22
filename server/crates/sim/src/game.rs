@@ -114,6 +114,9 @@ pub struct TickProfile {
 
 /// Most physics steps one tick runs (catching up after a late tick); the client's own cap (PhysicsWorld) is the same.
 const MAX_PHYSICS_STEPS: u32 = 4;
+/// A car nobody drives stays in neutral this long (s) after a line last pulled it (a tow with a little slack in it
+/// keeps rolling; parked again once it has stopped being towed).
+const TOWED_FOR: f32 = 1.5;
 
 /// A monotonic clock in nanoseconds (the server's; tests leave it unset).
 pub type Clock = Box<dyn Fn() -> u64 + Send>;
@@ -181,7 +184,7 @@ pub struct Match {
     /// Rooms: the server-run bots.
     bots: Option<Bots>,
     /// Map rooms: the vehicle physics world (docs/VEHICLE_PHYSICS.md), and the time not yet stepped (s).
-    physics: Option<RoomPhysics>,
+    pub(crate) physics: Option<RoomPhysics>,
     phys_acc: f32,
     /// Tow ropes (sim/tow.rs; physics rooms): the room's lines, the next id, a change to send, when they were last
     /// sent, the drivers holding their winch.
@@ -190,6 +193,9 @@ pub struct Match {
     ropes_dirty: bool,
     ropes_sent_ms: u64,
     winching: Vec<u16>,
+    /// Cars a taut line pulled lately and how much longer they count as TOWED (s): nobody at the wheel, they roll in
+    /// neutral with the brakes off instead of standing parked — then park again once the pull stops.
+    towed: Vec<(u16, f32)>,
     clock: Option<Clock>,
     profile: TickProfile,
     bot_events: Vec<BotEvent>,
@@ -297,6 +303,7 @@ impl Match {
             ropes_dirty: false,
             ropes_sent_ms: 0,
             winching: Vec::new(),
+            towed: Vec::new(),
             clock: None,
             profile: TickProfile::default(),
             bot_events: Vec::new(),
@@ -733,11 +740,11 @@ impl Match {
     }
 
     /// The car of `id` (player or bot): body, wire model, someone at the wheel.
-    fn car_of(&self, id: u16) -> Option<(dark_vehicle::rapier3d::prelude::RigidBodyHandle, u8, bool)> {
+    pub(crate) fn car_of(&self, id: u16) -> Option<(dark_vehicle::rapier3d::prelude::RigidBodyHandle, u8, bool)> {
         if let Some(hc) = self.players.get(&id).and_then(|p| p.car.as_ref()) {
             return Some((hc.car.body, hc.model, hc.driving));
         }
-        self.bots.as_ref()?.car_body(id).map(|(b, m)| (b, m, true))
+        self.bots.as_ref()?.car_body(id)
     }
 
     /// A car end someone may hook: their own car, or one with someone at the wheel (a parked car of someone else is
@@ -1098,12 +1105,20 @@ impl Match {
             self.phys_acc = (self.phys_acc + dt).min(h * MAX_PHYSICS_STEPS as f32);
             while self.phys_acc >= h {
                 let a = clock(&self.clock);
+                let towed = &self.towed;
                 if let Some(bots) = self.bots.as_mut() {
+                    bots.tow_cars(&towed.iter().map(|t| t.0).collect::<Vec<_>>());
                     bots.drive_cars(ph, h);
                 }
-                for p in self.players.values_mut() {
+                for (id, p) in self.players.iter_mut() {
                     let Some(hc) = p.car.as_mut() else { continue };
                     hc.car.controls = hc.next_controls();
+                    if !hc.driving && towed.iter().any(|t| t.0 == *id) {
+                        hc.car.controls = dark_vehicle::Controls {
+                            neutral: true,
+                            ..Default::default()
+                        };
+                    }
                     if hc.car.controls.parked && ph.world.pw.bodies[hc.car.body].is_sleeping() {
                         continue;
                     }
@@ -1112,9 +1127,20 @@ impl Match {
                     let ground = ph.ground(t[0] as f32, t[2] as f32) as f64;
                     hc.car.keep_above(&mut ph.world, ground);
                 }
+                self.towed.retain_mut(|t| {
+                    t.1 -= h;
+                    t.1 > 0.0
+                });
                 if !self.ropes.is_empty() {
                     let end_of = |c: u16, e: u8| rope_ends.iter().find(|x| x.0 == c && x.1 == e).map(|x| x.2);
-                    crate::tow::step(&mut self.ropes, &mut ph.world, &end_of, &self.winching, h);
+                    let mut pulled = Vec::new();
+                    crate::tow::step(&mut self.ropes, &mut ph.world, &end_of, &self.winching, h, &mut pulled);
+                    for c in pulled {
+                        match self.towed.iter_mut().find(|t| t.0 == c) {
+                            Some(t) => t.1 = TOWED_FOR,
+                            None => self.towed.push((c, TOWED_FOR)),
+                        }
+                    }
                 }
                 let b = clock(&self.clock);
                 ph.world.step();

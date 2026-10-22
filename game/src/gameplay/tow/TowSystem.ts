@@ -5,6 +5,10 @@ import { Groups } from '../../physics/PhysicsWorld'
 import type { TowHook } from '../../assets/loadModels'
 import { RopeKind, TowEnd, TowOp, cmToM, mToCm, type Rope } from '../../net/protocol'
 import { HOOK_REACH, ROPE_MAX, ropeTension, winchIn, type End } from './rope'
+import { TRUNK_RADIUS } from '../../world/types'
+import { trunkGirth } from '../../world/Forest/treeFactory'
+import { PILLAR_REACH } from '../../world/map/FixedMap'
+import type { CharacterModel } from '../player/CharacterModel'
 
 /**
  * TOW ROPES — every car carries a winch hook front and rear (scripts/blender/vehicle_hooks.py). On foot, next to ANY
@@ -19,26 +23,45 @@ import { HOOK_REACH, ROPE_MAX, ropeTension, winchIn, type End } from './rope'
  * (our car and fixed anchors: other cars there are not physical here).
  * PHYSICS (rope.ts, the server's tow.rs the same): a line that only pulls — a stiff damped spring past its length, at
  * most MAX_TENSION — applied at the fairlead on the body each fixed step.
- * DRAWN: each rope as ROPE_SEGS instanced cylinder segments sagging with its slack; the hook at its far end is the
- * car's own hook part moved there (Car / RemoteCar `placeHook`), so no new material or program.
- * Cost: per rope per fixed step a few flops; per frame ROPE_SEGS matrices; one draw for every rope.
- * ANIMATED (Mixamo clips, scripts/blender/hero/hero_clips_add.py): taking a hook / hanging it on a car's hook = a crouch
- * and a right-hand grab low (`hook_low`); tying it to a tree = a reach out at chest height (`hook_reach`); carrying it
- * = the right arm held out (`hook_carry`). Every character — ours and the remote ones — plays them when the room's
- * ropes change (so others see it too); the hook is drawn where it was until the hand gets there (GESTURE).
+ * AS A REAL WINCH: the drum free-spools as you walk the hook out, so the line paid out is what you've walked (it
+ * trails behind you on the ground, it isn't a 25 m loop in the air); a tree gets a trunk strap low on the trunk and the
+ * hook goes on the strap (the line is never wrapped round the tree); hung, the line keeps a little slack until the
+ * winch takes it up.
+ * DRAWN: each rope a verlet chain of LINE_PTS points (gravity, an inextensible line that only resists stretching,
+ * lying ON the terrain: every point kept above the ground under it) — instanced cylinder segments; the hook at its
+ * far end is the car's own hook part moved there (Car / RemoteCar `placeHook`); tree straps one instanced band each.
+ * Cost: per rope per fixed step a few flops; per frame LINE_PTS × LINE_ITERS constraint steps, LINE_PTS ground
+ * samples and matrices; one draw for every rope, one for every strap.
+ * ANIMATED (Mixamo clips, scripts/blender/hero/hero_clips_add.py): first a couple of steps up to the hook (in front of
+ * the bumper / facing the trunk), then a crouch and a right-hand grab (`hook_low`, blended toward the standing
+ * `hook_reach` the higher the hook is over the feet) with the hand put ON the hook by arm IK (CharacterModel
+ * `playGesture`); carrying, the hook hangs from the right hand by the side. Every character — ours and the remote ones — plays them when the room's ropes
+ * change (so others see it too); the hook is drawn where it was until the hand gets there.
  */
-/** Per rope change: the clip, its pace, where to cut it (fraction), and when the hand reaches the hook (s). */
-const GESTURE = {
-  take: { clip: 'hook_low', speed: 1.6, end: 0.72, at: 1.0 },
-  hangCar: { clip: 'hook_low', speed: 1.6, end: 0.72, at: 1.0 },
-  hangFixed: { clip: 'hook_reach', speed: 1.3, end: 0.62, at: 0.78 },
-} as const
-const ROPE_SEGS = 18
+/** The two reaching clips: the moment the hand is at the hook and where to cut it off (clip s), and how soon into the
+ *  gesture the grab comes (s). LOW crouches and grabs near the ground, HIGH reaches out standing at chest height. */
+const LOW = { name: 'hook_low', grab: 1.6, end: 2.78, at: 1.0 }
+const HIGH = { name: 'hook_reach', grab: 1.01, end: 2.15, at: 0.78 }
+/** The hook's height over the feet of whoever reaches (m) where the gesture goes from all LOW to all HIGH (the two
+ *  blended in between — a hook at the hip is a half crouch; on a slope a strap uphill can be at chest height). */
+const LOW_TO = 0.7
+const HIGH_FROM = 1.3
+/** Where the feet stand for it: this far (m, flat) back from a car's hook (clear of the bumper and a spare wheel) /
+ *  from the strap on a trunk. */
+const STAND = 0.65
+const STAND_TREE = 0.5
+const LINE_PTS = 22
+const LINE_ITERS = 24
 const MAX_DRAWN = 16
-const ROPE_RADIUS = 0.016
-/** How far round the player a tree / rock / post counts as "here" (m), and the hand height it is tied at. */
+const ROPE_RADIUS = 0.014
+/** How far round the player a tree / rock / post counts as "here" (m), and the height a hook is hung on a rock / post
+ *  (m over the ground). */
 const ANCHOR_REACH = 1.3
-const TIE_HEIGHT = 0.9
+const TIE_HEIGHT = 0.6
+/** Trees: the strap this far up the trunk model (× the tree's scale: ~0.45–0.8 m). */
+const STRAP_AT = 0.55
+/** Paid out past the hand when walking the hook out (m): the bit lying slack on the ground behind. */
+const PAY_SLACK = 0.6
 
 export interface RopeEnd {
   car: number
@@ -61,6 +84,7 @@ const endOf = (w: number): End => (w === TowEnd.FRONT ? 'F' : 'R')
 const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3(), _d = new THREE.Vector3()
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(1, 1, 1)
 const _up = new THREE.Vector3(0, 1, 0)
+const _gr = new Float32Array(LINE_PTS)
 
 export class TowSystem {
   readonly root = new THREE.Group()
@@ -71,14 +95,22 @@ export class TowSystem {
   private ropes: LocalRope[] = []
   private nextId = 1
   private readonly segs: THREE.InstancedMesh
+  private readonly straps: THREE.InstancedMesh
   /** The chosen target of the current action (set with `action`). */
-  private target: { site?: RopeEnd; rope?: LocalRope; point?: THREE.Vector3 } = {}
+  private target: { site?: RopeEnd; rope?: LocalRope; point?: THREE.Vector3; axis?: THREE.Vector3 } = {}
   private winching = false
   /** Rope id → its kind and holder as last seen, and (until `until`, ms) where the hook is still drawn: on the car
    *  (being taken) or in the holder's hand (being hung). */
-  private readonly seen = new Map<number, { kind: number; who: number; until: number; from: 'car' | 'hand' }>()
+  private readonly seen = new Map<number, { kind: number; who: number; until: number; from: 'car' | 'hand'; goal?: THREE.Vector3 }>()
   /** The car whose hook we carried at the last server update (-1 none). */
   private lastCarried = -1
+  /** H pressed: walking up to the hook; `run` does it once there (or `at`, ms, for an unhook mid-gesture). */
+  private pending: { run: () => void; at: number } | null = null
+  /** Rope id → its drawn line: points, previous points (verlet), paid-out length while carried. */
+  private readonly lines = new Map<number, { p: Float32Array; o: Float32Array; paid: number }>()
+  /** Rope id → its tree strap (a band round the trunk), null = tied to a rock / post (no strap drawn). */
+  private readonly strapOf = new Map<number, THREE.Matrix4 | null>()
+  private lastFrame = 0
 
   constructor(private readonly game: Game) {
     this.root.name = 'tow-ropes'
@@ -86,12 +118,20 @@ export class TowSystem {
     // (unlit-looking dark line: a Lambert on the shared lib material set would need a program of its own anyway)
     const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(0.05, 0.05, 0.055) })
     mat.name = 'lib/towRope'
-    this.segs = new THREE.InstancedMesh(geo, mat, ROPE_SEGS * MAX_DRAWN)
+    this.segs = new THREE.InstancedMesh(geo, mat, (LINE_PTS - 1) * MAX_DRAWN)
     this.segs.count = 0
     this.segs.frustumCulled = false
     this.segs.castShadow = true
     this.segs.name = 'tow-rope-segments'
     this.root.add(this.segs)
+    // tree-trunk protector strap: a 7.5 cm band (unit radius, scaled to the trunk), the same program as the line
+    const sMat = new THREE.MeshLambertMaterial({ color: new THREE.Color(0.55, 0.32, 0.04), side: THREE.DoubleSide })
+    sMat.name = 'lib/towStrap'
+    this.straps = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 0.075, 14, 1, true), sMat, MAX_DRAWN)
+    this.straps.count = 0
+    this.straps.frustumCulled = false
+    this.straps.name = 'tow-tree-straps'
+    this.root.add(this.straps)
   }
 
   // ------------------------------------------------------------------ who's who
@@ -129,6 +169,11 @@ export class TowSystem {
   private outOf(site: RopeEnd): LocalRope | undefined {
     return this.ropes.find((r) => r.car === site.car && endOf(r.end) === site.end)
   }
+  /** A car end a new rope can use: nothing on it, and the car is ours or someone is at its wheel (the server's rule: a
+   *  parked car's moves aren't sent to anyone, so nobody else hooks it). */
+  private free(site: RopeEnd): boolean {
+    return !this.outOf(site) && !this.hungOn(site) && (site.car === this.me || this.game.remotes.isDriving(site.car))
+  }
   /** A rope whose far end is hung on this car end. */
   private hungOn(site: RopeEnd): LocalRope | undefined {
     return this.ropes.find((r) => r.kind === RopeKind.CAR && r.who === site.car && endOf(r.end2) === site.end)
@@ -149,8 +194,8 @@ export class TowSystem {
     }
     return out.sort((a, b) => a.d - b.d)
   }
-  /** A tree / rock / post within reach of the player: the point on it to tie to, or null. */
-  private anchorNear(p: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 | null {
+  /** A tree / rock / post within reach of the player: the point on it to tie to, or null; a tree's axis into `axis`. */
+  private anchorNear(p: THREE.Vector3, out: THREE.Vector3, axis?: THREE.Vector3): THREE.Vector3 | null {
     const ph = this.game.physics, R = ph.R
     const at = _c.set(p.x, p.y + TIE_HEIGHT, p.z)
     let best: RAPIER.Collider | null = null, bd = Infinity
@@ -164,7 +209,59 @@ export class TowSystem {
     })
     if (!best) return null
     const pr = (best as RAPIER.Collider).projectPoint(at, true)
-    return pr ? out.set(pr.point.x, at.y, pr.point.z) : null
+    if (!pr) return null
+    out.set(pr.point.x, this.ground(pr.point.x, pr.point.z) + TIE_HEIGHT, pr.point.z)
+    // a tree: the shackle on the strap, on the bark facing us
+    const tr = this.trunkOf(best)
+    if (tr) {
+      _d.set(p.x - tr.x, 0, p.z - tr.z)
+      if (_d.lengthSq() < 1e-6) _d.set(1, 0, 0)
+      _d.normalize().multiplyScalar(tr.r + 0.03)
+      out.set(tr.x + _d.x, tr.y, tr.z + _d.z)
+      axis?.set(tr.x, tr.y, tr.z)
+    }
+    return out
+  }
+
+  /** A tree trunk: its axis, where the strap goes (STRAP_AT up the model: above the root flare, below the branches)
+   *  and the DRAWN radius there (the bark, not the thinner collider), or null (rock, post, landmark). Trunk colliders
+   *  are cylinders 3 × the tree's scale high (PhysicsWorld), their radius the species' TRUNK_RADIUS × scale — which
+   *  names the species whose model is measured. */
+  private trunkOf(c: RAPIER.Collider): { x: number; y: number; z: number; r: number } | null {
+    const R = this.game.physics.R
+    if (c.shapeType() !== R.ShapeType.Cylinder) return null
+    const sh = c.shape as RAPIER.Cylinder, ct = c.translation()
+    const s = sh.halfHeight / 3, r0 = sh.radius / s
+    let r = 0
+    TRUNK_RADIUS.forEach((tr, id) => {
+      if (Math.abs(tr - r0) < 0.004) r = Math.max(r, (trunkGirth(id, STRAP_AT, tr) ?? 0) * s)
+    })
+    // not a tree of the scatter (a sandstone pillar, a post): the strap at the tie height round its outline
+    if (!r) return { x: ct.x, y: ct.y - sh.halfHeight + TIE_HEIGHT, z: ct.z, r: sh.radius * (sh.radius > 2 ? PILLAR_REACH : 1.15) }
+    return { x: ct.x, y: ct.y - sh.halfHeight + STRAP_AT * s, z: ct.z, r }
+  }
+
+  /** The drawn ground at (x, z): the loaded chunk's surface (road ribbon included), else the terrain field. */
+  private ground(x: number, z: number): number {
+    const w = this.game.world
+    return w.groundAt(x, z) ?? w.fields.surface(x, z)
+  }
+
+  /** The trunk a hook tied at `p` is on: its strap's pose (a band round it at that height), null = not a trunk. */
+  private strapAt(p: THREE.Vector3): THREE.Matrix4 | null {
+    const ph = this.game.physics, R = ph.R
+    let m: THREE.Matrix4 | null = null
+    // (the tie point is on the bark: search out to the thickest flare)
+    ph.world.intersectionsWithShape(p, { x: 0, y: 0, z: 0, w: 1 }, new R.Ball(0.6), (c) => {
+      if (!(c.collisionGroups() >>> 16 & Groups.Static)) return true
+      const tr = this.trunkOf(c)
+      if (!tr) return true
+      // the band hugs the bark
+      m = new THREE.Matrix4().compose(_c.set(tr.x, tr.y, tr.z), _q.identity(), _s.set(tr.r + 0.01, 1, tr.r + 0.01))
+      _s.set(1, 1, 1)
+      return false
+    })
+    return m
   }
 
   // ------------------------------------------------------------------ the H key
@@ -182,16 +279,17 @@ export class TowSystem {
     const p = g.player.renderPosition
     const carried = this.ropes.find((r) => r.kind === RopeKind.HAND && r.who === me)
     if (carried) {
-      const site = this.sitesNear(p, HOOK_REACH).find((s) => s.site.car !== carried.car && !this.outOf(s.site) && !this.hungOn(s.site))?.site
+      const site = this.sitesNear(p, HOOK_REACH).find((s) => s.site.car !== carried.car && this.free(s.site))?.site
       if (site) {
         this.target = { rope: carried, site }
         this.action = 'hangCar'
         this.label = site.car === me ? 'Hook to your car' : 'Hook to this car'
         return
       }
-      const pt = this.anchorNear(p, new THREE.Vector3())
+      const axis = new THREE.Vector3(NaN, 0, 0)
+      const pt = this.anchorNear(p, new THREE.Vector3(), axis)
       if (pt) {
-        this.target = { rope: carried, point: pt }
+        this.target = { rope: carried, point: pt, axis: Number.isNaN(axis.x) ? undefined : axis }
         this.action = 'hangFixed'
         this.label = 'Tie the hook here'
         return
@@ -218,7 +316,7 @@ export class TowSystem {
       this.label = 'Unhook the rope'
       return
     }
-    const site = this.sitesNear(p, HOOK_REACH).find((s) => !this.outOf(s.site) && !this.hungOn(s.site))?.site
+    const site = this.sitesNear(p, HOOK_REACH).find((s) => this.free(s.site))?.site
     if (site) {
       this.target = { site }
       this.action = 'take'
@@ -226,10 +324,75 @@ export class TowSystem {
     }
   }
 
-  /** H pressed. */
+  /** H pressed: hands-on actions walk up to the hook first (`update` runs them once there). */
   press(): void {
-    const t = this.target, me = this.me
-    switch (this.action) {
+    const g = this.game, pl = g.player
+    if (this.pending || pl.busy.to || pl.busy.hold > 0) return
+    const action = this.action, t = { ...this.target }
+    if (action === 'take' || action === 'hangCar' || action === 'unhook') {
+      // car hooks: stand square in front of the bumper; a hung end: facing it from where we are
+      const site = action === 'unhook' ? null : t.site!
+      const goal = site ? this.point(site, 'eye', new THREE.Vector3()) : this.nearEnd(t.rope!, pl.curr, new THREE.Vector3())
+      if (!goal) return
+      if (site && this.frame(site.car, _m)) _d.set(0, 0, site.end === 'F' ? 1 : -1).transformDirection(_m) // (walking in toward the bumper)
+      else _d.subVectors(goal, pl.curr)
+      this.walkTo(goal, _d)
+      this.pending = {
+        at: 0,
+        run: () => {
+          if (action !== 'unhook') return this.run(action, t)
+          // unhooking: the hand goes to it, the line comes off as it gets there
+          const gs = this.reachFor(g.character, goal)
+          pl.busy.hold = gs.len
+          this.pending = { at: performance.now() + gs.at * 1000, run: () => this.run(action, t) }
+        },
+      }
+      return
+    }
+    if (action === 'hangFixed') {
+      // (a tree: out from the trunk's axis — some drawn trunks are wider than their collider, you can stand in the bark)
+      if (t.axis) _d.subVectors(t.axis, t.point!)
+      else _d.subVectors(t.point!, pl.curr)
+      this.walkTo(t.point!, _d, STAND_TREE)
+      this.pending = { at: 0, run: () => this.run(action, t) }
+      return
+    }
+    this.run(action, t)
+  }
+
+  /** Feet `stand` m back from `goal` along `dir` (flat), then hold still. */
+  private walkTo(goal: THREE.Vector3, dir: THREE.Vector3, stand = STAND): void {
+    const b = this.game.player.busy
+    dir.setY(0)
+    if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1)
+    dir.normalize()
+    b.to = new THREE.Vector3(goal.x - dir.x * stand, 0, goal.z - dir.z * stand)
+    b.t = 1.2
+    b.d = Infinity
+    b.walked = 0
+    b.hold = 0.15 // (until the gesture's own hold starts)
+  }
+
+  /** The hung end of `r` nearest to `p`: its far end or the fairlead it comes out of. */
+  private nearEnd(r: LocalRope, p: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 | null {
+    const far = this.farPoint(r, _b), fl = this.point({ car: r.car, end: endOf(r.end) }, 'fairlead', _d)
+    const q = !far ? fl : !fl ? far : far.distanceToSquared(p) < fl.distanceToSquared(p) ? far : fl
+    return q ? out.copy(q) : null
+  }
+
+  /** The gesture for a hand going to `target` (crouched ⇄ standing by its height over the feet), played on `ch`. */
+  private reachFor(ch: CharacterModel | null, target: THREE.Vector3): { len: number; at: number } {
+    if (!ch) return { len: 0, at: 0 }
+    const h = target.y - ch.root.position.y
+    const k = THREE.MathUtils.smoothstep(h, LOW_TO, HIGH_FROM)
+    const at = LOW.at + (HIGH.at - LOW.at) * k
+    const len = ch.playGesture([{ ...LOW, w: 1 - k }, { ...HIGH, w: k }], at, target)
+    return { len, at: len ? at : 0 }
+  }
+
+  private run(action: TowAction, t: { site?: RopeEnd; rope?: LocalRope; point?: THREE.Vector3 }): void {
+    const me = this.me
+    switch (action) {
       case 'take': {
         const site = t.site!
         if (this.serverRopes) {
@@ -259,7 +422,7 @@ export class TowSystem {
       case 'drop':
       case 'unhook': {
         const r = t.rope!
-        if (this.serverRopes) return this.send(this.action === 'drop' ? TowOp.DROP : TowOp.UNHOOK, { car: r.car, end: endOf(r.end) })
+        if (this.serverRopes) return this.send(action === 'drop' ? TowOp.DROP : TowOp.UNHOOK, { car: r.car, end: endOf(r.end) })
         this.ropes = this.ropes.filter((q) => q !== r)
         return
       }
@@ -391,14 +554,19 @@ export class TowSystem {
       // new in a hand: taken; hand → tree / hook: hung
       const kind = !s ? (r.kind === RopeKind.HAND ? 'take' : null) : s.kind === RopeKind.HAND ? (r.kind === RopeKind.CAR ? 'hangCar' : 'hangFixed') : null
       const actor = kind === 'take' ? r.who : s?.who ?? -1
-      if (kind) {
-        const gst = GESTURE[kind]
+      // (the hand goes to the hook on the bumper being taken / to where it is being hung)
+      const goal = kind === 'take' ? this.point({ car: r.car, end: endOf(r.end) }, 'eye', new THREE.Vector3()) : kind ? this.farPoint(r, new THREE.Vector3()) : null
+      if (kind && goal) {
         const ch = actor === me ? this.game.character : this.game.remotes.characterOf(actor)
-        const played = ch?.playGesture(gst.clip, gst.speed, gst.end) ?? false
-        this.seen.set(r.id, { kind: r.kind, who: r.kind === RopeKind.HAND ? r.who : actor, until: played ? now + gst.at * 1000 : 0, from: kind === 'take' ? 'car' : 'hand' })
+        const gs = this.reachFor(ch, goal)
+        if (actor === me) this.game.player.busy.hold = Math.max(this.game.player.busy.hold, gs.len)
+        this.seen.set(r.id, { kind: r.kind, who: r.kind === RopeKind.HAND ? r.who : actor, until: gs.len ? now + gs.at * 1000 : 0, from: kind === 'take' ? 'car' : 'hand', goal })
       } else this.seen.set(r.id, { kind: r.kind, who: r.who, until: 0, from: 'car' })
+      if (r.kind === RopeKind.FIXED && !this.strapOf.has(r.id)) this.strapOf.set(r.id, this.strapAt(this.farPoint(r, _c)!))
     }
     for (const id of [...this.seen.keys()]) if (!ids.has(id)) this.seen.delete(id)
+    for (const id of [...this.lines.keys()]) if (!ids.has(id)) this.lines.delete(id)
+    for (const [id] of this.strapOf) if (!this.ropes.some((r) => r.id === id && r.kind === RopeKind.FIXED)) this.strapOf.delete(id)
     // carrying: the right arm held out while a hook is in that hand
     this.game.character.carrying = holders.has(me)
     this.game.remotes.setCarrying(holders)
@@ -406,6 +574,17 @@ export class TowSystem {
 
   /** Per frame: the prompt, the lines, the hooks at their far ends. */
   update(): void {
+    const now = performance.now()
+    const dt = Math.min(1 / 30, Math.max(0, (now - this.lastFrame) / 1000))
+    this.lastFrame = now
+    // walked up to the hook: do it (or give up if something else took over — a knock, a car)
+    const pl = this.game.player
+    if (this.pending && (pl.stunned > 0 || pl.inVehicle || pl.dead)) this.pending = null
+    if (this.pending && !pl.busy.to && now >= this.pending.at) {
+      const p = this.pending
+      this.pending = null
+      p.run()
+    }
     this.choose()
     this.animate()
     const hookAction = this.action
@@ -421,6 +600,8 @@ export class TowSystem {
       // (mid-gesture: the hook still on the car / in the hand until the hand gets there)
       const sn = this.seen.get(r.id)
       const pending = sn && performance.now() < sn.until
+      // (the reaching hand follows the hook while the car rocks)
+      if (sn?.goal && performance.now() < sn.until + 700) (sn.from === 'car' ? this.point(site, 'eye', sn.goal) : this.farPoint(r, sn.goal))
       const b = !pending ? this.farPoint(r, _b) : sn.from === 'car' ? this.point(site, 'eye', _b) : this.handOf(sn.who, _b)
       if (!a || !b) continue
       // the hook at the far end, hanging (its eye up), turned along the line
@@ -429,27 +610,92 @@ export class TowSystem {
       _m.compose(b, _q.setFromAxisAngle(_up, yaw), _s)
       if (r.car === this.me) this.game.car.placeHook(site.end, _m)
       else this.game.remotes.placeHook(r.car, site.end, _m)
-      // the line: a parabola sagging with the slack (a taut line is straight)
-      const d = a.distanceTo(b)
-      const sag = Math.min(3, Math.sqrt(Math.max(0, r.lenM * r.lenM - d * d)) * 0.5)
-      if (n + ROPE_SEGS > ROPE_SEGS * MAX_DRAWN) continue
-      let prev = _c.copy(a)
-      for (let i = 1; i <= ROPE_SEGS; i++) {
-        const t = i / ROPE_SEGS
-        const q = _d.lerpVectors(a, b, t)
-        q.y -= 4 * sag * t * (1 - t)
-        const len = prev.distanceTo(q)
-        if (len > 1e-4) {
-          _q.setFromUnitVectors(_up, new THREE.Vector3().subVectors(q, prev).divideScalar(len))
-          this.segs.setMatrixAt(n++, _m.compose(prev, _q, _s.set(1, len, 1)))
-        }
-        prev = prev.copy(q)
+      // the hook hangs below its eye: the line ends at the eye
+      if (n + LINE_PTS - 1 > (LINE_PTS - 1) * MAX_DRAWN) continue
+      const P = this.line(r, a, b, dt)
+      for (let i = 0; i < LINE_PTS - 1; i++) {
+        _c.fromArray(P, i * 3)
+        _d.fromArray(P, i * 3 + 3).sub(_c)
+        const len = _d.length()
+        if (len < 1e-4) continue
+        _q.setFromUnitVectors(_up, _d.divideScalar(len))
+        this.segs.setMatrixAt(n++, _m.compose(_c, _q, _s.set(1, len, 1)))
       }
       _s.set(1, 1, 1)
     }
     this.segs.count = n
     this.segs.visible = n > 0
     if (n) this.segs.instanceMatrix.needsUpdate = true
+    let k = 0
+    for (const m of this.strapOf.values()) if (m && k < MAX_DRAWN) this.straps.setMatrixAt(k++, m)
+    this.straps.count = k
+    this.straps.visible = k > 0
+    if (k) this.straps.instanceMatrix.needsUpdate = true
+  }
+
+  /**
+   * The rope's drawn line from `a` (fairlead) to `b` (hook eye / hand), stepped `dt`: verlet points under gravity,
+   * each segment kept no longer than its share of the line (a rope only resists stretching — slack falls and lies
+   * down), every point kept on or above the ground under it, sliding little once it lies there.
+   */
+  private line(r: LocalRope, a: THREE.Vector3, b: THREE.Vector3, dt: number): Float32Array {
+    const N = LINE_PTS, d = a.distanceTo(b)
+    let L = this.lines.get(r.id)
+    if (!L || Math.hypot(L.p[0] - a.x, L.p[1] - a.y, L.p[2] - a.z) > 4) {
+      // new (or the car jumped): laid straight from the fairlead to the hook, then it settles
+      const p = new Float32Array(N * 3)
+      for (let i = 0; i < N; i++) _c.lerpVectors(a, b, i / (N - 1)).toArray(p, i * 3)
+      L = { p, o: p.slice(), paid: d + PAY_SLACK }
+      this.lines.set(r.id, L)
+    }
+    // the line out: carried, what has been walked out (the drum free-spools behind you); hung, the rope's length
+    if (r.kind === RopeKind.HAND) L.paid = Math.min(ROPE_MAX, Math.max(L.paid, d + PAY_SLACK))
+    else L.paid = r.lenM
+    const seg = Math.max(L.paid, d) / (N - 1)
+    const { p, o } = L
+    const gy = -9.81 * dt * dt
+    const gr = _gr
+    for (let i = 1; i < N - 1; i++) {
+      const j = i * 3
+      const vx = (p[j] - o[j]) * 0.96, vy = (p[j + 1] - o[j + 1]) * 0.96, vz = (p[j + 2] - o[j + 2]) * 0.96
+      o[j] = p[j]
+      o[j + 1] = p[j + 1]
+      o[j + 2] = p[j + 2]
+      p[j] += vx
+      p[j + 1] += vy + gy
+      p[j + 2] += vz
+      gr[i] = this.ground(p[j], p[j + 2]) + ROPE_RADIUS + 0.01
+    }
+    a.toArray(p, 0)
+    b.toArray(p, (N - 1) * 3)
+    for (let it = 0; it < LINE_ITERS; it++) {
+      for (let i = 0; i < N - 1; i++) {
+        const j = i * 3
+        const dx = p[j + 3] - p[j], dy = p[j + 4] - p[j + 1], dz = p[j + 5] - p[j + 2]
+        const l = Math.hypot(dx, dy, dz)
+        if (l <= seg || l < 1e-6) continue
+        const w0 = i === 0 ? 0 : 1, w1 = i + 1 === N - 1 ? 0 : 1
+        if (!w0 && !w1) continue
+        const k = (l - seg) / l / (w0 + w1)
+        p[j] += dx * k * w0
+        p[j + 1] += dy * k * w0
+        p[j + 2] += dz * k * w0
+        p[j + 3] -= dx * k * w1
+        p[j + 4] -= dy * k * w1
+        p[j + 5] -= dz * k * w1
+      }
+      for (let i = 1; i < N - 1; i++) if (p[i * 3 + 1] < gr[i]) p[i * 3 + 1] = gr[i]
+    }
+    // on the ground: friction (it lies where it fell instead of sliding about)
+    for (let i = 1; i < N - 1; i++) {
+      const j = i * 3
+      if (p[j + 1] <= gr[i] + 0.005) {
+        o[j] += (p[j] - o[j]) * 0.6
+        o[j + 2] += (p[j + 2] - o[j + 2]) * 0.6
+        o[j + 1] = p[j + 1]
+      }
+    }
+    return p
   }
 
   /** Ropes in the world (tests / probes). */
@@ -461,5 +707,8 @@ export class TowSystem {
     this.segs.geometry.dispose()
     ;(this.segs.material as THREE.Material).dispose()
     this.segs.dispose()
+    this.straps.geometry.dispose()
+    ;(this.straps.material as THREE.Material).dispose()
+    this.straps.dispose()
   }
 }

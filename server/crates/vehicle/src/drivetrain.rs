@@ -68,6 +68,8 @@ pub struct DriverInput {
     pub handbrake: bool,
     pub boost: bool,
     pub parked: bool,
+    /// Gearbox in neutral, brakes off: the car rolls free (towed on a rope with nobody at the wheel).
+    pub neutral: bool,
     /// 0..1 foot brake held together with the gas.
     pub brake: f64,
 }
@@ -963,6 +965,12 @@ impl Drivetrain {
             self.selector = Selector::P;
             self.gas = 0.0;
             self.brake = 1.0;
+            return;
+        }
+        if c.neutral {
+            self.selector = Selector::N;
+            self.gas = 0.0;
+            self.brake = 0.0;
             return;
         }
         if matches!(self.selector, Selector::P | Selector::N) {
