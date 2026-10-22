@@ -19,6 +19,7 @@ pub mod nav;
 pub mod noise;
 pub mod physics;
 pub mod rng;
+pub mod statics;
 pub mod validate;
 pub mod zone;
 

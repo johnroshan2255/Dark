@@ -285,7 +285,8 @@ export class Game {
       held: null,
       fpsCap: false,
     })
-    this.world = new WorldManager(opts.seed, this.materials, physics, map)
+    // (a fixed map grows the same nature for everyone — FixedMap.seed; the endless world is the session's)
+    this.world = new WorldManager(map?.seed ?? opts.seed, this.materials, physics, map)
     if (map) {
       this.mapProps = new MapProps(map, physics, this.materials)
       this.world.root.add(this.mapProps.root)
@@ -318,7 +319,7 @@ export class Game {
     this.cameraCtl.mode = this.settings.camera
     this.horizon = new HorizonTerrain(opts.seed)
     this.world.farForest.ground = this.horizon // far trees stand on the drawn horizon hills
-    this.landmarks = new LandmarkSystem(this.world.fields.landmarks, this.materials.landmark, physics, opts.seed, groundPalette())
+    this.landmarks = new LandmarkSystem(this.world.fields.landmarks, this.materials.landmark, physics, this.world.seed, groundPalette())
     this.caves = new CaveSystem(this.world.fields)
     this.bike = new Bike(this.materials.character, this.player, this.character, this.world.fields, physics, this.input)
     this.car = new Car(this.materials.character, models.truck, physics, this.world.fields, this.player, this.character, this.input, this.tuning(models.truck.id))

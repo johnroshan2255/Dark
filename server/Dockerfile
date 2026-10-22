@@ -14,8 +14,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /dark-server /usr/local/bin/dark-server
-# Maps this server can host (map.json + heights.bin per map; the rest of the map folder is client-only).
-COPY game/public/maps/island/map.json game/public/maps/island/heights.bin /maps/island/
+# Maps this server can host: map.json + heights.bin per map, biome.bin (where the water is frozen: ice to drive on)
+# and statics.bin (the game's trunks, boulders and set pieces for the cars' physics); the rest is client-only.
+COPY game/public/maps/island/map.json game/public/maps/island/heights.bin game/public/maps/island/biome.bin game/public/maps/island/statics.bin /maps/island/
 ENV DARK_BIND=0.0.0.0:7350 \
     DARK_MAPS_DIR=/maps \
     DARK_MAPS=island \

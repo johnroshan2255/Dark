@@ -255,13 +255,11 @@ ground (their height / pitch / roll are physics on the same grid).
 | 60 ± 20 ms, 5 % input packets dropped | 0 | 2.9 / 4.4 / 5.7 cm | 0 | 60 |
 | 60 ± 20 ms, 5 % dropped | 100 | 2.4–2.8 cm / 8–37 cm / 60–90 cm | 0–1 | 60 |
 
-**The open gap — world parity.** The client's world has collision geometry the server's doesn't: the road RIBBON
-(gutters, wheel ruts: a trimesh over the terrain), trees, rocks, rock formations, map set pieces, the desert pools.
-Driving in the lane near a road edge, the client car dips into a gutter and its body scrapes the ribbon while the
-server car rolls on the smooth heightfield: the two drift apart, the correction pulls back, and the scrapes add
-client-side crash damage (measured: every non-car hit in the 100-bot runs touched the ribbon). Next milestone:
-export the client generator's static colliders per map (`game/scripts/export-colliders.mjs` → `colliders.bin`;
-deterministic, the same world) into `MapPhysics`, then re-measure — and move crash damage to the server.
+**World parity (was the open gap; §9 closes most of it).** The client's world had collision geometry the server's
+didn't — trees, rocks, set pieces, the road ribbon, rock formations, the desert pools — and on fixed maps every player
+even grew their own trees (the scatter ran on each session's random seed). Off the road the server car drove through
+trunks the client car hit: the correction dragged the client car into them, and the scrapes wrecked it (measured: a
+car wrecked in 13–51 s of a 100-bot run, every non-car hit a static cylinder).
 
 **Still client-side (validated poses, v1):** walking, the BMX, boats, flights, arcade handling, endless-world rooms;
 garage tuning (the server runs the stock setup); weather wetness (server ground is dry).
@@ -277,3 +275,55 @@ a late tick runs 3 steps and the next 1, so the remote cars seemed to speed up a
 10.8 % of frames of the nearest bot cars jump > 5 cm). Car poses in snapshots are now carried along their velocity by
 the time not yet stepped: 0.2–0.3 % of frames, worst jump 26 cm–1.1 m (a collision), client 60 fps, server 0–1
 slow tick (36 ms) over two back-to-back 60 s runs with 100 bots each.
+
+## 9. Static world parity (2026-10-22)
+
+**One forest per map.** A fixed map grows its nature from `FixedMap.seed` (a hash of the map id) instead of the
+session's random seed — every player in an island room sees the same trees (they didn't), and the server can have them.
+
+**`statics.bin`.** `game/scripts/export-statics.mjs` runs the game's own builders — the chunk generator +
+`PhysicsWorld.addChunk` for every chunk of the map, `MapProps` for every set-piece tile, its plank bridges — into a
+scratch Rapier world in headless Chrome, and writes every collider (shape, world pose, groups, friction, breakable)
+to `game/public/maps/<id>/statics.bin`: on the island 35 546 trunks, 13 211 boulder hulls, 773 boxes and 10 meshes
+(set pieces + the 2 bridges), 5.5 MB. The server (`sim/src/statics.rs`) loads it with the map; `MapPhysics` merges
+trunks and boulders into one compound per 64 m cell and (groups, friction) — a room adds ~1.4 k colliders, the shapes
+shared by every room — keeps the meshes whole, leaves out breakable props (the client knocks them over), and drops its
+own bridge-deck boxes for the exported bridges. Parity test `statics_match_the_game`: 398 level rays the exporter
+cast in the game's world (≥ 3/4 of them hitting) give the same first hit on the server, worst 0.01 mm.
+
+Not exported (yet): the road ribbon (1.6 M triangles on the island) and the rock formations (1 M) — tens of MB; the
+ribbon is centimetre-scale (gutters, ruts) and the formations stand away from the roads. Rerun the exporter after
+changing the scatter, a map, a prop's collider or the seed (the parity test fails on a stale file).
+
+**World fixes found on the way.** (1) Boulders kept clear only of the endless world's main road, which a fixed map
+moves out of the world: 160 island boulders stood on a road bed or within 1.5 m of its edge. They now keep clear of
+the map's roads by the main road's rule (`scatter.ts`). (2) The deployed server image had no `biome.bin` (no ice on
+frozen lakes); the Dockerfile copies it and `statics.bin`.
+
+**Bots and solid statics.** Bots now meet what players meet: they look ahead toward their plan's target at bumper
+height ten times a second and go round a solid static (a trunk, a boulder, a stunt ramp, a cabin — on the drivable
+meshes only a wall-like face) by the first clear lateral offset (±3.5 / 6 / 9 m) that isn't over a drop; none clear,
+they slow and stop short. On bridges their lane stays inside the plank deck (narrower than the road, no railing), and
+a car is set down on the first solid surface under its lane point (`RoomPhysics::surface_below`: a bot respawned on a
+bridge used to land in the gorge under it).
+
+| 100 bots, 90 s, island (bench_physics_room) | per tick | worst tick | respawns |
+|---|---|---|---|
+| no statics (before) | 3.6 ms | 20.7 ms | 49 |
+| statics, bots blind to them | 5.9 ms | 15.3 ms | 89 |
+| statics + look-ahead, bridge deck lane, set-down on decks | 5.8 ms | 18.1 ms | 60–70 |
+
+~25 of the remaining respawns are at two stunt ramps standing across a road on a hillside (442, 604) and (552, −183):
+once a bot is up against one, every way round is the ramp or a drop; it waits and is respawned. (Reversing out is the
+next AI step.)
+
+**Measured with the real game** (release server, headless Chrome on the M4, 100 bots, island):
+
+| run | result |
+|---|---|
+| authoritative drive, 60 s, keeps its lane | 1 damage hit (a head-on with a bot at 47 km/h); no static hits; prediction error p50 1.7 / p95 9.4 cm (was 53 cm) |
+| ULTRA, phone viewport 844×390 @3×, CPU ×4, vsync, 2 × 60 s | median 60 fps, lowest second 58; car never wrecked (was wrecked in 13–51 s) |
+| ULTRA phone, 100 cars + 100 people in view, CPU ×4 / ×6, uncapped | 154 / 99 fps (CPU 3.8 / 6.3 ms a frame) |
+
+(The live runs' occasional 30–100 ms server ticks happen only with the throttled browser on the same laptop; the
+isolated bench above has none.)

@@ -251,6 +251,12 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     const scale = 0.4 + t * t * t * (2.2 + (fields.map ? 2 : 4.6) * oth) // mostly small stones, a rare 2.6 m boulder (bright desert: up to ~7 m)
     // The main road and its shoulders stay clear; big boulders further out (footprint ≈ 1.4 m × scale).
     if (fields.roadDistance(wx, wz) < WorldFields.ROAD_HALF_WIDTH + 1.5 + scale * 1.5) return 0
+    // …and a fixed map's own roads (its main road is out of the world: roadDistance never sees them — 160 island
+    // boulders sat on a road bed or within 1.5 m of its edge, where every car ran into them, 2026-10-22)
+    if (fields.map) {
+      const hit = fields.netRoad(wx, wz, 16)
+      if (hit && hit.dist - hit.halfWidth < 1.5 + scale * 1.5) return 0
+    }
     return scale
   })
 

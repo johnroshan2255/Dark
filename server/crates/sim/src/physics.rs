@@ -4,7 +4,7 @@
 use crate::map::MapData;
 use crate::noise::WATER;
 use dark_protocol::{Input, InputFrame, VehicleState, buttons, drive_opts, m_to_cm, mps_to_cms};
-use dark_vehicle::rapier3d::prelude::{Rotation, SharedShape, Vector};
+use dark_vehicle::rapier3d::prelude::{Pose, Rotation, SharedShape, Vector};
 use dark_vehicle::spec::AidLevel;
 use dark_vehicle::truck::Controls;
 use dark_vehicle::tyre::{SurfaceMix, surf};
@@ -18,11 +18,55 @@ pub struct MapPhysics {
     terrain: SharedShape,
     terrain_at: Vector,
     decks: Vec<(Vector, Vector, Rotation)>,
+    /// The game's static colliders (statics.bin): shape, pose, friction, packed groups.
+    solids: Vec<Solid>,
     /// Road segments per 32 m cell: (road, segment).
     cells: crate::fasthash::FastMap<(i32, i32), Vec<(u32, u32)>>,
 }
 
 const SURF_CELL: f32 = 32.0;
+/// A static collider for every room: shape, pose, friction, the game's packed groups.
+type Solid = (SharedShape, Vector, Rotation, f32, u32);
+
+/// Statics are merged per cell of this size (m).
+const SOLID_CELL: f32 = 64.0;
+
+/// The map's static colliders for a room: trunks and boulders merged into one compound per SOLID_CELL cell and kind
+/// (groups, friction) — a room holds ~1.4 k colliders, not ~50 k — meshes on their own; breakable props left out
+/// (the game breaks them off when hit: a car drives through).
+fn solids(map: &MapData) -> Vec<Solid> {
+    let Some(st) = &map.statics else { return Vec::new() };
+    let mut out = Vec::new();
+    // (cell x, cell z, groups, friction bits) → the pieces, relative to the cell's corner
+    type Cells = std::collections::BTreeMap<(i32, i32, u32, u32), Vec<(Pose, SharedShape)>>;
+    let mut cells = Cells::default();
+    for s in st.items.iter().filter(|s| !s.breakable) {
+        if s.mesh {
+            out.push((s.shape.clone(), s.at, s.rot, s.friction, s.groups));
+            continue;
+        }
+        let (cx, cz) = (
+            (s.at.x / SOLID_CELL).floor() as i32,
+            (s.at.z / SOLID_CELL).floor() as i32,
+        );
+        let origin = Vector::new(cx as f32 * SOLID_CELL, 0.0, cz as f32 * SOLID_CELL);
+        cells
+            .entry((cx, cz, s.groups, s.friction.to_bits()))
+            .or_default()
+            .push((Pose::from_parts(s.at - origin, s.rot), s.shape.clone()));
+    }
+    for ((cx, cz, g, f), parts) in cells {
+        let origin = Vector::new(cx as f32 * SOLID_CELL, 0.0, cz as f32 * SOLID_CELL);
+        out.push((
+            SharedShape::compound(parts),
+            origin,
+            Rotation::IDENTITY,
+            f32::from_bits(f),
+            g,
+        ));
+    }
+    out
+}
 
 impl MapPhysics {
     pub fn get(map: &MapData) -> Arc<MapPhysics> {
@@ -44,8 +88,9 @@ impl MapPhysics {
         let (terrain, terrain_at) = World::heightfield_shape(n, step, origin, &solid);
         // BRIDGES: a deck along each road's bridge samples, its top at the road surface, as wide as the road (the
         // client's plank deck is a trimesh there).
+        // (with the game's own colliders exported, its plank bridges come with them)
         let mut decks = Vec::new();
-        for r in &map.roads {
+        for r in map.roads.iter().filter(|_| map.statics.is_none()) {
             for i in 1..r.pts.len() {
                 if !(r.bridge[i] || r.bridge[i - 1]) {
                     continue;
@@ -80,18 +125,23 @@ impl MapPhysics {
             terrain,
             terrain_at,
             decks,
+            solids: solids(map),
             cells,
         }
     }
 
-    /// A physics world with this map's terrain and bridges (the terrain shape is shared, not copied).
-    /// Not (yet) here, unlike the client: trees, rocks, set pieces, the road ribbon's ruts, the desert pools.
+    /// A physics world with this map's terrain, bridges and (statics.bin) trunks, boulders and set pieces — the shapes
+    /// are shared, not copied. Not (yet) here, unlike the client: the road ribbon's ruts, the rock formations, the
+    /// desert pools.
     pub fn world(&self) -> World {
         let mut w = World::new();
         w.add_terrain(self.terrain.clone(), self.terrain_at);
         let deck = group(groups::STATIC | groups::STATIC_MESH, 0xffff & !groups::VEHICLE_MESH);
         for &(half, at, rot) in &self.decks {
             w.add_static_box(half, at, rot, deck);
+        }
+        for (shape, at, rot, friction, g) in &self.solids {
+            w.add_static(shape.clone(), *at, *rot, *friction, group(*g >> 16, *g & 0xffff));
         }
         w
     }
@@ -195,6 +245,22 @@ impl RoomPhysics {
     /// The solid ground (terrain or ice) under (x, z) — the streaming guard's floor.
     pub fn ground(&self, x: f32, z: f32) -> f32 {
         self.map.surface(x, z)
+    }
+
+    /// The solid surface under (x, z) looking down from `from_y` — a bridge deck, a set piece, the terrain — where a
+    /// car is set down (`ground` alone put a car spawned on a bridge into the gorge under it).
+    pub fn surface_below(&self, x: f32, z: f32, from_y: f32) -> f32 {
+        use dark_vehicle::rapier3d::prelude::{QueryFilter, Ray};
+        let g = self.ground(x, z);
+        if from_y <= g {
+            return g;
+        }
+        let filter = QueryFilter::new().groups(group(0xffff, groups::TERRAIN | groups::STATIC));
+        let ray = Ray::new(Vector::new(x, from_y, z), Vector::new(0.0, -1.0, 0.0));
+        self.world
+            .pw
+            .cast_ray(&ray, from_y - g + 0.5, true, filter)
+            .map_or(g, |(_, t)| from_y - t)
     }
 }
 
@@ -1189,5 +1255,60 @@ mod empty_room {
                 m.leave(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod statics {
+    use super::*;
+    use dark_vehicle::rapier3d::prelude::{QueryFilter, Ray};
+    use std::path::Path;
+
+    /// The game's static colliders on the server hit where the client's do: the exporter's level rays at trunks,
+    /// boulders and set pieces (cast in the game's scratch world) give the same first hit here.
+    #[test]
+    fn statics_match_the_game() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = base.join("../../../game/public/maps/island");
+        if !dir.join("statics.bin").exists() {
+            return;
+        }
+        let map = MapData::load(&dir).unwrap();
+        let st = map.statics.as_ref().unwrap();
+        let golden: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(base.join("golden/statics-probe-island.json")).unwrap()).unwrap();
+        assert_eq!(
+            golden["seed"].as_u64(),
+            Some(st.seed as u64),
+            "statics.bin and its probes come from one export"
+        );
+        let solid = st.items.iter().filter(|s| !s.breakable).count();
+        assert!(solid > 40_000, "the island's trunks and boulders ({solid})");
+        let ph = MapPhysics::get(&map);
+        let mut w = ph.world();
+        w.step(); // (scene queries see colliders from the first step on)
+        let filter = QueryFilter::new().groups(group(0xffff, groups::STATIC));
+        let (mut n, mut hits, mut worst) = (0, 0, 0.0f32);
+        for p in golden["probes"].as_array().unwrap() {
+            let v: Vec<f32> = p
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap() as f32)
+                .collect();
+            let ray = Ray::new(Vector::new(v[0], v[1], v[2]), Vector::new(v[3], v[4], v[5]));
+            let toi = w.pw.cast_ray(&ray, 12.0, true, filter).map_or(-1.0, |(_, t)| t);
+            let err = (toi - v[6]).abs();
+            assert!(err < 2e-3, "probe {n}: server {toi}, game {}", v[6]);
+            worst = worst.max(err);
+            n += 1;
+            hits += usize::from(toi >= 0.0);
+        }
+        assert!(n > 300, "{n} probes");
+        assert!(
+            hits > n * 3 / 4,
+            "{hits} of {n} probes hit (the export's rays must see its colliders)"
+        );
+        println!("{n} probes, worst {:.2} mm", worst * 1000.0);
     }
 }

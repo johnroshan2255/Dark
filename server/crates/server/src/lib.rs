@@ -41,7 +41,7 @@ pub fn load_maps(cfg: &Config) -> Result<HashMap<String, Arc<MapData>>> {
     for id in &cfg.maps {
         let dir = cfg.maps_dir.join(id);
         let m = MapData::load(&dir).with_context(|| format!("map {id} ({})", dir.display()))?;
-        info!(map = %id, roads = m.road_point_count(), half = m.half, "map loaded");
+        info!(map = %id, roads = m.road_point_count(), half = m.half, statics = m.statics_count(), "map loaded");
         maps.insert(id.clone(), Arc::new(m));
     }
     Ok(maps)

@@ -92,6 +92,23 @@ impl World {
         self.pw.colliders.insert_with_parent(c, body, &mut self.pw.bodies)
     }
 
+    /// A static collider of any (shared) shape: the map's trunks, boulders and set pieces.
+    pub fn add_static(
+        &mut self,
+        shape: SharedShape,
+        at: Vector,
+        rot: Rotation,
+        friction: f32,
+        groups: InteractionGroups,
+    ) -> ColliderHandle {
+        let body = self.pw.bodies.insert(RigidBodyBuilder::fixed());
+        let c = ColliderBuilder::new(shape)
+            .position(Pose::from_parts(at, rot))
+            .friction(friction)
+            .collision_groups(groups);
+        self.pw.colliders.insert_with_parent(c, body, &mut self.pw.bodies)
+    }
+
     /// A height grid as a Rapier heightfield shape (shareable between worlds: one per map, not per room) and where
     /// its collider goes. `heights` is row-major `[iz * n + ix]` (the map's `heights.bin` order), `step` m between
     /// samples, the grid's corner at `origin` (x, z).
@@ -137,5 +154,28 @@ impl World {
         self.pw
             .cast_ray(&Ray::new(origin, dir), max, true, filter)
             .map(|(_, t)| t)
+    }
+
+    /// First surface a ray crosses — distance, normal, the collider's member groups — ignoring `skip`'s colliders
+    /// (hollow shapes: a ray from inside or against one meets its far side, not a hit at 0).
+    pub fn cast_ray_normal(
+        &self,
+        origin: Vector,
+        dir: Vector,
+        max: f32,
+        groups: InteractionGroups,
+        skip: RigidBodyHandle,
+    ) -> Option<(f32, Vector, u32)> {
+        let filter = QueryFilter::new().groups(groups).exclude_rigid_body(skip);
+        self.pw
+            .cast_ray_and_get_normal(&Ray::new(origin, dir), max, false, filter)
+            .map(|(h, hit)| {
+                let member = self
+                    .pw
+                    .colliders
+                    .get(h)
+                    .map_or(0, |c| c.collision_groups().memberships.bits());
+                (hit.time_of_impact, hit.normal, member)
+            })
     }
 }

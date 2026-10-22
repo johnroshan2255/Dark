@@ -1,5 +1,5 @@
 import { CHUNK_SIZE } from '../constants'
-import { hashFloat } from '../noise/rng'
+import { hashFloat, seedFromString } from '../noise/rng'
 import { RoadType, type NetRoad } from '../Road/RoadNetwork'
 
 /**
@@ -139,6 +139,10 @@ export class FixedMap {
   readonly palette: Partial<Record<string, [number, number, number]>> = {}
   /** Conifers only (map.json `trees: 'conifer'`). */
   readonly conifers: boolean
+  /** The seed its nature grows from (the chunk scatter: trees, boulders, plants) — the same in every game and for
+   *  every player on the map, so a room shares one forest, and the server's physics has the same trunks and boulders
+   *  (`statics.bin`, scripts/export-statics.mjs). Not the session seed (weather, discoveries stay per game). */
+  readonly seed: number
   /** The roads' BRIDGES: each run of bridge samples with the bank sample before and after (deck centre line, world
    *  heights) and the deck half width — MapProps builds Dark's plank bridge along it. */
   readonly bridges: { xs: number[]; zs: number[]; ys: number[]; hw: number }[] = []
@@ -165,6 +169,7 @@ export class FixedMap {
 
   constructor(meta: MapJson, heights: ArrayBuffer, biome: ArrayBuffer, props: MapProps) {
     this.id = meta.id
+    this.seed = seedFromString(`map:${meta.id}`)
     this.props = props
     this.heightOffset = meta.heightOffset
     this.name = meta.name

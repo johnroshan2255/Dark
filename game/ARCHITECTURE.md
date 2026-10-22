@@ -80,6 +80,10 @@ World (seed)
 - **Generation is pure**: `generateChunk(seed, cx, cz) → ChunkData` (typed arrays only). Runs in a Web Worker
   (`src/world/Streaming/chunk.worker.ts`). Same seed ⇒ same world on every client. Generation uses only
   arithmetic + `Math.floor` (no `Math.random`, no `sin/cos` in anything gameplay-relevant).
+  A FIXED MAP's nature grows from `FixedMap.seed` (from the map id), not the session's seed: the same trees for every
+  player in a room, and for the server's car physics — `scripts/export-statics.mjs` writes the map's trunks, boulders
+  and set pieces to `public/maps/<id>/statics.bin` (rerun after changing the scatter, a map or a prop's collider;
+  the server's `statics_match_the_game` test fails on a stale file).
 - **Road** is a global analytic function `roadCenterX(z)` so any chunk can evaluate it without neighbours.
 - **Road graph (2026-10-15, `Road/RoadNetwork.ts`) — no road ends mid-way.** Nodes within `NET_BAND` (2.4 km) of
   the main road; tree links toward the main road + E/N loops; every structural LEAF (would dead-end on a bare hilltop)

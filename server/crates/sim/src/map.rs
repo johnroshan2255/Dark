@@ -21,6 +21,8 @@ pub enum MapError {
     Size { got: usize, want: usize },
     #[error("map has no roads to spawn on")]
     NoRoads,
+    #[error("statics.bin: {0}")]
+    Statics(String),
 }
 
 #[derive(Deserialize)]
@@ -119,10 +121,12 @@ pub struct MapData {
     pub(crate) nav: std::sync::OnceLock<std::sync::Arc<crate::nav::Nav>>,
     /// Vehicle physics shared by every room on this map (terrain shape, bridges, surfaces), built on first use.
     pub(crate) physics: std::sync::OnceLock<std::sync::Arc<crate::physics::MapPhysics>>,
+    /// The game's static colliders on this map (`statics.bin`; None: not exported — the cars meet only the terrain).
+    pub(crate) statics: Option<crate::statics::Statics>,
 }
 
 impl MapData {
-    /// Load `<dir>/map.json` + `<dir>/heights.bin`.
+    /// Load `<dir>/map.json` + `<dir>/heights.bin` (+ `biome.bin`, `statics.bin` when there).
     pub fn load(dir: &Path) -> Result<Self, MapError> {
         let read = |f: &str| {
             let p = dir.join(f);
@@ -139,7 +143,19 @@ impl MapData {
         } else {
             None
         };
+        // the game's static colliders (optional: trunks, boulders, set pieces — game/scripts/export-statics.mjs)
+        let statics = match std::fs::read(dir.join("statics.bin")) {
+            Ok(b) => Some(crate::statics::Statics::parse(&b).map_err(MapError::Statics)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => {
+                return Err(MapError::Io {
+                    path: dir.join("statics.bin").display().to_string(),
+                    source,
+                });
+            }
+        };
         let mut m = Self::from_parts(meta, &raw)?;
+        m.statics = statics;
         if let Some(b) = bio
             && b.len() == m.bn * m.bn * 2
         {
@@ -167,6 +183,11 @@ impl MapData {
         let i = (((x - self.borigin[0]) / self.bstep).round().max(0.0) as usize).min(self.bn - 1);
         let j = (((z - self.borigin[1]) / self.bstep).round().max(0.0) as usize).min(self.bn - 1);
         self.desert[j * self.bn + i] as f32 / 255.0
+    }
+
+    /// How many of the game's static colliders came with the map (`statics.bin`; 0 = none).
+    pub fn statics_count(&self) -> usize {
+        self.statics.as_ref().map_or(0, |s| s.items.len())
     }
 
     /// Water at (x, z) is frozen (ice to stand / drive on).
@@ -251,6 +272,7 @@ impl MapData {
             borigin: meta.biome_grid.as_ref().map_or([0.0; 2], |b| b.origin),
             nav: std::sync::OnceLock::new(),
             physics: std::sync::OnceLock::new(),
+            statics: None,
         })
     }
 
@@ -357,6 +379,7 @@ impl MapData {
             borigin: [0.0; 2],
             nav: std::sync::OnceLock::new(),
             physics: std::sync::OnceLock::new(),
+            statics: None,
         }
     }
 }

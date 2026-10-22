@@ -113,6 +113,92 @@ pub struct Seen {
     pub bot: bool,
 }
 
+/// OBSTACLES (the map's set pieces, trunks and boulders — solid on the server since statics.bin): every LOOK_EVERY s a
+/// bot car looks ahead toward its plan's target at bumper height. A solid static hit (a trunk, a boulder, a stunt ramp, a
+/// cabin) — or, on the drivable meshes (bridges, the loop, quarter-pipes: STATIC_MESH), a wall-like face, not a deck it
+/// drives up (normals steeper than WALL_NY) — within its braking reach sends it round: the first clear
+/// lateral offset of AVOID_OFFSETS (not over a drop), kept for AVOID_S s; none clear, it closes in slowly, stops STOP_AT m short and
+/// looks again (the stuck check respawns it). Returns the plan to drive (target, speed). Cost: ≤ 7 rays per car per look.
+#[allow(clippy::too_many_arguments)]
+fn avoid_obstacles(
+    world: &dark_vehicle::World,
+    ground: &dyn Fn(f32, f32) -> f32,
+    car: &Truck,
+    avoid: &mut (f32, f32, f32),
+    look_t: &mut f32,
+    pos: [f64; 3],
+    heading: f64,
+    t: [f32; 2],
+    v: f32,
+    dt: f32,
+) -> ([f32; 2], f32) {
+    const LOOK_EVERY: f32 = 0.1;
+    const AVOID_S: f32 = 1.5;
+    const WALL_NY: f32 = 0.6;
+    const STOP_AT: f32 = 4.0;
+    const BUMPER_Y: f32 = 0.8;
+    const MAX_DROP: f32 = 1.5;
+    const AVOID_OFFSETS: [f32; 6] = [3.5, -3.5, 6.0, -6.0, 9.0, -9.0];
+    use dark_vehicle::rapier3d::prelude::Vector;
+    use dark_vehicle::world::{group, groups};
+    avoid.1 -= dt;
+    *look_t -= dt;
+    // look where it is going (the plan's target: along the road), not along the bonnet (off the road in a bend)
+    let (tx, tz) = (t[0] - pos[0] as f32, t[1] - pos[2] as f32);
+    let tl = (tx * tx + tz * tz).sqrt();
+    let (fx, fz) = if tl > 2.0 {
+        (tx / tl, tz / tl)
+    } else {
+        dir_of(heading as f32)
+    };
+    let (rx, rz) = (-fz, fx);
+    let speed = car.speed.abs() as f32;
+    if *look_t <= 0.0 && avoid.1 <= 0.0 && v > 0.5 {
+        *look_t = LOOK_EVERY;
+        let reach = (6.0 + speed * 1.2).min(30.0);
+        // (the body's origin is at its wheels' contact: look from bumper height, over the bridge planks' edges)
+        let from = Vector::new(pos[0] as f32, pos[1] as f32 + BUMPER_Y, pos[2] as f32);
+        let solid = group(0xffff, groups::STATIC);
+        // a wall within `len` along (dx, dz) from `from`?
+        let wall = |dx: f32, dz: f32, len: f32| {
+            let l = (dx * dx + dz * dz).sqrt().max(1e-3);
+            world
+                .cast_ray_normal(from, Vector::new(dx / l, 0.0, dz / l), len, solid, car.body)
+                .filter(|&(_, n, member)| member & groups::STATIC_MESH == 0 || n.y < WALL_NY)
+                .map(|(d, _, _)| d)
+        };
+        if let Some(d) = wall(fx, fz, reach) {
+            // blocked: close in slowly (stopping STOP_AT m short) and look again — unless a side is clear
+            *avoid = (0.0, LOOK_EVERY * 2.0, ((d - STOP_AT) * 0.8).max(0.0));
+            for off in AVOID_OFFSETS {
+                let (dx, dz) = (fx * reach + rx * off, fz * reach + rz * off);
+                // (never round it over a drop: a bridge's side, a cliff)
+                let (ax, az) = (pos[0] as f32 + dx, pos[2] as f32 + dz);
+                if ground(ax, az) < pos[1] as f32 - MAX_DROP
+                    || ground(pos[0] as f32 + rx * off, pos[2] as f32 + rz * off) < pos[1] as f32 - MAX_DROP
+                {
+                    continue;
+                }
+                if wall(dx, dz, (dx * dx + dz * dz).sqrt()).is_none() {
+                    *avoid = (off, AVOID_S, 8.0);
+                    break;
+                }
+            }
+        }
+    }
+    let (off, left, cap) = *avoid;
+    if left <= 0.0 {
+        (t, v)
+    } else {
+        ([t[0] + rx * off, t[1] + rz * off], v.min(cap))
+    }
+}
+
+/// The game's plank bridge: deck half width = road half width × this + 0.4 m (FixedMap `ROAD_WIDTH_SCALE`).
+const BRIDGE_DECK_SCALE: f32 = 0.75;
+/// Half a car's width plus a margin (m): how far inside a deck's edge the lane stays.
+const CAR_HALF_WIDTH: f32 = 1.3;
+
 fn dir_of(yaw: f32) -> (f32, f32) {
     (-yaw.sin(), -yaw.cos())
 }
@@ -244,6 +330,10 @@ pub struct Bot {
     pitch: f32,
     roll: f32,
     vel: [f32; 3],
+    /// Going round an obstacle (`avoid_obstacles`): lateral offset (m, + right; 0 = blocked), seconds left, speed
+    /// cap (m/s); seconds to the next look.
+    avoid: (f32, f32, f32),
+    look_t: f32,
 }
 
 impl Bot {
@@ -511,6 +601,8 @@ impl Bots {
                 pitch: 0.0,
                 roll: 0.0,
                 vel: [0.0; 3],
+                avoid: (0.0, 0.0, 0.0),
+                look_t: 0.0,
             };
             let dist = 120.0 + self.rng.f32() * 500.0;
             self.place_on_road(&mut b, anchor, dist);
@@ -656,6 +748,8 @@ impl Bot {
             pitch: 0.0,
             roll: 0.0,
             vel: [0.0; 3],
+            avoid: (0.0, 0.0, 0.0),
+            look_t: 0.0,
         }
     }
 }
@@ -1391,7 +1485,14 @@ impl Bots {
         match (&self.world, r.lane) {
             (World::Map { nav, .. }, Lane::Edge(on)) => {
                 let p = nav.at(on);
-                (p.x - p.dz * r.lat, p.y, p.z + p.dx * r.lat, p.dx, p.dz, p.bridge)
+                // a bridge's plank deck is narrower than the road (the game's `ROAD_WIDTH_SCALE`; no railing): stay on it
+                let lat = if p.bridge {
+                    let deck = nav.roads[nav.edges[on.edge].road].half_width * BRIDGE_DECK_SCALE + 0.4;
+                    r.lat.clamp(-(deck - CAR_HALF_WIDTH), deck - CAR_HALF_WIDTH)
+                } else {
+                    r.lat
+                };
+                (p.x - p.dz * lat, p.y, p.z + p.dx * lat, p.dx, p.dz, p.bridge)
             }
             (World::Endless(e), Lane::Endless { z, dir }) => {
                 let x = e.road_x(z);
@@ -1486,16 +1587,22 @@ impl Bots {
                 continue;
             }
             let (px, pz, pyaw) = parked_car.map_or((b.x, b.z, b.yaw), |c| (c[0], c[1], c[2]));
+            // set down on what's solid under its lane point (a bridge deck), else the terrain
+            let set_y = if parked_car.is_none() {
+                ph.surface_below(px, pz, b.y + 1.5)
+            } else {
+                ph.ground(px, pz)
+            };
             match b.car.as_mut() {
                 None => {
-                    let y = ph.ground(px, pz);
+                    let y = set_y;
                     b.car = Some(ph.new_car(b.model, px, y, pz, pyaw));
                     self.built += 1;
                 }
                 Some(c) if b.placed || !c.enabled => {
                     self.set_down += 1;
                     c.set_enabled(&mut ph.world, true);
-                    let y = ph.ground(px, pz) as f64;
+                    let y = set_y as f64;
                     c.place(&mut ph.world, px as f64, y, pz as f64, pyaw as f64, 0.0);
                 }
                 Some(_) => {}
@@ -1504,7 +1611,25 @@ impl Bots {
             let car = b.car.as_mut().expect("just made");
             let pos = car.position(&ph.world);
             let heading = car.heading(&ph.world);
-            car.controls = match (b.mode, b.plan) {
+            let plan = match (b.mode, b.plan) {
+                (Mode::Car, Some((t, v))) => {
+                    let ground = |x: f32, z: f32| ph.ground(x, z);
+                    Some(avoid_obstacles(
+                        &ph.world,
+                        &ground,
+                        car,
+                        &mut b.avoid,
+                        &mut b.look_t,
+                        pos,
+                        heading,
+                        t,
+                        v,
+                        dt,
+                    ))
+                }
+                _ => None,
+            };
+            car.controls = match (b.mode, plan) {
                 (Mode::Car, Some((t, v))) => drive_to(
                     &Intent {
                         target: [t[0] as f64, t[1] as f64],
