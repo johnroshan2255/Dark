@@ -1534,7 +1534,9 @@ impl Bots {
 
     /// Server physics, after the tick's physics steps: each driving bot is where its car is — pose, speed, road
     /// progress (or off the road, thrown there) — and a car that doesn't move although its driver wants to is stuck.
-    pub fn after_physics(&mut self, ph: &RoomPhysics, dt: f32, now: u64) {
+    /// `lag` = time the physics hasn't stepped yet: the pose sent goes that far along the car's velocity (it is
+    /// stamped with the tick's time; the car stands at the last whole step).
+    pub fn after_physics(&mut self, ph: &RoomPhysics, dt: f32, now: u64, lag: f32) {
         if !self.physics {
             return;
         }
@@ -1572,6 +1574,12 @@ impl Bots {
             }
             self.progress_check(i, dt, now, wants);
             self.write_pose(i, dt);
+            let b = &mut self.bots[i];
+            if b.mode == Mode::Car && b.car.is_some() {
+                for k in 0..3 {
+                    b.pose.pos[k] += b.vel[k] * lag;
+                }
+            }
         }
     }
 

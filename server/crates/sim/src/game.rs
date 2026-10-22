@@ -194,8 +194,10 @@ pub struct Match {
     ents: Vec<EntityState>,
 }
 
-/// A server-simulated car's pose for the snapshots (the driver's pose while they drive it).
-fn car_pose(car: &dark_vehicle::Truck, world: &dark_vehicle::World, model: u8) -> Pose {
+/// A server-simulated car's pose for the snapshots (the driver's pose while they drive it), carried `lag` s along its
+/// velocity: the physics runs in whole 1/60 s steps, the snapshot is stamped with the tick's time — without this a
+/// tick of 3 steps and one of 1 read as a car speeding up and slowing down (up to ~0.25 m at 15 m/s).
+fn car_pose(car: &dark_vehicle::Truck, world: &dark_vehicle::World, model: u8, lag: f32) -> Pose {
     let t = car.position(world);
     let ax = car.axes(world);
     let v = world.pw.bodies[car.body].linvel();
@@ -210,7 +212,11 @@ fn car_pose(car: &dark_vehicle::Truck, world: &dark_vehicle::World, model: u8) -
         fl |= flags::AIRBORNE;
     }
     Pose {
-        pos: [t[0] as f32, t[1] as f32, t[2] as f32],
+        pos: [
+            t[0] as f32 + v.x * lag,
+            t[1] as f32 + v.y * lag,
+            t[2] as f32 + v.z * lag,
+        ],
         vel: [v.x, v.y, v.z],
         yaw: (-ax.f[0]).atan2(-ax.f[2]) as f32,
         pitch: ax.f[1].clamp(-1.0, 1.0).asin() as f32,
@@ -864,7 +870,7 @@ impl Match {
             if let Some(bots) = self.bots.as_mut() {
                 (prof.built, prof.set_down) = bots.take_car_events();
                 let a = clock(&self.clock);
-                bots.after_physics(ph, dt, self.now_ms);
+                bots.after_physics(ph, dt, self.now_ms, self.phys_acc);
                 prof.ai_us += (clock(&self.clock) - a) as f64 / 1e3;
             }
             // a driver is where their car is
@@ -874,7 +880,7 @@ impl Match {
                 if !hc.driving || !p.alive {
                     continue;
                 }
-                p.pose = car_pose(&hc.car, &ph.world, hc.model);
+                p.pose = car_pose(&hc.car, &ph.world, hc.model, self.phys_acc);
                 p.has_pose = true;
                 p.last_accept_ms = now;
             }

@@ -921,8 +921,11 @@ mod human_cars {
         // every frame applied once, in order: the ack trails the newest frame by at most the jitter buffer
         assert!(v.ack + 8 >= seq && v.ack <= seq, "ack {} vs sent {seq}", v.ack);
         let car = [cm_to_m(v.pos[0]), cm_to_m(v.pos[1]), cm_to_m(v.pos[2])];
+        // (the snapshot pose is carried ≤ one physics step along the velocity to the tick's time; the vehicle state is
+        // the car at its last step — what the driver reconciles with)
+        let step = (p.vel[0].powi(2) + p.vel[2].powi(2)).sqrt() / 60.0 + 0.02;
         assert!(
-            (car[0] - p.pos[0]).abs() < 0.02 && (car[2] - p.pos[2]).abs() < 0.02,
+            (car[0] - p.pos[0]).abs() < step && (car[2] - p.pos[2]).abs() < step,
             "pose and vehicle state agree"
         );
     }

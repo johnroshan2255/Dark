@@ -271,3 +271,9 @@ anyway; an empty room lingers 2 minutes): 4.5 ms → 2 µs per tick for 100 park
 most 4 physics steps (`MAX_PHYSICS_STEPS`, the client's cap too); the rest of the time is dropped — before, one slow
 tick made the next run 8 steps (a 297 ms tick was logged with several 100-bot test rooms left running on the same
 laptop as the browser).
+
+**Snapshot timing (2026-10-22).** Physics runs in whole 1/60 s steps but snapshots are stamped with the tick's time;
+a late tick runs 3 steps and the next 1, so the remote cars seemed to speed up and slow down (the 100-bot probe saw
+10.8 % of frames of the nearest bot cars jump > 5 cm). Car poses in snapshots are now carried along their velocity by
+the time not yet stepped: 0.2–0.3 % of frames, worst jump 26 cm–1.1 m (a collision), client 60 fps, server 0–1
+slow tick (36 ms) over two back-to-back 60 s runs with 100 bots each.
