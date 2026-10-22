@@ -95,6 +95,26 @@ pub enum Out {
     Rejected(u16, Reject),
 }
 
+/// Where the last tick's time went (µs), measured with the clock the server injects ([`Match::set_clock`]; the
+/// rules stay clock-free) — metrics and slow-tick logs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TickProfile {
+    /// Bot AI (plans + reading back the cars).
+    pub ai_us: f64,
+    /// Every car's own step (driver, tyre envelope ray casts, drivetrain) over the tick's physics steps.
+    pub cars_us: f64,
+    /// Rapier's world steps (collision detection + solver).
+    pub solver_us: f64,
+    /// Physics steps this tick, vehicles simulated, cars built and set down (spawns / respawns) this tick.
+    pub steps: u32,
+    pub vehicles: u32,
+    pub built: u32,
+    pub set_down: u32,
+}
+
+/// A monotonic clock in nanoseconds (the server's; tests leave it unset).
+pub type Clock = Box<dyn Fn() -> u64 + Send>;
+
 /// Read-only view of a player (admin listing, metrics).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerView {
@@ -158,6 +178,8 @@ pub struct Match {
     /// Map rooms: the vehicle physics world (docs/VEHICLE_PHYSICS.md), and the time not yet stepped (s).
     physics: Option<RoomPhysics>,
     phys_acc: f32,
+    clock: Option<Clock>,
+    profile: TickProfile,
     bot_events: Vec<BotEvent>,
     seen: Vec<Seen>,
     /// Snapshot scratch (reused every tick: no allocation per player but the packet itself).
@@ -219,6 +241,8 @@ impl Match {
             bots,
             physics,
             phys_acc: 0.0,
+            clock: None,
+            profile: TickProfile::default(),
             bot_events: Vec::new(),
             seen: Vec::new(),
             snap_ids: Vec::new(),
@@ -271,6 +295,16 @@ impl Match {
         self.players.values().filter(|p| p.bot).count()
     }
     /// What the bots have been doing (metrics).
+    /// Give the match a monotonic clock (ns) to profile its ticks with ([`Match::profile`]).
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock = Some(clock);
+    }
+
+    /// Where the last tick's time went.
+    pub fn profile(&self) -> TickProfile {
+        self.profile
+    }
+
     /// Vehicles in the room's physics world (0 without server physics).
     pub fn physics_vehicles(&self) -> usize {
         self.physics.as_ref().map_or(0, |p| p.vehicles)
@@ -637,14 +671,24 @@ impl Match {
             }
         }
         self.bot_events.clear();
+        let clock = |c: &Option<Clock>| c.as_ref().map_or(0, |f| f());
+        let mut prof = TickProfile::default();
+        let t0 = clock(&self.clock);
         bots.step(dt, self.now_ms, &self.seen, &mut self.bot_events);
+        prof.ai_us = (clock(&self.clock) - t0) as f64 / 1e3;
         // the cars move: fixed physics steps (the game's 1/60 s), the bots read back where they are
         if let Some(ph) = self.physics.as_mut() {
             let h = 1.0 / self.cfg.physics_hz.max(1) as f32;
             self.phys_acc = (self.phys_acc + dt).min(h * 8.0);
             while self.phys_acc >= h {
+                let a = clock(&self.clock);
                 bots.drive_cars(ph, h);
+                let b = clock(&self.clock);
                 ph.world.step();
+                let c = clock(&self.clock);
+                prof.cars_us += (b - a) as f64 / 1e3;
+                prof.solver_us += (c - b) as f64 / 1e3;
+                prof.steps += 1;
                 self.phys_acc -= h;
             }
             ph.vehicles = ph
@@ -654,8 +698,13 @@ impl Match {
                 .iter()
                 .filter(|(_, b)| b.is_dynamic() && b.is_enabled())
                 .count();
+            prof.vehicles = ph.vehicles as u32;
+            (prof.built, prof.set_down) = bots.take_car_events();
+            let a = clock(&self.clock);
             bots.after_physics(ph, dt, self.now_ms);
+            prof.ai_us += (clock(&self.clock) - a) as f64 / 1e3;
         }
+        self.profile = prof;
         for ev in self.bot_events.drain(..) {
             match ev {
                 BotEvent::Joined(id, name) => {

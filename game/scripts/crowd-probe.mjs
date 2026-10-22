@@ -1,7 +1,7 @@
 // WORST CASE CROWD: everyone in one place — N cars and N people on foot (as room bots) driving / walking round the
 // player within ~70 m, injected straight into RemotePlayers (offline; needs `npm run dev`). Prints fps, CPU / GPU ms,
 // draws and triangles averaged over 10 s.
-// usage: node scripts/crowd-probe.mjs <outdir> [cars=100] [people=100] [tier=ultra] [mobile=0]   env UNCAPPED=1, THROTTLE=4
+// usage: node scripts/crowd-probe.mjs <outdir> [cars=100] [people=100] [tier=ultra] [mobile=0]   env UNCAPPED=1, THROTTLE=4, PORT (5173)
 import puppeteer from 'puppeteer-core'
 import fs from 'node:fs'
 const [out, cars = '100', people = '100', tier = 'ultra', mobile = '0'] = process.argv.slice(2)
@@ -15,7 +15,7 @@ page.on('pageerror', (e) => console.log('PAGEERR', String(e).slice(0, 300)))
 if (mobile === '1') await page.emulate({ viewport: { width: 844, height: 390, isMobile: true, hasTouch: true, deviceScaleFactor: 3 }, userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36' })
 else await page.setViewport({ width: 1600, height: 900 })
 const cdp = await page.createCDPSession()
-await page.goto(`http://localhost:5173/?map=island&net=0&play=1&tier=${tier}&adaptive=0&hour=11`, { waitUntil: 'domcontentloaded' })
+await page.goto(`http://localhost:${process.env.PORT || 5173}/?map=island&net=0&play=1&tier=${tier}&adaptive=0&hour=11`, { waitUntil: 'domcontentloaded' })
 await page.waitForFunction(() => window.__game?.store.get().worldReady, { timeout: 180_000, polling: 300 })
 await page.waitForFunction(() => window.__game.world.stats.pending === 0, { timeout: 60_000, polling: 300 }).catch(() => {})
 await page.evaluate((nc, np) => {
@@ -51,14 +51,16 @@ await page.evaluate((nc, np) => {
   requestAnimationFrame(loop)
   g.player.pitch = -0.12
 }, Number(cars), Number(people))
-if (process.env.NOSHADOW) await page.evaluate(() => setInterval(() => { for (const s of window.__game.remotes.carSets.values()) for (const m of [s.body, s.wheels, s.mid, s.far]) m.castShadow = false }, 200))
+if (process.env.NOSHADOW) await page.evaluate(() => setInterval(() => { for (const s of window.__game.remotes.carSets.values()) for (const m of [s.mid, s.far]) m.castShadow = false }, 200))
 if (process.env.THROTTLE) await cdp.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.THROTTLE) })
 await new Promise((r) => setTimeout(r, 5000))
 await page.screenshot({ path: `${out}/crowd-${tier}${mobile === '1' ? '-mobile' : ''}.png` })
 console.log(await page.evaluate(() => {
   const R = window.__game.remotes, rows = [`remotes.update ${window.__crowdMs.toFixed(2)} ms`]
   const tri = (m) => (m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) / 3
-  for (const [k, s] of R.carSets) rows.push(`model ${k}: near ${s.near}×${tri(s.body) + tri(s.wheels) + tri(s.glass)} mid ${s.midN}×${tri(s.mid)} far ${s.farN}×${tri(s.far)}`)
+  // (full-detail cars are RemoteCars — R.cars; the batches draw the simplified and far ones)
+  rows.push(`full cars ${R.cars.size}`)
+  for (const [k, s] of R.carSets) rows.push(`model ${k}: mid ${s.midN}×${tri(s.mid)} far ${s.farN}×${tri(s.far)}`)
   let chars = 0
   for (const r of R.remotes.values()) if (r.char) chars++
   rows.push(`characters ${chars} silhouettes ${R.proxies.count}×${tri(R.proxies)}`)

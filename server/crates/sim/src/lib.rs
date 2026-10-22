@@ -22,5 +22,5 @@ pub mod rng;
 pub mod validate;
 pub mod zone;
 
-pub use game::{Match, MatchConfig, Out, PlayerView};
+pub use game::{Clock, Match, MatchConfig, Out, PlayerView, TickProfile};
 pub use map::{MapData, MapError};

@@ -315,6 +315,9 @@ pub struct Bots {
     physics: bool,
     /// Cars of bots that left, to take out of the physics world.
     dead_cars: Vec<Truck>,
+    /// Cars built / set down (spawn, respawn, back from a boat or a flight) since the last [`Bots::take_car_events`].
+    built: u32,
+    set_down: u32,
 }
 
 const CELL: f32 = 48.0;
@@ -339,7 +342,16 @@ impl Bots {
             seen: Vec::new(),
             physics: false,
             dead_cars: Vec::new(),
+            built: 0,
+            set_down: 0,
         }
+    }
+
+    /// Cars built and set down since the last call (profiling).
+    pub fn take_car_events(&mut self) -> (u32, u32) {
+        let e = (self.built, self.set_down);
+        (self.built, self.set_down) = (0, 0);
+        e
     }
 
     /// Drive the cars through the room's physics ([`Bots::drive_cars`] / [`Bots::after_physics`] each tick).
@@ -1475,8 +1487,10 @@ impl Bots {
                 None => {
                     let y = ph.ground(px, pz);
                     b.car = Some(ph.new_car(b.model, px, y, pz, pyaw));
+                    self.built += 1;
                 }
                 Some(c) if b.placed || !c.enabled => {
+                    self.set_down += 1;
                     c.set_enabled(&mut ph.world, true);
                     let y = ph.ground(px, pz) as f64;
                     c.place(&mut ph.world, px as f64, y, pz as f64, pyaw as f64, 0.0);

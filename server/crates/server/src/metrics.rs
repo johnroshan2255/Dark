@@ -11,6 +11,9 @@ pub const BOTS_ACTIVE: &str = "dark_bots_active";
 pub const TICK_SECONDS: &str = "dark_tick_seconds";
 pub const TICK_OVERRUNS: &str = "dark_tick_overruns_total";
 pub const SNAPSHOT_BYTES: &str = "dark_snapshot_bytes_total";
+pub const PHYSICS_SECONDS: &str = "dark_physics_seconds";
+pub const BOTS_AI_SECONDS: &str = "dark_bots_ai_seconds";
+pub const VEHICLES: &str = "dark_vehicles_simulated";
 pub const PACKETS_IN: &str = "dark_packets_in_total";
 pub const PACKETS_DROPPED: &str = "dark_packets_dropped_total";
 pub const CORRECTIONS: &str = "dark_corrections_total";
@@ -25,6 +28,14 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
             Matcher::Full(TICK_SECONDS.into()),
             &[0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.033, 0.066],
         )?
+        .set_buckets_for_metric(
+            Matcher::Full(PHYSICS_SECONDS.into()),
+            &[0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.033],
+        )?
+        .set_buckets_for_metric(
+            Matcher::Full(BOTS_AI_SECONDS.into()),
+            &[0.0001, 0.0005, 0.001, 0.002, 0.004, 0.008, 0.016],
+        )?
         .install_recorder()?;
     metrics::describe_gauge!(MATCHES_ACTIVE, "Matches running in this process");
     metrics::describe_gauge!(PLAYERS_CONNECTED, "Players connected to a match");
@@ -35,6 +46,17 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
         "Duration of one match tick (simulation + snapshots)"
     );
     metrics::describe_counter!(TICK_OVERRUNS, "Ticks that took longer than the tick period");
+    metrics::describe_histogram!(
+        PHYSICS_SECONDS,
+        metrics::Unit::Seconds,
+        "Vehicle physics per match tick (the cars' own steps + Rapier's world steps)"
+    );
+    metrics::describe_histogram!(
+        BOTS_AI_SECONDS,
+        metrics::Unit::Seconds,
+        "Bot AI per match tick (plans + reading back the cars)"
+    );
+    metrics::describe_gauge!(VEHICLES, "Vehicles simulated by server physics, all matches");
     metrics::describe_counter!(
         SNAPSHOT_BYTES,
         metrics::Unit::Bytes,

@@ -297,3 +297,20 @@ fn the_games_cars_load_and_drive() {
         assert!(up(&w, &t) > 0.98, "{}", def.id);
     }
 }
+
+/// What one car costs to build (bots spawn 4 per tick): `cargo test --release -p dark-vehicle --test physics car_build_cost -- --nocapture`
+#[test]
+fn car_build_cost() {
+    let mut w = World::new();
+    w.add_ground_box(2000.0);
+    for def in dark_vehicle::cars() {
+        let t0 = std::time::Instant::now();
+        let n = 8;
+        for k in 0..n {
+            let mut t = Truck::new(&mut w, def, None);
+            t.place(&mut w, k as f64 * 10.0, 0.0, 0.0, 0.0, 0.0);
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        println!("{}: {ms:.2} ms per car", def.id);
+    }
+}

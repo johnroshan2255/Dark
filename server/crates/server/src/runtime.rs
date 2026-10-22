@@ -141,7 +141,11 @@ pub fn spawn_match(
         epoch,
     };
     let hz = rules.tick_hz.max(1);
-    let game = Match::new(id, seed, map, rules, room, 0);
+    let mut game = Match::new(id, seed, map, rules, room, 0);
+    {
+        let t0 = Instant::now();
+        game.set_clock(Box::new(move || t0.elapsed().as_nanos() as u64));
+    }
     tokio::spawn(async move {
         info!(match_id = format_args!("{id:016x}"), map = %info.map, "match open");
         metrics::counter!(m::MATCHES_STARTED).increment(1);
@@ -156,8 +160,10 @@ pub fn spawn_match(
             snaps: Vec::new(),
             empty_since: Some(Instant::now()),
             last_reject: None,
+            vehicles: 0,
         };
         rt.run(hz).await;
+        metrics::gauge!(m::VEHICLES).decrement(rt.vehicles as f64);
         metrics::gauge!(m::BOTS_ACTIVE).decrement(info.bots.swap(0, Ordering::Relaxed) as f64);
         info.finished.store(true, Ordering::Relaxed);
         info.joinable.store(false, Ordering::Relaxed);
@@ -180,6 +186,8 @@ struct Runtime {
     empty_since: Option<Instant>,
     /// The player whose rejection was just routed (its `Correction` follows it).
     last_reject: Option<u16>,
+    /// Vehicles this match last reported to the gauge.
+    vehicles: u32,
 }
 
 enum Flow {
@@ -208,8 +216,30 @@ impl Runtime {
             };
             let took = t0.elapsed();
             metrics::histogram!(m::TICK_SECONDS).record(took.as_secs_f64());
+            let p = self.game.profile();
+            if p.steps > 0 {
+                metrics::histogram!(m::PHYSICS_SECONDS).record((p.cars_us + p.solver_us) / 1e6);
+            }
+            metrics::histogram!(m::BOTS_AI_SECONDS).record(p.ai_us / 1e6);
+            let before = self.vehicles;
+            self.vehicles = p.vehicles;
+            if self.vehicles != before {
+                metrics::gauge!(m::VEHICLES).increment(self.vehicles as f64 - before as f64);
+            }
             if took > period {
                 metrics::counter!(m::TICK_OVERRUNS).increment(1);
+                warn!(
+                    match_id = format_args!("{:016x}", self.info.id),
+                    ms = took.as_secs_f64() * 1e3,
+                    ai_ms = p.ai_us / 1e3,
+                    cars_ms = p.cars_us / 1e3,
+                    solver_ms = p.solver_us / 1e3,
+                    steps = p.steps,
+                    vehicles = p.vehicles,
+                    built = p.built,
+                    set_down = p.set_down,
+                    "slow tick"
+                );
             }
             if let Flow::Close(reason, why) = flow {
                 for (_, c) in self.conns.drain() {

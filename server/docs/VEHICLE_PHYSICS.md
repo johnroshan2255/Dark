@@ -198,3 +198,21 @@ at the island's start, 90 s): 100 cars in the physics; **3.9 ms per tick (11.7 %
 bots average 11.1 m/s, 93 % of driving samples on a road, the deepest a body dipped into the ground 0.6 m (a hard
 landing's suspension), cars on the 53 m high forest_far bridge deck stay on it; ~0.5 km covered per bot. CI runs the
 20-bot version (`bots_drive_physical_cars_on_the_island`): 20 cars, 14 m/s, 96 % on a road, 1 respawn in 40 s.
+
+### Checkpoint: 100 bots with the real game (2026-10-22, headless Chrome on the M4, release server)
+
+- **Profiling in production:** the server injects a monotonic clock into each match (`Match::set_clock`; the rules
+  stay clock-free) and records `dark_physics_seconds` (cars' own steps + Rapier) and `dark_bots_ai_seconds` per
+  tick, `dark_vehicles_simulated`, and logs every overrun as `slow tick` with the split (AI / cars / solver, steps,
+  vehicles, cars built / set down that tick).
+- **Live room, 100 bots, the player driving the island's roads 60–90 s** (`bots-net` probe): server 5.4–6.0 ms per
+  tick mean (physics ~5.2 ms of it), no overruns on a clean server; client 60 fps (LOW), worst frame 23–27 ms; the
+  nearest bot cars move smoothly (largest frame-to-frame jump of a remote car 9 cm; none float or sink). Earlier
+  runs that left several 100-bot rooms simulating on the same machine as the browser showed client stalls and a
+  93 ms server tick — machine contention, gone on a clean run; the slow-tick log now says which part it is if it
+  returns.
+- **100 bots right around the player** (`game/scripts/crowd-probe.mjs`, the remote-rendering path with 100 cars
+  [+ 100 people] within 70 m): 60 fps on every configuration — LOW desktop CPU 2.3 / GPU 5.6 ms, LOW phone viewport
+  with 4× CPU throttle CPU 4.4 / GPU 4.6 ms (with 100 people too), ULTRA desktop CPU 2.4 / GPU 8.9 ms, 158 draws.
+- **Known gap until stage D:** the player's own car is still client-simulated and does not collide with the bots
+  (it passes through them); stage D puts the human cars into the same server world.
