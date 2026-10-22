@@ -17,7 +17,8 @@
     "test:vehicle": "rolldown tests/vehicle.test.ts --format esm --platform node --external @dimforge/rapier3d-compat -o node_modules/.cache/tests/vehicle.test.mjs --log-level warn && node node_modules/.cache/tests/vehicle.test.mjs",
     "test:drivetrain": "rolldown tests/drivetrain.test.ts --format esm --platform node --external @dimforge/rapier3d-compat -o node_modules/.cache/tests/drivetrain.test.mjs --log-level warn && node node_modules/.cache/tests/drivetrain.test.mjs",
     "shot": "node scripts/shoot.mjs",
-    "test:protocol": "rolldown tests/protocol.test.ts --format esm --platform node -o node_modules/.cache/tests/protocol.test.mjs --log-level warn && node node_modules/.cache/tests/protocol.test.mjs"
+    "test:protocol": "rolldown tests/protocol.test.ts --format esm --platform node -o node_modules/.cache/tests/protocol.test.mjs --log-level warn && node node_modules/.cache/tests/protocol.test.mjs",
+    "golden:vehicle": "rolldown tests/vehicle-golden.ts --format esm --platform node --external @dimforge/rapier3d-compat -o node_modules/.cache/tests/vehicle-golden.mjs --log-level warn && node node_modules/.cache/tests/vehicle-golden.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

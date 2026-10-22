@@ -237,6 +237,11 @@ impl MapData {
         })
     }
 
+    /// The height grid: samples per side, spacing (m), corner (x, z), heights row-major `[iz * n + ix]` (world y).
+    pub fn height_grid(&self) -> (usize, f32, [f32; 2], &[f32]) {
+        (self.n, self.step, self.origin, &self.heights)
+    }
+
     /// Terrain height (world y) at (x, z) — `FixedMap.height`.
     pub fn height(&self, x: f32, z: f32) -> f32 {
         let cx = x.clamp(-self.half, self.half);

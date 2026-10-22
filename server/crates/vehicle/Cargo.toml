@@ -1,0 +1,18 @@
+[package]
+name = "dark-vehicle"
+description = "DARK vehicle physics: the game's Simulation car model (Rapier raycast vehicle + drivetrain) for the server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# rapier3d 0.36.1 is the Rust source of the browser's @dimforge/rapier3d-compat 0.21.0 (same parry3d 0.31.1): the
+# server runs the same raycast-vehicle controller and contact code as the client.
+rapier3d = "=0.36.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

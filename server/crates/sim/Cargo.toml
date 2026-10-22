@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 dark-protocol.workspace = true
+dark-vehicle.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

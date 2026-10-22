@@ -17,6 +17,7 @@ pub mod interest;
 pub mod map;
 pub mod nav;
 pub mod noise;
+pub mod physics;
 pub mod rng;
 pub mod validate;
 pub mod zone;
