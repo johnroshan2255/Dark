@@ -6,6 +6,7 @@ import { DYN_LAYER } from '../rendering/shadows/DynamicShadow'
 import { VEHICLES } from '../gameplay/vehicle/catalogue'
 import type { HeroAsset, VehicleModel } from '../assets/loadModels'
 import { RemoteCar } from './RemoteCar'
+import type { RemoteCarPose } from './RemoteColliders'
 import { cmToM, cmsToMps, Flags, i16ToPitch, isBot, u16ToYaw, type EntityState } from './protocol'
 
 /**
@@ -22,7 +23,8 @@ import { cmToM, cmsToMps, Flags, i16ToPitch, isBot, u16ToYaw, type EntityState }
  *    silhouette for the rest (1 draw).
  *  * NAME TAGS: one instanced billboard draw from a name atlas (TagLayer).
  *  * BOTS on the ground are set on THIS client's ground (the server only knows the endless world's road): wheels and
- *    feet meet the terrain the player sees.
+ *    feet meet the terrain the player sees — except cars in a room whose server simulates them (`serverPhysics`):
+ *    their height, pitch and ROLL are the server's physics on the same terrain grid.
  * CPU: interpolation + instance matrices, a few µs per remote; nothing allocated per frame.
  */
 const INTERP_MS = 100
@@ -50,6 +52,7 @@ interface Sample {
   z: number
   yaw: number
   pitch: number
+  roll: number
   vx: number
   vy: number
   vz: number
@@ -64,6 +67,7 @@ interface CarPose {
   z: number
   yaw: number
   pitch: number
+  roll: number
 }
 
 interface Remote {
@@ -77,6 +81,7 @@ interface Remote {
   pos: THREE.Vector3
   yaw: number
   pitch: number
+  roll: number
   speed: number
   /** Signed speed along the heading (m/s) and the turn rate (rad/s): the remote car's wheels roll and steer by them. */
   fwd: number
@@ -130,8 +135,9 @@ export class RemotePlayers {
   /** Soft contact shadows under the simplified cars and the far people (they cast no sun shadow): one draw. */
   private readonly blobs: THREE.InstancedMesh
   private blobN = 0
-  /** Per car model: blob footprint (width, length). */
+  /** Per car model: blob footprint (width, length); the body's box (half extents, centre height). */
   private readonly footprint = new Map<number, [number, number]>()
+  private readonly bodyBox = new Map<number, [number, number, number, number]>()
   private readonly tags = new TagLayer()
   private readonly names = new Map<number, string>()
   private readonly parked: Parked[] = []
@@ -140,6 +146,8 @@ export class RemotePlayers {
   /** Animated characters (the rest are silhouettes) and full-model cars (the rest simplified) — per tier. */
   maxCharacters = 12
   maxCars = 6
+  /** The room's server simulates the cars (RoomFlags.PHYSICS): their poses are physics — not set on our ground. */
+  serverPhysics = false
   /** The cars (remote id, or −1 − owner when parked) drawn full this quarter second. */
   private readonly fullCars = new Set<number>()
   private readonly carDist: { id: number; d: number }[] = []
@@ -199,6 +207,7 @@ export class RemotePlayers {
       s.z = cmToM(e.pos[2])
       s.yaw = u16ToYaw(e.yaw)
       s.pitch = i16ToPitch(e.pitch)
+      s.roll = i16ToPitch(e.roll)
       s.vx = cmsToMps(e.vel[0])
       s.vy = cmsToMps(e.vel[1])
       s.vz = cmsToMps(e.vel[2])
@@ -228,7 +237,7 @@ export class RemotePlayers {
     const bot = isBot(id)
     const name = this.names.get(id) ?? (bot ? 'Bot' : `Player ${id}`)
     const r: Remote = {
-      id, bot, samples: [], char: null, name, tagSlot: this.tags.alloc(), pos: new THREE.Vector3(), yaw: 0, pitch: 0,
+      id, bot, samples: [], char: null, name, tagSlot: this.tags.alloc(), pos: new THREE.Vector3(), yaw: 0, pitch: 0, roll: 0,
       speed: 0, fwd: 0, yawRate: 0, vy: 0, flags: 0, model: 0, dist: Infinity, visible: false, lastCar: null, wasDriving: false,
     }
     this.tags.write(r.tagSlot, name, bot)
@@ -271,6 +280,7 @@ export class RemotePlayers {
         vm.body.computeBoundingBox()
         const bb = vm.body.boundingBox!
         this.footprint.set(model, [(bb.max.x - bb.min.x) * 1.15, (bb.max.z - bb.min.z) * 1.1])
+        this.bodyBox.set(model, [(bb.max.x - bb.min.x) / 2, (bb.max.y - bb.min.y) / 2, (bb.max.z - bb.min.z) / 2, (bb.max.y + bb.min.y) / 2])
         const mk = (g: THREE.BufferGeometry, m: THREE.Material, name: string, shadow: boolean) => {
           const im = new THREE.InstancedMesh(g, m, CAP)
           im.count = 0
@@ -291,6 +301,19 @@ export class RemotePlayers {
       })
       .catch(() => {})
     return null
+  }
+
+  /** The remote cars as their newest snapshot says (server time, body-box centre, velocity) — for RemoteColliders. */
+  carPoses(out: RemoteCarPose[]): RemoteCarPose[] {
+    out.length = 0
+    for (const r of this.remotes.values()) {
+      const s = r.samples[r.samples.length - 1]
+      if (!s || !(s.flags & Flags.DRIVING) || s.model === BIKE_MODEL || s.flags & (Flags.FLYING | Flags.BOAT | Flags.DEAD)) continue
+      const b = this.bodyBox.get(s.model)
+      if (!b) continue
+      out.push({ id: r.id, t: s.t, x: s.x, y: s.y + b[3], z: s.z, yaw: s.yaw, vx: s.vx, vy: s.vy, vz: s.vz, half: [b[0], b[1], b[2]] })
+    }
+    return out
   }
 
   /** Per tier: how many people on foot get the animated character. */
@@ -328,6 +351,7 @@ export class RemotePlayers {
       dy = Math.atan2(Math.sin(dy), Math.cos(dy))
       r.yaw = a.yaw + dy * k
       r.pitch = a.pitch + (b.pitch - a.pitch) * k
+      r.roll = a.roll + (b.roll - a.roll) * k
       const vx = a.vx + (b.vx - a.vx) * k, vz = a.vz + (b.vz - a.vz) * k
       r.speed = Math.hypot(vx, vz)
       r.fwd = -vx * Math.sin(r.yaw) - vz * Math.cos(r.yaw)
@@ -339,7 +363,7 @@ export class RemotePlayers {
       r.visible = !(r.flags & Flags.DEAD)
       const driving = (r.flags & Flags.DRIVING) !== 0 && r.model !== BIKE_MODEL
       // bots: on our ground (wheels / feet), pitched along it — where the world is loaded
-      if (r.bot && !(r.flags & (Flags.FLYING | Flags.BOAT | Flags.AIRBORNE)) && r.dist < 400) {
+      if (r.bot && !(r.flags & (Flags.FLYING | Flags.BOAT | Flags.AIRBORNE)) && r.dist < 400 && !(this.serverPhysics && driving)) {
         const g = this.loadedGround(r.pos.x, r.pos.z)
         if (g !== null) {
           r.pos.y = g
@@ -352,13 +376,14 @@ export class RemotePlayers {
       }
       // parked: got out of a car → it stays there
       if (driving) {
-        const c = (r.lastCar ??= { model: 0, x: 0, y: 0, z: 0, yaw: 0, pitch: 0 })
+        const c = (r.lastCar ??= { model: 0, x: 0, y: 0, z: 0, yaw: 0, pitch: 0, roll: 0 })
         c.model = r.model
         c.x = r.pos.x
         c.y = r.pos.y
         c.z = r.pos.z
         c.yaw = r.yaw
         c.pitch = r.pitch
+        c.roll = r.roll
         if (!r.wasDriving) this.unpark(r.id)
       } else if (r.wasDriving && r.lastCar && r.lastCar.model) {
         this.unpark(r.id)
@@ -412,7 +437,7 @@ export class RemotePlayers {
         }
       }
       if (!r.visible) continue
-      if (driving) this.putCar(r.model, r.pos.x, r.pos.y, r.pos.z, r.yaw, r.pitch, r.dist, this.fullCars.has(r.id) ? r : null, dt)
+      if (driving) this.putCar(r.model, r.pos.x, r.pos.y, r.pos.z, r.yaw, r.pitch, r.roll, r.dist, this.fullCars.has(r.id) ? r : null, dt)
       else if (!r.char && px < CAP && r.dist < 400) {
         _e.set(0, r.yaw, 0)
         this.proxies.setMatrixAt(px++, _m.compose(r.pos, _q.setFromEuler(_e), _s))
@@ -430,7 +455,7 @@ export class RemotePlayers {
     this.tagged.length = 0
     for (const c of this.parked) {
       _p.set(c.x, c.y, c.z)
-      this.putCar(c.model, c.x, c.y, c.z, c.yaw, c.pitch, _p.distanceTo(eye), this.fullCars.has(-1 - c.owner) ? -1 - c.owner : null, dt)
+      this.putCar(c.model, c.x, c.y, c.z, c.yaw, c.pitch, c.roll, _p.distanceTo(eye), this.fullCars.has(-1 - c.owner) ? -1 - c.owner : null, dt)
     }
     // full cars not drawn this frame go back to their model's pool
     for (const [key, car] of this.cars) {
@@ -462,7 +487,7 @@ export class RemotePlayers {
   }
 
   /** @param full the driver (a moving car) or the parked key (−1 − owner) when it gets the full model, else null */
-  private putCar(model: number, x: number, y: number, z: number, yaw: number, pitch: number, dist: number, full: Remote | number | null, dt: number): void {
+  private putCar(model: number, x: number, y: number, z: number, yaw: number, pitch: number, roll: number, dist: number, full: Remote | number | null, dt: number): void {
     if (dist > CAR_FAR) return
     const s = this.carSet(model)
     if (!s) return
@@ -483,10 +508,10 @@ export class RemotePlayers {
       this.usedCars.add(key)
       const r = typeof full === 'number' ? null : full
       const f = r?.flags ?? 0
-      car.update(dt, _p.set(x, y, z), yaw, pitch, r?.fwd ?? 0, r?.yawRate ?? 0, (f & Flags.FLYING) !== 0, (f & Flags.BOAT) !== 0, (f & Flags.LIGHTS) !== 0, (f & Flags.BRAKING) !== 0, this.darkness)
+      car.update(dt, _p.set(x, y, z), yaw, pitch, roll, r?.fwd ?? 0, r?.yawRate ?? 0, (f & Flags.FLYING) !== 0, (f & Flags.BOAT) !== 0, (f & Flags.LIGHTS) !== 0, (f & Flags.BRAKING) !== 0, this.darkness)
       return
     }
-    _e.set(pitch, yaw, 0)
+    _e.set(pitch, yaw, -roll)
     _m.compose(_p.set(x, y, z), _q.setFromEuler(_e), _s)
     if (dist < CAR_MID) {
       if (s.midN < CAP) s.mid.setMatrixAt(s.midN++, _m)

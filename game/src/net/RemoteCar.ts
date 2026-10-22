@@ -123,10 +123,10 @@ export class RemoteCar {
    * Pose it: chassis at `pos` (car origin), `yaw` / `pitch`; `fwd` = signed forward speed (m/s), `yawRate` (rad/s);
    * `flags` the protocol's (FLYING, BOAT, LIGHTS, BRAKING); `darkness` 0 day … 1 night (the lamps).
    */
-  update(dt: number, pos: THREE.Vector3, yaw: number, pitch: number, fwd: number, yawRate: number, flying: boolean, boat: boolean, lights: boolean, braking: boolean, darkness: number): void {
+  update(dt: number, pos: THREE.Vector3, yaw: number, pitch: number, roll: number, fwd: number, yawRate: number, flying: boolean, boat: boolean, lights: boolean, braking: boolean, darkness: number): void {
     const vm = this.vm
     this.root.position.copy(pos)
-    this.root.rotation.set(pitch, yaw, 0, 'YXZ')
+    this.root.rotation.set(pitch, yaw, -roll, 'YXZ') // (roll + = right side down)
     this.tyreU.uGroundY.value = pos.y
     this.time += dt
     this.fly = flying ? Math.min(1, this.fly + dt / FLY_TIME) : Math.max(0, this.fly - dt / FLY_TIME)

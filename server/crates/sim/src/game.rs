@@ -649,7 +649,14 @@ impl Match {
             return;
         }
         if !v.enter {
-            if let Some(hc) = p.car.as_mut() {
+            // model 0: the car goes on without the server (a boat / a flight, client-simulated) — out of the world;
+            // else they got out: it stays, parked
+            if v.model == 0 {
+                if let Some(old) = p.car.take() {
+                    ph.bury(old.car);
+                    ph.sweep();
+                }
+            } else if let Some(hc) = p.car.as_mut() {
                 hc.driving = false;
             }
             return;
@@ -700,8 +707,19 @@ impl Match {
     pub fn on_action(&mut self, id: u16, kind: ActionKind, target: u16) {
         let Some(p) = self.players.get_mut(&id) else { return };
         match kind {
-            // the car is set down upright near where it was (≤ 9 m): skip one distance check
-            ActionKind::RespawnVehicle => p.grace = true,
+            // the car is set down upright near where it was (≤ 9 m): skip one distance check — or, driving a
+            // server-simulated car, the server sets it down upright where it is (the game's R)
+            ActionKind::RespawnVehicle => {
+                p.grace = true;
+                if let (Some(hc), Some(ph)) = (p.car.as_mut(), self.physics.as_mut())
+                    && hc.driving
+                {
+                    let t = hc.car.position(&ph.world);
+                    let heading = hc.car.heading(&ph.world);
+                    let y = ph.ground(t[0] as f32, t[2] as f32) as f64;
+                    hc.car.place(&mut ph.world, t[0], y, t[2], heading, 0.0);
+                }
+            }
             ActionKind::Ready => {}
             ActionKind::Spectate => {
                 if !p.alive {

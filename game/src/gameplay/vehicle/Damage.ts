@@ -73,6 +73,12 @@ export class Damage {
     this.hit(_d, sev)
   }
 
+  /** The velocity was changed by something that isn't a hit (the server's correction of a predicted car): shift the
+   *  history by it, so the jump is not read as an impact. */
+  rebase(dx: number, dy: number, dz: number): void {
+    for (const v of this.hist) (v.x += dx), (v.y += dy), (v.z += dz)
+  }
+
   /** Apply a hit from car-space direction `dir` (unit, centre → contact) with severity `sev` (m/s over the threshold). */
   hit(dir: THREE.Vector3, sev: number): void {
     const amount = Math.min(MAX_HIT, sev * PER_MS)

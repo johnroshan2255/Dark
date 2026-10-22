@@ -199,7 +199,13 @@ impl RoomPhysics {
 }
 
 /// A person's server-simulated car (stage D): the server owns its state; the driver's [`Input`] frames are its
-/// controls, applied in order, one per physics step. Never a pose from the client.
+/// controls. Never a pose from the client.
+///
+/// FRAME CLOCK: physics step k applies frame k — the numbering the client predicted with — so the state acked for
+/// frame k is comparable with the client's prediction of frame k. A frame not here in time is stood in for by the
+/// last controls (it still counts as frame k; arriving late it is dropped): a jittery link costs a step of stale
+/// controls, not a shift of every later frame. The clock starts BUFFER frames behind the newest frame and re-aligns
+/// when the client stalls (its frames all arrive behind the clock) or a burst piles up after a network pause.
 pub struct HumanCar {
     pub car: Truck,
     /// Wire model (catalogue index + 1).
@@ -208,23 +214,31 @@ pub struct HumanCar {
     pub driving: bool,
     /// The driver's settings (`Input.opts`).
     pub opts: u8,
-    /// Frames not yet applied (seq, frame), oldest first.
-    queue: std::collections::VecDeque<(u32, InputFrame)>,
-    /// Highest frame seq queued or applied (frames at or below it are duplicates / stale).
-    high: u32,
+    /// Frames received, not yet applied, by seq.
+    queue: std::collections::BTreeMap<u32, InputFrame>,
+    /// The frame the next physics step applies (0 = not aligned yet).
+    next: u32,
+    /// Newest frame received.
+    newest: u32,
     /// The last frame applied, and its seq (acked in `VehicleState`).
     last: InputFrame,
     pub ack: u32,
-    /// Physics steps without a fresh frame (the last one repeats ≤ STARVE_REPEAT, then the controls go neutral).
+    /// Steps in a row stood in for (the last controls repeat ≤ STARVE_REPEAT, then the controls go neutral).
     starved: u32,
-    /// Frames dropped (lost in transit beyond the redundancy, or trimmed when the client ran ahead) — metrics.
-    pub lost: u64,
+    /// Frames that arrived after their step (stood in for) and re-alignments — metrics.
+    pub late: u64,
+    pub resyncs: u64,
+    /// Recent frames whose step went by without them.
+    stood_in: std::collections::VecDeque<u32>,
 }
 
 /// Steps a missing frame is covered by repeating the last one (0.25 s at 60 Hz).
 const STARVE_REPEAT: u32 = 15;
-/// More frames waiting than this: the client is ahead (a burst after a stall) — the oldest are skipped.
-const QUEUE_MAX: usize = 6;
+/// The jitter buffer: the clock runs this many frames behind the newest frame received.
+const BUFFER: u32 = 3;
+/// Re-align when the newest frame is this far behind the clock (the client stalled) or ahead of it (a burst).
+const RESYNC_BEHIND: u32 = 12;
+const RESYNC_AHEAD: u32 = 20;
 
 impl HumanCar {
     pub fn new(car: Truck, model: u8) -> Self {
@@ -234,38 +248,52 @@ impl HumanCar {
             driving: true,
             opts: 2 | drive_opts::OFFROAD,
             queue: Default::default(),
-            high: 0,
+            next: 0,
+            newest: 0,
             last: InputFrame::default(),
             ack: 0,
             starved: 0,
-            lost: 0,
+            late: 0,
+            resyncs: 0,
+            stood_in: Default::default(),
         }
     }
 
-    /// Queue an input packet's frames: in order, duplicates (the redundant copies) and stale ones dropped.
+    /// Take an input packet's frames (the redundant copies of frames already here or past are ignored).
     pub fn push(&mut self, input: &Input) {
         self.opts = input.opts;
         let n = input.frames.len() as i64;
         for (k, f) in input.frames.iter().enumerate() {
             // (frames are numbered from 1; a first packet's redundant copies can reach below that)
             let seq = input.seq as i64 - (n - 1 - k as i64);
-            if seq < 1 || seq > u32::MAX as i64 || seq as u32 <= self.high {
+            if seq < 1 || seq > u32::MAX as i64 {
                 continue;
             }
             let seq = seq as u32;
-            if self.high != 0 && seq > self.high + 1 {
-                self.lost += (seq - self.high - 1) as u64; // (gone: beyond the redundancy)
+            self.newest = self.newest.max(seq);
+            if self.next != 0 && seq < self.next {
+                if let Some(i) = self.stood_in.iter().position(|&s| s == seq) {
+                    self.stood_in.remove(i);
+                    self.late += 1; // (its step went by on the last controls)
+                }
+                continue;
             }
-            self.high = seq;
-            self.queue.push_back((seq, *f));
+            self.queue.entry(seq).or_insert(*f);
         }
-        while self.queue.len() > 16 {
-            self.queue.pop_front();
-            self.lost += 1;
+        // align / re-align the clock to the stream
+        if self.next == 0 && self.newest != 0 {
+            self.next = self.newest.saturating_sub(BUFFER - 1).max(1);
+        } else if self.newest + RESYNC_BEHIND < self.next || self.newest > self.next + RESYNC_AHEAD {
+            self.next = self.newest.saturating_sub(BUFFER - 1).max(1);
+            self.resyncs += 1;
+        }
+        self.queue.retain(|&s, _| s >= self.next);
+        while self.queue.len() > 64 {
+            self.queue.pop_first();
         }
     }
 
-    /// The controls for the next physics step (the driver's next frame; parked when nobody is in it).
+    /// The controls for the next physics step (frame `next`; parked when nobody is in it).
     pub fn next_controls(&mut self) -> Controls {
         if !self.driving {
             let rolling = self.car.speed.abs() > 1.5;
@@ -275,20 +303,21 @@ impl HumanCar {
                 ..Default::default()
             };
         }
-        while self.queue.len() > QUEUE_MAX {
-            let (seq, f) = self.queue.pop_front().expect("non-empty");
-            (self.ack, self.last) = (seq, f);
-            self.lost += 1;
+        if self.next == 0 {
+            return Controls::default(); // (nothing received yet)
         }
-        let f = match self.queue.pop_front() {
-            Some((seq, f)) => {
+        let f = match self.queue.remove(&self.next) {
+            Some(f) => {
                 self.starved = 0;
-                self.ack = seq;
                 self.last = f;
                 f
             }
             None => {
                 self.starved += 1;
+                if self.stood_in.len() >= 32 {
+                    self.stood_in.pop_front();
+                }
+                self.stood_in.push_back(self.next);
                 if self.starved <= STARVE_REPEAT {
                     // (one-shot buttons don't repeat)
                     InputFrame {
@@ -300,6 +329,8 @@ impl HumanCar {
                 }
             }
         };
+        self.ack = self.next;
+        self.next += 1;
         let d = &mut self.car.drivetrain;
         d.aids = match self.opts & drive_opts::AIDS_MASK {
             0 => AidLevel::Off,
@@ -934,7 +965,12 @@ mod human_cars {
             Ok(ServerMsg::Vehicle(v)) => v,
             other => panic!("{other:?}"),
         };
-        assert!(v.ack <= seq, "ack {} beyond the newest frame {seq}", v.ack);
+        // (the frame clock runs on: this tick's ≤ 8 physics steps stood in for frames not sent — never re-applied)
+        assert!(
+            v.ack <= seq + 8,
+            "ack {} beyond the newest frame {seq} + this tick's steps",
+            v.ack
+        );
         let after = m.pose_of(1).unwrap().pos;
         let d = ((after[0] - before[0]).powi(2) + (after[2] - before[2]).powi(2)).sqrt();
         assert!(d < 3.0, "replayed packets moved the car {d:.1} m in one tick");

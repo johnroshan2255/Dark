@@ -72,7 +72,7 @@ import { TREE_FADE } from '../world/WorldManager'
 import { createStore, type GameStateShape, type Store } from './GameState'
 import { NetClient, loadPlayerName, loadSetup, wireModel, type LocalPose, type RoomSetup } from '../net/NetClient'
 import { RemotePlayers } from '../net/RemotePlayers'
-import { Flags, NO_PLAYER } from '../net/protocol'
+import { Buttons, Flags, NO_PLAYER } from '../net/protocol'
 import { loadSettings, saveSettings, type Settings } from './Settings'
 import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../world/Biomes'
 import { BIOMES } from '../world/biomes/BiomeDefs'
@@ -394,6 +394,14 @@ export class Game {
     if (pal?.dirt) globalUniforms.uRoadSoil.value.set(pal.dirt[0] * 0.62, pal.dirt[1] * 0.6, pal.dirt[2] * 0.6, 1)
     this.envRoot.add(this.remotes.root)
     this.net = new NetClient(this)
+    // (after Destruction's: every fixed step's predicted car state for the server-simulated car)
+    {
+      const prev = physics.afterStep
+      physics.afterStep = () => {
+        prev?.()
+        this.net.vehicle.afterStep()
+      }
+    }
     // Not in the water's mirror: the water itself, near-field grass, particles, the torch beam, debug helpers.
     this.envRoot.add(this.tyreMarks.mesh)
     this.reflection.hide.push(this.tyreMarks.mesh, this.water.mesh, this.world.grass.root, this.drift.points, this.vehicleFx.points, this.rain.points, this.ash.points, this.beam.mesh, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
@@ -459,10 +467,10 @@ export class Game {
       this.car.toggleFly()
     })
     // Simulation handling: X / Z gears (manual gearbox), Q low range, K locking differentials.
-    i.onPress('KeyX', () => this.car.shift(1))
-    i.onPress('KeyZ', () => this.car.shift(-1))
-    i.onPress('KeyQ', () => this.car.toggleLowRange())
-    i.onPress('KeyK', () => this.car.cycleLockers())
+    i.onPress('KeyX', () => (this.car.shift(1), this.net.vehicle.press(Buttons.SHIFT_UP)))
+    i.onPress('KeyZ', () => (this.car.shift(-1), this.net.vehicle.press(Buttons.SHIFT_DOWN)))
+    i.onPress('KeyQ', () => (this.car.toggleLowRange(), this.net.vehicle.press(Buttons.LOW_RANGE)))
+    i.onPress('KeyK', () => (this.car.cycleLockers(), this.net.vehicle.press(Buttons.LOCKERS)))
     i.onPress('BracketLeft', () => this.updateSettings({ resolution: Math.max(0.5, this.post.renderScale - 0.1) }))
     i.onPress('BracketRight', () => this.updateSettings({ resolution: Math.min(1, this.post.renderScale + 0.1) }))
     // F7: cycle tier manually. F8: back to auto quality.
@@ -897,6 +905,7 @@ export class Game {
           this.physics.advance(dt, (fdt) => {
             p.fixedUpdate(fdt)
             this.car.fixedUpdate(fdt)
+            this.net.vehicle.beforeStep()
             this.bike.fixedUpdate(fdt)
           })
           p.interpolate(this.physics.alpha)

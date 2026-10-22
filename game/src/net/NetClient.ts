@@ -4,6 +4,9 @@ import {
   type ServerMsg,
 } from './protocol'
 import { BIKE_MODEL } from './RemotePlayers'
+import { VehicleSync } from './VehicleSync'
+import { RemoteColliders, type RemoteCarPose } from './RemoteColliders'
+import type { ClientMsg } from './protocol'
 import type { Game } from '../game/Game'
 
 /**
@@ -16,6 +19,8 @@ import type { Game } from '../game/Game'
  * Identity: a guest session per browser (token cached in localStorage), with the player's chosen name.
  * In a room: the local pose goes out at SEND_HZ (the car's when driving), snapshots come in for RemotePlayers, a
  * `Correction` puts the player back where the server says; roster, room settings and owner go to the UI store.
+ * In a room whose server simulates the cars (RoomFlags.PHYSICS) the car is driven by INPUTS instead of poses and
+ * reconciled with the server's state (VehicleSync).
  */
 const SEND_HZ = 30
 const PING_EVERY = 2000
@@ -124,8 +129,24 @@ export class NetClient {
   private clock: number | null = null
   private names = new Map<number, string>()
   private joining = false
+  /** The room's server simulates the cars (RoomFlags.PHYSICS). */
+  private physicsRoom = false
+  /** Our car when the server simulates it: inputs out, prediction + reconciliation. */
+  readonly vehicle: VehicleSync
+  /** …and the remote cars as boxes it can hit (where the server's will be). */
+  private readonly colliders: RemoteColliders
+  private readonly carPoses: RemoteCarPose[] = []
+  /** Round trip (ms, smoothed from pings). */
+  rtt = 100
 
-  constructor(private readonly game: Game) {}
+  constructor(private readonly game: Game) {
+    this.vehicle = new VehicleSync(game, (m) => this.sendMsg(m))
+    this.colliders = new RemoteColliders(game.physics)
+  }
+
+  private sendMsg(m: ClientMsg): void {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(encodeClient(m))
+  }
 
   private get state(): NetState {
     return this.game.store.get().net
@@ -287,6 +308,8 @@ export class NetClient {
     }
     this.game.remotes.clear()
     this.names.clear()
+    this.physicsRoom = false
+    this.vehicle.active = false
     this.set({ status: this.state.status === 'off' ? 'off' : 'offline', room: null, players: [], me: NO_PLAYER, owner: NO_PLAYER })
   }
 
@@ -300,6 +323,8 @@ export class NetClient {
     this.epoch = 0
     this.clock = null
     this.names.clear()
+    this.physicsRoom = false
+    this.vehicle.active = false
     this.set({ room: seat.room, me: seat.player_id, owner: NO_PLAYER, players: [] })
     ws.onopen = () => ws.send(encodeClient({ t: 'hello', protocol: PROTOCOL_VERSION, ticket: seat.ticket }))
     ws.onmessage = (ev) => {
@@ -316,6 +341,8 @@ export class NetClient {
       if (this.ws !== ws) return
       this.ws = null
       this.joining = false
+      this.physicsRoom = false
+      this.vehicle.active = false
       this.game.remotes.clear()
       this.set({ status: 'offline', room: null, players: [], me: NO_PLAYER, owner: NO_PLAYER, message: this.state.message ?? 'Disconnected from the room' })
     }
@@ -332,6 +359,8 @@ export class NetClient {
       }
       case 'room': {
         const r = m.room
+        this.physicsRoom = (r.flags & RoomFlags.PHYSICS) !== 0
+        this.game.remotes.serverPhysics = this.physicsRoom
         const room = this.state.room
         if (room) {
           this.set({
@@ -360,6 +389,10 @@ export class NetClient {
         this.game.remotes.apply(m.serverTime, m.entities, m.removed)
         break
       }
+      case 'vehicleState': {
+        this.vehicle.onState(m.state)
+        break
+      }
       case 'correction': {
         this.epoch = m.epoch
         this.game.netCorrect(cmToM(m.pos[0]), cmToM(m.pos[1]), cmToM(m.pos[2]), u16ToYaw(m.yaw))
@@ -372,7 +405,9 @@ export class NetClient {
         break
       }
       case 'pong': {
-        this.syncClock(m.serverTime + (performance.now() - m.clientTime) / 2)
+        const rtt = performance.now() - m.clientTime
+        if (rtt >= 0 && rtt < 5000) this.rtt += (rtt - this.rtt) * 0.2
+        this.syncClock(m.serverTime + rtt / 2)
         break
       }
       case 'kick': {
@@ -410,9 +445,18 @@ export class NetClient {
       this.lastPing = now
       ws.send(encodeClient({ t: 'ping', clientTime: Math.floor(now) >>> 0 }))
     }
+    this.vehicle.update(this.physicsRoom)
+    // the remote cars our predicted car can hit: where they will be when the server runs our current frame
+    // (half a round trip from now, plus its 3-frame jitter buffer)
+    const sNow = this.serverNow()
+    if (this.vehicle.active && sNow !== null) {
+      this.colliders.update(this.game.remotes.carPoses(this.carPoses), this.game.car.pos, sNow + this.rtt / 2 + 50, dt)
+    } else this.colliders.clear()
     this.sendAcc += dt
     if (this.sendAcc < 1 / SEND_HZ) return
     this.sendAcc = Math.min(this.sendAcc - 1 / SEND_HZ, 1 / SEND_HZ)
+    // driving a server-simulated car: its inputs, never its pose
+    if (this.vehicle.active) return this.vehicle.flush()
     const p = this.game.localPose()
     this.seq = (this.seq + 1) >>> 0
     ws.send(

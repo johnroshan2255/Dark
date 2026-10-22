@@ -1184,6 +1184,11 @@ export class Car {
   /** A crash hit the car: damage added (%), world contact point, severity (m/s over the threshold). */
   onDamage: ((amount: number, at: THREE.Vector3, severity: number) => void) | null = null
   private readonly damage: Damage
+
+  /** The car's velocity was set by the server's correction (net/VehicleSync), not by a hit: no crash damage. */
+  velocityCorrected(dx: number, dy: number, dz: number): void {
+    this.damage.rebase(dx, dy, dz)
+  }
   private readonly glassGeo: THREE.BufferGeometry
 
   /** 100 %: the fuel goes up — anyone inside is thrown out, the car is thrown up, it burns, then smoulders black. */

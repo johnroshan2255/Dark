@@ -629,6 +629,12 @@ room pill (toolbar / under the minimap on touch) opens the room card: code, play
   fps uncapped (M4, ULTRA, desktop and phone viewports), +16–20 draws.
 - ROOM BOTS (`../server/crates/sim/src/bots.rs`): server-run players the owner sets (0–100, room settings); they
   cruise, race, convoy, explore, boat, fly, stroll and hang out; the client only draws them. `scripts/bots-probe.mjs`.
+- SERVER-SIMULATED CARS (2026-10-22, protocol v4, `../server/docs/VEHICLE_PHYSICS.md`): in map rooms the server
+  runs the game's car model (a Rust port, golden-tested against this one) for every bot and for each person driving
+  in Simulation handling. `net/VehicleSync.ts` sends the car's controls per physics step (`Input`), keeps predicting
+  locally (the same model) and reconciles with the server's `VehicleState`; `net/RemoteColliders.ts` puts the nearest
+  remote cars into our physics world as boxes where the server's will be. Boats, flights, arcade, walking, the BMX and
+  endless worlds stay client-simulated and validated.
 - `?net=0` plays offline (screenshot / benchmark runs teleport — the server would correct that).
 - Offline (no server) the game plays on alone; the room UI says the server can't be reached. Server URL:
   `VITE_DARK_SERVER`, else this host on port 7350.

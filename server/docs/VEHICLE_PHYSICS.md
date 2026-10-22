@@ -98,8 +98,8 @@ game/
 | A | this audit + plan | written, reviewed | **done** |
 | B | `dark-vehicle`: tyre + drivetrain port, one authoritative car on a heightfield | Drivetrain step-by-step matches TS golden; full car trajectory (accelerate, brake, turn) matches TS within tolerance; suspension over bumps, stable on slopes, two-car collision tests; benchmark 1 / 10 / 100 cars on the island heightfield recorded here | **done** (§6) |
 | C | bots drive the physical car | road following under physics (no teleports), 100-bot room benchmark (ms per tick, per vehicle, ray/solver split) | **done** (§7) |
-| D | human inputs authoritative (protocol v4) | input validation, collisions bot ⇄ human ⇄ human on the server, join / leave / late join | — |
-| E | client prediction + reconciliation + remote interpolation | headless drive with injected latency / loss: corrections measured, steering responsive | — |
+| D | human inputs authoritative (protocol v4) | input validation, collisions bot ⇄ human ⇄ human on the server, join / leave / late join | **done** (§8) |
+| E | client prediction + reconciliation + remote interpolation | headless drive with injected latency / loss: corrections measured, steering responsive | **done** (§8), with the world-parity gap below |
 | F | profiling + impairment tests + docs | multi-room benchmark, overload strategy, limitations listed | — |
 
 ## 6. Stage B results (measured 2026-10-22, Apple M4, release build)
@@ -216,3 +216,52 @@ landing's suspension), cars on the 53 m high forest_far bridge deck stay on it; 
   with 4× CPU throttle CPU 4.4 / GPU 4.6 ms (with 100 people too), ULTRA desktop CPU 2.4 / GPU 8.9 ms, 158 draws.
 - **Known gap until stage D:** the player's own car is still client-simulated and does not collide with the bots
   (it passes through them); stage D puts the human cars into the same server world.
+
+## 8. Stages D + E results (2026-10-22)
+
+**Server (D).** In map rooms (`room_flags::PHYSICS`, server-set) a person's car is a `HumanCar` (`sim/src/physics.rs`)
+in the same Rapier world as the bots' cars, driven only by `Input` frames (protocol v4, `docs/PROTOCOL.md`):
+- *Frame clock:* physics step k applies frame k (the numbering the client predicts with). A missing frame is stood in
+  for by the last controls (≤ 0.25 s, then neutral) and dropped if it arrives late; the clock starts 3 frames behind
+  the newest and re-aligns when the stream stalls (12 behind) or bursts (20 ahead). (The first version queued frames
+  and repeated without consuming the frame number: on a 60 ± 20 ms link every gap shifted all later frames — median
+  prediction error 28 cm, p95 1.2 m; with the clock 2.5 cm / 4 cm.)
+- *Validation:* frames clamped by type; duplicates and stale frames ignored; client `State` poses never move a
+  driven car; `Vehicle` enter only where the player is (≤ 15 m, on the ground) — otherwise the car appears where the
+  server has them; leaving / kick takes the car out; `RespawnVehicle` sets it upright where it is.
+- *Out:* the driver's pose is the car's (others see it with roll); `VehicleState` to the driver each tick through a
+  latest-only slot (`Conn.veh`), never the bounded reliable lane.
+- Tests (`physics::human_cars`): inputs drive the car and are acked; duplicate / old packets apply once; a client
+  can't place its car; a silent client's car coasts to a stop; leaving removes the car; a bot-driven car rams a parked
+  human car and pushes it 32 m.
+
+**Client (E).** `game/src/net/VehicleSync.ts`: the local car keeps running the game's model (instant steering); each
+fixed step's controls become a numbered frame and its predicted body state is kept; each `VehicleState` is compared
+with the prediction for its frame — < 2 cm ignored, else 30 % folded in per state (position, rotation, velocity, and
+into the later predictions so it's never counted twice), > 3 m / 0.6 rad snapped (visible). Velocity corrections are
+not crash damage (`Car.velocityCorrected`; before, corrections wrecked the car). `net/RemoteColliders.ts`: the 8
+nearest remote cars as dynamic 1.8 t boxes in the client's world, steered along each remote's newest snapshot
+extrapolated to when the server runs our current frame (half an RTT + the 3-frame buffer): the predicted car hits
+them where the server's will (kinematic boxes had infinite mass: a head-on reversed our car — twice the server's
+velocity change). Remote cars draw the server's roll; in PHYSICS rooms bot cars are no longer set on the client's
+ground (their height / pitch / roll are physics on the same grid).
+
+**Measured** (headless Chrome driving the island's roads at ~45 km/h, `auth-drive` probe, link impaired in the page):
+
+| link | bots | prediction error at the acked frame p50 / p95 / p99 | snaps | fps |
+|---|---|---|---|---|
+| localhost | 0 | 2.8 / 4.6 / 43 cm | 0 | 60 |
+| 60 ± 20 ms each way | 0 | 2.5 / 4.1 cm / 1.3 m (start-up) | 0 | 60 |
+| 60 ± 20 ms, 5 % input packets dropped | 0 | 2.9 / 4.4 / 5.7 cm | 0 | 60 |
+| 60 ± 20 ms, 5 % dropped | 100 | 2.4–2.8 cm / 8–37 cm / 60–90 cm | 0–1 | 60 |
+
+**The open gap — world parity.** The client's world has collision geometry the server's doesn't: the road RIBBON
+(gutters, wheel ruts: a trimesh over the terrain), trees, rocks, rock formations, map set pieces, the desert pools.
+Driving in the lane near a road edge, the client car dips into a gutter and its body scrapes the ribbon while the
+server car rolls on the smooth heightfield: the two drift apart, the correction pulls back, and the scrapes add
+client-side crash damage (measured: every non-car hit in the 100-bot runs touched the ribbon). Next milestone:
+export the client generator's static colliders per map (`game/scripts/export-colliders.mjs` → `colliders.bin`;
+deterministic, the same world) into `MapPhysics`, then re-measure — and move crash damage to the server.
+
+**Still client-side (validated poses, v1):** walking, the BMX, boats, flights, arcade handling, endless-world rooms;
+garage tuning (the server runs the stock setup); weather wetness (server ground is dry).

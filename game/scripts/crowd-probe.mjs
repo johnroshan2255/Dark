@@ -36,7 +36,7 @@ await page.evaluate((nc, np) => {
       const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r
       const vx = -Math.sin(a) * r * w, vz = Math.cos(a) * r * w
       const yaw = Math.atan2(-vx, -vz)
-      ents.push({ id: 0xc000 + k, flags: car ? 33 : 0, model: car ? 1 + (k % 3) : 0, pos: [Math.round(x * 100), Math.round(g.world.fields.height(x, z) * 100), Math.round(z * 100)], yaw: Math.round(((yaw / (Math.PI * 2)) % 1 + 1) % 1 * 65535), pitch: 0, vel: [Math.round(vx * 100), 0, Math.round(vz * 100)] })
+      ents.push({ id: 0xc000 + k, flags: car ? 33 : 0, model: car ? 1 + (k % 3) : 0, pos: [Math.round(x * 100), Math.round(g.world.fields.height(x, z) * 100), Math.round(z * 100)], yaw: Math.round(((yaw / (Math.PI * 2)) % 1 + 1) % 1 * 65535), pitch: 0, roll: 0, vel: [Math.round(vx * 100), 0, Math.round(vz * 100)] })
     }
     R.apply(t, ents, [])
   }
