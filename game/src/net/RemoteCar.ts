@@ -21,6 +21,7 @@ const FLY_TIME = 1.2
 const LOCK = 0.55
 const WHEEL_TURN = 2.35
 
+const _hk = new THREE.Matrix4()
 export class RemoteCar {
   readonly root = new THREE.Group()
   private readonly tyreU = tyreUniforms()
@@ -117,6 +118,28 @@ export class RemoteCar {
     this.lampMat = lamps.mat
     this.hull = new BoatHull(vm, this.mat)
     this.root.add(this.hull.root)
+    // tow hooks, stowed (TowSystem moves one to its rope's end: placeHook)
+    for (const [end, h] of [['F', vm.hooks.front], ['R', vm.hooks.rear]] as const) {
+      if (!h) continue
+      const m = add(new THREE.InstancedMesh(h.geo, this.mat, 1), true) as THREE.InstancedMesh
+      m.setMatrixAt(0, new THREE.Matrix4().setPosition(...h.eye))
+      this.hookMeshes[end] = m
+      this.hookEye[end] = h.eye
+    }
+  }
+
+  private readonly hookMeshes: Record<'F' | 'R', THREE.InstancedMesh | null> = { F: null, R: null }
+  private readonly hookEye: Record<'F' | 'R', [number, number, number] | null> = { F: null, R: null }
+
+  /** A tow hook at its rope's end (`world`: the hook's eye frame) or back on the car (null). */
+  placeHook(end: 'F' | 'R', world: THREE.Matrix4 | null): void {
+    const m = this.hookMeshes[end], eye = this.hookEye[end]
+    if (!m || !eye) return
+    if (world) {
+      this.root.updateMatrixWorld()
+      m.setMatrixAt(0, _hk.copy(this.root.matrixWorld).invert().multiply(world))
+    } else m.setMatrixAt(0, _hk.makeTranslation(...eye))
+    m.instanceMatrix.needsUpdate = true
   }
 
   /**

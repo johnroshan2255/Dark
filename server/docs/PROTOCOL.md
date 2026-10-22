@@ -1,4 +1,7 @@
-# DARK wire protocol — version 4
+# DARK wire protocol — version 5
+
+v5 (2026-10-22) added TOW ROPES (the winch hooks every car carries front and rear): `Tow` (client), `Ropes`
+(server); the server owns the ropes in physics rooms and pulls the cars it simulates with them (`sim/src/tow.rs`).
 
 v4 (2026-10-22) added SERVER-SIMULATED CARS (map rooms, `docs/VEHICLE_PHYSICS.md`): `Input` and `Vehicle` (client),
 `VehicleState` (server), `roll` in every snapshot entity (28 B), room flag `PHYSICS`.
@@ -37,6 +40,7 @@ update both, bump `PROTOCOL_VERSION`, regenerate the vectors (`UPDATE_GOLDEN=1 c
 | `0x05` | Leave | — | quitting |
 | `0x06` | Input | `seq u32` (the newest frame), `opts u8` (bits 0–1 aids 0 off · 1 std · 2 full, 2 OFFROAD assist, 3 MANUAL gearbox), `n u8` (1–8), n × frame (5 B: `steer i8`, `throttle i8`, `foot_brake u8`, `buttons u8`, `lift i8`), oldest first | driving a server-simulated car: one frame per 1/60 s physics step, sent ~30 Hz with the last 4 frames (redundancy) |
 | `0x07` | Vehicle | `enter u8`, `model u8`, `pos`, `yaw u16` | into the server-simulated car (the car of `model` standing at `pos`), or out (`enter` 0: `model` 0 = the car goes on as a boat / flight, else it is left parked) |
+| `0x08` | Tow | `op u8` (0 take · 1 hang on a fixed point · 2 hang on a car · 3 let go · 4 unhook · 5 winch), `car u16`, `end u8` (0 front · 1 rear), `car2 u16`, `end2 u8` (the winch: 1 on / 0 off), `pos` (the fixed point, cm) — 20 B | tow ropes (physics rooms): cars by their driver / owner's id; the server checks reach (hook 1.8 m + 1.2 m slack), the 25 m line, a static collider at a fixed point, a free end, and that someone else's car has a driver |
 
 Input `buttons`: 0 HANDBRAKE · 1 BOOST · 2 BRAKE (key down) · 3 LIGHTS · one-shots (the frame the key went down): 4 SHIFT_UP ·
 5 SHIFT_DOWN · 6 LOW_RANGE · 7 LOCKERS. Steer / throttle / lift are −127…127 (stick and one-axis pedal, + = right / gas / up).
@@ -60,6 +64,7 @@ Input `buttons`: 0 HANDBRAKE · 1 BOOST · 2 BRAKE (key down) · 3 LIGHTS · one
 | `0x8b` | Kick | `reason u8` (1 BadTicket · 2 VersionMismatch · 3 MatchFull · 4 MatchOver · 5 Cheating · 6 Flooding · 7 Malformed · 8 Timeout · 9 ServerShutdown · 10 Duplicate · 11 Kicked by the room owner), `message str` — the socket closes with code 4000 + reason |
 | `0x8c` | Room | `code str`, `name str`, `flags u8` (bit 0 PRIVATE · 1 ROADKILL · 2 FLYING · 3 PHYSICS, server-set: the server simulates the cars), `max_players u16`, `owner u16` (0xffff = none), `bots u8` (server-run players) — on joining a room and whenever its settings or owner change |
 | `0x8d` | VehicleState | `tick u32`, `server_time u32`, `ack u32` (the input frame this state follows), `pos`, `rot` 4 × `i16` (quaternion x y z w × 32 767), `vel`, `angvel` 3 × `i16` (mrad/s), `gear i8`, `engine u16` (rad/s × 10), `omega` 4 × `i16` (wheel spin, rad/s × 10) — 56 B, to the driver of a server-simulated car every tick, latest-only (a slow client gets the newest, never a backlog) |
+| `0x8e` | Ropes | `n u8` (≤ 32), then per rope: `id u16`, `car u16`, `end u8`, `kind u8` (0 in a hand · 1 fixed · 2 on a car), `who u16` (the hand's player / the car), `end2 u8`, `pos` (fixed: cm), `len u16` (line paid out, cm) — 23 B a rope | every tow rope in the room: on a change, every second, 5 Hz while a winch runs, and to a player joining |
 
 ## Flow
 

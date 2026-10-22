@@ -5,7 +5,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { WorldFields } from '../src/world/WorldFields'
-import { decodeClient, decodeServer, encodeClient, encodeServer, Flags, NO_PLAYER, Phase, ProtocolError, RoomFlags, yawToU16, u16ToYaw } from '../src/net/protocol'
+import { decodeClient, decodeServer, encodeClient, encodeServer, Flags, NO_PLAYER, Phase, ProtocolError, RoomFlags, RopeKind, TowEnd, TowOp, yawToU16, u16ToYaw } from '../src/net/protocol'
 
 let failures = 0
 const check = (name: string, ok: boolean, detail = '') => {
@@ -41,6 +41,10 @@ if (!existsSync(path)) {
   check('protocol: input frames', inp.t === 'input' && inp.seq === 4000000123 && inp.frames.length === 2 && inp.frames[0].steer === -127 && inp.frames[0].throttle === 127 && inp.frames[1].footBrake === 255 && inp.frames[1].lift === -127)
   const vs = decodeServer(bytes(golden['s.vehicle_state']))
   check('protocol: vehicle state', vs.t === 'vehicleState' && vs.state.ack === 4000000120 && vs.state.gear === -1 && vs.state.rot[1] === 23170 && vs.state.omega[2] === -32768 && vs.state.engine === 5861)
+  const tw = decodeClient(bytes(golden['c.tow']))
+  check('protocol: tow request', tw.t === 'tow' && tw.tow.op === TowOp.HANG_FIXED && tw.tow.car === 0x8003 && tw.tow.end === TowEnd.REAR && tw.tow.car2 === 17 && tw.tow.pos[0] === -55210)
+  const rp = decodeServer(bytes(golden['s.ropes']))
+  check('protocol: ropes', rp.t === 'ropes' && rp.ropes.length === 2 && rp.ropes[0].kind === RopeKind.FIXED && rp.ropes[0].len === 1250 && rp.ropes[1].kind === RopeKind.CAR && rp.ropes[1].who === 17 && rp.ropes[1].car === 0x8003)
   const sn = decodeServer(bytes(golden['s.snapshot']))
   check('protocol: entity roll', sn.t === 'snapshot' && sn.entities[0].roll === -5000 && sn.entities[1].roll === 32767)
   const ph = decodeServer(bytes(golden['s.phase']))

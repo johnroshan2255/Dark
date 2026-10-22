@@ -6,7 +6,7 @@
  * Full table: `server/docs/PROTOCOL.md`.
  */
 
-export const PROTOCOL_VERSION = 4
+export const PROTOCOL_VERSION = 5
 export const MAX_PACKET = 16 * 1024
 export const MAX_SNAPSHOT_ENTITIES = 96
 /** "Nobody" (e.g. the zone as a killer). */
@@ -88,6 +88,37 @@ export interface VehicleState {
   omega: [number, number, number, number]
 }
 
+/** TOW ROPES (protocol v5): what a `tow` request asks for. */
+export const TowOp = { TAKE: 0, HANG_FIXED: 1, HANG_CAR: 2, DROP: 3, UNHOOK: 4, WINCH: 5 } as const
+/** Car ends on the wire: front / rear hook. */
+export const TowEnd = { FRONT: 0, REAR: 1 } as const
+/** Where a rope's far end is: in a player's hand, on a tree / rock / post, on another car's hook. */
+export const RopeKind = { HAND: 0, FIXED: 1, CAR: 2 } as const
+export const MAX_ROPES = 32
+
+/** A tow-rope request: cars by their driver / owner's entity id; `pos` (cm) = the anchor of HANG_FIXED. */
+export interface TowMsg {
+  op: number
+  car: number
+  end: number
+  car2: number
+  end2: number
+  pos: V3
+}
+
+/** A tow rope in the room: out of `car`'s `end` hook to a hand (`who`), a fixed point (`pos`, cm) or `who`'s car's
+ *  `end2` hook; `len` = line paid out (cm). */
+export interface Rope {
+  id: number
+  car: number
+  end: number
+  kind: number
+  who: number
+  end2: number
+  pos: V3
+  len: number
+}
+
 export interface Zone {
   x: number
   z: number
@@ -120,6 +151,7 @@ export type ClientMsg =
   | { t: 'leave' }
   | { t: 'input'; seq: number; opts: number; frames: InputFrame[] }
   | { t: 'vehicle'; enter: boolean; model: number; pos: V3; yaw: number }
+  | { t: 'tow'; tow: TowMsg }
 
 export type ServerMsg =
   | { t: 'welcome'; protocol: number; playerId: number; matchId: bigint; tickRate: number; map: string; seed: number; spawn: V3; yaw: number; serverTime: number }
@@ -135,11 +167,12 @@ export type ServerMsg =
   | { t: 'kick'; reason: number; message: string }
   | { t: 'room'; room: RoomSettings }
   | { t: 'vehicleState'; state: VehicleState }
+  | { t: 'ropes'; ropes: Rope[] }
 
-const C = { HELLO: 0x01, STATE: 0x02, PING: 0x03, ACTION: 0x04, LEAVE: 0x05, INPUT: 0x06, VEHICLE: 0x07 } as const
+const C = { HELLO: 0x01, STATE: 0x02, PING: 0x03, ACTION: 0x04, LEAVE: 0x05, INPUT: 0x06, VEHICLE: 0x07, TOW: 0x08 } as const
 const S = {
   WELCOME: 0x81, SNAPSHOT: 0x82, PLAYER_JOINED: 0x83, PLAYER_LEFT: 0x84, PHASE: 0x85, ZONE: 0x86, ELIMINATED: 0x87, MATCH_END: 0x88,
-  CORRECTION: 0x89, PONG: 0x8a, KICK: 0x8b, ROOM: 0x8c, VEHICLE: 0x8d,
+  CORRECTION: 0x89, PONG: 0x8a, KICK: 0x8b, ROOM: 0x8c, VEHICLE: 0x8d, ROPES: 0x8e,
 } as const
 
 export class ProtocolError extends Error {}
@@ -254,6 +287,12 @@ export function encodeClient(m: ClientMsg): Uint8Array<ArrayBuffer> {
       for (const v of m.pos) w.i32(v)
       w.u16(m.yaw)
       break
+    case 'tow': {
+      const t = m.tow
+      w.u8(C.TOW); w.u8(t.op); w.u16(t.car); w.u8(t.end); w.u16(t.car2); w.u8(t.end2)
+      for (const v of t.pos) w.i32(v)
+      break
+    }
   }
   return w.done()
 }
@@ -279,6 +318,7 @@ export function decodeClient(buf: Uint8Array): ClientMsg {
       break
     }
     case C.VEHICLE: m = { t: 'vehicle', enter: r.u8() !== 0, model: r.u8(), pos: r.v3i32(), yaw: r.u16() }; break
+    case C.TOW: m = { t: 'tow', tow: { op: r.u8(), car: r.u16(), end: r.u8(), car2: r.u16(), end2: r.u8(), pos: r.v3i32() } }; break
     default: throw new ProtocolError(`unknown client kind 0x${k.toString(16)}`)
   }
   r.finish()
@@ -339,6 +379,16 @@ export function encodeServer(m: ServerMsg): Uint8Array<ArrayBuffer> {
       for (const x of v.omega) w.i16(x)
       break
     }
+    case 'ropes': {
+      const list = m.ropes.slice(0, MAX_ROPES)
+      w.u8(S.ROPES); w.u8(list.length)
+      for (const q of list) {
+        w.u16(q.id); w.u16(q.car); w.u8(q.end); w.u8(q.kind); w.u16(q.who); w.u8(q.end2)
+        for (const x of q.pos) w.i32(x)
+        w.u16(q.len)
+      }
+      break
+    }
   }
   return w.done()
 }
@@ -385,6 +435,14 @@ export function decodeServer(buf: Uint8Array): ServerMsg {
         },
       }
       break
+    case S.ROPES: {
+      const n = r.u8()
+      if (n > MAX_ROPES) throw new ProtocolError(`${n} ropes > ${MAX_ROPES}`)
+      const ropes: Rope[] = []
+      for (let i = 0; i < n; i++) ropes.push({ id: r.u16(), car: r.u16(), end: r.u8(), kind: r.u8(), who: r.u16(), end2: r.u8(), pos: r.v3i32(), len: r.u16() })
+      m = { t: 'ropes', ropes }
+      break
+    }
     default: throw new ProtocolError(`unknown server kind 0x${k.toString(16)}`)
   }
   r.finish()

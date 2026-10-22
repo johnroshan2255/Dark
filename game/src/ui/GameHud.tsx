@@ -26,6 +26,7 @@ export function GameHud({ game }: { game: Game }) {
   const letters = useRef<(HTMLSpanElement | null)[]>([])
   const hpBar = useRef<HTMLDivElement>(null)
   const prompt = useRef<HTMLDivElement>(null)
+  const hookPrompt = useRef<HTMLDivElement>(null)
   const toast = useRef<HTMLDivElement>(null)
   const lastTreasures = useRef(0)
   const toastUntil = useRef(0)
@@ -182,6 +183,13 @@ export function GameHud({ game }: { game: Game }) {
         const label = prompt.current.lastChild as HTMLElement
         if (label) label.textContent = chest ? 'Open chest' : car ? 'Drive truck' : 'Mount bike'
       }
+      // Tow hook (H): take / hang / let go / unhook on foot, the winch in the car (gameplay/tow/TowSystem).
+      if (hookPrompt.current) {
+        const t = game.tow
+        hookPrompt.current.style.display = t.action ? 'flex' : 'none'
+        const label = hookPrompt.current.lastChild as HTMLElement
+        if (label && label.textContent !== t.label) label.textContent = t.label
+      }
       // Treasure toast: a chest was just opened (CaveSystem.treasures went up).
       if (toast.current) {
         const n = game.caves.treasures
@@ -234,6 +242,10 @@ export function GameHud({ game }: { game: Game }) {
       <div ref={prompt} style={promptStyle}>
         <span style={keyCap}>E</span>
         <span>Mount bike</span>
+      </div>
+      <div ref={hookPrompt} style={{ ...promptStyle, bottom: `calc(${promptStyle.bottom ?? '0px'} + 46px)` }} data-testid="hook-prompt">
+        <span style={keyCap}>H</span>
+        <span />
       </div>
       {strip ? (
         <div style={{ ...stripBox, width: stripW }}>

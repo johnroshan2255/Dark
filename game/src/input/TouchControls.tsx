@@ -21,6 +21,7 @@ export function TouchControls({ game }: { game: Game }) {
   const flying = useStore(game.store, (s) => s.flying)
   const boat = useStore(game.store, (s) => s.boat)
   const lights = useStore(game.store, (s) => s.lights)
+  const hook = useStore(game.store, (s) => s.hookAction ?? null)
   const base = useRef<HTMLDivElement>(null)
   const knob = useRef<HTMLDivElement>(null)
   const moveId = useRef<number | null>(null)
@@ -154,6 +155,16 @@ export function TouchControls({ game }: { game: Game }) {
         <button style={btn} data-testid="btn-bike" onPointerDown={tap('KeyE')}>
           RIDE
         </button>
+        {hook && (
+          // Tow hook (H): a tap on foot (take / hang / let go / unhook); held in the car, the winch reels in.
+          <button
+            style={{ ...btn, background: 'rgba(196,40,28,0.55)' }}
+            data-testid="btn-hook"
+            {...(hook === 'winch' ? hold('KeyH') : { onPointerDown: tap('KeyH') })}
+          >
+            {hook === 'winch' ? 'WINCH' : 'HOOK'}
+          </button>
+        )}
         {driving && (
           // Air suspension / flight: ▲ ▼ lift the body on the ground, climb / sink in the air; FLY ⇄ LAND (L);
           // BOAT ⇄ CAR (O: the hull unfolds — refused in the air, the HUD says "Land first").

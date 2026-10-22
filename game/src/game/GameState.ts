@@ -1,3 +1,4 @@
+import type { TowAction } from '../gameplay/tow/TowSystem'
 import { useSyncExternalStore } from 'react'
 import type { TimeLabel } from '../rendering/lighting/TimeOfDay'
 import type { TierName } from '../rendering/quality/QualityTiers'
@@ -46,6 +47,8 @@ export interface GameStateShape {
   worldReady: boolean
   /** The car's damage 0 … 100 % (on a change only; the HUD's damage bar). */
   carDamage?: number
+  /** What H does right now (gameplay/tow/TowSystem): the hook prompt and the touch HOOK / WINCH button. */
+  hookAction?: TowAction
   /** Catalogue id of the vehicle in the world, and a model download in progress (0..1, or null). */
   vehicle: string
   vehicleLoading: number | null

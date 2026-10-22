@@ -863,6 +863,12 @@ mod human_cars {
 
     /// A room on the island (no bots) with player 1 standing on a road, its spawn (x, y, z, yaw).
     fn room(map: &Arc<MapData>) -> (Match, [f32; 4]) {
+        let r = map.roads.iter().max_by_key(|r| r.pts.len()).unwrap();
+        room_at(map, r.pts[20], r.pts[21])
+    }
+
+    /// The same, the player on the road at `a` facing `b`.
+    fn room_at(map: &Arc<MapData>, a: [f32; 3], b: [f32; 3]) -> (Match, [f32; 4]) {
         let room = RoomSettings {
             code: "DRIVE1".into(),
             name: "d".into(),
@@ -877,9 +883,6 @@ mod human_cars {
         };
         let mut m = Match::new(3, 7, Some(map.clone()), cfg, Some(room), 0);
         m.join(1, "driver").unwrap();
-        // a long straight-ish stretch of road
-        let r = map.roads.iter().max_by_key(|r| r.pts.len()).unwrap();
-        let (a, b) = (r.pts[20], r.pts[21]);
         let yaw = (-(b[0] - a[0])).atan2(-(b[2] - a[2]));
         let at = [a[0], map.height(a[0], a[2]), a[2], yaw];
         // (from the room's start to the road: one move the server allows, like the game's respawn "R")
@@ -1175,6 +1178,317 @@ mod human_cars {
             pushed > 1.0,
             "the human car was not pushed ({pushed:.2} m) — no contact?"
         );
+    }
+
+    /// TOW ROPES on the server: out of the car, take its front hook, tie it to a trunk, back in, hold the winch —
+    /// the server pulls the car toward the tree; the room hears about every step (Ropes).
+    #[test]
+    fn a_winch_on_a_tree_pulls_the_server_car() {
+        use crate::tow::hook_pts;
+        let Some(map) = island() else { return };
+        let Some(st) = map.statics.as_ref() else { return };
+        // a road spot with a trunk 8–14 m off it
+        let trunks: Vec<[f32; 2]> = st
+            .items
+            .iter()
+            .filter(|i| i.shape.as_cylinder().is_some() && !i.breakable)
+            .map(|i| [i.at.x, i.at.z])
+            .collect();
+        let (a, b) = map
+            .roads
+            .iter()
+            .flat_map(|r| r.pts.windows(2).step_by(7).map(|w| (w[0], w[1])))
+            .find(|(a, _)| {
+                trunks
+                    .iter()
+                    .any(|t| (8.0..14.0).contains(&(t[0] - a[0]).hypot(t[1] - a[2])))
+            })
+            .expect("a road by the trees");
+        let (mut m, at) = room_at(&map, a, b);
+        enter(&mut m, at);
+        let now = std::cell::Cell::new(66u64);
+        let tick = |m: &mut Match, n: usize, ropes: &mut Vec<Vec<Rope>>| {
+            for _ in 0..n {
+                now.set(now.get() + 33);
+                m.step(now.get());
+                for o in m.drain() {
+                    if let crate::game::Out::All(ServerMsg::Ropes(r)) = o {
+                        ropes.push(r);
+                    }
+                }
+            }
+        };
+        let mut heard = Vec::new();
+        tick(&mut m, 30, &mut heard);
+        let car = m.pose_of(1).unwrap();
+        m.on_vehicle(
+            1,
+            &VehicleMsg {
+                enter: false,
+                model: 1,
+                pos: [0; 3],
+                yaw: 0,
+            },
+        );
+        // the front hook, world (the car stands where its driver's pose is)
+        let (eye, _) = hook_pts(1, tow_end::FRONT).unwrap();
+        let (s, c) = car.yaw.sin_cos();
+        let (fx, fz) = (-s, -c); // forward
+        let hook = [car.pos[0] + fx * (-eye[2] as f32), car.pos[2] + fz * (-eye[2] as f32)];
+        // walk there, 25 cm a tick (the server checks the pace)
+        let mut seq = 100u32;
+        let mut pos = [car.pos[0] - fz * 1.6, car.pos[2] + fx * 1.6]; // (out beside the door)
+        let mut walk = |m: &mut Match, to: [f32; 2], heard: &mut Vec<Vec<Rope>>| {
+            loop {
+                let (dx, dz) = (to[0] - pos[0], to[1] - pos[1]);
+                let d = dx.hypot(dz);
+                let k = (0.25 / d.max(1e-3)).min(1.0);
+                pos = [pos[0] + dx * k, pos[1] + dz * k];
+                seq += 1;
+                m.on_state(1, &state(seq, [pos[0], map.height(pos[0], pos[1]), pos[1], 0.0], 0));
+                tick(m, 1, heard);
+                if d < 0.3 {
+                    break;
+                }
+            }
+        };
+        walk(&mut m, [hook[0] + fx * 0.6, hook[1] + fz * 0.6], &mut heard);
+        m.on_tow(
+            1,
+            &TowMsg {
+                op: tow_op::TAKE,
+                car: 1,
+                end: tow_end::FRONT,
+                ..Default::default()
+            },
+        );
+        tick(&mut m, 2, &mut heard);
+        assert!(
+            heard
+                .last()
+                .is_some_and(|r| r.len() == 1 && r[0].kind == rope_kind::HAND && r[0].who == 1),
+            "took the hook: {heard:?}"
+        );
+        // the nearest trunk 5–21 m from the hook (the line is 25 m)
+        let tree = st
+            .items
+            .iter()
+            .filter(|i| i.shape.as_cylinder().is_some() && !i.breakable)
+            .map(|i| (i, (i.at.x - hook[0]).hypot(i.at.z - hook[1])))
+            .filter(|(_, d)| (5.0..21.0).contains(d))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("a tree near the road")
+            .0;
+        let r = tree.shape.as_cylinder().unwrap().radius;
+        let (dx, dz) = (hook[0] - tree.at.x, hook[1] - tree.at.z);
+        let dl = dx.hypot(dz);
+        let stand = [tree.at.x + dx / dl * (r + 0.7), tree.at.z + dz / dl * (r + 0.7)];
+        walk(&mut m, stand, &mut heard);
+        let tie = [
+            tree.at.x + dx / dl * r,
+            map.height(stand[0], stand[1]) + 0.9,
+            tree.at.z + dz / dl * r,
+        ];
+        m.on_tow(
+            1,
+            &TowMsg {
+                op: tow_op::HANG_FIXED,
+                car: 1,
+                end: tow_end::FRONT,
+                pos: [m_to_cm(tie[0]), m_to_cm(tie[1]), m_to_cm(tie[2])],
+                ..Default::default()
+            },
+        );
+        tick(&mut m, 2, &mut heard);
+        let tied = heard.last().unwrap()[0];
+        assert_eq!(tied.kind, rope_kind::FIXED, "tied to the tree");
+        // back in, the winch held
+        walk(&mut m, [car.pos[0] - fz * 1.6, car.pos[2] + fx * 1.6], &mut heard);
+        enter(&mut m, [car.pos[0], car.pos[1], car.pos[2], car.yaw]);
+        m.on_tow(
+            1,
+            &TowMsg {
+                op: tow_op::WINCH,
+                car: 1,
+                end2: 1,
+                ..Default::default()
+            },
+        );
+        let d0 = (car.pos[0] - tree.at.x).hypot(car.pos[2] - tree.at.z);
+        tick(&mut m, 30 * 8, &mut heard);
+        let p = m.pose_of(1).unwrap().pos;
+        let d1 = (p[0] - tree.at.x).hypot(p[2] - tree.at.z);
+        let line = heard.last().unwrap()[0].len as f32 / 100.0;
+        println!(
+            "tree {d0:.2} → {d1:.2} m from the car, line {:.2} → {line:.2} m, {} rope updates",
+            tied.len as f32 / 100.0,
+            heard.len()
+        );
+        assert!(line < tied.len as f32 / 100.0 - 2.0, "the winch reeled the line in");
+        assert!(d1 < d0 - 1.0, "the car was pulled toward the tree: {d0:.2} → {d1:.2}");
+    }
+
+    /// TOWING A CAR: player 1 sits in their car, no input; player 2 parks ahead, takes their rear hook to player 1's
+    /// front hook, gets back in and drives off — player 1's car comes along.
+    #[test]
+    fn one_players_car_tows_anothers() {
+        use crate::tow::hook_pts;
+        let Some(map) = island() else { return };
+        let (mut m, at) = room(&map);
+        let (s, c) = at[3].sin_cos();
+        let (fx, fz) = (-s, -c);
+        let ahead = |d: f32| {
+            [
+                at[0] + fx * d,
+                map.height(at[0] + fx * d, at[2] + fz * d),
+                at[2] + fz * d,
+                at[3],
+            ]
+        };
+        // player 2 into the room, onto the road 10 m ahead (one allowed move), into a G500 there
+        m.join(2, "tow").unwrap();
+        m.on_state(
+            2,
+            &State {
+                seq: 1,
+                ..state(
+                    1,
+                    [map.lobby[0], map.height(map.lobby[0], map.lobby[1]), map.lobby[1], 0.0],
+                    0,
+                )
+            },
+        );
+        m.step(99);
+        m.on_action(2, ActionKind::RespawnVehicle, 0);
+        let b0 = ahead(10.0);
+        m.on_state(
+            2,
+            &State {
+                epoch: 1,
+                ..state(2, b0, 0)
+            },
+        ); // (after the server's correction of the lobby pose)
+        m.step(132);
+        enter(&mut m, at);
+        m.on_vehicle(
+            2,
+            &VehicleMsg {
+                enter: true,
+                model: 2,
+                pos: [m_to_cm(b0[0]), m_to_cm(b0[1]), m_to_cm(b0[2])],
+                yaw: yaw_to_u16(b0[3]),
+            },
+        );
+        let now = std::cell::Cell::new(132u64);
+        let seq = std::cell::Cell::new(10u32);
+        let tick = |m: &mut Match, n: usize, gas2: bool| {
+            for _ in 0..n {
+                if gas2 {
+                    seq.set(seq.get() + 2);
+                    let frame = InputFrame {
+                        throttle: 127,
+                        ..Default::default()
+                    };
+                    m.on_input(
+                        2,
+                        &Input {
+                            seq: seq.get(),
+                            opts: 2 | drive_opts::OFFROAD,
+                            frames: vec![frame; 4],
+                        },
+                    );
+                }
+                now.set(now.get() + 33);
+                m.step(now.get());
+                m.drain().for_each(drop);
+            }
+        };
+        tick(&mut m, 30, false);
+        let a_car = m.pose_of(1).unwrap();
+        let b_car = m.pose_of(2).unwrap();
+        m.on_vehicle(
+            2,
+            &VehicleMsg {
+                enter: false,
+                model: 2,
+                pos: [0; 3],
+                yaw: 0,
+            },
+        );
+        // player 2 walks (25 cm a tick) round to their rear hook, then to player 1's front hook
+        let mut pos = [b_car.pos[0] - fz * 1.8, b_car.pos[2] + fx * 1.8];
+        let walk = |m: &mut Match, pos: &mut [f32; 2], to: [f32; 2]| loop {
+            let (dx, dz) = (to[0] - pos[0], to[1] - pos[1]);
+            let d = dx.hypot(dz);
+            let k = (0.25 / d.max(1e-3)).min(1.0);
+            *pos = [pos[0] + dx * k, pos[1] + dz * k];
+            seq.set(seq.get() + 1);
+            m.on_state(
+                2,
+                &State {
+                    epoch: 1,
+                    ..state(seq.get(), [pos[0], map.height(pos[0], pos[1]), pos[1], 0.0], 0)
+                },
+            );
+            tick(m, 1, false);
+            if d < 0.3 {
+                break;
+            }
+        };
+        let rear_b = hook_pts(2, tow_end::REAR).unwrap().0[2] as f32; // (+: behind)
+        let front_a = -hook_pts(1, tow_end::FRONT).unwrap().0[2] as f32;
+        let b_hook = [b_car.pos[0] - fx * rear_b, b_car.pos[2] - fz * rear_b];
+        let a_hook = [a_car.pos[0] + fx * front_a, a_car.pos[2] + fz * front_a];
+        walk(
+            &mut m,
+            &mut pos,
+            [
+                b_car.pos[0] - fz * 1.8 - fx * (rear_b + 0.5),
+                b_car.pos[2] + fx * 1.8 - fz * (rear_b + 0.5),
+            ],
+        );
+        walk(&mut m, &mut pos, [b_hook[0] - fx * 0.6, b_hook[1] - fz * 0.6]);
+        m.on_tow(
+            2,
+            &TowMsg {
+                op: tow_op::TAKE,
+                car: 2,
+                end: tow_end::REAR,
+                ..Default::default()
+            },
+        );
+        walk(&mut m, &mut pos, [a_hook[0] + fx * 0.6, a_hook[1] + fz * 0.6]);
+        m.on_tow(
+            2,
+            &TowMsg {
+                op: tow_op::HANG_CAR,
+                car: 2,
+                end: tow_end::REAR,
+                car2: 1,
+                end2: tow_end::FRONT,
+                ..Default::default()
+            },
+        );
+        walk(&mut m, &mut pos, [b_car.pos[0] - fz * 1.8, b_car.pos[2] + fx * 1.8]);
+        m.on_vehicle(
+            2,
+            &VehicleMsg {
+                enter: true,
+                model: 2,
+                pos: [m_to_cm(b_car.pos[0]), m_to_cm(b_car.pos[1]), m_to_cm(b_car.pos[2])],
+                yaw: yaw_to_u16(b_car.yaw),
+            },
+        );
+        let a0 = m.pose_of(1).unwrap().pos;
+        tick(&mut m, 30 * 6, true);
+        let (a1, b1) = (m.pose_of(1).unwrap().pos, m.pose_of(2).unwrap().pos);
+        let moved = |p: [f32; 3], q: [f32; 3]| (q[0] - p[0]) * fx + (q[2] - p[2]) * fz;
+        println!(
+            "towing car moved {:.1} m, towed car {:.1} m forward",
+            moved(b_car.pos, b1),
+            moved(a0, a1)
+        );
+        assert!(moved(a0, a1) > 3.0, "player 1's car was towed: {:.2} m", moved(a0, a1));
     }
 }
 

@@ -18,7 +18,7 @@ pub use codec::{DecodeError, Reader, Writer};
 pub use messages::*;
 
 /// Bumped on any incompatible layout change; the server rejects a `Hello` with another version.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Largest packet either side accepts (bytes). Snapshots are bounded by [`MAX_SNAPSHOT_ENTITIES`].
 pub const MAX_PACKET: usize = 16 * 1024;

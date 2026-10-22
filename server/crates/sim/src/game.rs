@@ -183,6 +183,13 @@ pub struct Match {
     /// Map rooms: the vehicle physics world (docs/VEHICLE_PHYSICS.md), and the time not yet stepped (s).
     physics: Option<RoomPhysics>,
     phys_acc: f32,
+    /// Tow ropes (sim/tow.rs; physics rooms): the room's lines, the next id, a change to send, when they were last
+    /// sent, the drivers holding their winch.
+    ropes: Vec<crate::tow::Rope>,
+    next_rope: u16,
+    ropes_dirty: bool,
+    ropes_sent_ms: u64,
+    winching: Vec<u16>,
     clock: Option<Clock>,
     profile: TickProfile,
     bot_events: Vec<BotEvent>,
@@ -285,6 +292,11 @@ impl Match {
             bots,
             physics,
             phys_acc: 0.0,
+            ropes: Vec::new(),
+            next_rope: 1,
+            ropes_dirty: false,
+            ropes_sent_ms: 0,
+            winching: Vec::new(),
             clock: None,
             profile: TickProfile::default(),
             bot_events: Vec::new(),
@@ -545,6 +557,9 @@ impl Match {
         if let Some(r) = &self.room {
             self.out.push(Out::To(id, ServerMsg::Room(r.clone())));
         }
+        if !self.ropes.is_empty() {
+            self.out.push(Out::To(id, self.ropes_msg()));
+        }
         let spawn = if has_pose {
             [m_to_cm(pose.pos[0]), m_to_cm(pose.pos[1]), m_to_cm(pose.pos[2])]
         } else {
@@ -705,6 +720,230 @@ impl Match {
         p.car = Some(HumanCar::new(ph.new_car(model, x, y, z, yaw), model));
     }
 
+    // ---------------------------------------------------------------- tow ropes (sim/tow.rs)
+
+    fn ropes_msg(&self) -> ServerMsg {
+        ServerMsg::Ropes(
+            self.ropes
+                .iter()
+                .take(dark_protocol::MAX_ROPES)
+                .map(|r| r.wire())
+                .collect(),
+        )
+    }
+
+    /// The car of `id` (player or bot): body, wire model, someone at the wheel.
+    fn car_of(&self, id: u16) -> Option<(dark_vehicle::rapier3d::prelude::RigidBodyHandle, u8, bool)> {
+        if let Some(hc) = self.players.get(&id).and_then(|p| p.car.as_ref()) {
+            return Some((hc.car.body, hc.model, hc.driving));
+        }
+        self.bots.as_ref()?.car_body(id).map(|(b, m)| (b, m, true))
+    }
+
+    /// A car end someone may hook: their own car, or one with someone at the wheel (a parked car of someone else is
+    /// not seen moving by the others yet: no ropes on it).
+    fn hookable(&self, car: u16, end: u8, asker: u16) -> Option<crate::tow::CarEnd> {
+        let (body, model, driven) = self.car_of(car)?;
+        if car != asker && !driven {
+            return None;
+        }
+        let (eye, fairlead) = crate::tow::hook_pts(model, end)?;
+        Some(crate::tow::CarEnd { body, eye, fairlead })
+    }
+
+    /// A rope already out of this car end, or hung on it.
+    fn end_busy(&self, car: u16, end: u8) -> bool {
+        use crate::tow::Far;
+        self.ropes
+            .iter()
+            .any(|r| (r.car == car && r.end == end) || r.far == Far::Car(car, end))
+    }
+
+    /// A tow-rope request: checked against where the player, the hooks and the trees are on the server.
+    pub fn on_tow(&mut self, id: u16, t: &TowMsg) {
+        use crate::tow::*;
+        use dark_vehicle::rapier3d::prelude::{QueryFilter, Vector};
+        if self.physics.is_none() {
+            return;
+        }
+        let Some(p) = self.players.get(&id) else { return };
+        if p.bot || !p.alive || !p.has_pose {
+            return;
+        }
+        let me = p.pose.pos;
+        let driving = p.car.as_ref().is_some_and(|c| c.driving);
+        let flat = |a: [f32; 3], b: Vector| ((a[0] - b.x).powi(2) + (a[2] - b.z).powi(2)).sqrt();
+        let reach = HOOK_REACH + REACH_SLACK;
+        let carried = self
+            .ropes
+            .iter()
+            .position(|r| r.far == Far::Hand(id) && r.car == t.car && r.end == t.end);
+        match t.op {
+            tow_op::WINCH => {
+                self.winching.retain(|&w| w != id);
+                if t.end2 != 0 && driving {
+                    self.winching.push(id);
+                }
+            }
+            tow_op::TAKE => {
+                if driving || self.ropes.iter().any(|r| r.far == Far::Hand(id)) || self.end_busy(t.car, t.end) {
+                    return;
+                }
+                let Some(e) = self.hookable(t.car, t.end, id) else {
+                    return;
+                };
+                let ph = self.physics.as_ref().expect("checked");
+                if flat(me, world_point(&ph.world, e.body, e.eye)) > reach {
+                    return;
+                }
+                let rid = self.next_rope;
+                self.next_rope = self.next_rope.wrapping_add(1).max(1);
+                self.ropes.push(Rope {
+                    id: rid,
+                    car: t.car,
+                    end: t.end,
+                    far: Far::Hand(id),
+                    len: ROPE_MAX,
+                });
+                self.ropes_dirty = true;
+            }
+            tow_op::HANG_FIXED => {
+                let Some(k) = carried else { return };
+                let at = [cm_to_m(t.pos[0]), cm_to_m(t.pos[1]), cm_to_m(t.pos[2])];
+                let Some(e) = self.hookable(t.car, t.end, t.car) else {
+                    return;
+                };
+                let ph = self.physics.as_ref().expect("checked");
+                let pos = Vector::new(at[0], at[1], at[2]);
+                // by the player, on something solid (a trunk, a rock, a post: the room's statics), in the line's reach
+                let solid =
+                    QueryFilter::new().groups(dark_vehicle::world::group(0xffff, dark_vehicle::world::groups::STATIC));
+                let d = (world_point(&ph.world, e.body, e.fairlead) - pos).length();
+                if !at.iter().all(|c| c.is_finite())
+                    || flat(me, pos) > 2.5 + REACH_SLACK
+                    || ph.world.pw.project_point(pos, 1.0, true, solid).is_none()
+                    || d > ROPE_MAX
+                {
+                    return;
+                }
+                self.ropes[k].far = Far::Fixed(at);
+                self.ropes[k].len = (d + 0.3).min(ROPE_MAX);
+                self.ropes_dirty = true;
+            }
+            tow_op::HANG_CAR => {
+                let Some(k) = carried else { return };
+                if t.car2 == t.car || self.end_busy(t.car2, t.end2) {
+                    return;
+                }
+                let (Some(a), Some(b)) = (self.hookable(t.car, t.end, t.car), self.hookable(t.car2, t.end2, id)) else {
+                    return;
+                };
+                let ph = self.physics.as_ref().expect("checked");
+                let eye = world_point(&ph.world, b.body, b.eye);
+                let d = (world_point(&ph.world, a.body, a.fairlead) - eye).length();
+                if flat(me, eye) > reach || d > ROPE_MAX {
+                    return;
+                }
+                self.ropes[k].far = Far::Car(t.car2, t.end2);
+                self.ropes[k].len = (d + 0.3).min(ROPE_MAX);
+                self.ropes_dirty = true;
+            }
+            tow_op::DROP => {
+                if let Some(k) = carried {
+                    self.ropes.remove(k);
+                    self.ropes_dirty = true;
+                }
+            }
+            tow_op::UNHOOK => {
+                let Some(k) = self
+                    .ropes
+                    .iter()
+                    .position(|r| r.car == t.car && r.end == t.end && !matches!(r.far, Far::Hand(_)))
+                else {
+                    return;
+                };
+                let r = self.ropes[k];
+                let ph = self.physics.as_ref().expect("checked");
+                let near = |c: u16, e: u8, which: bool| {
+                    self.car_of(c).and_then(|(body, model, _)| {
+                        hook_pts(model, e)
+                            .map(|(eye, lead)| world_point(&ph.world, body, if which { eye } else { lead }))
+                    })
+                };
+                let mut ends = vec![near(r.car, r.end, false)];
+                match r.far {
+                    Far::Fixed(q) => ends.push(Some(Vector::new(q[0], q[1], q[2]))),
+                    Far::Car(c, e) => ends.push(near(c, e, true)),
+                    Far::Hand(_) => {}
+                }
+                if ends.into_iter().flatten().any(|q| flat(me, q) < reach) {
+                    self.ropes.remove(k);
+                    self.ropes_dirty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Ropes whose ends are gone (a car out of the world, a player left / died / got in a car / walked past the
+    /// line's length) go; the bots with a rope on their car wait.
+    fn prune_ropes(&mut self) {
+        use crate::tow::*;
+        let Some(ph) = self.physics.as_ref() else { return };
+        let before = self.ropes.len();
+        let keep: Vec<bool> = self
+            .ropes
+            .iter()
+            .map(|r| {
+                let Some((body, model, _)) = self.car_of(r.car) else {
+                    return false;
+                };
+                let Some((_, lead)) = hook_pts(model, r.end) else {
+                    return false;
+                };
+                match r.far {
+                    Far::Hand(pid) => self.players.get(&pid).is_some_and(|p| {
+                        p.alive && p.has_pose && !p.car.as_ref().is_some_and(|c| c.driving) && {
+                            let q = world_point(&ph.world, body, lead);
+                            ((p.pose.pos[0] - q.x).powi(2) + (p.pose.pos[2] - q.z).powi(2)).sqrt() < ROPE_MAX + 1.5
+                        }
+                    }),
+                    Far::Fixed(_) => true,
+                    Far::Car(c, _) => self.car_of(c).is_some(),
+                }
+            })
+            .collect();
+        let mut i = 0;
+        self.ropes.retain(|_| (keep[i], i += 1).0);
+        if self.ropes.len() != before {
+            self.ropes_dirty = true;
+        }
+        self.winching.retain(|w| {
+            self.players
+                .get(w)
+                .is_some_and(|p| p.car.as_ref().is_some_and(|c| c.driving))
+        });
+        if let Some(bots) = self.bots.as_mut() {
+            let held: Vec<u16> = self
+                .ropes
+                .iter()
+                .flat_map(|r| [Some(r.car), if let Far::Car(c, _) = r.far { Some(c) } else { None }])
+                .flatten()
+                .collect();
+            bots.hold_cars(&held);
+        }
+    }
+
+    /// The ropes to everyone: on a change, every second, five times a second while a winch runs.
+    fn send_ropes(&mut self) {
+        let every = if self.winching.is_empty() { 1_000 } else { 200 };
+        if self.ropes_dirty || (!self.ropes.is_empty() && self.now_ms >= self.ropes_sent_ms + every) {
+            self.out.push(Out::All(self.ropes_msg()));
+            self.ropes_dirty = false;
+            self.ropes_sent_ms = self.now_ms;
+        }
+    }
+
     /// The drivers' own car states (latest-only, one per driver per tick), encoded.
     pub fn vehicle_states(&mut self, out: &mut Vec<(u16, Vec<u8>)>) {
         let Some(ph) = self.physics.as_ref() else { return };
@@ -832,6 +1071,28 @@ impl Match {
         // empty room lingers 2 min); behind schedule → at most MAX_PHYSICS_STEPS per tick, the rest of the time is
         // dropped (a moment of slow motion, never a spiral of ever longer catch-up ticks).
         let anyone = self.players.values().any(|p| !p.bot);
+        // tow ropes: what's gone goes; the car ends the lines pull, found once for the tick's steps
+        self.prune_ropes();
+        let rope_ends: Vec<(u16, u8, crate::tow::CarEnd)> = self
+            .ropes
+            .iter()
+            .flat_map(|r| {
+                [
+                    Some((r.car, r.end)),
+                    if let crate::tow::Far::Car(c, e) = r.far {
+                        Some((c, e))
+                    } else {
+                        None
+                    },
+                ]
+            })
+            .flatten()
+            .filter_map(|(c, e)| {
+                let (body, model, _) = self.car_of(c)?;
+                let (eye, fairlead) = crate::tow::hook_pts(model, e)?;
+                Some((c, e, crate::tow::CarEnd { body, eye, fairlead }))
+            })
+            .collect();
         if let Some(ph) = self.physics.as_mut().filter(|_| anyone) {
             let h = 1.0 / self.cfg.physics_hz.max(1) as f32;
             self.phys_acc = (self.phys_acc + dt).min(h * MAX_PHYSICS_STEPS as f32);
@@ -850,6 +1111,10 @@ impl Match {
                     let t = hc.car.position(&ph.world);
                     let ground = ph.ground(t[0] as f32, t[2] as f32) as f64;
                     hc.car.keep_above(&mut ph.world, ground);
+                }
+                if !self.ropes.is_empty() {
+                    let end_of = |c: u16, e: u8| rope_ends.iter().find(|x| x.0 == c && x.1 == e).map(|x| x.2);
+                    crate::tow::step(&mut self.ropes, &mut ph.world, &end_of, &self.winching, h);
                 }
                 let b = clock(&self.clock);
                 ph.world.step();
@@ -886,6 +1151,7 @@ impl Match {
             }
         }
         self.profile = prof;
+        self.send_ropes();
         let Some(bots) = self.bots.as_mut() else { return };
         for ev in self.bot_events.drain(..) {
             match ev {

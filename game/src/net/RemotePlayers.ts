@@ -316,6 +316,63 @@ export class RemotePlayers {
     return out
   }
 
+  // ---------------------------------------------------------------- tow ropes (gameplay/tow/TowSystem)
+
+  /** The car `id` drives — or its parked car (`id` = the owner): model, pose. */
+  private towCar(id: number): { model: number; x: number; y: number; z: number; yaw: number; pitch: number; roll: number; key: number } | null {
+    const r = this.remotes.get(id)
+    if (r && r.visible && r.flags & Flags.DRIVING && r.model !== BIKE_MODEL) return { model: r.model, x: r.pos.x, y: r.pos.y, z: r.pos.z, yaw: r.yaw, pitch: r.pitch, roll: r.roll, key: id }
+    const c = this.parked.find((p) => p.owner === id)
+    return c ? { ...c, key: -1 - id } : null
+  }
+
+  /** The tow hooks of `id`'s car (car space), or null. */
+  carHooks(id: number): VehicleModel['hooks'] | null {
+    const c = this.towCar(id)
+    return c ? (this.carSets.get(c.model)?.vm.hooks ?? null) : null
+  }
+
+  /** `id`'s car's drawn pose; false = no car of theirs here. */
+  carFrame(id: number, out: THREE.Matrix4): boolean {
+    const c = this.towCar(id)
+    if (!c) return false
+    _e.set(c.pitch, c.yaw, -c.roll)
+    out.compose(_p.set(c.x, c.y, c.z), _q.setFromEuler(_e), _s)
+    return true
+  }
+
+  /** Whose cars (drivers / parked owners) are within `r` m of `p`. */
+  carIdsNear(p: THREE.Vector3, r: number): number[] {
+    const out: number[] = []
+    for (const q of this.remotes.values()) if (q.flags & Flags.DRIVING && q.model !== BIKE_MODEL && Math.hypot(q.pos.x - p.x, q.pos.z - p.z) < r) out.push(q.id)
+    for (const c of this.parked) if (Math.hypot(c.x - p.x, c.z - p.z) < r && !out.includes(c.owner)) out.push(c.owner)
+    return out
+  }
+
+  /** The car's stand-in body box centre above its ground point (m) — RemoteColliders' boxes sit there. */
+  bodyBoxCentre(id: number): number {
+    const c = this.towCar(id)
+    return (c && this.bodyBox.get(c.model)?.[3]) ?? 0
+  }
+
+  /** `id`'s right hand (a hook in it), world. */
+  handWorld(id: number, out: THREE.Vector3): THREE.Vector3 | null {
+    const r = this.remotes.get(id)
+    if (!r) return null
+    return r.char && r.char.root.visible ? r.char.handPosition(out) : out.set(r.pos.x, r.pos.y + 1, r.pos.z)
+  }
+
+  /** Every full-detail car's hooks back on their fairleads (TowSystem then moves the ones out). */
+  resetHooks(): void {
+    for (const c of this.cars.values()) (c.placeHook('F', null), c.placeHook('R', null))
+  }
+
+  /** `id`'s car's `end` hook at its rope's end (world eye frame) — when that car is drawn in full. */
+  placeHook(id: number, end: 'F' | 'R', world: THREE.Matrix4): void {
+    const c = this.towCar(id)
+    if (c) this.cars.get(c.key)?.placeHook(end, world)
+  }
+
   /** Per tier: how many people on foot get the animated character. */
   setQuality(maxCharacters: number, maxCars = this.maxCars): void {
     this.maxCharacters = maxCharacters

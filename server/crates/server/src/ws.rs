@@ -232,6 +232,7 @@ async fn session(app: Arc<App>, mut socket: WebSocket) {
             ClientMsg::Hello { .. } => "hello",
             ClientMsg::Input(_) => "input",
             ClientMsg::Vehicle(_) => "vehicle",
+            ClientMsg::Tow(_) => "tow",
         };
         metrics::counter!(m::PACKETS_IN, "kind" => kind).increment(1);
         match msg {

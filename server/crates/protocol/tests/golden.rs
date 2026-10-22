@@ -70,6 +70,17 @@ fn client_samples() -> Vec<(&'static str, ClientMsg)> {
                 yaw: 12_345,
             }),
         ),
+        (
+            "tow",
+            ClientMsg::Tow(TowMsg {
+                op: tow_op::HANG_FIXED,
+                car: 0x8003,
+                end: tow_end::REAR,
+                car2: 17,
+                end2: tow_end::FRONT,
+                pos: [-55_210, 3_400, 119_870],
+            }),
+        ),
     ]
 }
 
@@ -208,6 +219,31 @@ fn server_samples() -> Vec<(&'static str, ServerMsg)> {
                 engine: 5_861,
                 omega: [-468, -470, i16::MIN, i16::MAX],
             }),
+        ),
+        (
+            "ropes",
+            ServerMsg::Ropes(vec![
+                Rope {
+                    id: 1,
+                    car: 17,
+                    end: tow_end::FRONT,
+                    kind: rope_kind::FIXED,
+                    who: 0,
+                    end2: 0,
+                    pos: [-55_210, 3_400, 119_870],
+                    len: 1_250,
+                },
+                Rope {
+                    id: 2,
+                    car: 0x8003,
+                    end: tow_end::REAR,
+                    kind: rope_kind::CAR,
+                    who: 17,
+                    end2: tow_end::REAR,
+                    pos: [0, 0, 0],
+                    len: 2_500,
+                },
+            ]),
         ),
         (
             "kick",

@@ -334,6 +334,8 @@ pub struct Bot {
     /// cap (m/s); seconds to the next look.
     avoid: (f32, f32, f32),
     look_t: f32,
+    /// A tow rope is on its car (sim/tow.rs): it waits, brakes on, until it is taken off.
+    held: bool,
 }
 
 impl Bot {
@@ -603,6 +605,7 @@ impl Bots {
                 vel: [0.0; 3],
                 avoid: (0.0, 0.0, 0.0),
                 look_t: 0.0,
+                held: false,
             };
             let dist = 120.0 + self.rng.f32() * 500.0;
             self.place_on_road(&mut b, anchor, dist);
@@ -750,6 +753,7 @@ impl Bot {
             vel: [0.0; 3],
             avoid: (0.0, 0.0, 0.0),
             look_t: 0.0,
+            held: false,
         }
     }
 }
@@ -1570,6 +1574,20 @@ impl Bots {
     /// Server physics, each physics step: every bot's car gets its driver's controls (from the AI's plan) and steps.
     /// Cars appear on demand, follow placements (spawn / respawn / back from a boat or a flight), stand parked while
     /// their bot walks, and leave the world while it sails or flies (those stay kinematic).
+    /// The body and wire model of bot `id`'s car (driving it, or parked by it), for a tow rope.
+    pub fn car_body(&self, id: u16) -> Option<(dark_vehicle::rapier3d::prelude::RigidBodyHandle, u8)> {
+        let b = self.bots.iter().find(|b| b.id == id)?;
+        let c = b.car.as_ref()?;
+        (b.mode == Mode::Car || b.parked.is_some()).then_some((c.body, b.model))
+    }
+
+    /// The bots whose cars have a tow rope on them wait (brakes on) — the rest drive on.
+    pub fn hold_cars(&mut self, ids: &[u16]) {
+        for b in &mut self.bots {
+            b.held = ids.contains(&b.id);
+        }
+    }
+
     pub fn drive_cars(&mut self, ph: &mut RoomPhysics, dt: f32) {
         if !self.physics {
             return;
@@ -1612,7 +1630,7 @@ impl Bots {
             let pos = car.position(&ph.world);
             let heading = car.heading(&ph.world);
             let plan = match (b.mode, b.plan) {
-                (Mode::Car, Some((t, v))) => {
+                (Mode::Car, Some((t, v))) if !b.held => {
                     let ground = |x: f32, z: f32| ph.ground(x, z);
                     Some(avoid_obstacles(
                         &ph.world,
@@ -1682,7 +1700,7 @@ impl Bots {
             b.roll = (-ax.r[1]).atan2(ax.u[1]) as f32;
             b.vel = [v.x, v.y, v.z];
             b.braking = c.drivetrain.braking || c.controls.parked;
-            let wants = b.plan.is_some_and(|p| p.1 > 1.0);
+            let wants = !b.held && b.plan.is_some_and(|p| p.1 > 1.0);
             // road progress follows the car (the plan advanced it by the AI's own speed)
             if let Some(r) = b.road.as_ref() {
                 let r = r.clone();

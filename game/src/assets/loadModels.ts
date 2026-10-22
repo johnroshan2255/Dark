@@ -81,6 +81,17 @@ export interface TruckModel {
   cabin: THREE.BufferGeometry | null
   dials: THREE.BufferGeometry | null
   controls: CockpitPart[]
+  /** TOW HOOKS (scripts/blender/vehicle_hooks.py: `hook_F` / `hook_R`, their fairlead plates in the body), front and
+   *  rear; null = the model has none. */
+  hooks: { front: TowHook | null; rear: TowHook | null }
+}
+
+/** A detachable tow hook: geometry with its EYE (where the rope ties on) at the origin, where it hangs stowed (m, truck
+ *  space), and the FAIRLEAD the rope leaves the car through (m, truck space). Vertex-coloured, on the car program. */
+export interface TowHook {
+  geo: THREE.BufferGeometry
+  eye: [number, number, number]
+  fairlead: [number, number, number]
 }
 
 /** A moving cockpit part (Blender `pedal_gas|brake|clutch`, `gear_lever`, `wiper_L|R` with `pivot` + `axis` extras):
@@ -557,6 +568,8 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   // Brake hardware (`caliper_<FL|FR|RL|RR>`, scripts/blender/vehicle_brakes.py): kept out of the body and of the
   // wheel search (a drum is round and near the ground); the left corners become the per-axle geometry.
   const brakeParts = new Map<string, THREE.BufferGeometry[]>()
+  // Tow hooks (`hook_F` / `hook_R`, vehicle_hooks.py): kept out of the body and its collider — the game takes them off.
+  const hookParts = new Map<'F' | 'R', { geo: THREE.BufferGeometry; eye: THREE.Vector3; fairlead: THREE.Vector3 }>()
   // Untextured parts: on a textured model their UVs are pointed at a neutral texel once the map is known.
   const flat: THREE.BufferGeometry[] = []
   let map: THREE.Texture | null = null
@@ -583,6 +596,13 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
       ;(door ? door.glass : glasses).push(g)
       continue
     }
+    const hookKey = /hook_(F|R)\b/i.exec(m.name)?.[1].toUpperCase() as 'F' | 'R' | undefined
+    if (hookKey) {
+      const g = paintGeometry(m.geo, color, !!mm, 0, true)
+      if (!mm) flat.push(g)
+      hookParts.set(hookKey, { geo: g, eye: new THREE.Vector3(...((m.extras.eye as number[]) ?? [0, 0, 0])), fairlead: new THREE.Vector3(...((m.extras.fairlead as number[]) ?? [0, 0, 0])) })
+      continue
+    }
     const brakeKey = /caliper_(FL|FR|RL|RR|BL|BR)/i.exec(m.name)?.[1].toUpperCase().replace('B', 'R')
     if (brakeKey) {
       const g = paintGeometry(m.geo, color, !!mm, 0, true)
@@ -595,7 +615,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
     const textured = !!mm
     // Door insides / cabin interior: dark trim, never painted (textured: the texture darkened).
     const inner = /inner|interior/i.test(m.mat.name)
-    const paint = inner || /^(wheel_|caliper_|acc_|cab_|pedal_|gear_|wiper_)/i.test(m.name) ? 0 : def.paintRegex ? (def.paintRegex.test(m.mat.name) ? 1 : 0) : 1
+    const paint = inner || /^(wheel_|caliper_|acc_|cab_|pedal_|gear_|wiper_|tow_)/i.test(m.name) ? 0 : def.paintRegex ? (def.paintRegex.test(m.mat.name) ? 1 : 0) : 1
     const g = paintGeometry(m.geo, textured ? new THREE.Color(inner ? 0.3 : 1, inner ? 0.3 : 1, inner ? 0.3 : 1) : inner ? color.clone().multiplyScalar(0.35) : color, textured, paint, (vertexAo && !inner) || /^wheel_/i.test(m.name)) // (a big-triangle cabin liner would draw AO gradients as X shapes)
     if (!textured) flat.push(g)
     const control = /^(pedal_(?:gas|brake|clutch)|gear_lever|wiper_[LR])/i.exec(m.name)?.[1].toLowerCase()
@@ -710,6 +730,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   for (const w of wheels) (w.c.applyMatrix4(norm), (w.r *= k), w.geo.applyMatrix4(norm))
   for (const d of doorGeo) (d.body.applyMatrix4(norm), d.glass?.applyMatrix4(norm), d.hinge.applyMatrix4(norm))
   const brakeGeo = new Map([...brakeParts.entries()].map(([k, parts]) => [k, mergeGeometries(parts, false)!.applyMatrix4(norm)]))
+  for (const h of hookParts.values()) (h.geo.applyMatrix4(norm), h.eye.applyMatrix4(norm), h.fairlead.applyMatrix4(norm))
   // Ground = wheel bottoms; origin = wheelbase centre.
   const groundY = Math.min(...wheels.map((w) => w.c.y - w.r))
   const cx = wheels.reduce((a, w) => a + w.c.x, 0) / 4, cz = wheels.reduce((a, w) => a + w.c.z, 0) / 4
@@ -731,6 +752,18 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   for (const l of lampParts) l.geo.applyMatrix4(shift)
   for (const w of wheels) (w.c.applyMatrix4(shift), w.geo.applyMatrix4(shift))
   for (const g of brakeGeo.values()) g.applyMatrix4(shift)
+  const hook = (key: 'F' | 'R'): TowHook | null => {
+    const h = hookParts.get(key)
+    if (!h) return null
+    h.geo.applyMatrix4(shift)
+    h.eye.applyMatrix4(shift)
+    h.fairlead.applyMatrix4(shift)
+    h.geo.translate(-h.eye.x, -h.eye.y, -h.eye.z)
+    h.geo.computeBoundingSphere()
+    zeroTyre(h.geo)
+    return { geo: h.geo, eye: h.eye.toArray() as [number, number, number], fairlead: h.fairlead.toArray() as [number, number, number] }
+  }
+  const hooks = { front: hook('F'), rear: hook('R') }
   if (steeringWheel) pivot.applyMatrix4(shift)
   // Doors: into door space (hinge at the origin). Closed-door bounds still count for the body box below.
   const outline = new THREE.Box3()
@@ -829,6 +862,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
     cabin,
     dials,
     controls,
+    hooks,
   }
 }
 

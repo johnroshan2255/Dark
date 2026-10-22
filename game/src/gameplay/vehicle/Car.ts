@@ -89,6 +89,9 @@ export class Car {
   private readonly wheelRadius: number
   private readonly bodyMat: THREE.MeshLambertMaterial
   private readonly steering: THREE.InstancedMesh | null
+  /** The tow hooks (eye / fairlead, car space) and their meshes (TowSystem). */
+  readonly hooks: TruckModel['hooks']
+  private readonly hookMeshes: Record<'F' | 'R', THREE.InstancedMesh | null> = { F: null, R: null }
   private readonly steeringPivot: THREE.Vector3
   private readonly steeringAxis: THREE.Vector3
   private readonly doors: Door[] = []
@@ -222,6 +225,18 @@ export class Car {
       this.body.add(m)
       return m
     })
+    // TOW HOOKS (vehicle_hooks.py): hanging from the fairleads, on the car program; TowSystem moves one to the end of
+    // its rope while it is out (placeHook).
+    this.hooks = truck.hooks
+    for (const [end, h] of [['F', truck.hooks.front], ['R', truck.hooks.rear]] as const) {
+      if (!h) continue
+      const m = new THREE.InstancedMesh(h.geo, this.bodyMat, 1)
+      m.setMatrixAt(0, new THREE.Matrix4().setPosition(...h.eye))
+      m.frustumCulled = false
+      m.castShadow = true
+      this.body.add(m)
+      this.hookMeshes[end] = m
+    }
     // Steering wheel (split out of the body at load, when the model has one): turns with the driver's input.
     this.steering = truck.steeringWheel ? new THREE.InstancedMesh(truck.steeringWheel, this.bodyMat, 1) : null
     this.steeringPivot = new THREE.Vector3(...truck.steeringPivot)
@@ -411,6 +426,17 @@ export class Car {
   wheelContact(k: number, out: THREE.Vector3): THREE.Vector3 {
     const [x, y, z] = this.wheelPos[k]
     return out.set(x, y + this.sim.wheels[k].lift - this.wheelRadius + 0.05, z).applyMatrix4(this.root.matrixWorld) // hub sits (tyre−1)·r higher, tread (tyre)·r lower: net the same
+  }
+
+  /** A tow hook where its rope's end is (`world`: the hook's eye frame), or back on its fairlead (null). */
+  placeHook(end: 'F' | 'R', world: THREE.Matrix4 | null): void {
+    const m = this.hookMeshes[end], h = end === 'F' ? this.hooks.front : this.hooks.rear
+    if (!m || !h) return
+    if (world) {
+      this.body.updateMatrixWorld()
+      m.setMatrixAt(0, _hm.copy(this.body.matrixWorld).invert().multiply(world))
+    } else m.setMatrixAt(0, _hm.makeTranslation(...h.eye))
+    m.instanceMatrix.needsUpdate = true
   }
 
   /** Chassis forward axis in world space (rendered pose). */
@@ -1246,6 +1272,8 @@ export class Car {
     this.wheels.dispose()
     for (const b of this.brakes) b?.dispose()
     this.steering?.dispose()
+    this.hookMeshes.F?.dispose()
+    this.hookMeshes.R?.dispose()
     for (const m of this.doorMeshes) (m.geometry.dispose(), m.dispose())
     for (const d of this.doors) d.glass?.geometry.dispose()
     for (const m of [this.axles, this.rods, this.springs, this.jets]) (m.geometry.dispose(), m.dispose())
@@ -1610,3 +1638,4 @@ varying vec3 vGlassN; varying vec3 vGlassV;`)
   return (_glass = m)
 }
 const _dvel = new THREE.Vector3(), _dq = new THREE.Quaternion()
+const _hm = new THREE.Matrix4()

@@ -1,13 +1,14 @@
 import { VEHICLES } from '../gameplay/vehicle/catalogue'
 import {
-  Action, Flags, Kick, NO_PLAYER, isBot, NO_SPAWN, PROTOCOL_VERSION, RoomFlags, decodeServer, encodeClient, mToCm, mpsToCms, pitchToI16, yawToU16, cmToM, u16ToYaw,
-  type ServerMsg,
+  Action, Flags, Kick, NO_PLAYER, isBot, NO_SPAWN, PROTOCOL_VERSION, RoomFlags, TowOp, decodeServer, encodeClient, mToCm, mpsToCms, pitchToI16, yawToU16, cmToM, u16ToYaw,
+  type ServerMsg, type TowMsg,
 } from './protocol'
 import { BIKE_MODEL } from './RemotePlayers'
 import { VehicleSync } from './VehicleSync'
 import { RemoteColliders, type RemoteCarPose } from './RemoteColliders'
 import type { ClientMsg } from './protocol'
 import type { Game } from '../game/Game'
+import type RAPIER from '@dimforge/rapier3d-compat'
 
 /**
  * NET CLIENT — rooms on the DARK server (`server/`, `server/docs/PROTOCOL.md`).
@@ -146,6 +147,29 @@ export class NetClient {
 
   private sendMsg(m: ClientMsg): void {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(encodeClient(m))
+  }
+
+  /** The server simulates the cars here (RoomFlags.PHYSICS): tow ropes are its, remote cars are physical. */
+  get isPhysicsRoom(): boolean {
+    return this.physicsRoom
+  }
+
+  /** A tow-rope request (gameplay/tow/TowSystem). */
+  sendTow(tow: TowMsg): void {
+    this.sendMsg({ t: 'tow', tow })
+  }
+
+  private winch = false
+  /** The winch held / let go (sent on a change). */
+  towWinch(on: boolean): void {
+    if (on === this.winch) return
+    this.winch = on
+    this.sendMsg({ t: 'tow', tow: { op: TowOp.WINCH, car: this.state.me, end: 0, car2: 0, end2: on ? 1 : 0, pos: [0, 0, 0] } })
+  }
+
+  /** The physics stand-in of remote car `id` near us (a rope pulls it), or null. */
+  remoteBody(id: number): RAPIER.RigidBody | null {
+    return this.colliders.bodyOf(id)
   }
 
   private get state(): NetState {
@@ -307,9 +331,10 @@ export class NetClient {
       }
     }
     this.game.remotes.clear()
+    this.game.tow.clear()
     this.names.clear()
     this.physicsRoom = false
-    this.vehicle.active = false
+    this.vehicle.reset()
     this.set({ status: this.state.status === 'off' ? 'off' : 'offline', room: null, players: [], me: NO_PLAYER, owner: NO_PLAYER })
   }
 
@@ -342,8 +367,9 @@ export class NetClient {
       this.ws = null
       this.joining = false
       this.physicsRoom = false
-      this.vehicle.active = false
+      this.vehicle.reset()
       this.game.remotes.clear()
+      this.game.tow.clear()
       this.set({ status: 'offline', room: null, players: [], me: NO_PLAYER, owner: NO_PLAYER, message: this.state.message ?? 'Disconnected from the room' })
     }
   }
@@ -391,6 +417,10 @@ export class NetClient {
       }
       case 'vehicleState': {
         this.vehicle.onState(m.state)
+        break
+      }
+      case 'ropes': {
+        this.game.tow.onRopes(m.ropes)
         break
       }
       case 'correction': {

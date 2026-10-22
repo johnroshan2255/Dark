@@ -30,6 +30,8 @@ const cars = await page.evaluate(async () => {
       overhang: d.overhang ?? null,
       hulls: (d.hulls ?? []).map((h) => Array.from(h)),
       tyreHalfWidth: d.tyreHalfWidth ?? null,
+      // tow hooks (vehicle_hooks.py): where the rope ties on (eye) and leaves the car (fairlead), truck space
+      hooks: { front: g.car.hooks.front && { eye: g.car.hooks.front.eye, fairlead: g.car.hooks.front.fairlead }, rear: g.car.hooks.rear && { eye: g.car.hooks.rear.eye, fairlead: g.car.hooks.rear.fairlead } },
     }
     const { paint: _paint, ...stock } = def.stock
     out.push({ id: def.id, dims, stock, resolved: resolveSpec(def.spec, { wheelPos: d.wheelPos, half: d.half }) })

@@ -204,6 +204,23 @@ pub struct TruckDims {
     pub hulls: Option<Vec<Vec<f32>>>,
     #[serde(default)]
     pub tyre_half_width: Option<f64>,
+    /// Tow hooks (vehicle_hooks.py), truck space; absent: none.
+    #[serde(default)]
+    pub hooks: Option<Hooks>,
+}
+
+/// A car's tow hooks, front and rear.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+pub struct Hooks {
+    pub front: Option<HookPts>,
+    pub rear: Option<HookPts>,
+}
+
+/// Where a tow rope ties onto the hook (`eye`) and leaves the car (`fairlead`), m, truck space.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+pub struct HookPts {
+    pub eye: [f64; 3],
+    pub fairlead: [f64; 3],
 }
 
 /// `TruckTune` (VehicleSim.ts): the garage setup. kW, kN, ×, ×, N/m per kg, ×, kg.

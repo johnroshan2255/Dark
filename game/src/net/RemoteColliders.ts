@@ -112,6 +112,12 @@ export class RemoteColliders {
     }
   }
 
+  /** The box standing in for remote car `id` (a tow rope pulls it), or null. */
+  bodyOf(id: number): RAPIER.RigidBody | null {
+    const s = this.slots.find((q) => q.id === id && q.body.isEnabled())
+    return s ? s.body : null
+  }
+
   /** Not in a server-physics room any more: all boxes off. */
   clear(): void {
     for (const s of this.slots) s.body.setEnabled(false)

@@ -32,6 +32,7 @@ pub const C_ACTION: u8 = 0x04;
 pub const C_LEAVE: u8 = 0x05;
 pub const C_INPUT: u8 = 0x06;
 pub const C_VEHICLE: u8 = 0x07;
+pub const C_TOW: u8 = 0x08;
 
 /// Most input frames one [`Input`] packet carries (the newest last).
 pub const MAX_INPUT_FRAMES: usize = 8;
@@ -95,6 +96,42 @@ pub struct VehicleMsg {
     pub model: u8,
     pub pos: [i32; 3],
     pub yaw: u16,
+}
+
+/// What a [`TowMsg`] asks for (TOW ROPES: the winch line from a car's front / rear hook, docs/PROTOCOL.md).
+pub mod tow_op {
+    /// Take the hook of `car`'s `end` in hand (on foot, next to it).
+    pub const TAKE: u8 = 0;
+    /// Hang the hook in hand on a tree / rock / post at `pos`.
+    pub const HANG_FIXED: u8 = 1;
+    /// Hang the hook in hand on `car2`'s `end2` hook.
+    pub const HANG_CAR: u8 = 2;
+    /// Let go of the hook in hand (the winch winds it home).
+    pub const DROP: u8 = 3;
+    /// Take the rope of `car`'s `end` off whatever it is hung on (it winds home).
+    pub const UNHOOK: u8 = 4;
+    /// The driver's winch: `end2` = 1 reeling in, 0 stopped (every rope on the car being driven).
+    pub const WINCH: u8 = 5;
+}
+
+/// Car ends: front / rear hook.
+pub mod tow_end {
+    pub const FRONT: u8 = 0;
+    pub const REAR: u8 = 1;
+}
+
+/// A tow-rope request. Cars are named by their driver / owner's entity id (a parked car by its owner's).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TowMsg {
+    /// [`tow_op`].
+    pub op: u8,
+    pub car: u16,
+    /// [`tow_end`].
+    pub end: u8,
+    pub car2: u16,
+    pub end2: u8,
+    /// cm (HANG_FIXED: the anchor point).
+    pub pos: [i32; 3],
 }
 
 /// The client's simulated pose this frame (sent at the client's tick, ~30 Hz). The server validates it
@@ -163,6 +200,8 @@ pub enum ClientMsg {
     Input(Input),
     /// Into / out of the server-simulated car.
     Vehicle(VehicleMsg),
+    /// Tow ropes: take / hang / drop / unhook a hook, the winch.
+    Tow(TowMsg),
 }
 
 impl ClientMsg {
@@ -221,6 +260,17 @@ impl ClientMsg {
                     w.i32(p);
                 }
                 w.u16(v.yaw);
+            }
+            Self::Tow(t) => {
+                w.u8(C_TOW);
+                w.u8(t.op);
+                w.u16(t.car);
+                w.u8(t.end);
+                w.u16(t.car2);
+                w.u8(t.end2);
+                for p in t.pos {
+                    w.i32(p);
+                }
             }
         }
     }
@@ -282,6 +332,14 @@ impl ClientMsg {
                 pos: [r.i32()?, r.i32()?, r.i32()?],
                 yaw: r.u16()?,
             }),
+            C_TOW => Self::Tow(TowMsg {
+                op: r.u8()?,
+                car: r.u16()?,
+                end: r.u8()?,
+                car2: r.u16()?,
+                end2: r.u8()?,
+                pos: [r.i32()?, r.i32()?, r.i32()?],
+            }),
             k => return Err(DecodeError::UnknownKind(k)),
         };
         r.finish()?;
@@ -310,6 +368,7 @@ pub const S_PONG: u8 = 0x8a;
 pub const S_KICK: u8 = 0x8b;
 pub const S_ROOM: u8 = 0x8c;
 pub const S_VEHICLE: u8 = 0x8d;
+pub const S_ROPES: u8 = 0x8e;
 
 /// The authoritative state of the player's own server-simulated car (sent to its driver every tick): what the client
 /// reconciles its prediction against.
@@ -479,6 +538,37 @@ pub struct Zone {
     pub dps: u8,
 }
 
+/// Where a tow rope's far end is ([`Rope`]).
+pub mod rope_kind {
+    /// In a player's hand (`who` = the player).
+    pub const HAND: u8 = 0;
+    /// Hung on a tree / rock / post at `pos`.
+    pub const FIXED: u8 = 1;
+    /// Hung on `who`'s car, its `end2` hook.
+    pub const CAR: u8 = 2;
+}
+
+/// A tow rope out of a car's hook (the room's ropes: [`ServerMsg::Ropes`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rope {
+    pub id: u16,
+    /// The car the line comes out of (its driver / owner's entity id) and which end ([`tow_end`]).
+    pub car: u16,
+    pub end: u8,
+    /// [`rope_kind`].
+    pub kind: u8,
+    pub who: u16,
+    pub end2: u8,
+    /// cm (FIXED: the anchor).
+    pub pos: [i32; 3],
+    /// Line paid out (cm).
+    pub len: u16,
+}
+
+/// Most ropes in one [`ServerMsg::Ropes`].
+pub const MAX_ROPES: usize = 32;
+pub const ROPE_BYTES: usize = 23;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerMsg {
     Welcome {
@@ -549,6 +639,8 @@ pub enum ServerMsg {
     Room(RoomSettings),
     /// The player's own server-simulated car.
     Vehicle(VehicleState),
+    /// Every tow rope in the room (on a change, and every second).
+    Ropes(Vec<Rope>),
 }
 
 impl ServerMsg {
@@ -701,6 +793,22 @@ impl ServerMsg {
                     w.i16(x);
                 }
             }
+            Self::Ropes(list) => {
+                w.u8(S_ROPES);
+                w.u8(list.len().min(MAX_ROPES) as u8);
+                for r in list.iter().take(MAX_ROPES) {
+                    w.u16(r.id);
+                    w.u16(r.car);
+                    w.u8(r.end);
+                    w.u8(r.kind);
+                    w.u16(r.who);
+                    w.u8(r.end2);
+                    for p in r.pos {
+                        w.i32(p);
+                    }
+                    w.u16(r.len);
+                }
+            }
         }
     }
 
@@ -819,6 +927,26 @@ impl ServerMsg {
                 engine: r.u16()?,
                 omega: [r.i16()?, r.i16()?, r.i16()?, r.i16()?],
             }),
+            S_ROPES => {
+                let n = r.u8()? as usize;
+                if n > MAX_ROPES {
+                    return Err(DecodeError::TooLarge(MAX_ROPES));
+                }
+                let mut list = Vec::with_capacity(n);
+                for _ in 0..n {
+                    list.push(Rope {
+                        id: r.u16()?,
+                        car: r.u16()?,
+                        end: r.u8()?,
+                        kind: r.u8()?,
+                        who: r.u16()?,
+                        end2: r.u8()?,
+                        pos: [r.i32()?, r.i32()?, r.i32()?],
+                        len: r.u16()?,
+                    });
+                }
+                Self::Ropes(list)
+            }
             k => return Err(DecodeError::UnknownKind(k)),
         };
         r.finish()?;

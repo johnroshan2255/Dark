@@ -72,6 +72,7 @@ import { TREE_FADE } from '../world/WorldManager'
 import { createStore, type GameStateShape, type Store } from './GameState'
 import { NetClient, loadPlayerName, loadSetup, wireModel, type LocalPose, type RoomSetup } from '../net/NetClient'
 import { RemotePlayers } from '../net/RemotePlayers'
+import { TowSystem } from '../gameplay/tow/TowSystem'
 import { Buttons, Flags, NO_PLAYER } from '../net/protocol'
 import { loadSettings, saveSettings, type Settings } from './Settings'
 import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../world/Biomes'
@@ -130,6 +131,8 @@ export class Game {
   /** Multiplayer rooms (net/NetClient) and everyone else in the room (net/RemotePlayers). */
   readonly net: NetClient
   readonly remotes: RemotePlayers
+  /** Tow ropes: the winch hooks on every car (gameplay/tow/TowSystem). */
+  readonly tow: TowSystem
   readonly health = new Health()
   readonly audio = new AudioSystem()
   readonly ash = new AshParticles()
@@ -394,6 +397,8 @@ export class Game {
     }
     if (pal?.dirt) globalUniforms.uRoadSoil.value.set(pal.dirt[0] * 0.62, pal.dirt[1] * 0.6, pal.dirt[2] * 0.6, 1)
     this.envRoot.add(this.remotes.root)
+    this.tow = new TowSystem(this)
+    this.envRoot.add(this.tow.root)
     this.net = new NetClient(this)
     // (after Destruction's: every fixed step's predicted car state for the server-simulated car)
     {
@@ -468,6 +473,8 @@ export class Game {
       this.car.toggleFly()
     })
     // Simulation handling: X / Z gears (manual gearbox), Q low range, K locking differentials.
+    // H: the tow hooks — take / hang / let go / unhook on foot; held in the car, the winch (gameplay/tow/TowSystem).
+    i.onPress('KeyH', () => this.tow.press())
     i.onPress('KeyX', () => (this.car.shift(1), this.net.vehicle.press(Buttons.SHIFT_UP)))
     i.onPress('KeyZ', () => (this.car.shift(-1), this.net.vehicle.press(Buttons.SHIFT_DOWN)))
     i.onPress('KeyQ', () => (this.car.toggleLowRange(), this.net.vehicle.press(Buttons.LOW_RANGE)))
@@ -906,6 +913,7 @@ export class Game {
           this.physics.advance(dt, (fdt) => {
             p.fixedUpdate(fdt)
             this.car.fixedUpdate(fdt)
+            this.tow.fixedStep(fdt)
             this.net.vehicle.beforeStep()
             this.bike.fixedUpdate(fdt)
           })
@@ -998,6 +1006,7 @@ export class Game {
           this.car.wipers = Math.min(1, this.weather.rain * 1.6) // (wipers sweep with the rain)
           if (this.wreckClock > 0 && (this.wreckClock -= dt) <= 0) this.respawnCar()
           this.car.update(dt, this.physics.alpha, this.cameraCtl.flashOrigin, this.cameraCtl.flashTarget)
+          this.tow.update() // (after the cars are posed: the ropes run between their hooks)
           if (this.camera) {
             // Exhaust + tyre smoke/dust, lit by the sky fill and a share of the sun, sized in RT pixels.
             const L = this.lighting
@@ -1727,6 +1736,7 @@ export class Game {
     this.world.dispose()
     this.treeShadows.dispose()
     this.dynShadow.dispose()
+    this.tow.dispose()
     this.physicsDebug.dispose()
     this.post.dispose()
     this.sky.dispose()

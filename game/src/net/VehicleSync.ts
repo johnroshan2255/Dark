@@ -80,6 +80,7 @@ export class VehicleSync {
       this.active = true
       this.model = model
       this.hist.length = this.frames.length = 0
+      this.registered = true
       this.send({ t: 'vehicle', enter: true, model, pos: [mToCm(car.pos.x), mToCm(car.pos.y), mToCm(car.pos.z)], yaw: yawToU16(car.heading) })
     } else if (!want && this.active) {
       this.active = false
@@ -88,6 +89,27 @@ export class VehicleSync {
       const goesOn = car.driving
       this.send({ t: 'vehicle', enter: false, model: goesOn ? 0 : this.model, pos: [0, 0, 0], yaw: 0 })
     }
+  }
+
+  /** The server has our car (we got in once in this room): a tow rope can be put on it. */
+  private registered = false
+
+  /** Make sure the server has our car — parked where it stands — before a rope goes on it (a car never driven in
+   *  this room exists only here): in and straight out again, the server parks it. */
+  ensureServerCar(): void {
+    if (this.registered || this.active) return
+    const car = this.game.car
+    const model = wireModel(car.modelId, false)
+    const pos: [number, number, number] = [mToCm(car.pos.x), mToCm(car.pos.y), mToCm(car.pos.z)]
+    this.send({ t: 'vehicle', enter: true, model, pos, yaw: yawToU16(car.heading) })
+    this.send({ t: 'vehicle', enter: false, model, pos: [0, 0, 0], yaw: 0 })
+    this.registered = true
+  }
+
+  /** A new room: it has none of our cars. */
+  reset(): void {
+    this.active = false
+    this.registered = false
   }
 
   /** A one-shot driving action this frame (Buttons.SHIFT_UP …). */

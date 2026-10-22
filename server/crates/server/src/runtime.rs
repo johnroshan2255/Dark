@@ -345,6 +345,7 @@ impl Runtime {
                 ClientMsg::State(s) => self.game.on_state(pid, &s),
                 ClientMsg::Input(i) => self.game.on_input(pid, &i),
                 ClientMsg::Vehicle(v) => self.game.on_vehicle(pid, &v),
+                ClientMsg::Tow(t) => self.game.on_tow(pid, &t),
                 ClientMsg::Action { kind, target } => self.game.on_action(pid, kind, target),
                 ClientMsg::Leave => self.drop_player(pid),
                 ClientMsg::Hello { .. } | ClientMsg::Ping { .. } => {}
