@@ -42,7 +42,7 @@ export interface DriverInput {
  * what smokes, loses grip and burns) on the tread BULK under it. Heat in = the tyre's share of the SLIDING power
  * at the contact, |Fx·(ω·r − vx)| + |Fy·vy| (W); out = convection to the air (rising with the air speed over the
  * tyre: the car's speed and the tread's own rim speed) and conduction into the bulk / rim / road. Sizes scale with
- * the tyre (∝ r²). Anchors (tuned in tests/drivetrain.test.ts): a brake-stand burnout of the 85 kW pickup smokes
+ * the tyre (∝ r²). Anchors (tuned in tests/drivetrain.test.ts): a brake-stand burnout of an 85 kW rear-drive car smokes
  * hard within ~2–4 s (surface ≈ 180–200 °C) and ignites after ~15–25 s (≈ 360 °C, rubber's ignition range
  * 350–400 °C); a 1 g skidpad / a 0–100 run stays under ~110 °C; a drift gets hot and smoky, not alight.
  */

@@ -5,7 +5,7 @@ import type { BiomeWeights } from '../../world/Biomes'
 
 /**
  * VEHICLE EFFECTS — exhaust puffs and tyre smoke / dust, the way a 4×4 reads in over the hill:
- *   - EXHAUST: soft grey-blue puffs from the car's own tailpipe(s) (catalogue `exhaust`: the Żuk's rear right,
+ *   - EXHAUST: soft grey-blue puffs from the car's own tailpipe(s) (catalogue `exhaust`: the van's rear right,
  *     the G500's side exits) while the engine runs — a lazy idle trickle, a thicker stream under throttle —
  *     blown out along the pipe, then drifting up, growing as they fade.
  *   - TYRES: each wheel in contact emits by its SLIP (VehicleSim `wheelSlip`: sideways slide, a locked rear on

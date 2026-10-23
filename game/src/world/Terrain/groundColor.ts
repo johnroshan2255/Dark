@@ -101,7 +101,10 @@ function paletteOf(fields: WorldFields): Palette {
       // meadow: the bright grass, its sunny (flower-warmed) and darker patches; forest floor: the dark grass
       fresh: mix(g, gd, 0.25), olive: g, golden: c.flowers ? mix(g, c.flowers, 0.22) : g, ochre: c.dirt ? mix(g, c.dirt, 0.35) : base.ochre,
       moss: gd, litter: mix(gd, [0.02, 0.05, 0.02], 0.25), alpine: mix(g, c.cliff ?? base.rock, 0.3),
-      earth: c.rock ?? base.earth, rock: c.cliff ?? base.rock, sand: c.sand ?? c.dirt ?? base.sand, forest: 0.6,
+      earth: c.rock ?? base.earth, sand: c.sand ?? c.dirt ?? base.sand, forest: 0.6,
+      // (the walls seen from afar — the horizon, coarse LODs — carry the map's wall vegetation mixed in: up close the
+      // terrain shader paints it in patches, uCliffMoss)
+      rock: c.cliff ? (c.cliffMoss ? mix(c.cliff, c.cliffMoss, (m.cliffMoss ?? 0.4) * 0.8) : c.cliff) : base.rock,
     }
     mapPalettes.set(m, p)
   }

@@ -1,6 +1,5 @@
 import * as THREE from 'three'
 import type { BiomeField, BiomeWeights } from '../../world/Biomes'
-import { SNOW_LINE } from '../../world/Biomes'
 import { globalUniforms } from '../shaders/uniforms'
 
 /**
@@ -86,16 +85,16 @@ export class BiomeMap {
 }
 
 /**
- * GLSL: `biomeAt(xz)` → region weights (desert, snow); `snowAt(xz, y)` adds the altitude snow line exactly like
- * `BiomeField.weights(…, h)` (78–112 m, 30 m higher in the desert).
+ * GLSL: `biomeAt(xz)` → region weights (desert, snow); `biomeWithSnowLine(xz, y)` adds the altitude snow line (uSnowLine) like
+ * `BiomeField.weights(…, h)` (SNOW_LINE, 30 m higher in the desert; off on fixed maps).
  */
 export const BIOME_GLSL = /* glsl */ `
-uniform sampler2D uBiomeMap; uniform vec4 uBiomeRect; uniform float uBiomeActive;
+uniform sampler2D uBiomeMap; uniform vec4 uBiomeRect; uniform float uBiomeActive; uniform vec2 uSnowLine;
 // No snow or desert anywhere in the map (most of the forest): skip the fetch entirely (uniform branch).
 vec2 biomeAt(vec2 xz) { return uBiomeActive > 0.5 ? texture2D(uBiomeMap, (xz - uBiomeRect.xy) * uBiomeRect.zw).rg : vec2(0.0); }
 vec2 biomeWithSnowLine(vec2 xz, float y) {
   vec2 b = biomeAt(xz);
-  float alt = smoothstep(${SNOW_LINE[0].toFixed(1)} + b.x * 30.0, ${SNOW_LINE[1].toFixed(1)} + b.x * 30.0, y);
+  float alt = smoothstep(uSnowLine.x + b.x * 30.0, uSnowLine.y + b.x * 30.0, y);
   float snow = max(b.y, alt);
   return vec2(min(b.x, 1.0 - snow), snow);
 }`

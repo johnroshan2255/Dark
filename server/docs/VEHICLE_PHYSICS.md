@@ -12,7 +12,7 @@ marked done until its acceptance test passes.
 | Map set pieces | `world/map/MapProps.ts` | `props.json` instanced per 200 m tile; fixed colliders within 140 m; plank bridges as trimeshes from `map.json` `bridges`. |
 | Collision groups | `PhysicsWorld.Groups` | Terrain 0x1, Static 0x2, Player 0x4, Monster 0x8, Vehicle 0x10, Debris 0x20, VehicleMesh 0x40, StaticMesh 0x80, TerrainMesh 0x100 (`(member << 16) \| filter`). |
 | Vehicle model | `gameplay/vehicle/VehicleSim.ts` `TruckSim` (1 754 lines) + `drivetrain/` (1 805) | Rapier **dynamic body + `DynamicRayCastVehicleController`** used for **springs and wheel contacts only**. In the default *Simulation* handling (`mode 'drivetrain'`) Rapier's tyre friction and damping are OFF: our own damper (digressive, bump/rebound), anti-roll bars, bump + hard stops, a **tyre envelope** (8–18 ray casts per wheel per step: tyres roll over stones), and `Drivetrain` (engine curve, turbo, gearbox / CVT / converter, clutch, open / LSD / Torsen / viscous / locked diffs, per-wheel ω, combined-slip tyre forces, tyre heat, ABS / TCS / ESC, cornering assist) apply every tyre force with `addForceAtPoint`. Other modes on the same body: *legacy* (Rapier friction; used by **arcade** handling, the **hover**/flying car and the **boat**). Plus a BMX (`BikeSim`). |
-| Car data | `gameplay/vehicle/catalogue.ts`, `specs.ts`, `drivetrain/spec.ts` | 3 cars (pickup, gwagen, zuk). A spec sheet → `resolveSpec()` → `Resolved` (plain SI numbers, JSON-able). Body geometry (`TruckDims`: wheel positions, radius, half extents, convex hulls, exact trimesh) is baked from the GLBs at load (`assets/loadModels.ts`). |
+| Car data | `gameplay/vehicle/catalogue.ts`, `specs.ts`, `drivetrain/spec.ts` | 3 cars (gwagen, bmw, van — model index = catalogue index + 1). A spec sheet → `resolveSpec()` → `Resolved` (plain SI numbers, JSON-able). Body geometry (`TruckDims`: wheel positions, radius, half extents, convex hulls, exact trimesh) is baked from the GLBs at load (`assets/loadModels.ts`). |
 | Per-step extras | `Car.fixedUpdate` | input → pedals (`keyPedals` smoothing), `unhook`, `Damage.step` (dents, wreck), fly / boat transforms, freeze when no ground collider streamed, `keepAbove`. |
 | Server | `server/` Rust, tokio + axum, one task per match | `Match` ticks at **30 Hz** (`MatchConfig.tick_hz`), WebSocket binary protocol v3, interest management (≤ 64 entities, 30 / 15 / 5 Hz by distance), rooms, HMAC tickets, Prometheus metrics. |
 | Authority (v1) | `sim/src/validate.rs` | **Client-authoritative movement with server validation**: the client streams its own pose (`State`, 30 Hz); the server checks speed caps, teleport, ground (heightfield, 2.5 m tolerance), bounds, flying, and answers a `Correction` (snap + epoch) or kicks. Server owns lifecycle, zone, HP, roadkill, eliminations. |
@@ -115,22 +115,23 @@ the game's collision groups, heightfield), `control.rs` (AI driver: target point
 
 | scenario | drivetrain replay (worst relative difference) | whole car vs game (worst position error) |
 |---|---|---|
-| pickup: 3 s full throttle, 2 s turn, 2 s brake, 1 s roll | 2.8e-13 over 480 steps | < 1 mm (velocity ≤ 1 mm/s) |
-| G-Class, same | 4.8e-11 | < 1 mm |
-| Żuk, same | 1.3e-8 over the first 14 steps (see below) | 5.4 cm over 8 s, ~70 m |
-| pickup up a 15° ramp, 5 s | 1.7e-13 | < 1 mm |
+| G-Class: 3 s full throttle, 2 s turn, 2 s brake, 1 s roll | 1.5e-11 over 480 steps | 6 mm (velocity ≤ 3 mm/s) |
+| BMW E30, same (45 % throttle) | 1.6e-9 over the first 12 steps (see below) | 0.49 m over 8 s |
+| kei van, same (60 % throttle) | 6.3e-8 over the first 48 steps | 2 mm |
+| kei van up a 15° ramp, 5 s | 1.8e-13 over 48 steps | 1 mm |
 
-The Żuk (no aids, open diff) pulls away with its rear wheels spinning. In that regime the game's OWN drivetrain
+(2026-10-23, the fleet swap: pickup and Żuk retired.) A light rear-drive car (the E30: open diff, no LSD) pulls away
+with its rear wheels spinning. In that regime the game's OWN drivetrain
 turns a 1e-12 nudge into 3 % by step 17 and 100 % by step 20 (TypeScript replayed against itself), so an open-loop
 replay can't be followed past the onset by any implementation. **Consequence for the design:** client prediction
 will diverge from the server during wheelspin and must be reconciled continuously (Stage E), never trusted.
 
 A game quirk the port reproduces on purpose: `TruckSim.configure` sizes the brakes on the spec sheet's tyre radius
-and only then sets every axle to the model's wheel radius (pickup: 0.3937 vs 0.391 m → brakes 0.7 % stronger).
+and only then sets every axle to the model's wheel radius (e.g. 0.3937 vs 0.391 m → brakes 0.7 % stronger).
 
-**Behaviour** (`tests/physics.rs`): 0–6 s full throttle 16.4 m/s, brakes 0.67 g (a 1989 pickup without ABS);
-over 12 cm planks every 6 m: wheels travel 11 cm, body stays level, never airborne; parked on 20°: slides 4 mm in
-5 s; rear-ending a standing car at speed pushes it to 8 m/s, bodies never interpenetrate; an 8-car pile-up stays
+**Behaviour** (`tests/physics.rs`, the G500): 5 s full throttle 26.9 m/s (BMW 20.2, van 12.7), brakes 0.73 g;
+over 12 cm planks every 6 m: wheels lift ≤ 12.5 cm, body stays level, never airborne; parked on 20°: slides 6 mm in
+5 s; rear-ending a standing car at speed pushes it to 11 m/s, bodies never interpenetrate; an 8-car pile-up stays
 upright and on the ground; on a ±3 m heightfield the body stays −0.07…0.15 m from the ground.
 
 **Cost** (`cargo test --release -p dark-sim bench_vehicle_physics -- --ignored --nocapture`, island heightfield

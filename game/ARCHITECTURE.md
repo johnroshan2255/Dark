@@ -329,31 +329,33 @@ road takes the other's height round the crossing). Checked by driving every road
 On the Island the stuck spots were the export's stunt ramps / log ramps, two rock pillars and a pole standing ON the
 road centre lines: removed from props.json (the ramps on stunt_spur / jump_spur / pump_spur stay — that's their job).
 
-ZHANGJIAJIE & WULINGYUAN (2026-10-23, `public/maps/zhangjiajie/`) — a forest of sandstone PILLARS, built by
-`scripts/blender/zhangjiajie/build.py` from the user's height-map render (`heightmap.png`, 1024 px) and design atlas
-(`atlas.png`: colour concept, palette, drivable routes). The render is shaded and tilted, not a DEM, so it is read for
-its STRUCTURE: mesas = bright smooth areas (the edge tables), rivers = the darkest path between hand-picked points
-(main river N → SW, its NE branch), the rest pillar forest with its brightness → pillar height; the legend, watermark
-and streaky bottom band are filled by mirroring the relief above them. Heights at game scale (the render's 1300 m
-would be a wall on a 2.4 km map): valley floors ≈ 0–30 m rising from the rivers, mesas ≈ 140–175 m with ragged sheer
-cliffs, pillars 16–215 m. Roads are the Highlands' heading-aware A* over the base relief (before the pillars): a 6.7 km
-scenic loop, a cross road and a valley road through the middle (river crossings → bridges) and the MESA ROAD — a ramp
-cut into the north-west mesa's flank as a ravine, climbed in switchbacks to the lookout (Tianmen's bends). Then the
-island's `roads.py` and `map_preview.py` (pillars drawn as columns with green caps when map.json has them). Palette =
-the atlas swatches (vegetation greens, sandstone, soil, river blues); `trees: 'conifer'`.
-PILLARS AS MESHES (`world/map/PillarField.ts`, map.json `pillars`: x, base y, z, radius, height, rotation, variant ×
-~1.6 k): first stamped into the height grid, they turned into cones beyond LOD0 (the terrain is 2 m only near the
-player, 4–8 m to ~250 m, ~58 m on the horizon) and the skyline into soft pyramids. Now the grid holds only their
-talus mounds and each pillar is an instance — 5 silhouettes (column, spire, two tiers with a wooded ledge, bulging
-crown, leaning) × 3 LODs (~900 / ~220 / ~80 tris; 150 / 430 m; none past the tier's view distance), fluted, stepped
-grey / tan strata, water streaks, a crown of green canopy lumps and shrubs on the ledges, all vertex colours from the
-palette, on a stylized Lambert WITHOUT the boulders' cull fade (+1 program, ≤ 15 draws for every pillar). Re-binned
-into the LODs every 10 m of movement. Physics: a fixed cylinder per pillar (Static: car, player, camera, the tow's
-anchors — a strap goes round a pillar at the tie height; exported to statics.bin so the server's cars and bots meet
-them). Nothing grows inside one (`FixedMap.inPillar`, scatter). The horizon mesh averages five points per vertex on
-fixed maps (a point sample in the 26 m river channel flooded a 60 m horizon cell: a lake that wasn't there). The pale
-haze over the far valley floors is the height mist, not water. Cost (ULTRA, start, desktop): 113 draws, 0.77 M tris,
-GPU ≈ 5.5 ms.
+ZHANGJIAJIE & WULINGYUAN (2026-10-23, `public/maps/zhangjiajie/`, 4 km × 4 km, 2001² grid at 2 m) — sandstone
+TOWER HILLS sculpted and eroded in Blender, approved by the user from renders before they went into the game.
+`scripts/blender/zhangjiajie/terrain.py` (→ `terrain/terrain.npy`, `floor.npy`; RENDER=1 for Cycles approval renders):
+the layout read from the user's height-map render (`ref/heightmap_original.png`, via build.py stage 1: spire field,
+white tables, rivers) → ~120 tower massifs at ~5× the render's tip spacing (~300 m; heights × HS = 0.75 since the user asked for 3/4, tops ≈ 90–320 m, tables ≈ 340–420 m), each tapered — wide base, walls
+of 61–77° that differ side to side (sheer / stepped with strata ledges / cut by gullies and alcoves), an uneven domed
+top; split into fused columns of different heights; 50–70 m flat, drivable gaps; tables round the edge with ragged,
+tapered rims → A.N.T. Landscape's eroder (Blender extension, `blender --command extension install antlandscape`)
+for river scour and scree, clipped to −60 / +25 m. `build.py` (HALF 2000) takes that terrain (`TERRAIN=0`: the older
+procedural towers), routes the roads through the gaps (lowest corridor A*, relaxed bends, 6:1 cuts), trees, props,
+map.json; then `island/roads.py`, `map_preview.py`, `export-statics.mjs`. (History: a synthesised relief was "1 % of
+the height map"; instanced pillar meshes on grass "small pillars on a ground"; thin terrain towers "too narrow" — the
+user wants the Island's high hills, taller, many, wide, with gaps to drive round.) map.json: atlas palette (`cliff` →
+`uCliffStone`, `cliffMoss` → `uCliffMoss` wall vegetation), `trees: 'liyue'`, `treeLine: 1000`, `mist` (BiomeAir.
+applyMapAir: valley mist, distance tint ≤ 0.3, haze × 0.4), `aerial: [200, 2600, 0.45]` (the stylize shader's
+distance desaturation — the default 30 → 600 m greyed every hill), `horizonRes: 160`, `crags: false`. Terrain LODs on
+a `crags: false` map keep each coarse vertex's highest grid point; the horizon the highest of 5 samples on a cliff
+cell. THE LOOK (2026-10-23, after the user's in-game check against their photos): `light` (BiomeAir.applyMapAir: a
+neutral sun, a cool pale sky fill, soft cel shading — the bright style's golden light turned the jade forest yellow
+and the grey-beige stone orange); `cliff` with `uCliffStone.w = 2` = NATURAL SANDSTONE in the terrain shader (no
+stacked blocks: smooth faces streaked down their height — pale / grey bands, thin rust, dark wet runnels, strata
+lines — and vertical flutes as a normal tilt); jade crown hues for every tree (WorldChunk JADE_HUES) at full forest
+density; `grass: 0.3` (forest floor, not meadow); `mistSheets` (world/map/MistSheets.ts: 1–3 see-through drifting
+cloud sheets at 45 / 90 / 150 m that fade where the ground rises to them — cloud in the gorges, no fog pass, 1 draw
+each; LOW draws one); coarse terrain LODs take their normals from the coarse surface. Fixed maps have no altitude snow line (`uSnowLine`). Memory: heights.bin 8 MB (Float32 16 MB per thread: main +
+each chunk worker), statics.bin 9 MB. Cost (desktop M4, headless, HIGH): 2.9–6.7 ms GPU, 46–63 draws, 0.16–0.44 M
+tris; LOW hill top 2.4 ms.
 
 ## 4. Rendering
 
@@ -396,11 +398,13 @@ GPU ≈ 5.5 ms.
   modulating the time-of-day params; rain streaks (`particles/RainParticles.ts`), tree sway (`uniforms.ts` `foliageSway`).
   Precipitation follows the biome underfoot: rain in the forest, none in the desert, SNOW on the snowfields (the same
   particle pool as soft drifting flakes; a light snowfall even under a fair sky); no puddles on sand or snow.
-- **Lights at night**: car head/tail/brake/reverse lamps (`Car`, F switch in the truck, auto with the dark) share the single spot light
-  with the torch; street lamps on every roadside post are additive glow + road pool sprites instanced with the poles
+- **Lights at night**: car head/tail/brake/reverse lamps (`Car`, F switch in the truck, auto with the dark; lamp
+  positions from the catalogue `lamps`, a second pair of quads per side with `head2` — the BMW's quad lamps) light
+  the road with TWO spot lights: the torch's shadowed spot is the left beam, `LightingSystem.headlight2` (no shadow,
+  always in the scene so no program re-resolves) the right one, each 0.6 × the torch's intensity; street lamps on every roadside post are additive glow + road pool sprites instanced with the poles
   (`MaterialLibrary.lampGlow`) that flicker on at dusk — no extra real lights (skills/lighting fixed light pool).
 - **Realistic drivetrain** (Simulation handling, the default; skills/realistic-vehicle-system): every garage car is
-  its real spec sheet (`gameplay/vehicle/specs.ts`: 1989 Hilux 22R-E pickup, G500 4×4², Żuk A06) resolved against
+  its real spec sheet (`gameplay/vehicle/specs.ts`: G500 4×4², BMW E30 M3, a 1983 800 cc kei van) resolved against
   the model's measured wheelbase / track (`drivetrain/spec.ts`) into `drivetrain/Drivetrain.ts`: engine torque
   curve (petrol / turbo / diesel / EV) with idle control, limiter and engine braking → auto-clutch, torque
   converter, CVT or direct drive (velocity constraints with torque capacity) → stepped gearbox with a shift map
@@ -416,12 +420,12 @@ GPU ≈ 5.5 ms.
   skills/realistic-vehicle-system). The HUD shows tacho, gear and aid lamps; the engine sound follows the sim's rpm; wheel spin,
   dust and brake / reverse lamps read the sim. Boat and flight hand Rapier back to the legacy setup. Measured:
   +0.015–0.04 ms CPU per physics step (Node, 4 wheels, 8 substeps), no allocation per step; no GPU change.
-  `tests/drivetrain.test.ts` (56 checks over the 3 cars: 0–100 and top speed vs published, shifts, parking on
+  `tests/drivetrain.test.ts` (100 checks over the 3 cars: 0–100 and top speed vs published, shifts, parking on
   15°, TCS, 35° low-range climb, skidpad, braking, ESC, drop, boat handoff).
   BRAKE HARDWARE (`scripts/blender/vehicle_brakes.py` via the Blender MCP socket, `scripts/blender/bl.mjs`):
-  `caliper_FL…RR` per corner — disc + hat + caliper (G500 all round, pickup front) or drum (pickup rear, Żuk) —
+  `caliper_FL…RR` per corner — disc + hat + caliper (G500, BMW) or drum (the van) —
   steering and riding with the wheel, never spinning; +2 draws (one per axle, no shadow pass), +1.1–1.3 k tris;
-  the same pass brought the G500 inside the vehicle budget (39.5 k tris, 12 materials: planar decimate + merged
+  the same pass brought the G500 inside the then vehicle budget (39.5 k tris, 12 materials: planar decimate + merged
   near-black materials).
   RIDE + LOOK: each wheel rides deterministic GROUND ROUGHNESS (bumps, ruts, stones by surface — the terrain mesh is
   smooth at wheel scale) through its suspension, so the springs and dampers visibly work on every road (dirt road,
@@ -429,16 +433,16 @@ GPU ≈ 5.5 ms.
   knobby tread + steel / alloy rims, 2.4–2.9 k tris each) with baked Cycles AO in every part's vertex colours; the
   car shader flattens and bulges each tyre from its real load (`tyreW` attribute, `uTyre[4]`; tread shear on
   HIGH), coats the lower body and tyres in dirt from the ground it drives on, and adds paint gloss on MEDIUM+
-  (a soft terminator instead of the cel step). Tris: pickup 17.4 k, Żuk 23.6 k, G500 39.7 k (budget 40 k).
+  (a soft terminator instead of the cel step). Tris (2026-10-23, budget 30 k): BMW 15.2 k, van 29.8 k, G500 29.7 k.
   Measured seed 7, RTX 4050 laptop: no fps change (144 capped), GPU within noise (4.6–6.3 ms HIGH, 2.8 ms LOW).
   DRIFT + KIT: handbrake slides can be caught and held (no shifts mid-slide, handbrake declutches, full lock into
-  a slide, pickup rear LSD, each car's real aids by default — the 1989 pickup and the Żuk have no TCS / ESC);
-  tests/drivetrain.test.ts checks catch (all) and hold (pickup).
+  a slide, each car's real aids by default — the 1983 kei van has no ABS / TCS / ESC);
+  tests/drivetrain.test.ts checks catch (all) and hold (the BMW).
   BURNOUT + TYRE HEAT: W + S (touch: DRIFT + stick forward at a standstill) = gas + foot brake 0.75 → a brake-stand:
   the front-biased brakes hold the fronts, the engine spins the driven rears (manual: clutch held to ~75 % of the
   redline, then dumped). Per tyre a two-lump tread temperature (`Drivetrain` `TYRE`) from the sliding power: grip
-  falls past 120 °C, smoke from 140 °C, FIRE at 360 °C (bulk ≥ 170 °C) — pickup: smoke 2.7 s, fire ~21 s, 0.0 m
-  of creep; Żuk (open diff: a one-wheel peel) 3.1 s / ~15 s, 0.3 m; limit cornering 30 s and 0–100 stay < 110 °C.
+  falls past 120 °C, smoke from 140 °C, FIRE at 360 °C (bulk ≥ 170 °C) — measured on an 85 kW LSD rear-driver: smoke 2.7 s, fire ~21 s, 0.0 m
+  of creep; open diff (a one-wheel peel) 3.1 s / ~15 s, 0.3 m; limit cornering 30 s and 0–100 stay < 110 °C.
   VehicleFx: heat smoke, additive flames + soot + a glow sprite in the SAME draw (premultiplied blending; no real
   light — no point-light pool exists); HUD lamp `TYRES n°C` / `TYRE FIRE`, toast on ignition, synthesized crackle.
   Cost: thermal ≈ 0.2 µs per physics step, +320 B; GPU (M4, 1280×720, seed 7, 6.5 m chase) burnout HIGH ≈ +0.4 ms,
@@ -541,8 +545,8 @@ Measured (RTX 4050, 1080p): GPU time within noise on every tier, LOW +8 draws (�
   loaded on demand (`loadVehicle`, cached). `Game.selectVehicle` swaps the car in the world live; `Game.setTuning` →
   `Car.retune` → `TruckSim.retune` changes power / force / boost / grip / springs / tyre size / mass in Rapier in
   place; paint tints the masked panels in the car shader. Saved per vehicle in Settings (`garage`).
-- **Scale**: real-world. Each car's `length` is set so its WHEELBASE matches the real vehicle (Hilux Xtra Cab 3.095 m,
-  G500 4×4² 2.85 m, Żuk 2.70 m); the player is a 1.78 m adult — the hero (`hero.lod0.glb`, built by
+- **Scale**: real-world. Each car's `length` is set so its WHEELBASE matches the real vehicle (G500 4×4² 2.85 m,
+  BMW E30 2.57 m, kei van 1.84 m); the player is a 1.78 m adult — the hero (`hero.lod0.glb`, built by
   `scripts/blender/hero/`: AI-generated body, rebuilt face + modelled hands, Mixamo rig of 65 bones incl. fingers,
   15 k tris, 1024² albedo on `MaterialLibrary.hero`, 2.3 MB) animated by `CharacterModel`: 13 Mixamo clips — idle,
   walk → jog → run → sprint blended by speed on one shared foot phase (stride lengths measured from the clips: no
@@ -554,8 +558,12 @@ Measured (RTX 4050, 1080p): GPU time within noise on every tier, LOW +8 draws (�
   no longer loaded.)
 - **Doors, cabin, axles** (models prepared in Blender: `scripts/blender/vehicle_doors.py` + `vehicle_finish.py`):
   the front doors are separate parts (`door_FL*`/`door_FR*` with a `hinge` glTF extra, dark jamb in the opening),
-  the steering wheel is a named part on every car, the Żuk has a ~150-tri cabin, and only the base-colour texture is
-  kept (≤ 1024²; Żuk 3.9 → 0.7 MB). `Car` hangs each door on its hinge (one instanced draw on the car program +
+  the steering wheel is a named part on every car, and only the base-colour texture is kept (≤ 1024²; the BMW's
+  one 1024² JPEG). The BMW and the van come out of ONE script, `scripts/blender/vehicle_prep.py CAR=bmw_e30|carry_van`
+  (normalise → debadge → wheels → decimate to budget → bake textures into vertex colours → matte role materials →
+  calipers → doors → steering wheel, pedals, gear lever, dial → AO → export), then `vehicle_hooks.py`;
+  `vehicle_trim.py` brings a finished car under 30 k tris and makes its materials matte (metallic 0, roughness 0.85:
+  the source gloss read as glitter). `Car` hangs each door on its hinge (one instanced draw on the car program +
   its window): held by the entry animation, else latched, else swinging free (the car's acceleration and the head
   wind; slams shut). Live beam axles + diffs + driveshaft (catalogue `axles`, models without their own) are one
   5-instance draw that tilts with each wheel's suspension. Cost with the car in view: +5 draws (+10 on HIGH with
@@ -722,7 +730,7 @@ and the fps every second (spots below FPS_LOW). HEADLESS=0 is a visible window t
 | `E` | mount / get off the BMX (touch: BIKE) — W/S pedal/brake, A/D steer, Shift faster |
 | `L` | in a car: fly ⇄ land (touch: FLY / LAND) |
 | `X` / `Z` | in a car (Simulation, manual gearbox): gear up / down |
-| `Q` / `K` | in a car (Simulation): low range / lock differentials (2H ⇄ 4H on the pickup) |
+| `Q` / `K` | in a car (Simulation): low range / lock differentials (G500) |
 | `↑` / `↓` | in a car: raise / lower the body (air suspension); flying: climb / sink (touch: ▲ ▼) |
 | `F7` / `F8` | cycle quality preset low → ultra (disables auto) / toggle adaptive quality |
 | touch | left half: joystick (full push = sprint) · right half: look · LIGHT / JUMP / FPS / TIME / fullscreen buttons |

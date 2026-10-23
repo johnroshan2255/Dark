@@ -371,7 +371,7 @@ abstract class VehicleBase {
   }
 }
 
-/** Pickup-truck dimensions from the model (assets/loadModels TruckModel). */
+/** The car's dimensions from the model (assets/loadModels TruckModel). */
 export interface TruckDims {
   wheelPos: [number, number, number][]
   wheelRadius: number

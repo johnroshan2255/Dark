@@ -21,6 +21,12 @@ export class LightingSystem {
   readonly sun = new THREE.DirectionalLight()
   readonly hemi = new THREE.HemisphereLight()
   readonly flashlight = new THREE.SpotLight(0xfff1d6, 0, 42, 0.42, 0.5, 1.6)
+  /** The car's RIGHT headlight beam (the flashlight is the left one while driving; 2026-10-23, the user: "we need
+   *  two lights in front"). No shadow; always in the scene (intensity 0 on foot) so the light count — part of every
+   *  program's key — never changes. Cost: one more spot term per lit fragment. */
+  readonly headlight2 = new THREE.SpotLight(0xfff1d6, 0, 42, 0.42, 0.5, 1.6)
+  readonly headlight2Origin = new THREE.Vector3()
+  readonly headlight2Target = new THREE.Vector3()
   flashlightOn = false // off by default (daylight); F toggles — in the truck F toggles the headlights instead
   /** What the spot light is doing THIS frame: the torch on foot, the headlights in the truck (set by Game). */
   spotOn = false
@@ -58,11 +64,11 @@ export class LightingSystem {
     this.flashlight.shadow.camera.far = 42
     this.flashlight.shadow.bias = -0.0008
     this.flashlight.shadow.normalBias = 0.03
-    this.root.add(this.sun, this.sun.target, this.hemi, this.flashlight, this.flashlight.target)
+    this.root.add(this.sun, this.sun.target, this.hemi, this.flashlight, this.flashlight.target, this.headlight2, this.headlight2.target)
     // Every pass that draws the main scene must collect the same lights: the dynamic-shadow pass's camera sees only
     // DYN_LAYER, and with no lights there three's light state flipped 3 → 0 → 3 lights each frame — every lit
     // material re-resolved its program twice a frame (~0.6 ms on a 4×-throttled phone CPU, measured 2026-10-22).
-    for (const l of [this.sun, this.hemi, this.flashlight]) l.layers.enable(DYN_LAYER)
+    for (const l of [this.sun, this.hemi, this.flashlight, this.headlight2]) l.layers.enable(DYN_LAYER)
   }
 
   /**
@@ -177,7 +183,15 @@ export class LightingSystem {
     // In daylight a flashlight barely registers — scale it down with the sun so the beam pool doesn't glow on a
     // sunny road; full strength at dusk/night/nightmare.
     const daylight = sunK * (1 - tod.nightmare) * (1 - this.cave)
-    f.intensity = this.spotOn ? this.flashlightIntensity * flick * (1 - 0.85 * daylight) : 0
+    f.intensity = this.spotOn ? this.flashlightIntensity * flick * (1 - 0.85 * daylight) * (this.spotIsHeadlights ? 0.6 : 1) : 0
+    // the second beam (headlights only): each lamp 60 % of the torch — the pair lights the road a bit brighter and
+    // wider than one cone
+    const h2 = this.headlight2
+    h2.position.copy(this.headlight2Origin)
+    h2.target.position.copy(this.headlight2Target)
+    h2.intensity = this.spotOn && this.spotIsHeadlights ? this.flashlightIntensity * 0.6 * (1 - 0.85 * daylight) : 0
+    h2.updateMatrixWorld()
+    h2.target.updateMatrixWorld()
     // No shadow re-render while off; the shadow pass is the flashlight's main cost.
     f.shadow.autoUpdate = this.flashlightOn && f.castShadow
     // But a castShadow light MUST have a map: shaders compiled with NUM_SPOT_LIGHT_SHADOWS sample it,

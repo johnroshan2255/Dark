@@ -1,6 +1,7 @@
 import { loadFixedMap, setActiveMap, type FixedMap } from '../world/map/FixedMap'
 import { MapProps } from '../world/map/MapProps'
 import { PillarField } from '../world/map/PillarField'
+import { MistSheets } from '../world/map/MistSheets'
 import * as THREE from 'three'
 import { CaveSystem } from '../gameplay/caves/CaveSystem'
 import { MOUTH_X } from '../world/Formations/caves'
@@ -66,7 +67,7 @@ import { Destruction } from '../gameplay/destruction/Destruction'
 import { TrailMap } from '../rendering/trails/TrailMap'
 import { WindDrift } from '../rendering/particles/WindDrift'
 import { BiomeMap } from '../rendering/biome/BiomeMap'
-import { applyBiomeAir } from '../rendering/weather/BiomeAir'
+import { applyBiomeAir, applyMapAir, type MapAir } from '../rendering/weather/BiomeAir'
 import { GameLoop } from './GameLoop'
 import { bakeImpostors, useImpostorAtlas, type ImpostorAtlas } from '../rendering/impostors/Impostors'
 import { TREE_FADE } from '../world/WorldManager'
@@ -156,7 +157,7 @@ export class Game {
   /** Hillside caves: crystals, pools, sunbeams, chests and the in-the-dark factor (gameplay/caves). */
   readonly caves: CaveSystem
   private readonly caveFog = new THREE.Color(0.02, 0.045, 0.085) // the Chasm's blue haze (sRGB ≈ 32, 57, 84 in the refs)
-  private readonly aerialBase = globalUniforms.uAerial.value.z
+  private aerialBase = globalUniforms.uAerial.value.z
   readonly monsters: MonsterSystem
   readonly lightning: Lightning
   private respawnTimer = 0
@@ -189,6 +190,8 @@ export class Game {
   private readonly bwRegion: BiomeWeights = [0, 0]
   /** All region weights under the player (air, ambient particles). */
   private readonly rw: RegionWeights = new Float32Array(BIOME_COUNT)
+  /** A fixed map's own sky (map.json palette skyZenith / skyHaze), applied after the biome air. */
+  private mapAir: MapAir | null = null
   private readonly ahead = new THREE.Vector3()
   private readonly mistColor = new THREE.Color()
   private readonly fxLight = new THREE.Color()
@@ -239,6 +242,9 @@ export class Game {
   private mapProps: MapProps | null = null
   /** A pillar map's sandstone columns (world/map/PillarField.ts). */
   readonly pillars: PillarField | null = null
+  /** A map's cloud sheets in its gorges (world/map/MistSheets.ts, map.json `mistSheets`). */
+  private mistSheets: MistSheets | null = null
+  private readonly mistCol = new THREE.Color()
 
   private constructor(opts: GameOptions, physics: PhysicsWorld, private readonly models: GameModels, readonly map: FixedMap | null = null) {
     this.physics = physics
@@ -299,6 +305,10 @@ export class Game {
       if (map.pillars.length) {
         ;(this as { pillars: PillarField | null }).pillars = new PillarField(map, physics)
         this.world.root.add(this.pillars!.root)
+      }
+      if (map.mistSheets?.length) {
+        this.mistSheets = new MistSheets(map, map.mistSheets.map(([y, density]) => ({ y, density })), new THREE.Color(0xe8eef4))
+        this.world.root.add(this.mistSheets.root)
       }
     }
     this.biomeMap = new BiomeMap(this.world.fields.biomes)
@@ -396,6 +406,9 @@ export class Game {
     this.envRoot.add(this.caves.group, this.destruction.mesh, this.drift.points, this.sky.mesh, this.bike.root, this.car.root, this.vehicleFx.points, this.rain.points, this.horizon.mesh, this.landmarks.group, this.water.mesh, this.beam.mesh, this.monsters.rig.root, this.lightning.mesh, this.ash.points, this.character.root, this.blobShadow, this.chunkDebug.object, this.cullingDebug.helper, this.physicsDebug.object)
     this.remotes = new RemotePlayers(this.materials.hero, models.hero, (id) => loadVehicle(id), this.materials.characterInstanced, (x, z) => this.world.groundAt(x, z) ?? this.world.fields.height(x, z), (x, z) => this.world.groundAt(x, z))
     this.remotes.setQuality(this.quality.remoteCharacters, this.quality.remoteCars)
+    // a fixed map's snow is its biome map's alone (no altitude snow line: Zhangjiajie's 250 m tables and spire crowns
+    // went white under it)
+    if (map) globalUniforms.uSnowLine.value.set(1e5, 1e5 + 40)
     // a fixed map's own colours: its water and its dirt roads (the ground takes the rest: groundColor)
     const pal = map?.palette
     if (pal?.waterDeep) {
@@ -403,6 +416,25 @@ export class Game {
       this.water.setDeep([w[0] * 0.55 + d[0] * 0.45, w[1] * 0.55 + d[1] * 0.45, w[2] * 0.55 + d[2] * 0.45], 0.42)
     }
     if (pal?.dirt) globalUniforms.uRoadSoil.value.set(pal.dirt[0] * 0.62, pal.dirt[1] * 0.6, pal.dirt[2] * 0.6, 1)
+    if (pal?.cliff) globalUniforms.uCliffStone.value.set(pal.cliff[0], pal.cliff[1], pal.cliff[2], map?.naturalStone ? 2 : 1) // (2: natural streaked stone)
+    if (pal?.cliffMoss && map?.cliffMoss) globalUniforms.uCliffMoss.value.set(pal.cliffMoss[0], pal.cliffMoss[1], pal.cliffMoss[2], map.cliffMoss)
+    // ... and its air (sky, horizon haze): BiomeAir.applyMapAir, every frame after the biome air
+    if (pal?.skyZenith || pal?.skyHaze || map?.mist || map?.light) {
+      const col = (v?: [number, number, number]) => (v ? new THREE.Color().setRGB(v[0], v[1], v[2]) : undefined)
+      const hexc = (h?: string) => (h ? new THREE.Color(parseInt(h, 16)) : undefined)
+      const L = map?.light
+      this.mapAir = {
+        zenith: col(pal?.skyZenith), haze: col(pal?.skyHaze), mist: map?.mist,
+        light: L ? { sun: hexc(L.sun), fill: hexc(L.fill), bounce: hexc(L.bounce), tint: hexc(L.tint), toon: L.toon, split: L.split, saturation: L.saturation } : undefined,
+      }
+    }
+    // ... and its aerial perspective (map.json `aerial`: start, end m, strength — Zhangjiajie's towers are the view:
+    // the default 30 → 600 m at 0.75 turned every hill past a few hundred metres grey-blue)
+    if (map?.aerial) {
+      globalUniforms.uAerial.value.x = map.aerial[0]
+      globalUniforms.uAerial.value.y = map.aerial[1]
+      this.aerialBase = map.aerial[2]
+    }
     this.envRoot.add(this.remotes.root)
     this.tow = new TowSystem(this)
     // (the tow gestures: loaded after the start — nothing needs them before someone takes a hook)
@@ -696,7 +728,9 @@ export class Game {
     this.reflection.every = q.reflectionEvery
     this.reflection.skyline = q.reflectionSkyline
     this.post.setAO(q.ao.scale, q.ao.samples, q.ao.radius)
-    this.horizon.configure(q.horizon)
+    // (a map's own horizon grid on every tier, map.json horizonRes — Zhangjiajie's towers: past LOW's short chunk ring
+    // a 48² grid left slivers of sky between the chunks' cliffs and its own, and the towers melted into cones)
+    this.horizon.configure(this.map?.horizonRes ? { size: q.horizon.size, res: Math.max(q.horizon.res, this.map.horizonRes) } : q.horizon)
     // Phones: the scene at ≤ 1.5 MP on every preset (2× canvas at full scale). ULTRA's desktop budget (4.2 MP) let a
     // 3.25× phone shade 2.3 MP (Mali-G720, 2026-10-20: 23–40 fps with every feature already down).
     this.post.setPixelBudget(this.device?.mobile ? Math.min(q.pixelBudget, MOBILE_PIXEL_BUDGET) : q.pixelBudget)
@@ -1040,7 +1074,7 @@ export class Game {
       })
       .add({
         name: 'world',
-        update: (dt) => {
+        update: (dt, time) => {
           this.destruction.update(dt)
           if (!this.camera) return
           // Physics look-ahead: where a moving vehicle / player will be in ~1.5 s → its chunk gets colliders early.
@@ -1049,6 +1083,11 @@ export class Game {
           this.world.update(p.renderPosition, this.cullingDebug.cullCamera(this.camera), this.ahead)
           this.mapProps?.update(p.renderPosition)
           this.pillars?.update(p.renderPosition, this.quality.viewDistance * 1.05)
+          if (this.mistSheets) {
+            // the cloud takes the sky's haze, lifted toward white (by day) — dimmed with the light at night
+            this.mistCol.copy(this.tod.current.fogColor).lerp(this.tod.current.sunColor, 0.15).multiplyScalar(1.05)
+            this.mistSheets.update(time, this.camera.position.y, this.quality.name === 'low' ? 1 : this.quality.name === 'medium' ? 2 : 3, this.mistCol)
+          }
           {
             const q = this.quality
             this.landmarks.update(dt, p.renderPosition.x, p.renderPosition.z, q.landmarkRange, q.sunShadowExtent * 1.5, q.shadows && q.objectShadows)
@@ -1074,6 +1113,7 @@ export class Game {
           const bw = this.world.fields.biome(p.renderPosition.x, p.renderPosition.z, this.bw, p.renderPosition.y)
           const rw = this.world.fields.region(p.renderPosition.x, p.renderPosition.z, this.rw, p.renderPosition.y)
           applyBiomeAir(this.tod.current, bw[0], bw[1], rw[Biome.Autumn], rw[Biome.Mystic])
+          if (this.mapAir) applyMapAir(this.tod.current, this.mapAir)
           // CAVES: how deep in the dark the player stands → the lights dim (sky fill, sun on tiers without shadows),
           // the torch works at full strength; fog / exposure / haze below.
           this.caves.update(dt, time, p.renderPosition, this.lighting.keyStrength * (1 - this.tod.nightmare) * THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.0, 0.25))
@@ -1086,6 +1126,7 @@ export class Game {
             this.lastLodSwitches = this.world.stats.lodSwitches
             this.lighting.invalidateShadow()
           }
+          if (this.car.driving) this.car.headlamp2(this.lighting.headlight2Origin, this.lighting.headlight2Target)
           this.lighting.update(dt, p.renderPosition, c.flashOrigin, c.flashTarget)
           // Image tree shadows follow the key light and take away its direct light like the real shadow would (its
           // shadow.intensity), less as it fades (dusk, overcast), none in a cave.
@@ -1752,6 +1793,7 @@ export class Game {
   dispose(): void {
     this.mapProps?.dispose()
     this.pillars?.dispose()
+    this.mistSheets?.dispose()
     window.removeEventListener('touchstart', this.onFirstTouch)
     this.world.dispose()
     this.treeShadows.dispose()

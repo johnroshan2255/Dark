@@ -161,8 +161,10 @@ export class PillarField {
       cliff: new THREE.Color().setRGB(...(map.palette.cliff ?? [0.37, 0.3, 0.22])),
       pale: new THREE.Color().setRGB(...(map.palette.sand ?? [0.62, 0.45, 0.28])),
       grey: new THREE.Color(0.2, 0.2, 0.19),
-      green: new THREE.Color().setRGB(...(map.palette.grass ?? [0.13, 0.25, 0.1])),
-      greenDark: new THREE.Color().setRGB(...(map.palette.grassDark ?? [0.02, 0.07, 0.04])),
+      // the crowns and ledge shrubs are trees: the map's leaf greens when it has them (its ground greens went near
+      // black-blue against the sky on the columns' tops), else its grass
+      green: new THREE.Color().setRGB(...(map.palette.leafLight ?? map.palette.grass ?? [0.13, 0.25, 0.1])),
+      greenDark: new THREE.Color().setRGB(...(map.palette.leafMid ?? map.palette.grassDark ?? [0.02, 0.07, 0.04])),
     }
     this.mats = new Float32Array(this.n * 16)
     this.variant = new Uint8Array(this.n)

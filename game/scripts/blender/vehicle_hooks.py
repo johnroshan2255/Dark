@@ -13,8 +13,8 @@ Low-poly (~250 tris a hook, ~70 a mount), vertex colours on the wheels' material
 the 12-material budget), placed in METRES from the wheels like vehicle_details.py.
 
 Headless (no MCP add-on needed):
-  blender -b --python scripts/blender/vehicle_hooks.py -- NAME=zuk_a06 SRC=src/assets/models/vehicles/ OUT=/tmp/hooks/
-or through the add-on: node scripts/blender/bl.mjs scripts/blender/vehicle_hooks.py NAME=zuk_a06 SRC=… OUT=…
+  blender -b --python scripts/blender/vehicle_hooks.py -- NAME=carry_van SRC=src/assets/models/vehicles/ OUT=/tmp/hooks/
+or through the add-on: node scripts/blender/bl.mjs scripts/blender/vehicle_hooks.py NAME=carry_van SRC=… OUT=…
 Then copy OUT/<NAME>.lod0.glb to src/assets/models/vehicles/. Re-runs replace the hooks (the G500's cut stays cut).
 """
 import bpy, bmesh, math, os, re, sys, json
@@ -23,17 +23,17 @@ from mathutils import Vector, Matrix
 for a in (sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []):
     if '=' in a:
         globals()[a.split('=', 1)[0]] = a.split('=', 1)[1]
-NAME = globals().get('NAME', 'zuk_a06')
+NAME = globals().get('NAME', 'carry_van')
 SRC = globals().get('SRC', 'src/assets/models/vehicles/')
 OUT = globals().get('OUT', '/tmp/hooks/')
 os.makedirs(OUT, exist_ok=True)
-METRES = {'pickup_truck': 0.391, 'mercedes_g500_4x4': 0.475, 'zuk_a06': 0.339}
+METRES = {'mercedes_g500_4x4': 0.475, 'bmw_e30': 0.3, 'carry_van': 0.255}
 # Per car and end: (x across, + = left; height above the ground) of the tow point, m — on the bumper's face (found
 # below). The G500's front is where its own hook hung (right of the winch, under the bumper lip).
 POINTS = {
-    'pickup_truck': {'F': (0.0, 0.50), 'R': (0.0, 0.62)},
     'mercedes_g500_4x4': {'F': (-0.152, 0.72), 'R': (0.0, 0.78)},
-    'zuk_a06': {'F': (0.0, 0.42), 'R': (0.0, 0.45)},
+    'bmw_e30': {'F': (-0.25, 0.30), 'R': (0.30, 0.25)},      # (the E30's own tow eyes: front right, rear left)
+    'carry_van': {'F': (0.0, 0.40), 'R': (0.0, 0.40)},
 }
 # The G500's modelled hook (metres in P()'s frame): its loose parts inside this box are deleted.
 CUT = {'mercedes_g500_4x4': {'F': ((-0.18, -1.02, 0.62), (-0.12, -0.92, 0.73))}}
@@ -134,7 +134,7 @@ SKIP_HIT = ('wheel_', 'caliper_', 'hook_', 'tow_mount_')
 
 def face_y(end, x, z):
     """The body's face (m along) at (x, z): a ray from outside that end, toward the car (vertices alone miss big
-    flat panels — the pickup's tailgate is one quad)."""
+    flat panels — a tailgate can be one quad)."""
     out = -1 if end == 'F' else 1
     o = P(x, (WB / 2) + out * (WB / 2 + 4), z)
     d = Vector((0, -out * (1 if k > 0 else -1), 0)).normalized()

@@ -1,13 +1,15 @@
 import * as THREE from 'three'
 import type { CockpitPart, TruckModel } from '../../assets/loadModels'
+import { vehicleDef } from './catalogue'
 
 /**
  * THE COCKPIT you see in first person (parts from scripts/blender/vehicle_cabin.py, loaded by loadModels):
  *
  *  - INSTRUMENTS: the gauge faces (`dial_*`) are UV-mapped onto ONE canvas per car, drawn here like the real dash —
- *    the Hilux's round speedometer + tachometer, the Żuk's big speedometer and lamp strip, the G-Class's wide twin
- *    screen — needles, numbers, the gear, warning lamps. Redrawn only when a shown value changes (≤ 15 Hz) and only
- *    while you look at it (first person, in the car); one 512 × 256 (G500 1024 × 208) upload then.
+ *    by the catalogue's `dash`: 'twin' round speedometer + tachometer (the E30), 'single' big speedometer and lamp
+ *    strip (the kei van), 'screen' the G-Class's wide twin screen — needles, numbers, the gear, warning lamps.
+ *    Redrawn only when a shown value changes (≤ 15 Hz) and only while you look at it (first person, in the car);
+ *    one 512 × 256 (screen 1024 × 208) upload then.
  *  - CONTROLS: pedals swing on their pivots with the throttle / brake / clutch, the gear lever moves through its
  *    gate (H pattern for the manuals, P R N D for the automatic), the wipers sweep with the rain.
  * Cost: 1 draw for the dials (unlit, it glows like a backlit cluster at night) + 1 per control (≤ 6 small meshes on
@@ -53,15 +55,15 @@ export class Cockpit {
   private drawn = ''
   private drawT = 0
   private wiperT = 0
-  private readonly style: 'pickup' | 'zuk' | 'gwagen'
+  private readonly style: 'twin' | 'single' | 'screen'
 
   constructor(truck: TruckModel, material: THREE.Material, private readonly maxKmh: number, private readonly maxRpm: number, private readonly auto: boolean) {
     this.root.name = 'cockpit'
-    this.style = truck.id === 'zuk' ? 'zuk' : truck.id === 'gwagen' ? 'gwagen' : 'pickup'
+    this.style = vehicleDef(truck.id).dash
     if (truck.dials) {
       const c = document.createElement('canvas')
-      c.width = this.style === 'gwagen' ? 1024 : 512
-      c.height = this.style === 'gwagen' ? 208 : 256
+      c.width = this.style === 'screen' ? 1024 : 512
+      c.height = this.style === 'screen' ? 208 : 256
       this.canvas = c
       this.ctx = c.getContext('2d')
       this.tex = new THREE.CanvasTexture(c)
@@ -149,10 +151,10 @@ export class Cockpit {
   private draw(s: CockpitState): void {
     const g = this.ctx!, c = this.canvas!
     g.clearRect(0, 0, c.width, c.height)
-    if (this.style === 'gwagen') this.drawScreen(g, c, s)
+    if (this.style === 'screen') this.drawScreen(g, c, s)
     else {
-      this.dial(g, 128, 128, 120, s.kmh, this.maxKmh, this.maxKmh > 120 ? 20 : 10, 'km/h', this.style === 'zuk')
-      if (this.style === 'zuk') this.lampStrip(g, s)
+      this.dial(g, 128, 128, 120, s.kmh, this.maxKmh, this.maxKmh > 120 ? 20 : 10, 'km/h', this.style === 'single')
+      if (this.style === 'single') this.lampStrip(g, s)
       else this.dial(g, 384, 128, 120, s.rpm / 1000, this.maxRpm / 1000, 1, '×1000 r/min', false, this.maxRpm / 1000 - 1.5, s.gear)
     }
     this.tex!.needsUpdate = true
@@ -196,7 +198,7 @@ export class Cockpit {
     g.restore()
   }
 
-  /** The Żuk's strip right of the speedometer: fuel and temperature bars and the lamp row (charge, oil, lights). */
+  /** The single-dial cluster's strip (the kei van) right of the speedometer: fuel and temperature bars and the lamp row (charge, oil, lights). */
   private lampStrip(g: CanvasRenderingContext2D, s: CockpitState): void {
     g.save()
     g.fillStyle = '#101113'; g.fillRect(256, 64, 256, 128)
@@ -206,7 +208,7 @@ export class Cockpit {
       g.strokeStyle = '#d9d2bd'; g.lineWidth = 2; g.strokeRect(x, 96, 60, 18)
       g.fillStyle = '#e6a13a'; g.fillRect(x + 2, 98, 56 * v, 14)
     }
-    bar(270, 'PALIWO', 0.7)
+    bar(270, 'FUEL', 0.7)
     bar(350, 'TEMP', 0.45 + Math.min(0.3, s.rpm / 12000))
     const lamp = (x: number, col: string, on: boolean) => {
       g.fillStyle = on ? col : '#2a2b2e'; g.beginPath(); g.arc(x, 150, 11, 0, Math.PI * 2); g.fill()

@@ -4,7 +4,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import heroUrl from './models/characters/hero.lod0.glb?url'
 import heroTowUrl from './models/characters/hero_tow_clips.glb?url'
 import hullUrl from './models/vehicles/boat_hull.lod0.glb?url'
-import { vehicleDef, type VehicleDef } from '../gameplay/vehicle/catalogue'
+import { DEFAULT_VEHICLE, vehicleDef, type VehicleDef } from '../gameplay/vehicle/catalogue'
 import { bodyHulls, triangles } from '../gameplay/vehicle/hulls'
 import { loadTreeModels } from './treeModels'
 
@@ -14,8 +14,8 @@ import { loadTreeModels } from './treeModels'
  *
  *   hero    the player (scripts/blender/hero/): one skinned mesh (15 k tris, 65-bone Mixamo skeleton incl. fingers),
  *           its 1024² albedo and 13 Mixamo clips — kept as a scene graph (CharacterModel animates it).
- *   vehicles the garage catalogue (gameplay/vehicle/catalogue.ts): pickup (Sketchfab, 00amza), Mercedes G500 4×4²,
- *           Żuk A06 — each baked by `bakeVehicle` (materials → vertex colours, paint mask, wheels split out or
+ *   vehicles the garage catalogue (gameplay/vehicle/catalogue.ts): Mercedes G500 4×4², BMW E30, the kei van — each
+ *           baked by `bakeVehicle` (materials → vertex colours, paint mask, wheels split out or
  *           found by name, glass split off) and normalised: metres, facing −Z, origin on the ground at the
  *           wheelbase centre. Loaded on demand and cached (`loadVehicle`).
  *   hull    the amphibious boat hull every car deploys (scripts/blender/boat_hull.py; gameplay/vehicle/BoatHull.ts):
@@ -152,11 +152,11 @@ function hsv(r: number, g: number, b: number): [number, number, number] {
 }
 
 /**
- * PAINT MASK from the texture: a vehicle's body colour is ONE dominant hue across the big panels (olive pickup,
- * blue Żuk) while rims, tyres, glass, chrome, seats, lights and rust are greys, blacks, creams, reds. The most
+ * PAINT MASK from the texture: a vehicle's body colour is ONE dominant hue across the big panels (the G500's
+ * green) while rims, tyres, glass, chrome, seats, lights and rust are greys, blacks, creams, reds. The most
  * common saturated hue wins; pixels within ~25° of it (and saturated / bright enough) are paint. Soft edges.
  */
-function buildPaintMap(tex: THREE.Texture): THREE.Texture | null {
+function buildPaintMap(tex: THREE.Texture, white = false): THREE.Texture | null {
   const px = readPixels(tex)
   if (!px) return null
   const { data, w, h } = px
@@ -177,7 +177,9 @@ function buildPaintMap(tex: THREE.Texture): THREE.Texture | null {
     const [hh, sat, val] = hsv(data[i * 4] / 255, data[i * 4 + 1] / 255, data[i * 4 + 2] / 255)
     let dh = Math.abs(hh - h0)
     dh = Math.min(dh, 1 - dh)
-    const m = (1 - ss(0.06, 0.1, dh)) * ss(0.1, 0.2, sat) * ss(0.06, 0.14, val)
+    // (a WHITE car, catalogue `whitePaint`: the bright, neutral texels are the paint — trim, glass, lamps and tyres
+    //  are dark or coloured)
+    const m = white ? ss(0.62, 0.78, val) * (1 - ss(0.1, 0.2, sat)) : (1 - ss(0.06, 0.1, dh)) * ss(0.1, 0.2, sat) * ss(0.06, 0.14, val)
     out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = Math.round(m * 255)
     out[i * 4 + 3] = 255
   }
@@ -329,7 +331,7 @@ export function loadHull(): Promise<HullAsset> {
 }
 
 /** @param onProgress 0..1 over both downloads (bytes). */
-export async function loadModels(onProgress?: (f: number) => void, vehicleId = 'pickup'): Promise<GameModels> {
+export async function loadModels(onProgress?: (f: number) => void, vehicleId = DEFAULT_VEHICLE): Promise<GameModels> {
   const loader = new GLTFLoader()
   const got = [0, 0]
   const report = () => onProgress?.(Math.min(1, (got[0] + got[1]) / 2))
@@ -690,11 +692,11 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
     wheels = found.map((w) => ({ c: w.c, r: w.r, geo: subset(body, (t) => triComp[t] === w.id) }))
     body = subset(body, (t) => !isWheel.has(triComp[t]))
   }
-  // Steering wheel (pickup): the ring in front of the left seat, found in normalised space.
+  // Steering wheel: a named part, or (catalogue `steering`) the ring in front of the left seat, found in normalised space.
   let steeringWheel: THREE.BufferGeometry | null = null
   let pivot = new THREE.Vector3(), axis = new THREE.Vector3(0, 0, -1), steeringRadius = 0.19
   if (steerParts.length) {
-    // Named in Blender (G500, Żuk): same pivot / axis solve as below.
+    // Named in Blender (`steering_wheel`, every car now): same pivot / axis solve as below.
     steeringWheel = mergeGeometries(steerParts, false)!.applyMatrix4(norm)
   } else if (def.steering) {
     const { triComp, boxes } = components(body)
@@ -824,7 +826,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   let mesh: Float32Array | undefined, hulls: Float32Array[] | undefined
   if (doors.length) bb.union(outline)
   if (map) map.colorSpace = THREE.SRGBColorSpace
-  const paintMap = map ? buildPaintMap(map) : null
+  const paintMap = map ? buildPaintMap(map, !!def.whitePaint) : null
   const lamps = map ? findLamps(body, map, bb.min.z, bb.max.z) : { head: null, tail: null }
   if (lampParts.length) {
     const fromParts = findLampsInParts(lampParts.map((l) => ({ geo: l.geo.index ? l.geo.toNonIndexed() : l.geo, color: l.color })), bb.min.z, bb.max.z)
@@ -852,7 +854,7 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
         { g: body, at: undefined }, { g: glass, at: undefined },
         // door parts are in hinge space: back to the closed position
         ...doors.flatMap((d) => [{ g: d.body, at: d.hinge }, { g: d.glass, at: d.hinge }]),
-        // (a part may be an empty placeholder — the Żuk's door glass has no vertices: switching to it threw here)
+        // (a part may be an empty placeholder — a door glass with no vertices: switching to it threw here)
       ].filter((p) => p.g?.getAttribute('position')).map((p) => ({ position: p.g!.getAttribute('position').array, index: p.g!.index?.array ?? null, offset: p.at }))))
     },
     get hulls() {

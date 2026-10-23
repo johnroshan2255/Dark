@@ -14,7 +14,7 @@ VEHICLE PREP, step 4 (any car; skills/realistic-vehicle-system §8.2, §8.9): RE
    it into the baked material colour (scene extra `vertex_ao`). Wheel / brake parts keep their albedo × AO.
 
 Run (Blender with the MCP add-on server on :9876), after vehicle_brakes.py:
-  node scripts/blender/bl.mjs scripts/blender/vehicle_realism.py NAME=pickup_truck OUT=C:/tmp/real/
+  node scripts/blender/bl.mjs scripts/blender/vehicle_realism.py NAME=mercedes_g500_4x4 OUT=C:/tmp/real/
 Then copy OUT/<NAME>.lod0.glb to src/assets/models/vehicles/ and run `npm run validate:assets`.
 """
 import bpy, bmesh, math, os, json, re
@@ -23,12 +23,10 @@ from mathutils import Vector, Matrix
 SRC = 'C:/Project/Dark/src/assets/models/vehicles/'
 CARS = {
     # tyre: tread style; rim: rim style + rim/tyre radius ratio; metres: the tyre radius in metres (AO distance)
-    'pickup_truck': {'tread': 'mt', 'rim': 'steel', 'ratio': 0.5, 'metres': 0.391, 'rim_rgb': (0.055, 0.057, 0.06)},
     'mercedes_g500_4x4': {'tread': 'at', 'rim': 'alloy', 'ratio': 0.6, 'metres': 0.475, 'rim_rgb': (0.11, 0.11, 0.12),
                           'segs': 32, 'rows': 22},  # (lighter wheels: the G500 is at the 40 k budget)
-    'zuk_a06': {'tread': 'road', 'rim': 'cap', 'ratio': 0.55, 'metres': 0.339, 'rim_rgb': (0.36, 0.37, 0.38)},
 }
-NAME = globals().get('NAME', 'pickup_truck')
+NAME = globals().get('NAME', 'mercedes_g500_4x4')
 OUT = globals().get('OUT', 'C:/tmp/real/')
 cfg = CARS[NAME]
 os.makedirs(OUT, exist_ok=True)

@@ -11,7 +11,9 @@ import { RD_ATTR } from './roadSurface'
  * Quad diagonal must match sampleHeight() AND Rapier's heightfield: split along (10)-(01),
  * triangles (00,01,10) and (10,01,11). Verified by tests/world.test.ts.
  */
-export function buildTerrainGeometry(d: ChunkData, lod: number): THREE.BufferGeometry {
+/** @param peaks coarse LODs take the HIGHEST grid point of each vertex's cell (and its colour / normal): a tower map's
+ *  25 m tops sampled every 8 m turned into points — Zhangjiajie (map.json `crags: false`). */
+export function buildTerrainGeometry(d: ChunkData, lod: number, peaks = false): THREE.BufferGeometry {
   const s = LOD_TERRAIN_STRIDE[lod]
   const m = CHUNK_RES / s + 1 // verts per edge at this LOD
   const skirtDepth = 1 + s * 1.5
@@ -46,10 +48,38 @@ export function buildTerrainGeometry(d: ChunkData, lod: number): THREE.BufferGeo
     bio[dst * 2 + 1] = d.biome[src * 2 + 1]
   }
 
+  const half = s >> 1
   for (let j = 0; j < m; j++) {
     for (let i = 0; i < m; i++) {
-      const src = j * s * CHUNK_VERTS + i * s
+      let src = j * s * CHUNK_VERTS + i * s
+      if (peaks && s > 1) {
+        // (inside the chunk only: its edge vertices stay exact, so neighbours at another LOD still meet)
+        const edge = i === 0 || j === 0 || i === m - 1 || j === m - 1
+        for (let dj = edge ? 0 : -half; dj <= (edge ? 0 : half); dj++) {
+          for (let di = edge ? 0 : -half; di <= (edge ? 0 : half); di++) {
+            const k = (j * s + dj) * CHUNK_VERTS + i * s + di
+            if (hs[k] > hs[src]) src = k
+          }
+        }
+        copy(j * m + i, src, hs[src])
+        pos[(j * m + i) * 3] = i * s * CELL_SIZE
+        pos[(j * m + i) * 3 + 2] = j * s * CELL_SIZE
+        continue
+      }
       copy(j * m + i, src, hs[src])
+    }
+  }
+  if (peaks && s > 1) {
+    // (and its normals from the COARSE surface: a picked point's own 2 m normal disagreed with its neighbours' — the
+    // walls read as big flat facets in the cel ramp)
+    const L = s * CELL_SIZE
+    for (let j = 1; j < m - 1; j++) {
+      for (let i = 1; i < m - 1; i++) {
+        const k = j * m + i
+        const dx = (pos[(k + 1) * 3 + 1] - pos[(k - 1) * 3 + 1]) / (2 * L), dz = (pos[(k + m) * 3 + 1] - pos[(k - m) * 3 + 1]) / (2 * L)
+        const inv = 1 / Math.hypot(dx, 1, dz)
+        nor[k * 3] = -dx * inv; nor[k * 3 + 1] = inv; nor[k * 3 + 2] = -dz * inv
+      }
     }
   }
 

@@ -19,7 +19,8 @@ const log = process.env.VERBOSE ? console.log : () => {}
 
 const R = await PhysicsWorld.load()
 
-/** Truck dimensions as normalised from pickup_truck.lod0.glb (assets/loadModels). */
+/** A 5 m truck's dimensions (normalised like assets/loadModels does) — a fixed fixture for the arcade /
+ *  legacy / bike / boat tests. */
 const TRUCK = {
   wheelPos: [[-0.74, 0.386, -1.513], [0.74, 0.386, -1.513], [-0.74, 0.386, 1.513], [0.74, 0.386, 1.513]] as [number, number, number][],
   wheelRadius: 0.386,
@@ -417,7 +418,7 @@ for (const [deg, want] of [[12, true], [18, true], [32, false]] as const) {
     }
     return p
   }
-  /** The pickup's hull as BoatHull fits it: bilge points ±0.58 m, at y −0.09, bow shoulder → transom; draft 0.36. */
+  /** The fixture truck's hull as BoatHull fits it: bilge points ±0.58 m, at y −0.09, bow shoulder → transom; draft 0.36. */
   const boat = (p: PhysicsWorld, water: (x: number, z: number) => number, y: number, z = 0): TruckSim => {
     const t = new TruckSim(p, TRUCK)
     t.hullPts = [-2.09, 0.25, 2.65].flatMap((hz) => [[-0.58, -0.09, hz], [0.58, -0.09, hz]] as [number, number, number][])

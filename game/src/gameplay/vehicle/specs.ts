@@ -5,25 +5,7 @@ import type { VehicleSpec } from './drivetrain/spec'
  * load against each model's measured wheelbase and track (drivetrain/spec.ts resolveSpec). Kept apart from the
  * catalogue so the Node tests can import them (the catalogue imports model URLs through Vite).
  */
-export const SPECS: Record<'pickup' | 'gwagen' | 'zuk', VehicleSpec> = {
-  // A 1989 Hilux Xtra Cab 4×4 (22R-E): 85 kW / 192 N·m, W56 5-speed, RF1A transfer case (low 2.28), IFS front,
-  // leaf-sprung live rear axle, front discs / rear drums, no ABS. 0–100 and top speed: period road tests (≈).
-  pickup: {
-    class: 'pickup',
-    published: { zeroTo100: 14.5, topSpeed: 145, turningCircle: 11.8 },
-    mass: { kerb: 1600, frontShare: 0.56 },
-    power: { kind: 'petrol', peakPower: 85, powerRpm: 4800, peakTorque: 192, torqueRpm: 3400, redline: 5400, idle: 800 },
-    transmission: { kind: 'manual', ratios: [3.954, 2.141, 1.384, 1.0, 0.85], reverse: 4.091, final: 4.1 },
-    drive: { layout: 'part-time-4WD', low: 2.28, lockers: ['centre'] },
-    axles: [
-      { suspension: 'double-wishbone', steered: true, tyre: '31x10.50R15', tyreKind: 'at', brake: 'disc', travel: 0.2 },
-      // Rear: the factory limited-slip option — it is what lets a rear-drive truck hold a slide on the throttle.
-      { suspension: 'solid-leaf', tyre: '31x10.50R15', tyreKind: 'at', brake: 'drum', travel: 0.28, diff: 'lsd' },
-    ],
-    brakes: { abs: false },
-    aids: 'off', // 1989: no traction or stability control
-    aero: { cd: 0.5, frontalArea: 2.9 },
-  },
+export const SPECS: Record<'gwagen' | 'bmw' | 'van', VehicleSpec> = {
   // G500 4×4² (2015): M176 4.0 V8 biturbo 310 kW / 610 N·m (2250–4750), 7G-Tronic Plus (ratios verified),
   // permanent 4MATIC 50:50 with three locking diffs, low range 2.1, portal axles, 325/55R22, 3021 kg, 0–100 7.4 s,
   // 210 km/h (limited). Final drive 5.4 is derived (portal + axle reduction), not published.
@@ -41,21 +23,44 @@ export const SPECS: Record<'pickup' | 'gwagen' | 'zuk', VehicleSpec> = {
     brakes: { abs: true },
     aero: { cd: 0.54, frontalArea: 4.0 },
   },
-  // Żuk A06 (1972): S-21 2.12 L petrol, 51.5 kW / 147 N·m, 4-speed manual (ratios approximate), rear drive on a
-  // leaf-sprung live axle, Warszawa wishbone front, drums all round, 6.50-16 bias-ply tyres, 100 km/h.
-  zuk: {
-    class: 'van',
-    published: { topSpeed: 100, turningCircle: 12.5 },
-    mass: { kerb: 1480, frontShare: 0.5 },
-    power: { kind: 'petrol', peakPower: 51.5, powerRpm: 4000, peakTorque: 147, torqueRpm: 2300, redline: 4400, idle: 700 },
-    transmission: { kind: 'manual', ratios: [3.6, 2.2, 1.45, 1.0], reverse: 4.0 },
+  // BMW E30 M3 (1986, European): S14 2.3 L four, 147 kW at 6750 rpm, 240 N·m at 4750 rpm, 7250 redline; Getrag 265
+  // close-ratio 5-speed (dogleg first) 3.72 / 2.40 / 1.77 / 1.26 / 1.00, R 4.23, final 3.25, a 25 % rear LSD;
+  // MacPherson front, semi-trailing-arm rear (≈ multi-link here); discs all round with ABS; 205/55R15; 1200 kg;
+  // 0–100 6.7 s, 235 km/h; Cd 0.33. TUNED (skills/realistic-vehicle-system §8.4, data only): C_dA 0.78 solved from
+  // the 235 km/h top speed (Cd × A = 0.63 ran to 278 km/h: the sim's losses are lower than the real car's), quick
+  // 0.28 s shifts, 50:50 with the driver, road tyres (the game's cars climb grass walls with the off-road assist;
+  // performance rubber can't), and an OPEN rear diff — with the 25 % LSD the 123 W/kg car spun donuts on the
+  // skidpad at a quarter throttle (1.45 g of 'lateral'); open, it still holds a drift (tests/drivetrain).
+  bmw: {
+    class: 'sports',
+    published: { zeroTo100: 6.7, topSpeed: 235, turningCircle: 10.5 },
+    mass: { kerb: 1200, frontShare: 0.5, comHeight: 0.48 },
+    power: { kind: 'petrol', peakPower: 147, powerRpm: 6750, peakTorque: 240, torqueRpm: 4750, redline: 7250, idle: 900 },
+    transmission: { kind: 'manual', ratios: [3.72, 2.4, 1.77, 1.26, 1.0], reverse: 4.23, final: 3.25, shift: 0.28, efficiency: 0.9 },
     drive: { layout: 'FR' },
     axles: [
-      { suspension: 'double-wishbone', steered: true, tyre: '6.50-16', tyreKind: 'road', brake: 'drum', travel: 0.18 },
-      { suspension: 'solid-leaf', tyre: '6.50-16', tyreKind: 'road', brake: 'drum', travel: 0.24 },
+      { suspension: 'macpherson', steered: true, tyre: '205/55R15', tyreKind: 'road', brake: 'disc', travel: 0.16 },
+      { suspension: 'multi-link', tyre: '205/55R15', tyreKind: 'road', brake: 'disc', travel: 0.16 },
     ],
-    brakes: { abs: false },
-    aids: 'off', // 1972: none
-    aero: { cd: 0.5, frontalArea: 3.2 },
+    brakes: { abs: true },
+    aero: { cdA: 0.78 },
+  },
+  // The kei van (a 1980–85 cab-over 800 cc van, the ST90 kind): F8A 797 cc four, 27 kW at 5500 rpm, ≈ 57 N·m at
+  // 3000, 4-speed manual 3.818 / 2.294 / 1.506 / 1.0, R 3.818, final 5.375, engine under the seats driving the rear
+  // (leaf-sprung live axle), MacPherson front, drums all round, 145/80R12, 860 kg, ≈ 105 km/h. No aids.
+  van: {
+    class: 'van',
+    published: { topSpeed: 105, turningCircle: 8.4 },
+    mass: { kerb: 860, frontShare: 0.48, comHeight: 0.72 },
+    power: { kind: 'petrol', peakPower: 27, powerRpm: 5500, peakTorque: 57, torqueRpm: 3000, redline: 6000, idle: 850 },
+    transmission: { kind: 'manual', ratios: [3.818, 2.294, 1.506, 1.0], reverse: 3.818, final: 5.375 },
+    drive: { layout: 'FR' },
+    axles: [
+      { suspension: 'macpherson', steered: true, tyre: '145/80R12', tyreKind: 'road', brake: 'drum', travel: 0.15 },
+      { suspension: 'solid-leaf', tyre: '145/80R12', tyreKind: 'road', brake: 'drum', travel: 0.18 },
+    ],
+    brakes: { abs: false, maxDecel: 0.85 },
+    aids: 'off', // 1980s kei van: none
+    aero: { cd: 0.45, frontalArea: 2.3 },
   },
 }

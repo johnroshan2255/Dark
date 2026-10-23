@@ -52,9 +52,9 @@ export const MAPS: MapInfo[] = [
   {
     id: 'zhangjiajie',
     name: 'Zhangjiajie & Wulingyuan',
-    blurb: 'A forest of sheer sandstone pillars crowned with pines, flat-topped mesas, a river winding through the gorges, a scenic loop with bridges and a switchback road up to a mesa-top lookout.',
-    areaKm2: 5.76,
-    regions: ['Pillar forest', 'Mesas', 'River gorges', 'Switchbacks'],
+    blurb: 'A 4 km field of towering sandstone hills, eroded and crowned with forest, flat-topped tables round the edge, a river winding through misty gorges and a scenic loop between the hills.',
+    areaKm2: 16,
+    regions: ['Sandstone towers', 'Mesas', 'River gorges', 'Forest'],
     preview: '/maps/zhangjiajie/preview.jpg',
     minimap: '/maps/zhangjiajie/minimap.jpg',
   },
@@ -69,14 +69,49 @@ interface MapJson {
   grid: { n: number; step: number; min: number; range: number; origin: [number, number] }
   biomeGrid: { n: number; step: number; origin: [number, number] }
   spawn: [number, number, number]
-  /** The map's own colours (hex 'rrggbb'): ground (grass bright / dark, dirt, rock, cliff, sand) and water. */
-  palette?: Partial<Record<'grass' | 'grassDark' | 'dirt' | 'rock' | 'cliff' | 'sand' | 'water' | 'waterDeep' | 'flowers', string>>
-  /** 'conifer': the forest is spruce / fir / pine only (else the region's mix). */
-  trees?: 'conifer'
+  /** The map's own colours (hex 'rrggbb'): ground (grass bright / dark, dirt, rock, cliff, sand), `stone` (its loose
+   *  boulders, the crags to match; the cliffs are steep, mostly shaded faces, so a `cliff` that reads as the same rock
+   *  is a lighter hex — Zhangjiajie: stone 74706a, cliff b8b1a6), water, the tiered
+   *  pines' leaves (leafLight / leafMid / leafDark) and its air (skyZenith, skyHaze: the horizon and the far haze). */
+  palette?: Partial<Record<MapColour, string>>
+  /** 'conifer': the forest is spruce / fir / pine only; 'liyue': Liyue's twisted pines among broadleaves (Zhangjiajie);
+   *  else the region's mix. */
+  trees?: 'conifer' | 'liyue'
+  /** Valley MIST: density (/ m) at its base, base height (m, world), falloff (/ m) — BiomeAir.applyMapAir. */
+  mist?: [number, number, number]
+  /** The horizon grid's resolution on every tier (≥ the tier's): tall narrow relief on the skyline. */
+  horizonRes?: number
+  /** false: no crags on the steep ground (the map's walls are its own rock). */
+  crags?: boolean
+  /** Natural streaked sandstone on the cliffs (the terrain shader's uCliffStone.w = 2) instead of stacked blocks. */
+  naturalStone?: boolean
+  /** Coarse terrain LODs keep each vertex's highest grid point (tall narrow relief keeps its tops in the distance). */
+  peakLod?: boolean
+  /** Loose stones and boulders: × the scatter's rock density (default 1) — Zhangjiajie's scree slopes. */
+  rocks?: number
+  /** Crag / tor size on the steep ground (× default 1; < 1 also caps the slope that sets their height). */
+  cragScale?: number
+  /** Share of the loose stones that are BIG boulders (5–11 m; default 0). */
+  bigRocks?: number
+  /** Share of the cliffs covered by vegetation (palette.cliffMoss) — the terrain shader's uCliffMoss. */
+  cliffMoss?: number
+  /** No trees above this (m, world; default 330) — Zhangjiajie's tower tops are forested at 430 m. */
+  treeLine?: number
+  /** Aerial perspective: start, end (m), strength — the stylize shader's uAerial (default 30, 600, 0.75). */
+  aerial?: [number, number, number]
+  /** The map's light (BiomeAir.applyMapAir): hex hues for the sun, sky fill, ground bounce, white balance; cel strength,
+   *  split tone, saturation multiplier. */
+  light?: { sun?: string; fill?: string; bounce?: string; tint?: string; toon?: number; split?: number; saturation?: number }
+  /** Grass amount (× the meadow density; default 1) — Zhangjiajie's floors are forest, not meadow. */
+  grass?: number
+  /** Cloud sheets in the gorges: [height (m, world), density 0..1] each, lowest first (world/map/MistSheets.ts). */
+  mistSheets?: [number, number][]
   roads: { name: string; class: string; halfWidth: number; closed: boolean; x: number[]; z: number[]; h: number[]; bridge: number[] }[]
   /** Sandstone PILLARS (Zhangjiajie): [x, base y (world), z, radius, height, rotation, variant] per pillar, flat. */
   pillars?: number[]
 }
+
+export type MapColour = 'grass' | 'grassDark' | 'dirt' | 'rock' | 'cliff' | 'stone' | 'cliffMoss' | 'sand' | 'water' | 'waterDeep' | 'flowers' | 'leafLight' | 'leafMid' | 'leafDark' | 'skyZenith' | 'skyHaze'
 
 /** Values per pillar in map.json `pillars` / FixedMap.pillars, and the lookup grid's cell (m: > the widest pillar). */
 export const PILLAR_STRIDE = 7
@@ -156,6 +191,25 @@ export class FixedMap {
   readonly palette: Partial<Record<string, [number, number, number]>> = {}
   /** Conifers only (map.json `trees: 'conifer'`). */
   readonly conifers: boolean
+  /** Liyue's twisted pines among broadleaves (map.json `trees: 'liyue'`). */
+  readonly liyue: boolean
+  /** map.json `mist`, `horizonRes`, `crags` (see MapJson). */
+  readonly mist?: [number, number, number]
+  readonly horizonRes?: number
+  readonly crags: boolean
+  readonly naturalStone: boolean
+  readonly peakLod: boolean
+  readonly rocks: number
+  readonly cragScale?: number
+  readonly bigRocks: number
+  readonly cliffMoss?: number
+  readonly treeLine: number
+  readonly aerial?: [number, number, number]
+  readonly light?: MapJson['light']
+  readonly grass: number
+  readonly mistSheets?: [number, number][]
+  /** The tiered pines' leaf colours (sRGB hex numbers: palette leafLight / leafMid / leafDark — all three or none). */
+  readonly leaves?: { light: number; mid: number; dark: number }
   /** The seed its nature grows from (the chunk scatter: trees, boulders, plants) — the same in every game and for
    *  every player on the map, so a room shares one forest, and the server's physics has the same trunks and boulders
    *  (`statics.bin`, scripts/export-statics.mjs). Not the session seed (weather, discoveries stay per game). */
@@ -208,6 +262,23 @@ export class FixedMap {
     for (let i = 0; i < raw.length; i++) this.h[i] = raw[i] * k + off
     for (const [k, v] of Object.entries(meta.palette ?? {})) if (v) this.palette[k] = srgbHex(v)
     this.conifers = meta.trees === 'conifer'
+    this.liyue = meta.trees === 'liyue'
+    this.mist = meta.mist
+    this.horizonRes = meta.horizonRes
+    this.crags = meta.crags !== false
+    this.naturalStone = !!meta.naturalStone
+    this.peakLod = !!meta.peakLod
+    this.rocks = meta.rocks ?? 1
+    this.cragScale = meta.cragScale
+    this.bigRocks = meta.bigRocks ?? 0
+    this.cliffMoss = meta.cliffMoss
+    this.treeLine = meta.treeLine ?? 330
+    this.aerial = meta.aerial
+    this.light = meta.light
+    this.grass = meta.grass ?? 1
+    this.mistSheets = meta.mistSheets
+    const lp = meta.palette
+    if (lp?.leafLight && lp.leafMid && lp.leafDark) this.leaves = { light: parseInt(lp.leafLight, 16), mid: parseInt(lp.leafMid, 16), dark: parseInt(lp.leafDark, 16) }
     this.pillars = new Float32Array(meta.pillars ?? [])
     for (let i = 0; i < this.pillars.length; i += PILLAR_STRIDE) {
       const k = this.pillarKey(Math.floor((this.pillars[i] + this.half) / PILLAR_CELL), Math.floor((this.pillars[i + 2] + this.half) / PILLAR_CELL))

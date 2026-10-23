@@ -55,6 +55,7 @@ export class Water {
         uBiomeMap: globalUniforms.uBiomeMap,
         uBiomeRect: globalUniforms.uBiomeRect,
         uBiomeActive: globalUniforms.uBiomeActive,
+        uSnowLine: globalUniforms.uSnowLine,
       },
       vertexShader: /* glsl */ `
         varying vec3 vWorld;

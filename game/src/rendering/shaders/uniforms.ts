@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { SNOW_LINE } from '../../world/Biomes'
 
 /**
  * Shared uniform OBJECTS. Materials reference these directly (onBeforeCompile / ShaderMaterial),
@@ -63,6 +64,12 @@ export const globalUniforms = {
   uTreeLod: { value: new THREE.Vector4(-1, 0, 1e5, 1e5 + 1) }, // x < 0 = off (legacy chunk LOD)
   /** A fixed map's own dirt-road colour (linear rgb; w = 1 on, 0 = the default earth) — map.json `palette.dirt`. */
   uRoadSoil: { value: new THREE.Vector4(0.31, 0.225, 0.15, 0) },
+  /** A fixed map's own cliff stone (linear rgb; w = 1 on, 0 = the style's slate) — map.json `palette.cliff`. */
+  uCliffStone: { value: new THREE.Vector4(0, 0, 0, 0) },
+  /** A fixed map's VEGETATION on its cliffs (linear rgb; w = the share of the walls it covers, 0 = none) — map.json
+   *  `palette.cliffMoss` + `cliffMoss` (Zhangjiajie: shrubs and moss clinging to the towers in long hanging patches,
+   *  rust-orange streaks between). */
+  uCliffMoss: { value: new THREE.Vector4(0, 0, 0, 0) },
   /**
    * AERIAL PERSPECTIVE (Genshin's distance "filter", stylize fog block): from x to y metres distant surfaces lose
    * saturation and contrast toward the haze (z = strength), so far detail reads as soft silhouettes long before the
@@ -92,6 +99,9 @@ export const globalUniforms = {
   uSurfaceDetail: { value: 0 },
   /** 1 = some snow or desert lies inside the biome map (else the biome-cover lookups are skipped entirely). */
   uBiomeActive: { value: 0 },
+  /** The altitude snow line the shaders add to the biome map (m: snow starts, full) — world/Biomes SNOW_LINE; a fixed
+   *  map moves it out of reach (its snow is its biome map's: WorldFields' fixed-map biomes have no snow line either). */
+  uSnowLine: { value: new THREE.Vector2(SNOW_LINE[0], SNOW_LINE[1]) },
   uTrailRect: { value: new THREE.Vector4(-1e5, -1e5, 1e-6, 1e-6) },
   /** IMAGE TREE SHADOWS (rendering/shadows/TreeShadows): top-down shade image round the player (R = 0..1 shade), its
    *  rect (minX, minZ, 1/size, strength) and the switch (LOW shadow level; else 0 → the lookup is skipped). */

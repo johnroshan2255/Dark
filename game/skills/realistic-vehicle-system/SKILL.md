@@ -830,18 +830,18 @@ animation, latched shut, or swinging free from the car's acceleration and the wi
 
 | Concern | Where | Status |
 |---|---|---|
-| Spec sheets | `src/gameplay/vehicle/specs.ts` (`SPECS`: Node-importable), referenced by `catalogue.ts` `spec` | exists: pickup (1989 Hilux 22R-E / W56 / RF1A), G500 4×4² (M176 / 7G-Tronic / 3 lockers), Żuk A06 |
+| Spec sheets | `src/gameplay/vehicle/specs.ts` (`SPECS`: Node-importable), referenced by `catalogue.ts` `spec` | exists: G500 4×4² (M176 / 7G-Tronic / 3 lockers), BMW E30 M3 (S14 / Getrag 265), kei van (F8A 800 cc / 4-speed, drums, no aids) — 2026-10-23; the pickup and Żuk are retired |
 | Spec → numbers | `src/gameplay/vehicle/drivetrain/spec.ts` (`resolveSpec`, class defaults, tyre sizes, torque curves) | exists |
 | Drivetrain | `drivetrain/Drivetrain.ts` (engine, clutch / converter / CVT / EV, shift map, diffs, tyres, brakes, ABS / EBD / TCS / ESC, static hold), `drivetrain/tyre.ts` (combined slip, surfaces), `drivetrain/surface.ts` (DARK's road / region / ice / wet sampling) | exists; render-free, Rapier-free |
 | Sim glue | `VehicleSim.ts` `TruckSim`: `setDrivetrain`, `configure('drivetrain' \| 'legacy')`, `afterReal` (contacts, ARB, bump stops, forces at the patches, aero), `real` | exists; Simulation handling on the wheels; arcade / legacy / boat / hover unchanged |
 | Model bake / normalise / part splitting | `src/assets/loadModels.ts` `bakeVehicle` | exists; reads `wheelRegex`, `door_FL/FR` + `hinge`, `steering_wheel`, lamps, glass, `inner`, `caliper_*` (→ `brakes` per axle, vertex colours kept). Planned: rear doors, hood/trunk, empties, `lamp_ind_*` |
-| Blender prep scripts | `scripts/blender/vehicle_doors.py`, `vehicle_finish.py`, `vehicle_brakes.py` (disc + hat + caliper / drum per corner, budget pass), `bl.mjs` (runs a script over the MCP socket) | exist |
+| Blender prep scripts | NEW CARS: `scripts/blender/vehicle_prep.py CAR=<key>` (one config per car: normalise, debadge, wheels, budget decimate, texture → vertex colours, matte role materials, calipers, doors, steering wheel / pedals / gear lever / dial, AO, export) + `vehicle_hooks.py`; `vehicle_trim.py` (≤ 30 k tris + matte, extras kept). Older per-step scripts: `vehicle_doors.py`, `vehicle_finish.py`, `vehicle_brakes.py`, `bl.mjs` (runs a script over the MCP socket) | exist |
 | Render | `src/gameplay/vehicle/Car.ts` (one instanced program: body, wheels, brakes, steering, doors, axles, struts, lamps) | exists; wheel spin = the drivetrain's ∫ω, lamps from its brake / gear; linkages per type, deformation, gauges planned |
 | Controls / settings | `Car.shift` / `toggleLowRange` / `cycleLockers` / `driveSettings`; keys X Z Q K (`Game`); Settings → Controls: Gearbox (auto / manual), Driving aids (car default / off / std / full) | exists; touch buttons for gears / low / lockers planned |
 | Entry / exit animation | `src/gameplay/vehicle/CarEntry.ts` | exists (front doors) |
 | Effects / audio / HUD | `rendering/particles/VehicleFx.ts` (per-wheel slip), `audio/AudioSystem.ts` (`car.sim`: rpm / load / shift from the drivetrain; the fake gearbox stays for arcade), `ui/GameHud.tsx` (tacho bar, gear, ABS / TCS / ESC / LOW / 4WD / LOCK lamps) | exists |
 | Boat mode | `src/gameplay/vehicle/BoatHull.ts` (hull fit + deploy pose), `VehicleSim` `boat` (buoyancy, jet), `Car.boatStep` | exists; handoff per §8.11 |
-| Tests | `tests/drivetrain.test.ts` (`npm run test:drivetrain`, part of `npm test`: the universal suite, 56 checks over the 3 cars), `tests/vehicle.test.ts` (arcade, legacy, bike, boat, flight, entry) | exist |
+| Tests | `tests/drivetrain.test.ts` (`npm run test:drivetrain`, part of `npm test`: the universal suite, 100 checks over the 3 cars), `tests/vehicle.test.ts` (arcade, legacy, bike, boat, flight, entry) | exist |
 
 DARK specifics:
 - **Rapier `@dimforge/rapier3d-compat` 0.21:** `DynamicRayCastVehicleController`. Forces go in before

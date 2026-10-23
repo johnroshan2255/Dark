@@ -34,6 +34,8 @@ const SAND_ROCK = [1.45, 1.2, 0.85] as const
 /** Bright: red sandstone boulders (the shader's desert re-tint is off in bright; the tint does it here). */
 const SAND_ROCK_OTH = [2.0, 1.05, 0.62] as const
 const NO_TINT = [1, 1, 1] as const
+/** propGeometries makeRock's body colour (sRGB 0x857d74), linear: a map's `stone` tint divides by it. */
+const ROCK_BODY = [0.235, 0.205, 0.175] as const
 function biomeTint(fields: WorldFields, origin: readonly [number, number], data: Float32Array, o: number, snowT: readonly number[], sandT: readonly number[], out: [number, number, number]): void {
   const w = fields.biome(origin[0] + data[o], origin[1] + data[o + 2], _bw, data[o + 1])
   const s = w[0], n = w[1]
@@ -142,7 +144,10 @@ const hueSet = () => (isOverland() ? OVER_HUES : isGenshin() ? GEN_HUES : GENSHI
 // A palette map's TIERED pines (map.json `trees: 'conifer'`) carry its greens in their geometry: gentle variation only.
 const TIERED_HUES = [BASE, [0.92, 1.0, 1.0] as const, [1.06, 1.05, 0.94] as const, [0.86, 0.94, 0.92] as const]
 const tieredMap = (fields: WorldFields, id: number) => !!fields.map?.conifers && (id === TreeSpecies.Spruce || id === TreeSpecies.Fir || id === TreeSpecies.Pine)
-const huesOf = (sp: SpeciesDef, fields: WorldFields) => tieredMap(fields, sp.id) ? TIERED_HUES : (sp.modelled ? GEN_HUES : hueSet())[sp.id] ?? hueSet()[0]
+// Zhangjiajie (map.json trees: 'liyue'): every crown pulled to the deep jade / emerald of the photos (the bright
+// broadleaves' lime and gold read as autumn there), a little variety stand to stand
+const JADE_HUES = [[0.52, 0.74, 0.6], [0.46, 0.68, 0.58], [0.6, 0.8, 0.58], [0.5, 0.66, 0.5]] as const
+const huesOf = (sp: SpeciesDef, fields: WorldFields) => fields.map?.liyue ? JADE_HUES : tieredMap(fields, sp.id) ? TIERED_HUES : (sp.modelled ? GEN_HUES : hueSet())[sp.id] ?? hueSet()[0]
 const farConiferHues = (sp?: SpeciesDef) =>
   sp?.modelled ? ([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) :
   isOverland() ? ([OVER_GREEN, OVER_DEEP, OVER_GREEN, OVER_LARCH] as const) : isGenshin() ? ([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) : ([TEAL, DEEP, FRESH, BRIGHT, LIME, ORANGE] as const)
@@ -351,7 +356,12 @@ export class WorldChunk implements Cullable, TerrainSource {
       biomeTint(fields, this.origin, data.trees, o, FROST_TREE, sp >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
       if ((isBroadleaf(sp) || sp === TreeSpecies.Pine) && !fields.map?.conifers) regionLeafTint(fields, this.origin[0] + data.trees[o], this.origin[1] + data.trees[o + 2], data.trees[o + 1], out)
     }
-    const rockTint = (o: number, out: [number, number, number]) => biomeTint(fields, this.origin, data.rocks, o, SNOW_ROCK, fields.palette === 0 ? SAND_ROCK_OTH : SAND_ROCK, out)
+    // (a map's own stone, palette `stone`: the boulders re-tinted from propGeometries' warm grey ROCK_BODY to it)
+    const st = fields.map?.palette.stone
+    const rockTint = (o: number, out: [number, number, number]) => {
+      biomeTint(fields, this.origin, data.rocks, o, SNOW_ROCK, fields.palette === 0 ? SAND_ROCK_OTH : SAND_ROCK, out)
+      if (st) for (let q = 0; q < 3; q++) out[q] *= st[q] / ROCK_BODY[q]
+    }
     const perSpecies = speciesTreeAttrs(data.trees, this.origin, fields, geos.trees)
     for (const { sp, attrs } of perSpecies) {
       // Near meshes: full detail, or level 1 tagged as the NEAR LOD band (LOW's near trees).
@@ -537,7 +547,7 @@ export class WorldChunk implements Cullable, TerrainSource {
     // A LOD0 terrain is 2 k triangles; ~15 % of chunks touch water. Trees/props still use `lod`.
     const tl = this.shore ? 0 : lod
     if (!this.terrain[tl]) {
-      const mesh = new THREE.Mesh(buildTerrainGeometry(this.data, tl), this.mats.terrain)
+      const mesh = new THREE.Mesh(buildTerrainGeometry(this.data, tl, !!this.fields.map?.peakLod), this.mats.terrain)
       mesh.receiveShadow = true // constant: receiveShadow is part of the program key
       mesh.frustumCulled = true // bounding sphere set by buildTerrainGeometry; lets shadow passes cull
       this.terrain[tl] = this.add(mesh)

@@ -5,23 +5,20 @@ Real 4×4s, pickups and vans in the field carry kit: spare wheels, racks, jerryc
 car gets its own set, built here as low-poly geometry (one material `detail_hw`, vertex colours), named `acc_*`
 (the loader never paints them), placed in METRES from the car's wheels and body box (`k` = model units per metre
 from the measured wheel radius):
-  pickup — LED light bar on the roll cage, twin spotlights + winch on the bull bar, spare wheel, jerrycans and a
-           toolbox in the bed, rock sliders, a snorkel;
   G500   — the G-Class rear spare in a hard cover, a roof rack with jerrycans and a bag
-           (+ a collapse decimate of the hidden underbody details: the car sits at the 40 k budget);
-  Żuk    — a roof rack with a ladder, crates and a tarp-covered load, a rear step.
+           (+ a collapse decimate of the hidden underbody details: the car sits at the 40 k budget).
 Then Cycles AO is baked again: body parts get fresh AO, the new parts albedo × AO (wheels and brakes keep theirs).
 
 Run after vehicle_realism.py:
-  node scripts/blender/bl.mjs scripts/blender/vehicle_details.py NAME=pickup_truck OUT=C:/tmp/details/
+  node scripts/blender/bl.mjs scripts/blender/vehicle_details.py NAME=mercedes_g500_4x4 OUT=C:/tmp/details/
 """
 import bpy, bmesh, math, os, json, re
 from mathutils import Vector, Matrix
 
 SRC = 'C:/Project/Dark/src/assets/models/vehicles/'
-NAME = globals().get('NAME', 'pickup_truck')
+NAME = globals().get('NAME', 'mercedes_g500_4x4')
 OUT = globals().get('OUT', 'C:/tmp/details/')
-METRES = {'pickup_truck': 0.391, 'mercedes_g500_4x4': 0.475, 'zuk_a06': 0.339}
+METRES = {'mercedes_g500_4x4': 0.475}
 os.makedirs(OUT, exist_ok=True)
 
 BLACK = (0.02, 0.02, 0.022)
@@ -216,36 +213,7 @@ top = H(bhi.z)                 # roof / cage top (m)
 nose, tail = (blo.y - yF) / k, (bhi.y - yF) / k   # body front / rear (m, along y from the front axle)
 half = (bhi.x - blo.x) / 2 / k
 # (no mud flaps: rubber sheets hanging behind the tyres read as black slabs at game distance — removed)
-if NAME == 'pickup_truck':
-    cab_y = wb * 0.36          # roll-cage front hoop over the cab
-    cage = top_at(cab_y - 0.25, cab_y + 0.25)
-    kit.box(P(0, cab_y, cage + 0.06), (1.12, 0.07, 0.09), BLACK)                      # LED light bar
-    for i in range(10):
-        kit.box(P(-0.5 + i * 0.111, cab_y - 0.036, cage + 0.06), (0.085, 0.006, 0.06), LENS)
-    for s in (-1, 1):
-        kit.box(P(s * 0.5, cab_y, cage + 0.02), (0.04, 0.05, 0.05), STEEL)            # brackets
-    for s in (-1, 1):                                                                # bull-bar spotlights + mounts
-        kit.lamp(P(s * 0.36, nose + 0.06, 0.98), 0.085)
-        kit.tube(P(s * 0.36, nose + 0.1, 0.88), P(s * 0.36, nose + 0.1, 0.95), 0.015, STEEL, 6)
-    kit.tube(P(-0.28, nose + 0.12, 0.5), P(0.28, nose + 0.12, 0.5), 0.07, BLACK, 12)  # winch drum
-    kit.box(P(0, nose + 0.06, 0.5), (0.2, 0.06, 0.12), STEEL)                          # fairlead
-    bed = H(W['RL'][0].z) + 0.47                                                      # bed floor (m)
-    kit.spare(P(0.05, wb + 0.05, bed + 0.14), Vector((0, 0, 1)), 0.39, 0.26)         # spare lying in the bed
-    kit.jerrycan(P(0.55, wb - 0.6, bed + 0.24), OLIVE)
-    kit.jerrycan(P(0.55, wb - 0.22, bed + 0.24), RED)
-    kit.box(P(-0.35, wb - 0.62, bed + 0.17), (0.75, 0.32, 0.34), ALU)                # toolbox
-    sill = width_at(0.45, 0.75, 0.6, wb - 0.6)
-    for s in (-1, 1):                                                                # rock sliders under the sills
-        kit.tube(P(s * (sill - 0.05), 0.62, 0.47), P(s * (sill - 0.05), wb - 0.62, 0.47), 0.035, STEEL, 8)
-        for y in (0.9, wb / 2, wb - 0.9):
-            kit.tube(P(s * (sill - 0.05), y, 0.47), P(s * (sill - 0.25), y, 0.55), 0.02, STEEL, 6)
-    fender = width_at(0.8, 1.0, -0.2, 0.45)
-    a = P(-(fender + 0.04), 0.15, 0.85); b = P(-(fender + 0.04), 0.35, 1.1)           # snorkel (right): up the
-    c = P(-(fender - 0.02), 0.72, 1.62)                                              # fender, along the A-pillar
-    kit.tube(a, b, 0.05, BLACK, 10); kit.tube(b, c, 0.05, BLACK, 10)
-    kit.box(c + Vector((0, -0.05 * k, 0.06 * k)), (0.13, 0.2, 0.11), BLACK)
-    kit.box(P(0, tail + 0.05, 0.45), (0.12, 0.25, 0.08), STEEL)                      # tow hitch
-elif NAME == 'mercedes_g500_4x4':
+if NAME == 'mercedes_g500_4x4':
     kit.spare(P(0, tail + 0.16, 1.05), Vector((0, 1, 0)), 0.46, 0.33, cover=(0.06, 0.065, 0.07))
     kit.box(P(0, tail + 0.03, 1.05), (0.2, 0.05, 0.2), STEEL)
     rack_y = wb * 0.55
@@ -262,28 +230,6 @@ elif NAME == 'mercedes_g500_4x4':
     kit.jerrycan(P(-0.45, rack_y + 0.45, top + 0.33), OLIVE, Matrix.Rotation(math.pi / 2, 3, 'Z'))
     kit.jerrycan(P(-0.45, rack_y + 0.05, top + 0.33), OLIVE, Matrix.Rotation(math.pi / 2, 3, 'Z'))
     kit.box(P(0.3, rack_y + 0.15, top + 0.22), (0.55, 0.8, 0.28), CANVAS)           # roof bag
-elif NAME == 'zuk_a06':
-    rack_y = wb * 0.55
-    rl = 2.6
-    top = top_at(rack_y - 1.2, rack_y + 1.2)
-    half = width_at(top - 0.3, top, rack_y - 1, rack_y + 1)
-    for s in (-1, 1):
-        kit.box(P(s * (half - 0.12), rack_y, top + 0.06), (0.04, rl, 0.05), BLACK)
-        for t in (-0.45, 0.0, 0.45):
-            kit.tube(P(s * (half - 0.12), rack_y + t * rl, top), P(s * (half - 0.12), rack_y + t * rl, top + 0.06), 0.015, BLACK, 6)
-    for i in range(6):
-        kit.tube(P(-(half - 0.12), rack_y - rl / 2 + i * rl / 5, top + 0.09), P(half - 0.12, rack_y - rl / 2 + i * rl / 5, top + 0.09), 0.018, BLACK, 6)
-    kit.box(P(0.05, rack_y - 0.45, top + 0.3), (1.1, 1.2, 0.4), CANVAS)               # tarp-covered load
-    for s in (-1, 1):
-        kit.tube(P(s * 0.4, rack_y - 1.05, top + 0.2), P(s * 0.4, rack_y + 0.15, top + 0.2), 0.02, BLACK, 6)  # straps
-    kit.box(P(-0.25, rack_y + 0.65, top + 0.22), (0.5, 0.4, 0.26), WOOD)               # crates
-    kit.box(P(0.3, rack_y + 0.7, top + 0.2), (0.45, 0.35, 0.22), WOOD)
-    for s in (-1, 1):                                                                 # ladder up the back
-        kit.tube(P(s * 0.2, tail + 0.03, 0.55), P(s * 0.2, tail + 0.03, top + 0.12), 0.015, ALU, 6)
-    for i in range(6):
-        z = 0.65 + i * (top - 0.6) / 6
-        kit.tube(P(-0.2, tail + 0.03, z), P(0.2, tail + 0.03, z), 0.012, ALU, 6)
-    kit.box(P(0, tail + 0.08, 0.38), (0.9, 0.16, 0.05), STEEL)                        # rear step
 acc = kit.finish('acc_' + NAME.split('_')[0])
 
 # ---- G500 budget: decimate the hidden underbody details ----

@@ -483,7 +483,7 @@ export class WorldFields {
   }
 
   forestDensity(x: number, z: number, h?: number): number {
-    if (this.map) return this.map.forestDensity(x, z) * (h !== undefined && h > 330 ? 0 : 1)
+    if (this.map) return this.map.forestDensity(x, z) * (h !== undefined && h > this.map.treeLine ? 0 : 1)
     // GROVES, not a forest wall: only the top third of the noise grows trees (dense at the heart, thinning at the
     // edge), leaving open meadows between them — Genshin's lands are mostly open grass and flowers.
     const n = fbm(this.forestN, x * 0.006, z * 0.006, 3) * 0.5 + 0.5

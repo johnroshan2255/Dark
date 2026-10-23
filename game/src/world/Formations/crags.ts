@@ -120,13 +120,16 @@ export function buildCrags(fields: WorldFields, cx: number, cz: number, heights:
       const h0 = sampleHeight(heights, lx, lz)
       if (h0 < WorldFields.WATER + 0.5) continue
       const r = hashFloat(seed, gx, gz, L + 3)
-      const ws = P.ws + P.wsVar * r // half-width across the slope
-      const wd = P.wd + P.wdVar * hashFloat(seed, gx, gz, L + 4) // half-depth down the slope
+      // (a map's own crag size, map.json `cragScale` — Zhangjiajie: stones on its eroded slopes, not 25 m blocks on
+      // its 70° walls; the slope that sets a tor's height capped there too)
+      const cs = fields.map?.cragScale ?? 1
+      const ws = (P.ws + P.wsVar * r) * cs // half-width across the slope
+      const wd = (P.wd + P.wdVar * hashFloat(seed, gx, gz, L + 4)) * cs // half-depth down the slope
       // Clear of every road (bright tors: their spread across the slope and the rubble below them). The canyon
       // walls 10 m off the road get rock too (with the old across-slope margin they stayed bare sand slopes).
       if (fields.anyRoadEdge(wx, wz) < (fields.palette === 0 ? 3 + Math.max(wd * 1.7 + 1.5, ws * 1.3) : 4 + ws)) continue
       if (fields.pois.near(wx, wz, 6) || fields.formations.near(wx, wz, 2) || fields.landmarks.near(wx, wz, 8) || nearBridge(fields, wx, wz, Math.max(ws, wd) * 1.4 + 4)) continue
-      if (fields.palette === 0) addTor(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L, P.salt > 0)
+      if (fields.palette === 0) addTor(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, cs < 1 ? Math.min(g, 1.8) : g, ws, wd, seed, gx, gz, L, P.salt > 0)
       else addCrag(fields, out, lx, lz, wx, wz, h0, _g[0] / g, _g[1] / g, g, ws, wd, seed, gx, gz, L)
       count++
     }
@@ -349,6 +352,10 @@ function addTor(
   const sand = w[0], snow = w[1]
   // Granite light grey (linear ≈ sRGB 150,150,144), warm sandstone in the desert, cold grey-blue in the snow.
   let br = 0.58, bg = 0.57, bb = 0.52
+  // (a map's own stone, palette `stone` = its loose boulders' colour: the crags take its hue, at their usual ×2.6
+  //  brightness over the boulders' default body — the two read as the same rock, as they do by default)
+  const st = fields.map?.palette.stone
+  if (st) (br = st[0] * 2.6), (bg = st[1] * 2.6), (bb = st[2] * 2.6)
   br += (0.6 - br) * sand; bg += (0.3 - bg) * sand; bb += (0.18 - bb) * sand
   br += (0.36 - br) * snow; bg += (0.39 - bg) * snow; bb += (0.45 - bb) * snow
   const green = (1 - sand) * (1 - snow)

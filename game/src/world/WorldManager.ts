@@ -87,8 +87,9 @@ export class WorldManager {
     this.root.matrixAutoUpdate = false
     this.fields = new WorldFields(seed, map)
     this.fields.palette = groundPalette() // main-thread copy (grass, HUD); the workers get it per request
-    // conifer maps (map.json trees: 'conifer') grow the stylised tiered pines of their reference
-    this.geos = createPropGeometries({ tieredPines: !!map?.conifers })
+    // conifer maps (map.json trees: 'conifer') grow the stylised tiered pines of their reference, in the map's own
+    // leaf colours when it has them
+    this.geos = createPropGeometries({ tieredPines: !!map?.conifers, leaves: map?.leaves })
     this.grass = new GrassField(mats.grass, mats.grassMid, mats.grassFar, mats.grassNearU, mats.grassMidU, mats.grassFarU, this.fields, this.chunks)
     this.root.add(this.grass.root)
     // every tree impostor (streamed chunks + far forest) in one draw

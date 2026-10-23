@@ -7,7 +7,7 @@ real GLASS, and the working-kit add-ons removed.
   - MODE=MEASURE: prints the car's frame and cabin landmarks (metres) and renders the driver's view to OUT;
   - MODE=BUILD (later steps of this script) builds the cockpit.
 
-  node scripts/blender/bl.mjs scripts/blender/vehicle_cabin.py NAME=pickup_truck MODE=MEASURE OUT=C:/tmp/cabin/
+  node scripts/blender/bl.mjs scripts/blender/vehicle_cabin.py NAME=mercedes_g500_4x4 MODE=MEASURE OUT=C:/tmp/cabin/
 """
 import bpy, bmesh, math, os, json, re
 from mathutils import Vector, Matrix
@@ -16,14 +16,14 @@ from mathutils import Vector, Matrix
 # the game folder this step writes to (a re-run would build a second cockpit on top of the first).
 #   git show <rev>:src/assets/models/vehicles/<name>.lod0.glb > <SRC>/<name>.lod0.glb
 SRC = globals().get('SRC', 'C:/tmp/vehicles_src/')
-NAME = globals().get('NAME', 'pickup_truck')
+NAME = globals().get('NAME', 'mercedes_g500_4x4')
 MODE = globals().get('MODE', 'MEASURE')
 OUT = globals().get('OUT', 'C:/tmp/cabin/')
-METRES = {'pickup_truck': 0.391, 'mercedes_g500_4x4': 0.475, 'zuk_a06': 0.339}
+METRES = {'mercedes_g500_4x4': 0.475}
 # Catalogue `cabin` (src/gameplay/vehicle/catalogue.ts): hip height, roof height (m above the ground), eye behind the wheel.
-CABIN = {'pickup_truck': (0.84, 1.66, 0.51), 'mercedes_g500_4x4': (1.35, 2.2, 0.49), 'zuk_a06': (0.98, 1.8, 0.42)}
+CABIN = {'mercedes_g500_4x4': (1.35, 2.2, 0.49)}
 # Driver's eye (m, this script's frame) — Car.eyeLocal read in game: x across (+ = left), y from the front axle, z.
-EYE = {'pickup_truck': (0.445, 1.50, 1.50), 'mercedes_g500_4x4': (0.407, 1.51, 2.01), 'zuk_a06': (0.369, 0.82, 1.64)}
+EYE = {'mercedes_g500_4x4': (0.407, 1.51, 2.01)}
 os.makedirs(OUT, exist_ok=True)
 
 sc = bpy.data.scenes.get('cab_' + NAME) or bpy.data.scenes.new('cab_' + NAME)
@@ -191,22 +191,6 @@ if MODE == 'PARTS':
         for c_ in sorted(comps, key=lambda t: -t[0])[:25]:
             print(o.name[:40], c_)
 
-if MODE == 'ZUKBOX':
-    it = next(o for o in meshes if o.name.startswith('interior'))
-    pts = [local(it.matrix_world @ v.co) for v in it.data.vertices]
-    print('interior box', [round(min(p[i] for p in pts), 2) for i in range(3)], [round(max(p[i] for p in pts), 2) for i in range(3)])
-    it.hide_render = True
-    sc.render.engine = 'BLENDER_WORKBENCH'
-    sc.display.shading.color_type = 'TEXTURE'
-    sc.render.resolution_x, sc.render.resolution_y = 800, 450
-    cam_d = bpy.data.cameras.new('zb'); cam_d.clip_start = 0.02 * k; cam_d.lens = 13
-    cam = bpy.data.objects.new('zb', cam_d); sc.collection.objects.link(cam); sc.camera = cam
-    ex, ey, ez = EYE[NAME]
-    for nm, at, look in (('zb_fwd', P(ex, ey, ez), P(ex, ey - 2, ez - 0.6)), ('zb_back', P(0, 0.6, 1.5), P(0, 3.5, 1.2))):
-        cam.location = at
-        cam.rotation_euler = (look - at).to_track_quat('-Z', 'Y').to_euler()
-        sc.render.filepath = OUT + NAME + '_' + nm + '.png'
-        bpy.ops.render.render(write_still=True)
 
 
 # =====================================================================================================================
@@ -216,7 +200,7 @@ if MODE == 'ZUKBOX':
 #     steering_wheel   rebuilt (rim + spokes + hub) — the loader finds its pivot and column axis from the ring
 #     dial_<car>       gauge faces: quads UV-mapped onto a canvas the game draws (needles, numbers) — material `dial`
 #     pedal_<gas|brake|clutch>, gear_lever, wiper_<L|R>: moving parts, extras `pivot` (glTF space) + `axis`
-#   Glass: every window face on ONE material `glass` (transparent); the Żuk's painted windows become real glass.
+#   Glass: every window face on ONE material `glass` (transparent).
 # =====================================================================================================================
 if MODE == 'BUILD':
     WHEEL_MAT = next(s.material for o in meshes if o.name.startswith('wheel_') for s in o.material_slots if s.material)
@@ -338,71 +322,6 @@ if MODE == 'BUILD':
             if s.material and re.search('wind|glas', s.material.name, re.I) and not re.search('light|lamp', s.material.name, re.I):
                 s.material = glass
 
-    if NAME == 'zuk_a06':
-        # The Żuk's windows are PAINTED (dark glossy texels, even the wipers and a sticker): those faces → glass.
-        for o in [o for o in meshes if o.name.startswith(('Plane.018', 'door_'))]:
-            tex = next((n.image for s in o.material_slots if s.material and s.material.node_tree for n in s.material.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image), None)
-            if not tex:
-                continue
-            w_, h_ = tex.size
-            px = tex.pixels[:]
-            uvl = o.data.uv_layers.active
-            if glass.name not in [s.material.name for s in o.material_slots if s.material]:
-                o.data.materials.append(glass)
-            gi = [s.material.name if s.material else '' for s in o.material_slots].index(glass.name)
-            n_glass = 0
-            for poly in o.data.polygons:
-                cz = local(o.matrix_world @ poly.center).z
-                nw = (o.matrix_world.to_3x3() @ poly.normal).normalized()
-                if not (1.08 < cz < 1.92) or abs(nw.z) > 0.55:
-                    continue
-                us = [uvl.data[li].uv for li in poly.loop_indices]
-                u_ = sum(x.x for x in us) / len(us); v_ = sum(x.y for x in us) / len(us)
-                ix = min(w_ - 1, max(0, int((u_ % 1) * w_))); iy = min(h_ - 1, max(0, int((v_ % 1) * h_)))
-                o_ = (iy * w_ + ix) * 4
-                r_, g_, b_ = px[o_], px[o_ + 1], px[o_ + 2]
-                mx, mn = max(r_, g_, b_), min(r_, g_, b_)
-                if mx < float(globals().get('DARK', '0.2')) and (mx - mn) < 0.08:
-                    poly.material_index = gi
-                    n_glass += 1
-            # …then the rest of each pane: grow into neighbours in the SAME PLANE whose texel is grey (the painted
-            # highlights, the 'PL' sticker, the wiper strokes — not the blue paint), so no pane keeps a painted corner.
-            def texel(poly):
-                us = [uvl.data[li].uv for li in poly.loop_indices]
-                u_ = sum(x.x for x in us) / len(us); v_ = sum(x.y for x in us) / len(us)
-                ix = min(w_ - 1, max(0, int((u_ % 1) * w_))); iy = min(h_ - 1, max(0, int((v_ % 1) * h_)))
-                o_ = (iy * w_ + ix) * 4
-                return px[o_], px[o_ + 1], px[o_ + 2]
-            edge_faces = {}
-            for poly in o.data.polygons:
-                for ek in poly.edge_keys:
-                    edge_faces.setdefault(ek, []).append(poly.index)
-            polys = o.data.polygons
-            front = [p_.index for p_ in polys if p_.material_index == gi]
-            grown = 0
-            while front:
-                nxt = []
-                for fi in front:
-                    a = polys[fi]
-                    for ek in a.edge_keys:
-                        for fj in edge_faces[ek]:
-                            b = polys[fj]
-                            if b.material_index == gi or a.normal.dot(b.normal) < 0.985:
-                                continue
-                            r_, g_, b_ = texel(b)
-                            if max(r_, g_, b_) - min(r_, g_, b_) < 0.12 and max(r_, g_, b_) < 0.5 and 1.16 < local(o.matrix_world @ b.center).z < 1.95:
-                                b.material_index = gi
-                                nxt.append(fj)
-                                grown += 1
-                front = nxt
-            print('zuk glass faces', o.name, n_glass, '+ grown', grown)
-            if o.name.startswith('Plane.018'):
-                gp = [local(o.matrix_world @ o.data.vertices[i].co) for poly in o.data.polygons if poly.material_index == gi for i in poly.vertices]
-                ymin = min(p.y for p in gp)
-                fr = [p for p in gp if p.y < ymin + 0.25]
-                print('zuk windscreen', [round(min(p[i] for p in fr), 2) for i in range(3)], [round(max(p[i] for p in fr), 2) for i in range(3)])
-        for o in [o for o in sc.objects if o.name.startswith(('interior', 'steering_wheel'))]:
-            bpy.data.objects.remove(o, do_unlink=True)
     if NAME == 'mercedes_g500_4x4':
         for o in [o for o in sc.objects if o.name.startswith('steering_wheel')]:
             bpy.data.objects.remove(o, do_unlink=True)
@@ -427,28 +346,6 @@ if MODE == 'BUILD':
                     kill += comp
             print('g500 static wiper verts removed', len(kill))
             bmesh.ops.delete(bm, geom=kill, context='VERTS'); bm.to_mesh(paint.data); bm.free()
-    if NAME == 'pickup_truck':
-        # The textured static steering wheel (rim, spokes, hub: loose parts in this box) → removed for a working one.
-        box = (0.15, 0.85, 0.80, 0.70, 1.04, 1.34)
-        body = next(o for o in sc.objects if o.name.startswith('pickup body_vehicle'))
-        bm = bmesh.new(); bm.from_mesh(body.data); bm.verts.ensure_lookup_table()
-        seen = set(); kill = []
-        for v in bm.verts:
-            if v.index in seen:
-                continue
-            stack = [v]; comp = []; seen.add(v.index)
-            while stack:
-                a = stack.pop(); comp.append(a)
-                for e in a.link_edges:
-                    b = e.other_vert(a)
-                    if b.index not in seen:
-                        seen.add(b.index); stack.append(b)
-            pts = [local(body.matrix_world @ a.co) for a in comp]
-            if all(box[i] <= min(p[i] for p in pts) and max(p[i] for p in pts) <= box[i + 3] for i in range(3)):
-                kill += comp
-        print('pickup old wheel verts removed', len(kill))
-        bmesh.ops.delete(bm, geom=kill, context='VERTS')
-        bm.to_mesh(body.data); bm.free()
     meshes = [o for o in sc.objects if o.type == 'MESH']
     dg = bpy.context.evaluated_depsgraph_get()
 
@@ -593,19 +490,7 @@ if MODE == 'BUILD':
             cab.box(P(x, y + 0.25 + math.sin(t) * (back + 0.12), cz + 0.05 + math.cos(t) * (back + 0.12)), (w * 0.55, 0.09, 0.17), col, bb)
 
     # ================================ per car ================================
-    if NAME == 'pickup_truck':
-        wc = P(0.42, 0.95, 1.07)
-        wn = D(0, 0.96, 0.28)
-        wheel(wc, wn, 0.185, 0.016, (100, -100, 20, -20), GREY, hub=0.055, hub_col=GREY)
-        dial_quads([(0.355, 0.8, 1.12, 0.085, 0.085, (0.0, 0.0, 0.5, 1.0)), (0.49, 0.8, 1.12, 0.085, 0.085, (0.5, 0.0, 1.0, 1.0))], 'dial_pickup')
-        for nm, x in (('pedal_clutch', 0.58), ('pedal_brake', 0.44), ('pedal_gas', 0.31)):
-            pedal(nm, x, 0.66, 0.92, 0.74)
-        gear(0.04, 1.18, top_h=0.38, lean=0.25)
-        fz = floor_at(-0.08, 1.2)
-        cab.tube(P(-0.08, 1.2, fz), P(-0.08, 1.28, fz + 0.3), 0.007, STEEL, 6)
-        cab.box(P(-0.08, 1.28, fz + 0.31), (0.035, 0.035, 0.04), BLACK)
-        wipers([(0.33, 0.37, 1.17), (-0.17, 0.37, 1.17)], 0.42, (-1, 0, 0.12))
-    elif NAME == 'mercedes_g500_4x4':
+    if NAME == 'mercedes_g500_4x4':
         wc = P(0.436, 1.08, 1.553)
         wn = D(0, 0.929, 0.37)
         wheel(wc, wn, 0.185, 0.021, (90, -90, 0), LEATHER, hub=0.075, hub_col=BLACK, star=True)
@@ -633,33 +518,6 @@ if MODE == 'BUILD':
         for nm, x, pad in (('pedal_brake', 0.42, (0.13, 0.025, 0.07)), ('pedal_gas', 0.27, (0.06, 0.02, 0.17))):
             pedal(nm, x, 0.72, 1.45, 0.82, pad=pad)
         wipers([(0.365, 0.69, 1.58), (-0.19, 0.69, 1.58)], 0.42, (-1, 0, 0.35))
-    elif NAME == 'zuk_a06':
-        fz = floor_at(0.0, 1.5, 1.6)
-        # (the windscreen runs y −0.43…−0.18, z 1.22…1.61: the dash fills the cab nose up to its lower edge)
-        cab.box(P(0, 1.6, fz + 0.01), (1.3, 4.0, 0.02), RUBBER)
-        cab.box(P(0, 0.62, fz + 0.2), (0.38, 0.75, 0.4), GREY)                                # engine cover
-        cab.box(P(0, -0.2, 1.2), (1.34, 0.5, 0.04), BODY_BLUE)                                 # dash top (painted metal)
-        cab.box(P(0, 0.04, 1.06), (1.34, 0.04, 0.3), BODY_BLUE)                                # dash face
-        cab.box(P(0, -0.2, 0.82), (1.34, 0.5, 0.04), SOFT)                                     # under-dash / footwell top
-        cab.box(P(0.36, 0.065, 1.08), (0.5, 0.012, 0.14), BLACK)                               # instrument strip
-        for i in range(5):
-            cab.box(P(-0.05 - i * 0.07, 0.065, 1.0), (0.02, 0.012, 0.012), LIGHT)
-        wc = P(0.383, 0.413, 1.27)
-        wn = D(0, 0.766, 0.643)
-        wheel(wc, wn, 0.21, 0.011, (90, -90), BLACK, hub=0.05)
-        # (on the instrument strip, just in front of it — explicit: the new dash isn't in the scene to cast onto yet)
-        screen_fixed(0.27, 0.1, 1.09, 0.11, 0.11, (0.0, 0.0, 0.5, 1.0), 'dial_zuk', hood=False, more=((0.46, 0.1, 1.09, 0.2, 0.1, (0.5, 0.25, 1.0, 0.75)),))
-        seat(0.37, 0.95, 0.98, 0.46, VINYL_BLUE, back=0.55, tilt=10, head=False)
-        seat(-0.37, 0.95, 0.98, 0.46, VINYL_BLUE, back=0.55, tilt=10, head=False)
-        for y in (1.85, 2.65):
-            seat(0.0, y, 0.92, 1.18, VINYL_BLUE, back=0.5, tilt=8, head=False)
-        for nm, x in (('pedal_clutch', 0.5), ('pedal_brake', 0.37), ('pedal_gas', 0.25)):
-            pedal(nm, x, 0.0, 0.85, 0.12)
-        gear(0.1, 0.2, top_h=0.6, lean=0.45)                                                  # out of the floor ahead of the engine cover (bus-like)
-        cab.box(P(0.0, -0.12, 1.66), (0.2, 0.02, 0.07), BLACK)                                 # rear-view mirror
-        for s_ in (0.33, -0.33):
-            cab.box(P(s_, -0.05, 1.7), (0.48, 0.18, 0.02), GREY)                               # sun visors
-        wipers([(0.42, -0.47, 1.2), (-0.1, -0.47, 1.2)], 0.36, (-1, 0, 0.35))
     built.append(cab.finish('cab_' + NAME.split('_')[0]))
     meshes = [o for o in sc.objects if o.type == 'MESH']
     # Budget (≤ 40 k): the G500's hidden underbody details take the cut (as vehicle_details.py did).

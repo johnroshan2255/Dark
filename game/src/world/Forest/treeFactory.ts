@@ -596,7 +596,10 @@ export function trunkGirth(id: number, y: number, colliderR: number): number | n
 }
 const GIRTH = new Map<number, number>()
 
-export function createTreeLibrary(opts: { tiered?: boolean } = {}): { species: SpeciesDef[]; dispose(): void } {
+/** A map's own leaf colours for the tiered pines (sRGB hex; FixedMap.leaves — map.json palette leafLight / leafMid / leafDark). */
+export interface LeafColours { light: number; mid: number; dark: number }
+
+export function createTreeLibrary(opts: { tiered?: boolean; leaves?: LeafColours } = {}): { species: SpeciesDef[]; dispose(): void } {
   const build = (fn: (l: number, r: Rng) => THREE.BufferGeometry, seed: number, name: string) =>
     [0, 1, 2].map((l) => {
       const soup = fn(l, new Rng(seed + l))
@@ -639,10 +642,11 @@ export function createTreeLibrary(opts: { tiered?: boolean } = {}): { species: S
   }
   // Conifer maps: the tiered pines replace spruce / fir / pine (after the modelled ones: they win here)
   if (opts.tiered) {
+    const T: TieredOpts = opts.leaves ? { ...TIERED, ...opts.leaves } : TIERED
     const tiered: [number, string, number, TieredOpts][] = [
-      [TreeSpecies.Spruce, 'spruce', 101, TIERED],
-      [TreeSpecies.Fir, 'fir', 303, { ...TIERED, height: 8.5, radius: 2.4, tiers: [6, 4, 3] }],
-      [TreeSpecies.Pine, 'pine', 404, { ...TIERED, height: 14, radius: 3.0, bare: 2.2, tiers: [8, 5, 3] }],
+      [TreeSpecies.Spruce, 'spruce', 101, T],
+      [TreeSpecies.Fir, 'fir', 303, { ...T, height: 8.5, radius: 2.4, tiers: [6, 4, 3] }],
+      [TreeSpecies.Pine, 'pine', 404, { ...T, height: 14, radius: 3.0, bare: 2.2, tiers: [8, 5, 3] }],
     ]
     for (const [id, name, seed, o] of tiered) {
       const i = species.findIndex((s) => s.id === id)

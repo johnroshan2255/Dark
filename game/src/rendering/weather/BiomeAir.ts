@@ -133,3 +133,47 @@ export function applyBiomeAir(p: LightingParams, sand: number, snow: number, aut
     p.split *= 1 - 0.8 * sand // no cool split-toned shadows
   }
 }
+
+/** A fixed map's own air (FixedMap.palette skyZenith / skyHaze, linear rgb). */
+export interface MapAir {
+  zenith?: THREE.Color; haze?: THREE.Color; /** density / m, base (m), falloff / m */ mist?: [number, number, number]
+  /** The map's LIGHT (map.json `light`): sun / sky-fill / ground-bounce hues, white balance, cel strength, split tone,
+   *  saturation — Zhangjiajie: a neutral sun and a cool pale fill (the bright style's golden light turned its jade
+   *  forest yellow and its grey-beige stone orange) and soft shading. */
+  light?: { sun?: THREE.Color; fill?: THREE.Color; bounce?: THREE.Color; tint?: THREE.Color; toon?: number; split?: number; saturation?: number }
+}
+
+/**
+ * MAP AIR: a fixed map's sky (Zhangjiajie's atlas: a clear mid-blue zenith over a soft blue-grey horizon, the far
+ * spires and ridges fading into that blue-grey). Each colour is re-hued to the map's at the phase's own brightness,
+ * so dawn, dusk and night keep their light; a little more aerial haze, the depth of the atlas's layered spires.
+ * After applyBiomeAir (a map's region air is its own). Cost: a few colour ops per frame.
+ */
+export function applyMapAir(p: LightingParams, air: MapAir): void {
+  const L = air.light
+  if (L) {
+    if (L.sun) hueToward(p.sunColor, L.sun, 0.85)
+    if (L.fill) hueToward(p.hemiSky, L.fill, 0.85)
+    if (L.bounce) hueToward(p.hemiGround, L.bounce, 0.85)
+    if (L.tint) hueToward(p.tint, L.tint, 0.9)
+    if (L.toon !== undefined) p.toon = Math.min(p.toon, L.toon)
+    if (L.split !== undefined) p.split = Math.min(p.split, L.split)
+    if (L.saturation !== undefined) p.saturation *= L.saturation
+  }
+  if (air.zenith) hueToward(p.skyZenith, air.zenith, 0.8)
+  if (air.haze) {
+    hueToward(p.fogColor, air.haze, 0.8)
+    hueToward(p.landHaze, air.haze, 0.85)
+    hueToward(p.tint, air.haze, 0.08)
+  }
+  // the map's valley mist (Zhangjiajie's gorges full of cloud), never thinner than the phase's own (dawn, rain)
+  if (air.mist) {
+    p.mistDensity = Math.max(p.mistDensity, air.mist[0])
+    p.mistBase = Math.max(p.mistBase, air.mist[1])
+    p.mistFalloff = air.mist[2]
+    // (the mist is the map's depth: the distance tint of the land stays lighter, so the far towers keep their rust and
+    // green — at the bright day's 0.72 they were blue-grey cut-outs from a tower top)
+    p.fogMax = Math.min(p.fogMax, 0.3)
+    p.haze *= 0.4
+  }
+}

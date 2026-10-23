@@ -1,10 +1,10 @@
 """
 VEHICLE PREP, step 1 of 2: cut the front doors out of the garage cars. Run inside Blender 5.x (Text Editor, or the
 MCP add-on). Input: the ORIGINAL GLBs (`git show 8538725:src/assets/models/vehicles/<name>.lod0.glb`) in SRC; each
-car goes into a scene named after it (create scenes 'pickup_truck', 'mercedes_g500_4x4', 'zuk_a06' first, each
-with a camera). Along each door outline (pixels of a 1600-px orthographic left-side render, CARS below) the skin is
+car goes into a scene named after it (create the scene 'mercedes_g500_4x4' first, with a
+camera). Along each door outline (pixels of a 1600-px orthographic left-side render, CARS below) the skin is
 bisected, the door faces (skin, trim, mirror, window) move to `door_FL_<car>` / `door_FR_<car>`, the opening gets
-a dark jamb, the Żuk door an inner panel (the others have modelled door cards), and the imported custom normals
+a dark jamb (the G500 has modelled door cards), and the imported custom normals
 are transferred back onto the original skin (bmesh drops them). Then run vehicle_finish.py.
 """
 import bpy, bmesh, mathutils, math
@@ -14,12 +14,8 @@ SRC = 'C:/path/to/original/vehicles/'  # the original GLBs (see above)
 
 # Door outlines in PIXELS of the left-side render (1600 px = ortho span s, centred on ctr), front first.
 CARS = {
-    'pickup_truck': dict(length=5.1, s=8.00588, cy=0.36133, cz=1.30923,
-                         poly=[(497, 585), (762, 585), (762, 336), (605, 336), (500, 430)]),
     'mercedes_g500_4x4': dict(length=4.8, s=0.0509201, cy=-0.000834598, cz=0.0113197,
                               poly=[(599, 557), (905, 557), (905, 151), (690, 151), (599, 290)]),
-    'zuk_a06': dict(length=4.4, s=1.48317, cy=-0.048993, cz=0.166539,
-                    panel=True, poly=[(330, 175), (596, 175), (596, 652), (415, 652), (385, 600), (350, 550), (330, 505)]),
 }
 SKIP = ('wheel', 'tyre', 'tire', 'caliper', 'rim_')
 

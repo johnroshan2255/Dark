@@ -427,6 +427,7 @@ export class GrassField {
     // (FixedMap.poolRing: refs — grass and sedge ring a desert spring's water).
     const map = this.fields.map
     if (map) {
+      v *= map.grass
       const sand = this.fields.biome(x, z, _bw)[0]
       if (sand > 0.01) v = v * (1 - sand) + sand * 0.85 * map.poolRing(x, z)
     }

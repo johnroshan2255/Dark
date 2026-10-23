@@ -33,13 +33,13 @@ export interface TuneRange {
 }
 
 export const TUNE_RANGES: TuneRange[] = [
-  { key: 'power', label: 'Engine power', min: 40, max: 400, step: 5, unit: 'kW' },
+  { key: 'power', label: 'Engine power', min: 20, max: 400, step: 5, unit: 'kW' },
   { key: 'force', label: 'Pulling force', min: 6, max: 30, step: 0.5, unit: 'kN' },
   { key: 'boost', label: 'Boost', min: 1.2, max: 3, step: 0.1, unit: '×' },
   { key: 'grip', label: 'Tyre grip', min: 1.2, max: 4, step: 0.1, unit: 'μ' },
   { key: 'suspension', label: 'Suspension', min: 18, max: 70, step: 1, unit: '' },
   { key: 'tyre', label: 'Tyre size', min: 0.8, max: 1.4, step: 0.05, unit: '×' },
-  { key: 'mass', label: 'Weight', min: 900, max: 3600, step: 50, unit: 'kg' },
+  { key: 'mass', label: 'Weight', min: 700, max: 3600, step: 50, unit: 'kg' },
 ]
 
 export const PAINTS: { name: string; hex: string }[] = [
@@ -57,7 +57,8 @@ export interface VehicleDef {
   year: string
   blurb: string
   /** Model file (Vite URL), length after normalising (m) — chosen so the WHEELBASE matches the real vehicle
-   *  (Hilux Xtra Cab 3.095 m · G500 4×4² 2.85 m · Żuk 2.70 m); the human is a 1.78 m adult (CharacterModel). */
+   *  (G500 4×4² 2.85 m · E30 2.57 m · kei van 1.84 m: the last two are already in metres, vehicle_prep.py); the
+   *  human is a 1.78 m adult (CharacterModel). */
   url: string
   length: number
   /** Which model axis points forward in the source file ('+z' = Sketchfab default; rotated to −Z in game). */
@@ -67,11 +68,18 @@ export interface VehicleDef {
   /** Meshes whose material name matches take the paint colour; undefined = every body mesh — for textured models
    *  further limited per pixel to the body paint (loadModels buildPaintMap: the texture's dominant body hue). */
   paintRegex?: RegExp
-  /** Look for a steering wheel to animate (the pickup has one). */
+  /** Look for an unnamed steering wheel to animate (a model without a `steering_wheel` part). */
   steering?: boolean
-  /** Lamp positions (right side; mirrored) — FALLBACK only: the lamps are found on the model itself at load
-   *  (loadModels findLamps / findLampsInParts); this is used when nothing is found, then a body-box guess. */
-  lamps?: { head: [number, number, number]; tail: [number, number, number] }
+  /** Lamp lenses (car space, the RIGHT side; mirrored to the left), measured on the model: they WIN over the lamps
+   *  found on the model at load (loadModels findLamps / findLampsInParts — a guess that put the G500's heads on its
+   *  bumper), then a body-box guess. `head2`: a second headlamp per side (the E30's quad lamps); sizes are half
+   *  extents (m). */
+  lamps?: { head: [number, number, number]; tail: [number, number, number]; head2?: [number, number, number]; headSize?: [number, number]; tailSize?: [number, number] }
+  /** The dash: 'twin' round speedo + tacho, 'single' speedo + lamp strip, 'screen' a wide twin screen (Cockpit). */
+  dash: 'twin' | 'single' | 'screen'
+  /** Paint mask for a WHITE (unsaturated) textured body: the bright neutral texels take the paint (buildPaintMap
+   *  otherwise picks the body's dominant saturated hue). */
+  whitePaint?: boolean
   /** Driver's cabin (measured in Blender, m): seated hip height, the roof's underside above the seat, and how far
    *  the hips sit behind the steering wheel's centre. The driver's seat x is the steering wheel's. */
   cabin: { hip: number; roof: number; behind: number }
@@ -99,36 +107,22 @@ export interface VehicleDef {
 
 import type { VehicleSpec } from './drivetrain/spec'
 import { SPECS } from './specs'
-import pickupUrl from '../../assets/models/vehicles/pickup_truck.lod0.glb?url'
 import gwagenUrl from '../../assets/models/vehicles/mercedes_g500_4x4.lod0.glb?url'
-import zukUrl from '../../assets/models/vehicles/zuk_a06.lod0.glb?url'
+import bmwUrl from '../../assets/models/vehicles/bmw_e30.lod0.glb?url'
+import vanUrl from '../../assets/models/vehicles/carry_van.lod0.glb?url'
 
 export const VEHICLES: VehicleDef[] = [
-  {
-    id: 'pickup',
-    name: 'Ranger Pickup',
-    maker: 'Workhorse',
-    year: '1989',
-    blurb: 'The farm truck. Tough, simple, climbs anything in low range.',
-    url: pickupUrl, length: 5.23, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, steering: true, axles: true, bytes: 2_840_516,
-    grade: { sat: 0.5, gain: 0.88 }, // toy-bright olive → faded, sun-worn paint
-    cabin: { hip: 0.84, roof: 1.66, behind: 0.51 },
-    engine: { pitch: 1, gears: [0, 5.5, 11, 17.5, 25, 34, 60] },
-    // No pipe on the model (its underside is one flat floor plate): the real 1980s Hilux tailpipe ends under the
-    // bed just behind the rear tyre on the left, turned out — placed there, clear of the bed (y 0.66).
-    exhaust: [{ at: [-0.68, 0.45, 2.15], dir: [-0.5, 0, 0.84] }],
-    stock: { power: 120, force: 12, boost: 2.2, grip: 2.4, suspension: 36, tyre: 1, mass: 1750, paint: '#ffffff' },
-    spec: SPECS.pickup,
-  },
   {
     id: 'gwagen',
     name: 'G500 4×4²',
     maker: 'Mercedes-Benz',
     year: '2015',
     blurb: 'Portal axles, twin-turbo V8, 45 cm of ground clearance. The mountain goat.',
-    url: gwagenUrl, length: 4.68, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, paintRegex: /CarPaint/i, bytes: 2_569_772,
+    url: gwagenUrl, length: 4.68, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, paintRegex: /CarPaint/i, bytes: 1_977_452, dash: 'screen',
     cabin: { hip: 1.35, roof: 2.2, behind: 0.49 },
-    lamps: { head: [0.66, 1.08, -2.44], tail: [0.72, 1.22, 2.43] },
+    // its two round headlamps in the wings (the lens parts `glas_light`, measured) and the tail lamps at the back
+    // corners — the old fallback [0.66, 1.08, −2.44] floated 30 cm ahead of the grille, at bumper height
+    lamps: { head: [0.597, 1.206, -2.13], tail: [0.7, 1.0, 2.29], headSize: [0.088, 0.088], tailSize: [0.07, 0.12] },
     engine: { pitch: 0.8, gears: [0, 7, 14, 22, 31, 42, 70] },
     // Side exits, as on the real 4×4²: twin tips each side under the sill just ahead of the rear wheels, angled
     // out and back (the model's own pipes; tip mouths measured, sides alternating).
@@ -140,24 +134,41 @@ export const VEHICLES: VehicleDef[] = [
     spec: SPECS.gwagen,
   },
   {
-    id: 'zuk',
-    name: 'Żuk A06',
-    maker: 'FSC Lublin',
-    year: '1972',
-    blurb: 'A Polish delivery van with a lawnmower engine. Slow, light, oddly capable.',
-    url: zukUrl, length: 4.4, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, axles: true, bytes: 1_785_832,
-    grade: { sat: 0.55, gain: 0.9 }, // candy cyan → the faded blue of a working 1970s van
-    cabin: { hip: 0.98, roof: 1.8, behind: 0.42 },
-    engine: { pitch: 1.22, gears: [0, 4, 8.5, 14, 20, 27, 45] },
-    // The model's own tailpipe: from the silencer across the rear frame to the rear RIGHT, ending under the body
-    // ~0.2 m short of the step, blowing straight back.
-    exhaust: [{ at: [0.6, 0.36, 2.3], dir: [0, 0, 1] }],
-    stock: { power: 55, force: 8, boost: 2.4, grip: 2.0, suspension: 28, tyre: 1, mass: 1400, paint: '#ffffff' },
-    spec: SPECS.zuk,
+    id: 'bmw',
+    name: 'E30 M3',
+    maker: 'BMW',
+    year: '1986',
+    blurb: 'The touring-car homologation special: a 2.3 L four that revs to 7250, a limited-slip rear and a box-flared body.',
+    url: bmwUrl, length: 4.3185, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, steering: true, bytes: 1_324_664, dash: 'twin',
+    whitePaint: true,
+    cabin: { hip: 0.42, roof: 1.3, behind: 0.42 },
+    // quad round headlamps (outer + inner per side), the wide tail lamps (scripts/blender/vehicle_prep.py measure)
+    lamps: { head: [0.586, 0.606, -1.99], head2: [0.41, 0.606, -1.99], headSize: [0.072, 0.072], tail: [0.51, 0.655, 2.22], tailSize: [0.148, 0.075] },
+    engine: { pitch: 1.3, gears: [0, 13, 21, 30, 41, 54, 72] },
+    // twin tips under the rear bumper on the left (the model's own pipes), blowing straight back
+    exhaust: [{ at: [-0.4, 0.24, 2.16], dir: [0, 0, 1] }, { at: [-0.46, 0.24, 2.16], dir: [0, 0, 1] }],
+    stock: { power: 147, force: 11, boost: 2.0, grip: 2.6, suspension: 40, tyre: 1, mass: 1200, paint: '#ffffff' },
+    spec: SPECS.bmw,
+  },
+  {
+    id: 'van',
+    name: 'Kei Van',
+    maker: 'Workhorse',
+    year: '1983',
+    blurb: 'A cab-over 800 cc delivery van: tiny, light, slow — and it goes anywhere a cart track goes.',
+    url: vanUrl, length: 3.3777, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, paintRegex: /^paint/i, axles: true, bytes: 3_258_788, dash: 'single',
+    // (a squat cab: windscreen 1.02–1.55 m — the head at 1.38 looks out of it, not into the headliner)
+    cabin: { hip: 0.72, roof: 1.5, behind: 0.38 },
+    lamps: { head: [0.492, 0.752, -1.62], headSize: [0.075, 0.075], tail: [0.648, 0.758, 1.66], tailSize: [0.05, 0.068] },
+    engine: { pitch: 1.35, gears: [0, 4.5, 9, 15, 22, 29, 35] },
+    // under the rear on the right, ahead of the bumper, blowing straight back
+    exhaust: [{ at: [0.42, 0.22, 1.55], dir: [0, 0, 1] }],
+    stock: { power: 27, force: 6, boost: 2.4, grip: 2.0, suspension: 30, tyre: 1, mass: 860, paint: '#ffffff' },
+    spec: SPECS.van,
   },
 ]
 
-export const DEFAULT_VEHICLE = 'pickup'
+export const DEFAULT_VEHICLE = 'gwagen'
 
 export function vehicleDef(id: string): VehicleDef {
   return VEHICLES.find((v) => v.id === id) ?? VEHICLES[0]

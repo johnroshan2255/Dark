@@ -14,7 +14,7 @@ near-black materials are merged, and a PLANAR decimate (dissolves only coplanar 
 parts over the triangle budget.
 
 Run (Blender with the MCP add-on server on :9876):
-  node scripts/blender/bl.mjs scripts/blender/vehicle_brakes.py NAME=pickup_truck OUT=C:/tmp/brakes/
+  node scripts/blender/bl.mjs scripts/blender/vehicle_brakes.py NAME=mercedes_g500_4x4 OUT=C:/tmp/brakes/
 Then copy OUT/<NAME>.lod0.glb to src/assets/models/vehicles/ and run `npm run validate:assets`.
 """
 import bpy, bmesh, math, os, json, re
@@ -23,13 +23,11 @@ from mathutils import Vector
 SRC = 'C:/Project/Dark/src/assets/models/vehicles/'
 CARS = {
     # rim = rim radius / tyre radius (31x10.50R15: 15/31; 325/55R22: 22/36.1; 6.50-16: 16/28.8)
-    'pickup_truck': {'front': 'disc', 'rear': 'drum', 'rim': 0.484, 'caliper': (0.11, 0.11, 0.12)},
     'mercedes_g500_4x4': {'front': 'disc', 'rear': 'disc', 'rim': 0.61, 'caliper': (0.55, 0.04, 0.03),
                           'merge': {'Carbon.012': 'Under.012', 'CP_Plastic.012': 'Under.012'},
                           'drop': 'caliper_', 'planar': 0.0087},
-    'zuk_a06': {'front': 'drum', 'rear': 'drum', 'rim': 0.556},
 }
-NAME = globals().get('NAME', 'pickup_truck')
+NAME = globals().get('NAME', 'mercedes_g500_4x4')
 OUT = globals().get('OUT', 'C:/tmp/brakes/')
 cfg = CARS[NAME]
 os.makedirs(OUT, exist_ok=True)

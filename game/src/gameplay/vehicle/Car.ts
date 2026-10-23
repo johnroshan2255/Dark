@@ -70,7 +70,7 @@ export type CarEvent = 'doorOpen' | 'doorSlam' | 'drive' | 'out' | 'fly' | 'boat
 const BOAT_TIME = 2.2
 /** Foot brake with both pedals (W + S, touch brake-stand): the driver holding the car for a burnout — enough
  *  front-biased pressure to hold the fronts against the spinning rears' push, not so much that a modest engine can't
- *  turn the rear brakes (pickup and Żuk: rears spin, < 1 m of creep; tests/drivetrain.test.ts). */
+ *  turn the rear brakes (the 2WD cars: rears spin, < 1 m of creep; tests/drivetrain.test.ts). */
 const BURN_BRAKE = 0.75
 /** Respawn: put down this high above the ground (m) and let it drop onto its wheels. */
 const RESPAWN_DROP = 0.5
@@ -299,7 +299,7 @@ export class Car {
     )
     // First-person eye: the seated head, under the roof.
     this.eye.set(seat.x, Math.min(seat.y + 0.66, cab.roof - 0.08), seat.z - 0.05)
-    // AXLES (pickup, Żuk): a unit cylinder along X, instanced 5× — front / rear beams hub to hub (they tilt with
+    // AXLES (catalogue `axles`: the kei van): a unit cylinder along X, instanced 5× — front / rear beams hub to hub (they tilt with
     // the suspension like a real solid axle), the two diff housings and the driveshaft between them.
     // Same program as the body: the gear carries its colour in the vertices and samples a neutral texel.
     const gear = (g: THREE.BufferGeometry, rgb: [number, number, number]) => gearGeometry(truck, g, rgb)
@@ -348,8 +348,15 @@ export class Car {
 
   /** Headlamp origin and a point 28 m down the road (world) — the spot light and the beam when the lights are on. */
   headlamp(origin: THREE.Vector3, target: THREE.Vector3): void {
-    origin.copy(this.headPos).applyMatrix4(this.root.matrixWorld)
-    target.set(0, this.headPos.y - 1.2, this.headPos.z - 28).applyMatrix4(this.root.matrixWorld)
+    // the LEFT lamp's beam (the right one: headlamp2) — two beams like a real car, not one cone from the badge
+    origin.set(-this.headPos.x, this.headPos.y, this.headPos.z).applyMatrix4(this.root.matrixWorld)
+    target.set(-this.headPos.x * 0.6, this.headPos.y - 1.2, this.headPos.z - 28).applyMatrix4(this.root.matrixWorld)
+  }
+
+  /** The right headlamp's beam (LightingSystem.headlight2). */
+  headlamp2(origin: THREE.Vector3, target: THREE.Vector3): void {
+    origin.set(this.headPos.x, this.headPos.y, this.headPos.z).applyMatrix4(this.root.matrixWorld)
+    target.set(this.headPos.x * 0.6, this.headPos.y - 1.2, this.headPos.z - 28).applyMatrix4(this.root.matrixWorld)
   }
 
   /** Lamp uniforms once per frame (darkness 0 day … 1 night). */
@@ -1402,19 +1409,21 @@ return mix(mix(mix(dirtHash(i), dirtHash(i + vec3(1,0,0)), f.x), mix(dirtHash(i 
           diffuseColor.rgb = mix(diffuseColor.rgb, burnt, uBurn * (0.85 + 0.15 * nb));
           carCoat = max(carCoat, uBurn);
         } }`)
-      // GLOSS (MEDIUM+): painted metal catches the sun as a highlight and the sky at grazing angles (Fresnel);
-      // rubber and the dirt coat stay matte. Fog applies after it, like the rest of the colour.
+      // GLOSS (MEDIUM+): painted metal catches the sun as a SOFT, broad sheen and a little of the sky at grazing
+      // angles (Fresnel); rubber and the dirt coat stay matte. (2026-10-23, the user: "reflection is like glitter" —
+      // the sharp pow-56 highlight sparkled on every small facet of the models: now pow 14, a third as strong, paint
+      // only.) Fog applies after it, like the rest of the colour.
       .replace('#include <tonemapping_fragment>', `{
 vec3 Vg = normalize(vViewPosition);
 float fres = pow(1.0 - max(dot(normal, Vg), 0.0), 4.0);
-float shine = uGloss * (0.35 + 0.65 * vPaint) * (1.0 - vTyre) * (1.0 - carCoat);
+float shine = uGloss * (0.1 + 0.9 * vPaint) * (1.0 - vTyre) * (1.0 - carCoat);
 vec3 g = vec3(0.0);
 #if NUM_DIR_LIGHTS > 0
 vec3 Lg = directionalLights[0].direction;
-g += directionalLights[0].color * pow(max(dot(normal, normalize(Lg + Vg)), 0.0), 56.0) * 0.32 * step(0.0, dot(normal, Lg));
+g += directionalLights[0].color * pow(max(dot(normal, normalize(Lg + Vg)), 0.0), 14.0) * 0.1 * smoothstep(0.0, 0.3, dot(normal, Lg));
 #endif
 #ifdef USE_FOG
-g += fogColor * fres * 0.2;
+g += fogColor * fres * 0.08;
 #endif
 gl_FragColor.rgb += g * shine;
 }
@@ -1424,7 +1433,7 @@ gl_FragColor.rgb += g * shine;
   // A machine, not a cartoon: a soft terminator (toon 0.3) and a faint rim — real light and the baked AO shape it.
   const m = stylize(mat, { key: 'truck', rim: 0.14, toon: 0.3 })
   m.name = 'lib/truck'
-  // Both faces: from inside, the shell's panels are its inner walls (the Żuk's painted-metal cab).
+  // Both faces: from inside, the shell's panels are its inner walls (a painted-metal cab).
   m.side = THREE.DoubleSide
   return m
 }
@@ -1480,13 +1489,15 @@ export function carLamps(truck: TruckModel): { mesh: THREE.Mesh; mat: THREE.Shad
   // found in the texture at load (loadModels findLamps: pale lenses facing forward, red ones facing back), else the
   // catalogue, else a guess from the body box. Each quad sits 2 cm proud of its lens (so it passes the depth test).
   // Reverse lamps: the lower part of the tail cluster (white).
+  // (the catalogue's measured lamps first: the G500's found "head" was a pale patch of its bumper — one lamp low on
+  // the front instead of the two in the wings; 2026-10-23)
   const h = truck.half, b = truck.bottom
-  const found = truck.lamps
-  const head = found.head?.c ?? def.lamps?.head ?? [h.x * 0.62, b + h.y * 0.62, truck.front - 0.03]
-  const tail = found.tail?.c ?? def.lamps?.tail ?? [h.x * 0.66, b + h.y * 0.62, truck.rear + 0.03]
-  const headSize = found.head ? [found.head.w, found.head.h] : [0.17, 0.11]
-  const tailSize = found.tail ? [found.tail.w, found.tail.h] : [0.2, 0.08]
-  const headPos = new THREE.Vector3(0, head[1], head[2])
+  const found = truck.lamps, L = def.lamps
+  const head = L?.head ?? found.head?.c ?? [h.x * 0.62, b + h.y * 0.62, truck.front - 0.03]
+  const tail = L?.tail ?? found.tail?.c ?? [h.x * 0.66, b + h.y * 0.62, truck.rear + 0.03]
+  const headSize = L?.headSize ?? (found.head && !L ? [found.head.w, found.head.h] : [0.17, 0.11])
+  const tailSize = L?.tailSize ?? (found.tail && !L ? [found.tail.w, found.tail.h] : [0.2, 0.08])
+  const headPos = new THREE.Vector3(head[0], head[1], head[2])
   const pos: number[] = [], id: number[] = [], corner: number[] = [], idx: number[] = []
   const quad = (cx: number, cy: number, cz: number, w: number, hh: number, back: boolean, lamp: number) => {
     const base = pos.length / 3
@@ -1499,6 +1510,7 @@ export function carLamps(truck: TruckModel): { mesh: THREE.Mesh; mat: THREE.Shad
   }
   for (const side of [-1, 1]) {
     quad(side * head[0], head[1], head[2], headSize[0] * 1.15, headSize[1] * 1.15, false, 0)
+    if (L?.head2) quad(side * L.head2[0], L.head2[1], L.head2[2], headSize[0] * 1.15, headSize[1] * 1.15, false, 0)
     quad(side * tail[0], tail[1], tail[2], tailSize[0] * 1.1, tailSize[1] * 1.1, true, 1)
     quad(side * (tail[0] - tailSize[0] * 0.25), tail[1] - tailSize[1] * 0.55, tail[2] + 0.004, tailSize[0] * 0.5, tailSize[1] * 0.4, true, 2)
   }

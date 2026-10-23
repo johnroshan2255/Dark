@@ -12,7 +12,7 @@ import { ART } from '../artStyle'
  *
  *   - ASPHALT: dark rubber where a tyre SLIDES — a drift (slip angle), wheelspin / a burnout (a black patch at the
  *     spinning wheel that gets darker the longer it spins, then a streak as the car launches), a locked wheel under
- *     braking (cars without ABS: the 1989 pickup, the Żuk; with ABS the marks are faint and broken, the pulses).
+ *     braking (cars without ABS: the kei van; with ABS the marks are faint and broken, the pulses).
  *     Intensity from the wheel's slip (Drivetrain κ / α, else VehicleSim `wheelSlip`) × its load.
  *   - LAND (dirt, grass, sand, snow, mud…): a TRACK even when just rolling — faint flattened grass, clear ruts in
  *     dirt, shadowed grooves with lit rims in sand and snow — and a dark torn-up mark when the wheel slides or spins

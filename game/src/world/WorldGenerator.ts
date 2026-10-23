@@ -144,7 +144,9 @@ export class WorldGenerator {
       for (let i = 0; i < m.indices.length; i++) idx.push(m.indices[i] + base)
     }
     const crag = { pos: [] as number[], nor: [] as number[], col: [] as number[] }
-    buildCrags(this.fields, cx, cz, heights, crag)
+    // (not on a map without crags — Zhangjiajie: its rock is its towers' walls; a tor on every steep cell hung 150 m
+    // curtains of rock down them and grey granite boulders over its wooded slopes)
+    if (this.fields.map?.crags !== false) buildCrags(this.fields, cx, cz, heights, crag)
     buildBridges(this.fields, cx, cz, crag) // bright: rope bridges over the river (same mesh + collider)
     buildCamps(this.fields, cx, cz, crag) // bright: oasis camps (white tents, campfire)
     for (let i = 0; i < crag.pos.length; i += 3) {

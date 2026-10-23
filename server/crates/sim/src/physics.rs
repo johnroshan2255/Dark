@@ -544,8 +544,8 @@ mod bench {
     use std::path::Path;
     use std::time::Instant;
 
-    fn pickup() -> CarDef {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vehicle/golden/drive-pickup.json");
+    fn golden_car() -> CarDef {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vehicle/golden/drive-gwagen.json");
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
         serde_json::from_value(v["def"].clone()).unwrap()
     }
@@ -559,9 +559,9 @@ mod bench {
     /// of contacts). Returns (µs per physics step: cars, world; per car; mean speed; upright share).
     fn run(map: &MapData, n: usize, packed: bool, secs: f64) -> (f64, f64, f64, f64, f64) {
         let mut world = MapPhysics::get(map).world();
-        // BOXES=1: the golden traces' pickup (frame boxes); else the game's exported car (convex body hulls)
+        // BOXES=1: the golden traces' G500 (frame boxes); else the game's exported car (convex body hulls)
         let def = if std::env::var("BOXES").is_ok() {
-            pickup()
+            golden_car()
         } else {
             dark_vehicle::cars()[0].clone()
         };
@@ -661,7 +661,7 @@ mod bench {
             return;
         }
         let map = MapData::load(&dir).unwrap();
-        println!("island, 60 Hz physics, the game's pickup (drivetrain mode, tyre envelope), 10 s per case:");
+        println!("island, 60 Hz physics, the game's first car (drivetrain mode, tyre envelope), 10 s per case:");
         for (n, packed) in [(1, false), (10, false), (100, false), (100, true)] {
             let (c, w, per, v, up) = run(&map, n, packed, 10.0);
             println!(
@@ -921,12 +921,13 @@ mod human_cars {
         }
     }
 
+    /// Player 1 gets into the BMW (model 2: the light road car; model 1, the 3 t G500, is the other player's).
     fn enter(m: &mut Match, at: [f32; 4]) {
         m.on_vehicle(
             1,
             &VehicleMsg {
                 enter: true,
-                model: 1,
+                model: 2,
                 pos: [m_to_cm(at[0]), m_to_cm(at[1]), m_to_cm(at[2])],
                 yaw: yaw_to_u16(at[3]),
             },
@@ -987,7 +988,7 @@ mod human_cars {
             (p.vel[0].powi(2) + p.vel[2].powi(2)).sqrt()
         );
         assert!(moved > 25.0, "the car barely moved ({moved:.1} m)");
-        assert!(p.flags & flags::DRIVING != 0 && p.model == 1);
+        assert!(p.flags & flags::DRIVING != 0 && p.model == 2);
         // every frame applied once, in order: the ack trails the newest frame by at most the jitter buffer
         assert!(v.ack + 8 >= seq && v.ack <= seq, "ack {} vs sent {seq}", v.ack);
         let car = [cm_to_m(v.pos[0]), cm_to_m(v.pos[1]), cm_to_m(v.pos[2])];
@@ -1073,7 +1074,7 @@ mod human_cars {
             1,
             &VehicleMsg {
                 enter: false,
-                model: 1,
+                model: 2,
                 pos: [0; 3],
                 yaw: 0,
             },
@@ -1082,7 +1083,7 @@ mod human_cars {
             1,
             &VehicleMsg {
                 enter: true,
-                model: 2,
+                model: 1,
                 pos: [m_to_cm(far[0]), m_to_cm(far[1]), m_to_cm(far[2])],
                 yaw: 0,
             },
@@ -1094,7 +1095,7 @@ mod human_cars {
             "the car was created where the client said: x {}",
             p.pos[0]
         );
-        assert_eq!(p.model, 2);
+        assert_eq!(p.model, 1);
     }
 
     #[test]
@@ -1226,7 +1227,7 @@ mod human_cars {
             1,
             &VehicleMsg {
                 enter: false,
-                model: 1,
+                model: 2,
                 pos: [0; 3],
                 yaw: 0,
             },
@@ -1386,7 +1387,7 @@ mod human_cars {
             2,
             &VehicleMsg {
                 enter: true,
-                model: 2,
+                model: 1,
                 pos: [m_to_cm(b0[0]), m_to_cm(b0[1]), m_to_cm(b0[2])],
                 yaw: yaw_to_u16(b0[3]),
             },
@@ -1427,7 +1428,7 @@ mod human_cars {
             2,
             &VehicleMsg {
                 enter: false,
-                model: 2,
+                model: 1,
                 pos: [0; 3],
                 yaw: 0,
             },
@@ -1491,7 +1492,7 @@ mod human_cars {
             2,
             &VehicleMsg {
                 enter: true,
-                model: 2,
+                model: 1,
                 pos: [m_to_cm(b_car.pos[0]), m_to_cm(b_car.pos[1]), m_to_cm(b_car.pos[2])],
                 yaw: yaw_to_u16(b_car.yaw),
             },
@@ -1502,7 +1503,7 @@ mod human_cars {
                 1,
                 &VehicleMsg {
                     enter: false,
-                    model: 1,
+                    model: 2,
                     pos: [0; 3],
                     yaw: 0,
                 },
@@ -1564,7 +1565,7 @@ mod human_cars {
             2,
             &VehicleMsg {
                 enter: true,
-                model: 2,
+                model: 1,
                 pos: [m_to_cm(b0[0]), m_to_cm(b0[1]), m_to_cm(b0[2])],
                 yaw: yaw_to_u16(b0[3]),
             },
@@ -1573,7 +1574,7 @@ mod human_cars {
             2,
             &VehicleMsg {
                 enter: false,
-                model: 2,
+                model: 1,
                 pos: [0; 3],
                 yaw: 0,
             },
@@ -1665,7 +1666,7 @@ mod human_cars {
             1,
             &VehicleMsg {
                 enter: false,
-                model: 1,
+                model: 2,
                 pos: [0; 3],
                 yaw: 0,
             },

@@ -20,9 +20,9 @@ const R = await PhysicsWorld.load()
 
 /** The models as the game's loader normalises them (same numbers as tests/drivetrain.test.ts). */
 const MODELS: Record<string, { wheelPos: [number, number, number][]; wheelRadius: number; half: { x: number; y: number; z: number } }> = {
-  pickup: { wheelPos: [[-0.756, 0.403, -1.551], [0.756, 0.403, -1.551], [-0.755, 0.391, 1.551], [0.756, 0.391, 1.551]], wheelRadius: 0.391, half: { x: 0.946, y: 0.973, z: 2.615 } },
-  gwagen: { wheelPos: [[-0.904, 0.475, -1.426], [0.904, 0.475, -1.426], [-0.9, 0.475, 1.426], [0.9, 0.475, 1.426]], wheelRadius: 0.475, half: { x: 1.083, y: 0.946, z: 2.34 } },
-  zuk: { wheelPos: [[-0.647, 0.339, -1.349], [0.647, 0.339, -1.349], [-0.647, 0.339, 1.349], [0.647, 0.339, 1.349]], wheelRadius: 0.339, half: { x: 1.084, y: 0.936, z: 2.2 } },
+  gwagen: { wheelPos: [[-0.918, 0.483, -1.448], [0.918, 0.482, -1.448], [-0.914, 0.482, 1.448], [0.914, 0.482, 1.448]], wheelRadius: 0.482, half: { x: 1.1, y: 0.96, z: 2.34 } },
+  bmw: { wheelPos: [[-0.719, 0.3, -1.285], [0.719, 0.3, -1.285], [-0.719, 0.3, 1.285], [0.719, 0.3, 1.285]], wheelRadius: 0.3, half: { x: 0.857, y: 0.605, z: 2.159 } },
+  van: { wheelPos: [[-0.591, 0.255, -0.92], [0.601, 0.255, -0.92], [-0.6, 0.255, 0.92], [0.59, 0.255, 0.92]], wheelRadius: 0.255, half: { x: 0.817, y: 0.739, z: 1.689 } },
 }
 
 interface Phase { secs: number; ctl: Partial<Controls> }
@@ -30,18 +30,20 @@ interface Scenario { name: string; car: keyof typeof SPECS; ramp?: number; phase
 
 const SCENARIOS: Scenario[] = [
   // accelerate, a held turn, brake to a stop, roll
-  ...(['pickup', 'gwagen', 'zuk'] as const).map((car): Scenario => ({
+  // (the E30 at full throttle spins its rears — a chaotic regime no two implementations follow open-loop, see
+  //  golden.rs replay_steps: it pulls away on 45 %, the kei van on 60 %)
+  ...(['gwagen', 'bmw', 'van'] as const).map((car): Scenario => ({
     name: `drive-${car}`,
     car,
     phases: [
-      { secs: 3, ctl: { throttle: 1 } },
-      { secs: 2, ctl: { throttle: 1, steer: 0.6 } },
+      { secs: 3, ctl: { throttle: car === 'bmw' ? 0.45 : car === 'van' ? 0.6 : 1 } },
+      { secs: 2, ctl: { throttle: car === 'bmw' ? 0.45 : car === 'van' ? 0.6 : 1, steer: 0.6 } },
       { secs: 2, ctl: { throttle: -1 } },
       { secs: 1, ctl: {} },
     ],
   })),
   // up a 15° ramp from a standstill
-  { name: 'ramp-pickup', car: 'pickup', ramp: 15, phases: [{ secs: 5, ctl: { throttle: 1 } }] },
+  { name: 'ramp-van', car: 'van', ramp: 15, phases: [{ secs: 5, ctl: { throttle: 1 } }] },
 ]
 
 function world(rampDeg = 0, half = 4000, L = 60): PhysicsWorld {

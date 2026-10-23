@@ -1,12 +1,12 @@
 //! Behaviour of the server's car on its own (Stage B acceptance): driving + braking, suspension over bumps, holding
-//! on a slope, car ⇄ car collisions, a heightfield. The car is the golden traces' pickup (the game's numbers).
+//! on a slope, car ⇄ car collisions, a heightfield. The car is the golden traces' G500 (the game's numbers).
 
 use dark_vehicle::spec::CarDef;
 use dark_vehicle::{Controls, Truck, World};
 use rapier3d::prelude::{Rotation, Vector};
 
-fn pickup() -> CarDef {
-    let path = format!("{}/golden/drive-pickup.json", env!("CARGO_MANIFEST_DIR"));
+fn car() -> CarDef {
+    let path = format!("{}/golden/drive-gwagen.json", env!("CARGO_MANIFEST_DIR"));
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     serde_json::from_value(v["def"].clone()).unwrap()
 }
@@ -34,7 +34,7 @@ fn up(world: &World, t: &Truck) -> f64 {
 fn drives_and_brakes_on_the_flat() {
     let mut w = World::new();
     w.add_ground_box(2000.0);
-    let def = pickup();
+    let def = car();
     let mut t = Truck::new(&mut w, &def, None);
     t.place(&mut w, 0.0, 0.0, 0.0, 0.0, 0.0);
     t.controls = Controls {
@@ -61,7 +61,7 @@ fn drives_and_brakes_on_the_flat() {
         }
     });
     let dist = (p1[2] - p0[2]).abs();
-    // ~0.6–0.9 g on asphalt (a 1989 pickup, no ABS): v²/(2·a)
+    // ~0.6–0.9 g on asphalt (the G500 on ABS): v²/(2·a)
     let a = v * v / (2.0 * dist);
     println!(
         "braking from {v:.1} m/s: {dist:.1} m (≈ {:.2} g), stopped after {:?} steps",
@@ -86,7 +86,7 @@ fn suspension_rides_over_bumps() {
             Rotation::IDENTITY,
         );
     }
-    let def = pickup();
+    let def = car();
     let mut t = Truck::new(&mut w, &def, None);
     t.place(&mut w, 0.0, 0.0, 0.0, 0.0, 0.0);
     t.controls = Controls {
@@ -125,7 +125,7 @@ fn holds_still_parked_on_a_slope() {
         Vector::new(0.0, -0.5, 0.0),
         Rotation::from_rotation_x(deg),
     );
-    let def = pickup();
+    let def = car();
     let mut t = Truck::new(&mut w, &def, None);
     // on the slope's surface at the centre, facing uphill (−Z climbs: rotation about +X tilts −Z up)
     t.place(&mut w, 0.0, 0.3, 0.0, 0.0, deg as f64);
@@ -147,7 +147,7 @@ fn holds_still_parked_on_a_slope() {
 fn two_cars_collide_and_exchange_momentum() {
     let mut w = World::new();
     w.add_ground_box(2000.0);
-    let def = pickup();
+    let def = car();
     let mut a = Truck::new(&mut w, &def, None);
     let mut b = Truck::new(&mut w, &def, None);
     a.place(&mut w, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -173,7 +173,7 @@ fn two_cars_collide_and_exchange_momentum() {
 fn a_pile_up_stays_solid() {
     let mut w = World::new();
     w.add_ground_box(2000.0);
-    let def = pickup();
+    let def = car();
     // 8 cars driving at one point from all sides
     let mut cars: Vec<Truck> = (0..8)
         .map(|k| {
@@ -231,7 +231,7 @@ fn drives_over_a_heightfield() {
         let b = s(ix, iz + 1) + (s(ix + 1, iz + 1) - s(ix, iz + 1)) * tx;
         a + (b - a) * tz
     };
-    let def = pickup();
+    let def = car();
     let mut t = Truck::new(&mut w, &def, None);
     t.place(&mut w, 0.0, ground(0.0, 100.0) + 0.1, 100.0, 0.0, 0.0);
     t.controls = Controls {
@@ -263,7 +263,7 @@ fn the_games_cars_load_and_drive() {
     let cars = dark_vehicle::cars();
     assert_eq!(
         cars.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-        ["pickup", "gwagen", "zuk"]
+        ["gwagen", "bmw", "van"]
     );
     for def in cars {
         assert!(

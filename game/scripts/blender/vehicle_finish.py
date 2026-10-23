@@ -1,6 +1,6 @@
 """
 VEHICLE PREP, step 2 of 2 (after vehicle_doors.py, same Blender session): the G500's steering wheel split out as
-`steering_wheel`, a low-poly Żuk cabin (inward-facing liner, bench, dash, steering wheel — ~150 tris), each door's
+`steering_wheel`, each door's
 hinge stored as a glTF extra (`hinge`, glTF space), only the base-colour texture kept (≤ 1024²; normal / roughness /
 emissive maps dropped — the game bakes them away), exported to OUT as <name>.lod0.glb. Copy the results to
 src/assets/models/vehicles/: loadModels `bakeVehicle` reads `door_*`, `steering_wheel` and `*inner*` / `*interior*`.
@@ -12,7 +12,7 @@ OUT = 'C:/path/to/out/'
 import os
 os.makedirs(OUT, exist_ok=True)
 win = bpy.context.window_manager.windows[0]
-K = {'pickup_truck': 0.8543265, 'mercedes_g500_4x4': 105.87297, 'zuk_a06': 3.2800702}
+K = {'mercedes_g500_4x4': 105.87297}
 report = {}
 
 
@@ -118,45 +118,9 @@ def ring(bm, c, r, tube, n_axis, seg=12, tseg=4):
             bm.faces.new((a, b2, c2, d2))
 
 
-def zuk_interior(sc):
-    k = K['zuk_a06']
-    m = 1 / k  # one metre in model units
-    dark = flat_mat('interior_dark', (0.045, 0.045, 0.05))
-    seat = flat_mat('interior_seat', (0.12, 0.085, 0.06))
-    steel = flat_mat('interior_wheel', (0.03, 0.03, 0.03))
-    # Cabin liner: an inward-facing box (seen only through the open door) + floor, dash, bench.
-    bm = bmesh.new()
-    floor, roof = -0.015, 0.42
-    for f in box(bm, (-0.2, -0.50, floor), (0.2, 0.57, 0.40), inward=True): f.material_index = 0
-    for f in box(bm, (-0.2, -0.50, 0.09), (0.2, -0.445, 0.19)): f.material_index = 0  # dashboard
-    for f in box(bm, (-0.195, -0.36, floor), (0.195, -0.22, 0.10)): f.material_index = 1  # bench base + cushion
-    for f in box(bm, (-0.195, -0.225, 0.10), (0.195, -0.19, 0.31)): f.material_index = 1  # backrest
-    for f in box(bm, (-0.2, -0.19, floor), (0.2, -0.17, 0.40)): f.material_index = 0  # bulkhead behind the cab
-    me = bpy.data.meshes.new('interior'); bm.to_mesh(me); bm.free()
-    for mm in (dark, seat): me.materials.append(mm)
-    ob = bpy.data.objects.new('interior', me); sc.collection.objects.link(ob)
-    # Steering wheel: rim + 2 spokes, tilted ~40° (bus style), in front of the left (driver) seat.
-    bm = bmesh.new()
-    c = Vector((0.12, -0.415, 0.235))
-    axis = Vector((0, -math.cos(math.radians(40)), -math.sin(math.radians(40))))  # down the column, away from the driver
-    ring(bm, c, 0.19 * m, 0.016 * m, axis)
-    u = axis.orthogonal().normalized()
-    for s in (-1, 1):
-        a = c + u * s * 0.17 * m
-        box_c = (a + c) / 2
-        hh = Vector((abs(a.x - c.x) / 2 + 0.01 * m, abs(a.y - c.y) / 2 + 0.01 * m, abs(a.z - c.z) / 2 + 0.01 * m))
-        box(bm, box_c - hh, box_c + hh)
-    me = bpy.data.meshes.new('steering_wheel'); bm.to_mesh(me); bm.free(); me.materials.append(steel)
-    sw = bpy.data.objects.new('steering_wheel', me); sc.collection.objects.link(sw)
-    # Column (static, part of the interior).
-    bm = bmesh.new(); bm.from_mesh(ob.data)
-    col = c + axis * 0.18 * m
-    hh = Vector((0.02 * m, 0.09 * m, 0.03 * m))
-    for f in box(bm, col - hh, col + hh): f.material_index = 0
-    bm.to_mesh(ob.data); bm.free()
 
 
-for f in ['pickup_truck', 'mercedes_g500_4x4', 'zuk_a06']:
+for f in ['mercedes_g500_4x4']:
     sc = bpy.data.scenes[f]
     win.scene = sc
     k = K[f]
@@ -166,8 +130,6 @@ for f in ['pickup_truck', 'mercedes_g500_4x4', 'zuk_a06']:
             bpy.data.objects.remove(o)
     if f == 'mercedes_g500_4x4':
         separate_parts(sc, 'steering_wheel', Vector((0.456, -0.36, 1.645)) / k, 0.235 / k)
-    if f == 'zuk_a06':
-        zuk_interior(sc)
     for o in sc.objects:
         if o.name.startswith('door_'):
             h = door_hinge(sc, o, k)

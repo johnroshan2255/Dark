@@ -113,6 +113,9 @@ export function oasisAt(fields: WorldFields, wx: number, wz: number, h: number):
 function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: number): number {
   // a conifer map (map.json trees: 'conifer'): spruce, pine and fir stands — the reference's tiered pines
   if (fields.map?.conifers && fields.biome(wx, wz, _bw, h)[0] < 0.5) return r < 0.5 ? TreeSpecies.Spruce : r < 0.82 ? TreeSpecies.Pine : TreeSpecies.Fir
+  // Zhangjiajie (map.json trees: 'liyue'): Liyue's twisted, flat-crowned pines on the tops and ledges, broadleaf groves
+  // in the gorges
+  if (fields.map?.liyue) return r < 0.55 ? TreeSpecies.Pine : pickWeighted(LIYUE_BROADLEAF, regionRoll(fields.seed, Math.floor(wx / 40), Math.floor(wz / 40), 6164))
   if (oasisAt(fields, wx, wz, h) > 0.2) return r < 0.85 ? TreeSpecies.Palm : TreeSpecies.Cactus
   if (fields.map && (fields.map.poolRing(wx, wz) > 0.3 || fields.map.palmCell(Math.floor(wx / TREE_CELL), Math.floor(wz / TREE_CELL)))) return TreeSpecies.Palm // a desert pool's palms / the map's kept palms
   if (fields.beach(wx, wz, h) > 0.4) return TreeSpecies.Palm // fixed maps: the few beach trees are palms
@@ -126,6 +129,7 @@ function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: 
  * Mondstadt/slender ones, so a forest reads as groves of distinct trees while a chunk adds only 1–2 draws.
  * Deterministic (hash of the cell / tree position + seed).
  */
+const LIYUE_BROADLEAF: readonly [number, number][] = [[TreeSpecies.Birch, 0.55], [TreeSpecies.Slender, 0.45]] // (the deep greens: oak / curvy read yellow)
 const STAND_TYPES: readonly [number, number][] = [[TreeSpecies.Birch, 0.26], [TreeSpecies.Slender, 0.28], [TreeSpecies.Oak, 0.14], [TreeSpecies.Curvy, 0.18], [TreeSpecies.Golden, 0.14]]
 function broadleafStand(fields: WorldFields, wx: number, wz: number): number {
   const cx = Math.floor(wx / 56), cz = Math.floor(wz / 56)
@@ -178,13 +182,14 @@ function treeAccept(fields: WorldFields, wx: number, wz: number, r: number, h: n
   // the ground), a lone one now and then between them (forestDensity is ~0 on sand).
   const sand = fields.biome(wx, wz, _bw, h)[0]
   const clump = Math.min(1, Math.max(0, (fields.colorVariation(wx * 0.5 + 91, wz * 0.5 - 37) - 0.62) * 5))
-  // Trees: 60 % of the grove density (the player asked for fewer — more open meadow between thinner groves).
+  // Trees: 60 % of the grove density (the player asked for fewer — more open meadow between thinner groves);
+  // Zhangjiajie (trees: 'liyue') the full density: its floors are closed forest in the photos.
   // Fixed maps: the BEACH stays open — a tenth of the trees, and its low sand no longer counts as oasis palm
   // groves (2026-10-21, "remove lot of rocks and trees from beach area").
   // 2026-10-21 ("reduce beach trees to 20 %"): none of its own — only the map's kept palms (below), each with a
   // bush clump round it (beachTreeNear).
   const beach = fields.beach(wx, wz, h)
-  const density = Math.max(fields.forestDensity(wx, wz, h) * TREE_SHARE, sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - CLEAR_ROAD) / 45) * (fields.palette === 1 ? 0.55 : 1) * (1 - beach) // overland: big trees, spaced
+  const density = Math.max(fields.forestDensity(wx, wz, h) * (fields.map?.liyue ? 1 : TREE_SHARE), sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - CLEAR_ROAD) / 45) * (fields.palette === 1 ? 0.55 : 1) * (1 - beach) // overland: big trees, spaced
   // Fixed maps: a palm or two at each desert pool (FixedMap.poolRing; pickSpecies makes them palms).
   if (fields.map) {
     const ring = fields.map.poolRing(wx, wz)
@@ -246,10 +251,15 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     // Fixed maps (2026-10-21, "it has a lot of rocks"): the sand keeps ~30 % of its stones, the beach ~4 %, and the
     // truck-sized boulders stay under ~4.5 m (the mesas' cliffs carry the big rock now).
     const few = fields.map ? 1 - w[0] * (0.7 + 0.26 * fields.beach(wx, wz, h)) : 1
-    const p = 0.14 * (1 + w[0] * 1.2 + w[1] * 0.5) * (1 + 1.2 * oth) * few // sparse (≈ 9 per chunk in the forest); deserts and snowfields stonier
+    // (a map's own stoniness, map.json `rocks` — Zhangjiajie's eroded slopes: scree like the Island's snowy hills)
+    const p = Math.min(0.9, 0.14 * (1 + w[0] * 1.2 + w[1] * 0.5) * (1 + 1.2 * oth) * few * (fields.map?.rocks ?? 1)) // sparse (≈ 9 per chunk in the forest); deserts and snowfields stonier
     if (r >= p) return 0
     const t = r / p
-    const scale = 0.4 + t * t * t * (2.2 + (fields.map ? 2 : 4.6) * oth) // mostly small stones, a rare 2.6 m boulder (bright desert: up to ~7 m)
+    let scale = 0.4 + t * t * t * (2.2 + (fields.map ? 2 : 4.6) * oth) // mostly small stones, a rare 2.6 m boulder (bright desert: up to ~7 m)
+    // a map's BIG ROCKS (map.json `bigRocks`: their share of the stones) — house-sized boulders, 5–11 m, fallen
+    // from the cliffs (Zhangjiajie)
+    const big = fields.map?.bigRocks ?? 0
+    if (big > 0 && t < big) scale = 3.5 + 4.5 * (t / big) ** 0.7
     // The main road and its shoulders stay clear; big boulders further out (footprint ≈ 1.4 m × scale).
     if (fields.roadDistance(wx, wz) < WorldFields.ROAD_HALF_WIDTH + 1.5 + scale * 1.5) return 0
     // …and a fixed map's own roads (its main road is out of the world: roadDistance never sees them — 160 island

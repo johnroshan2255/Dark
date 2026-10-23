@@ -19,9 +19,9 @@ const R = await PhysicsWorld.load()
 /** Each model as the game's loader normalises it (assets/loadModels bakeVehicle: metres, −Z forward, wheelbase
  *  centre origin, ground at y = 0) — measured from the GLBs. */
 const MODELS: Record<string, { wheelPos: [number, number, number][]; wheelRadius: number; half: { x: number; y: number; z: number } }> = {
-  pickup: { wheelPos: [[-0.756, 0.403, -1.551], [0.756, 0.403, -1.551], [-0.755, 0.391, 1.551], [0.756, 0.391, 1.551]], wheelRadius: 0.391, half: { x: 0.946, y: 0.973, z: 2.615 } },
-  gwagen: { wheelPos: [[-0.904, 0.475, -1.426], [0.904, 0.475, -1.426], [-0.9, 0.475, 1.426], [0.9, 0.475, 1.426]], wheelRadius: 0.475, half: { x: 1.083, y: 0.946, z: 2.34 } },
-  zuk: { wheelPos: [[-0.647, 0.339, -1.349], [0.647, 0.339, -1.349], [-0.647, 0.339, 1.349], [0.647, 0.339, 1.349]], wheelRadius: 0.339, half: { x: 1.084, y: 0.936, z: 2.2 } },
+  gwagen: { wheelPos: [[-0.918, 0.483, -1.448], [0.918, 0.482, -1.448], [-0.914, 0.482, 1.448], [0.914, 0.482, 1.448]], wheelRadius: 0.482, half: { x: 1.1, y: 0.96, z: 2.34 } },
+  bmw: { wheelPos: [[-0.719, 0.3, -1.285], [0.719, 0.3, -1.285], [-0.719, 0.3, 1.285], [0.719, 0.3, 1.285]], wheelRadius: 0.3, half: { x: 0.857, y: 0.605, z: 2.159 } },
+  van: { wheelPos: [[-0.591, 0.255, -0.92], [0.601, 0.255, -0.92], [-0.6, 0.255, 0.92], [0.59, 0.255, 0.92]], wheelRadius: 0.255, half: { x: 0.817, y: 0.739, z: 1.689 } },
 }
 
 /** Ground, with an optional ramp rising toward −Z from z = −4. */
@@ -252,9 +252,13 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     run(p, t, 4, { throttle: 0.6 })
     let maxLat = 0, maxRoll = 0
     const lat: number[] = []
+    // (a powerful rear-drive car — the E30 at 123 W/kg — spins its rears into donuts at half throttle on full lock,
+    //  and v·yaw rate then measures the spin, not the grip: the pedal scales down with power-to-weight for 2WD cars)
+    const pw = (spec.power.peakPower * 1000) / spec.mass.kerb, twoWd = !RS.axles.every((a) => a.driven)
+    const k2 = twoWd ? Math.min(1, Math.max(0.3, 60 / Math.max(1, pw))) : 1
     for (let k = 0; k < 600; k++) {
       // Hold ~the speed that saturates the tyres at full lock; measure v·yaw rate.
-      const thr = t.speed < 15 ? 0.5 : 0.2
+      const thr = (t.speed < 15 ? 0.5 : 0.2) * k2
       run(p, t, 1 / 60, { throttle: thr, steer: 1 })
       const w = t.body.angvel()
       const a = Math.abs(t.speed * w.y)
@@ -340,7 +344,9 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
       const t = car(p, id, { aids: 'off' })
       run(p, t, 1, {})
       while (t.speed < 50 / 3.6) run(p, t, 0.1, { throttle: 1 })
-      run(p, t, 0.45, { throttle: 0, steer: 0.8, handbrake: true })
+      // (the flick scales with the wheelbase: a 1.84 m kei van or a 2.57 m E30 turns a 0.45 s yank — sized for a
+      //  3.0 m wheelbase — into a full spin; the same SLIDE needs a shorter one)
+      run(p, t, 0.45 * Math.min(1, RS.wheelbase / 3.0), { throttle: 0, steer: 0.8, handbrake: true })
       const slip = () => Math.atan2(t.lateral, Math.max(1, Math.abs(t.speed)))
       let held = 0, maxS = 0
       for (let k = 0; k < 150; k++) {
@@ -355,7 +361,7 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
     }
     const c = flick(1.4)
     check(`${id}: a handbrake slide can be CAUGHT (counter-steer → straight, no spin)`, c.end < 0.18 && c.maxS < 1.2 && c.up > 0.9, `max ${deg(c.maxS).toFixed(0)}°, end ${deg(c.end).toFixed(0)}°`)
-    if (id === 'pickup') {
+    if (id === 'bmw') {
       const h = flick(1.1)
       check(`${id}: a drift can be HELD on throttle + counter-steer (15–57° ≥ 1 s, LSD rear)`, h.held >= 1 && h.up > 0.9, `held ${h.held.toFixed(1)} s, max ${deg(h.maxS).toFixed(0)}°`)
     }
@@ -363,7 +369,7 @@ for (const id of Object.keys(SPECS) as (keyof typeof SPECS)[]) {
   // ---------------- burnout + tyre heat ----------------
   // BRAKE-STAND (W + S): the brakes (front-biased) hold the fronts, the engine spins the driven rears against their
   // brakes. A car driving its rear axle only (rear-drive, part-time 4WD in 2H) does it; a permanent 4×4 can't hold
-  // its driven fronts (it creeps off), like the real thing. Aids off (a 1989 pickup / 1972 van: the real car's).
+  // its driven fronts (it creeps off), like the real thing. Aids off (an old van's: the real car's).
   const rearDrive = RS.drive.layout === 'part-time-4WD' /* (2H) */ || (!RS.axles[0].driven && RS.drive.layout !== 'AWD-permanent' && RS.drive.layout !== 'AWD-on-demand')
   if (rearDrive) {
     const p = world()

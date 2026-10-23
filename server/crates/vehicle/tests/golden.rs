@@ -151,14 +151,19 @@ fn load(name: &str) -> Golden {
         .expect("golden json")
 }
 
-const ALL: [&str; 4] = ["drive-pickup", "drive-gwagen", "drive-zuk", "ramp-pickup"];
+const ALL: [&str; 4] = ["drive-gwagen", "drive-bmw", "drive-van", "ramp-van"];
 
-/// Steps the open-loop drivetrain replay is compared for. The Żuk (no aids, open diff) pulls away with its rears
-/// spinning — a stiff regime where the GAME'S OWN drivetrain turns a 1e-12 nudge at step 10 into 3e-2 by step 17
-/// and 100 % by step 20 (measured: TypeScript replayed against itself). Past that onset no implementation can
-/// follow another open-loop; the whole-car test below still covers the run.
+/// Steps the open-loop drivetrain replay is compared for. A light rear-drive car pulling away (the E30, the kei van:
+/// open diff, the clutch biting while the static hold lets go) is a stiff regime where the GAME'S OWN
+/// drivetrain turns a 1e-12 nudge into 3e-2 within a few steps (measured: TypeScript replayed against
+/// itself) — the E30 leaves the 1e-6 band at step 12, the kei van at step 50. Past that onset no implementation can follow another
+/// open-loop; the whole-car test below still covers the run (the E30 within its tolerance).
 fn replay_steps(name: &str, n: usize) -> usize {
-    if name == "drive-zuk" { 14 } else { n }
+    match name {
+        "drive-bmw" => 12,
+        "drive-van" | "ramp-van" => 48, // (its rears break loose pulling away: leaves the band at step 50 / 56)
+        _ => n,
+    }
 }
 
 /// |a − b| within `tol` relative to the magnitude (and an absolute floor).

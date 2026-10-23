@@ -3,7 +3,7 @@ import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js'
 import { isOverland } from '../../rendering/artStyle'
 import { createFenceGeometry, createLampGlowGeometry, createPoleGeometry } from '../Road/propMeshes'
 import { createPoiGeometries } from '../POI/poiGeometry'
-import { createDesertUndergrowth, createRegionUndergrowth, createTreeLibrary, createUndergrowth, type SpeciesDef } from './treeFactory'
+import { createDesertUndergrowth, createRegionUndergrowth, createTreeLibrary, createUndergrowth, type LeafColours, type SpeciesDef } from './treeFactory'
 
 /**
  * Placeholder low-poly vegetation/prop geometry built in code, until AI-generated
@@ -166,8 +166,8 @@ function makeRock(far: boolean): THREE.BufferGeometry {
   return g
 }
 
-export function createPropGeometries(opts: { tieredPines?: boolean } = {}): PropGeometries {
-  const lib = createTreeLibrary({ tiered: opts.tieredPines })
+export function createPropGeometries(opts: { tieredPines?: boolean; leaves?: LeafColours } = {}): PropGeometries {
+  const lib = createTreeLibrary({ tiered: opts.tieredPines, leaves: opts.leaves })
   const rock = makeRock(false)
   const rockFar = makeRock(true)
   const { fern, bush } = createUndergrowth()

@@ -42,8 +42,12 @@ export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, 
   const colors = new Float32Array(n * n * 3)
   const canopyOut = new Float32Array(n * n * 4)
   // (a fixed map: the mean of five points across the vertex's cell — a point sample in a 26 m river channel pulled a
-  // whole 60 m horizon cell under the water: a lake along the valley that isn't there; Zhangjiajie, 2026-10-23)
+  // whole 60 m horizon cell under the water: a lake along the valley that isn't there; Zhangjiajie, 2026-10-23. On a
+  // CLIFF — the five points > 30 m apart — the HIGHEST: a tower or table keeps its flat top and its height on the
+  // skyline (their mean shaved the tables into fins with sky between; the lowest turned Zhangjiajie's towers into
+  // needles).)
   const box = !!fields.map
+  const top = new Uint8Array(n * n)                 // (vertices standing for a tower / table top: coloured as one)
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
       const x = cx + off[i], z = cz + off[j]
@@ -52,7 +56,11 @@ export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, 
         continue
       }
       const dx = (off[Math.min(n - 1, i + 1)] - off[Math.max(0, i - 1)]) / 6, dz = (off[Math.min(n - 1, j + 1)] - off[Math.max(0, j - 1)]) / 6
-      heights[j * n + i] = (fields.heightNoCave(x, z) + fields.heightNoCave(x + dx, z) + fields.heightNoCave(x - dx, z) + fields.heightNoCave(x, z + dz) + fields.heightNoCave(x, z - dz)) / 5
+      const h0 = fields.heightNoCave(x, z), h1 = fields.heightNoCave(x + dx, z), h2 = fields.heightNoCave(x - dx, z), h3 = fields.heightNoCave(x, z + dz), h4 = fields.heightNoCave(x, z - dz)
+      const lo = Math.min(h0, h1, h2, h3, h4)
+      const hi = Math.max(h0, h1, h2, h3, h4)
+      heights[j * n + i] = hi - lo > 30 ? hi : (h0 + h1 + h2 + h3 + h4) / 5
+      if (hi - lo > 30) top[j * n + i] = 1
     }
   }
   for (let j = 0; j < n; j++) {
@@ -66,7 +74,7 @@ export function generateFarTerrain(fields: WorldFields, cx: number, cz: number, 
       const hz = (heights[j1 * n + i] - heights[j0 * n + i]) / Math.max(1e-3, off[j1] - off[j0])
       const slope = Math.hypot(hx, hz)
       const c: [number, number, number] = [0, 0, 0]
-      groundColor(fields, x, z, h, Math.min(1, slope * 0.8), c)
+      groundColor(fields, x, z, h, top[k] ? 0 : Math.min(1, slope * 0.8), c)
       // Canopy seen from afar: clustered dark-teal / olive / golden stands (refer vista), not one green.
       const forest = h > WorldFields.WATER + 1 ? fields.forestDensity(x, z, h) : 0
       const stand = fields.colorVariation(x * 0.4 + 57, z * 0.4 - 13)

@@ -123,7 +123,7 @@ vec3 overlandPalette(vec3 c) {
  * (wind-carved ridges) as normal perturbations, plus sun GLINTS. World-space, faded with distance (no aliasing).
  */
 const TRAIL_GLSL = /* glsl */ `
-uniform sampler2D uTrailMap; uniform vec4 uTrailRect; uniform float uTrailOn, uSurfaceDetail; uniform vec4 uRoadSoil;
+uniform sampler2D uTrailMap; uniform vec4 uTrailRect; uniform float uTrailOn, uSurfaceDetail; uniform vec4 uRoadSoil, uCliffStone, uCliffMoss;
 float trailAt(vec2 xz) {
   if (uTrailOn < 0.5) return 0.0;
   vec2 uv = (xz - uTrailRect.xy) * uTrailRect.zw;
@@ -227,8 +227,11 @@ export function stylize<T extends THREE.Material>(material: T, o: StylizeOptions
       uTrailOn: u.uTrailOn,
       uSurfaceDetail: u.uSurfaceDetail,
       uRoadSoil: u.uRoadSoil,
+      uCliffStone: u.uCliffStone,
+      uCliffMoss: u.uCliffMoss,
       uNoiseTex: u.uNoiseTex,
       uBiomeActive: u.uBiomeActive,
+      uSnowLine: u.uSnowLine,
       uTreeShade: u.uTreeShade,
       uTreeShadeRect: u.uTreeShadeRect,
       uTreeShadeOn: u.uTreeShadeOn,
@@ -509,6 +512,7 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
         ${gen ? `// GENSHIN (reference-matched): warm light-grey stone (lit ≈ 170,166,150 on screen); the blue comes from the
         // cool sky fill in the shade, not from the albedo.
         vec3 stone = mix(vec3(0.47, 0.44, 0.37), vec3(0.55, 0.51, 0.42), region);` : 'vec3 stone = mix(vec3(0.17, 0.21, 0.3), vec3(0.24, 0.25, 0.31), region); // slate blue ↔ lavender grey'}
+        if (uCliffStone.w > 0.5) stone = mix(uCliffStone.rgb * 0.72, uCliffStone.rgb, region); // (a map's own stone: Zhangjiajie's tan sandstone)
         stone *= 0.86 + 0.28 * st_hash(cell + 1.3);
         stone *= 0.76 + 0.34 * smoothstep(-0.55, 0.55, rel.y);
         if (fine) stone *= 0.94 + 0.12 * st_noise(vec2(u * 0.22, vWorldPos.y * 0.04));
@@ -517,9 +521,35 @@ ${over ? `  // OVERLAND: flat colour fields — only the big soft patches above,
         // walls, so its albedo sits lower (×0.74; measured on screen: was ~18 % brighter than the crags).
         ${bright ? `stone *= 0.9; // BRIGHT: flat per-block tone, no brush streaks` : `vec4 cb = texture2D(uBrush, vec2(u * 0.07, vWorldPos.y * 0.022));
         stone *= (0.74 + 0.36 * cb.g + 0.3 * (cb.r - 0.5)) * 0.74;`}
+        if (uCliffStone.w > 1.5) {
+          // a map's NATURAL SANDSTONE (uCliffStone.w = 2 — Zhangjiajie): no stacked blocks, a smooth face streaked down
+          // its height — pale and grey bands, rust stains, dark wet runnels — and thin strata lines across it
+          top = 0.0;
+          float s1 = st_noise(vec2(u * 0.22, vWorldPos.y * 0.01)), s2 = st_noise(vec2(u * 0.9 + 7.0, vWorldPos.y * 0.035));
+          // FLUTES: the light turns across the face in vertical grooves (a normal tilt along the face, ~6–15 m apart,
+          // finer ones between) — breaks the big flat planes of the heightfield's walls in the cel ramp
+          float fl = st_noise(vec2(u * 0.11, vWorldPos.y * 0.004)) - st_noise(vec2(u * 0.11 + 0.35, vWorldPos.y * 0.004));
+          float fl2 = st_noise(vec2(u * 0.45 + 3.0, vWorldPos.y * 0.012)) - st_noise(vec2(u * 0.45 + 3.25, vWorldPos.y * 0.012));
+          cliffTilt = vec3(-vNxz.y, 0.0, vNxz.x) * (fl * 2.4 + fl2 * 1.1) + vec3(0.0, (s2 - 0.5) * 0.25, 0.0);
+          stone = mix(uCliffStone.rgb * 0.62, uCliffStone.rgb * 1.08, s1 * 0.65 + s2 * 0.35);
+          float rust = smoothstep(0.7, 0.82, st_noise(vec2(u * 0.12 + 3.0, vWorldPos.y * 0.008)));
+          stone = mix(stone, stone * vec3(1.1, 0.9, 0.74), rust * 0.45);
+          float wetS = smoothstep(0.62, 0.74, st_noise(vec2(u * 0.4 + 9.0, vWorldPos.y * 0.006)));
+          stone *= 1.0 - 0.5 * wetS;
+          float layer = sin(vWorldPos.y * 0.21 + st_noise(wp * 0.015) * 4.0) * 0.5 + 0.5;
+          stone *= 1.0 - 0.22 * smoothstep(0.82, 0.97, layer);
+        }
         float mn = st_noise(wp * 0.21 + vec2(vWorldPos.y * 0.13));
         float moss = max(smoothstep(0.63, 0.7, vUpN + (mn - 0.5) * 0.2), top * smoothstep(0.55, 0.75, mn) * step(0.7, st_hash(cell + 7.7)));
         stone = mix(stone, vec3(0.2, 0.3, 0.07) * (0.8 + 0.4 * mn), moss * (1.0 - vBiome.y) * 0.75);
+        if (uCliffMoss.w > 0.0) {
+          // a map's wall vegetation: rust streaks down the stone, then long hanging patches of shrubs and moss
+          float rs = st_noise(vec2(u * 0.11, vWorldPos.y * 0.006));
+          stone = mix(stone, stone * vec3(1.12, 0.78, 0.52), smoothstep(0.6, 0.72, rs) * (uCliffStone.w > 1.5 ? 0.0 : 0.8)); // (natural stone: its own, thinner rust)
+          float hang = st_noise(vec2(u * 0.05, vWorldPos.y * 0.016)) * 0.62 + st_noise(vec2(u * 0.19, vWorldPos.y * 0.05)) * 0.38;
+          float cov = smoothstep(1.0 - uCliffMoss.w - 0.06, 1.0 - uCliffMoss.w + 0.06, hang + top * 0.12);
+          stone = mix(stone, uCliffMoss.rgb * (0.7 + 0.55 * mn) * (0.85 + 0.3 * st_hash(cell + 2.9)), cov);
+        }
         stone *= mix(vec3(1.0), vec3(0.9, 0.96, 1.08), vBiome.y);${bright ? `
         // BRIGHT: snow clings to every ledge and less-steep part of a snowy cliff, its edge broken into long
         // horizontal brush strokes (their painted snow banks), slab tops snowed over.
