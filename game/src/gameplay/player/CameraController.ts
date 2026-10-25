@@ -9,6 +9,9 @@ import type { Car } from '../vehicle/Car'
 export type CameraMode = 'fpp' | 'tpp'
 
 const TPP_DISTANCE = 4.4
+/** the third-person camera's clearance from the world (m): a ball cast to it, so a wall beside it pulls it in too */
+const CAM_RADIUS = 0.4
+const IDENTITY = { x: 0, y: 0, z: 0, w: 1 }
 const TPP_SHOULDER = 0.55
 const TPP_PIVOT = 2.3
 
@@ -92,7 +95,10 @@ export class CameraController {
   private readonly right = new THREE.Vector3()
   private readonly pivot = new THREE.Vector3()
   private readonly desired = new THREE.Vector3()
-  private readonly ray: RAPIER.Ray
+  /** the camera's clearance ball (cast pivot → camera) */
+  private readonly ball: RAPIER.Ball
+  private readonly castFrom = { x: 0, y: 0, z: 0 }
+  private readonly castDir = { x: 0, y: 0, z: 1 }
   /** The car being driven with Simulation handling (Game sets it every frame), else null: chassis-attached first
    *  person and the weighted chase view. Arcade and on foot use the plain paths below. */
   car: Car | null = null
@@ -120,7 +126,7 @@ export class CameraController {
     private readonly character: CharacterModel,
     private readonly blob: THREE.Mesh,
   ) {
-    this.ray = new physics.R.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 })
+    this.ball = new physics.R.Ball(CAM_RADIUS)
   }
 
   /** Zoom the third-person view by wheel notches / pinch steps (+ = out). */
@@ -205,10 +211,12 @@ export class CameraController {
     const dy = this.desired.y - this.pivot.y
     const dz = this.desired.z - this.pivot.z
     const len = Math.hypot(dx, dy, dz)
-    this.ray.origin = { x: this.pivot.x, y: this.pivot.y, z: this.pivot.z }
-    this.ray.dir = { x: dx / len, y: dy / len, z: dz / len }
-    const hit = this.physics.world.castRay(this.ray, len, true, undefined, undefined, p.collider, this.ignoreBody ?? undefined)
-    const target = hit ? Math.max(0.35, hit.timeOfImpact - 0.3) : len
+    // a BALL cast, not a ray (2026-10-26, a gorge between pillars: a wall beside the camera never crossed the line to the
+    // car — the camera sat against the rock and its near plane cut the wall open, the world behind showing through)
+    this.castDir.x = dx / len; this.castDir.y = dy / len; this.castDir.z = dz / len
+    this.castFrom.x = this.pivot.x; this.castFrom.y = this.pivot.y; this.castFrom.z = this.pivot.z
+    const hit = this.physics.world.castShape(this.castFrom, IDENTITY, this.castDir, this.ball, 0, len, false, undefined, undefined, p.collider, this.ignoreBody ?? undefined)
+    const target = hit ? Math.max(0.35, hit.time_of_impact - 0.05) : len
     // (named `pull`, NOT `k`: shadowing the knockdown amount made the camera roll ~0.5° and wobble every frame)
     const pull = target < this.dist ? 1 - Math.exp(-30 * dt) : 1 - Math.exp(-4 * dt)
     this.dist += (target - this.dist) * pull

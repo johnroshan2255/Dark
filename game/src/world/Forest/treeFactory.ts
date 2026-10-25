@@ -688,23 +688,73 @@ export function registerAutumnPines(p: NonNullable<typeof AUTUMN>): void {
 }
 
 /**
- * SOFT-LOOK BROADLEAF (the PlayCanvas soft look): the bark vertices (the atlas's bark texel) of a broadleaf take a warm
- * BROWN, a little darker at the foot (2026-10-25: "its trunk brown not white" — the pale aspen white is gone), and its
- * leaves (every other vertex, linear colour) LEAF_K darker ("leafs bit darker"; the bushes keep their own).
+ * THE SOFT CROWN (the PlayCanvas soft look's broadleaves). The bark vertices (the atlas's bark texel) take a warm
+ * BROWN, a little darker at the foot (2026-10-25: "its trunk brown not white"). 2026-10-26, the user's sketch over a
+ * screenshot ("the leaf should grow towards the ground and reduce the trunk height so that I won't see the trunk, dark
+ * green, … in some trees golden shades"): the trunk below the crown is SHORTENED (× TRUNK_K, the crown itself keeps its size), the crown DROOPS — every
+ * point sinks with the square of its distance from the trunk, the outer leaves hang toward the ground round the trunk
+ * — and the leaves take a DARK GREEN at their own brightness. `gold`: about a third of the leaf clumps (whole clumps,
+ * hashed by their centre) turn autumn gold. The mapping moves positions AND the billboard tufts' centres alike (the
+ * cards stay attached to their branches); colliders are untouched (the trunk stays where it was).
  */
-const LEAF_K = 0.8
-function aspenBark(g: THREE.BufferGeometry): THREE.BufferGeometry {
+const TRUNK_K = 0.45
+const DROOP = 0.5
+const LEAF_GREEN = new THREE.Color(0.045, 0.12, 0.038) // (linear: sRGB ≈ #3d5f36, a deep calm green)
+const LEAF_GOLD = new THREE.Color(0.42, 0.26, 0.035) // (linear: sRGB ≈ #ad8b35)
+function softCrown(g: THREE.BufferGeometry, gold: boolean): THREE.BufferGeometry {
   const r = g.clone()
   const uv = r.getAttribute('uv'), col = r.getAttribute('color'), pos = r.getAttribute('position')
+  const bbc = r.getAttribute('bbCenter'), bbo = r.getAttribute('bbOff')
   if (!uv || !col) return r
   const solid = (u: number, v: number) => u > 0.95 && v < 0.05 // (the atlas's opaque block: bark and other solids)
+  const bark = (u: number, v: number) => u > 0.9775 && u < 0.985 && v < 0.038
+  const billboard = (i: number) => !!bbo && (bbo.getX(i) !== 0 || bbo.getY(i) !== 0)
+  // the crown's extent: its leaves' heights (the lowest 10 % ignored — a stray low spray) and reach from the trunk
+  const ys: number[] = []
+  let reach = 0.5, top = 0
+  for (let i = 0; i < uv.count; i++) {
+    if (solid(uv.getX(i), uv.getY(i))) continue
+    const b = billboard(i) && bbc
+    const x = b ? bbc!.getX(i) : pos.getX(i), y = b ? bbc!.getY(i) : pos.getY(i), z = b ? bbc!.getZ(i) : pos.getZ(i)
+    ys.push(y)
+    reach = Math.max(reach, Math.hypot(x, z))
+    top = Math.max(top, y)
+  }
+  if (!ys.length) return r
+  ys.sort((a, b) => a - b)
+  const base = ys[Math.floor(ys.length * 0.1)]
+  const crownH = Math.max(1, top - base)
+  const sink = DROOP * crownH
+  const map = (x: number, y: number, z: number): number => {
+    // trunk shortened below the crown's base; the crown shifted down with it, then drooping outward
+    let h = y < base ? y * TRUNK_K : base * TRUNK_K + (y - base)
+    const t = Math.min(1, Math.hypot(x, z) / reach)
+    h -= sink * t * t * Math.min(1, Math.max(0, (y - base * 0.6) / Math.max(0.5, base * 0.4)))
+    return y < base ? h : Math.max(0.35, h)
+  }
+  for (let i = 0; i < pos.count; i++) pos.setY(i, map(pos.getX(i), pos.getY(i), pos.getZ(i)))
+  if (bbc) for (let i = 0; i < bbc.count; i++) if (billboard(i)) bbc.setY(i, map(bbc.getX(i), bbc.getY(i), bbc.getZ(i)))
+  const c = new THREE.Color()
   for (let i = 0; i < uv.count; i++) {
     const u = uv.getX(i), v = uv.getY(i)
-    if (u > 0.9775 && u < 0.985 && v < 0.038) {
+    if (bark(u, v)) {
       const k = 0.72 + 0.28 * Math.min(1, Math.max(0, pos.getY(i) / 3))
       col.setXYZ(i, 0.2 * k, 0.12 * k, 0.07 * k) // (sRGB ≈ #7c5f4a mid-trunk)
-    } else if (!solid(u, v)) col.setXYZ(i, col.getX(i) * LEAF_K, col.getY(i) * LEAF_K, col.getZ(i) * LEAF_K)
+      continue
+    }
+    if (solid(u, v)) continue
+    // the leaf's own brightness (its painted light and shade) in the dark green — or gold for a hashed third of clumps
+    const lum = 0.2126 * col.getX(i) + 0.7152 * col.getY(i) + 0.0722 * col.getZ(i)
+    const b = billboard(i) && bbc
+    const hx = Math.round((b ? bbc!.getX(i) : pos.getX(i)) / 0.7), hz = Math.round((b ? bbc!.getZ(i) : pos.getZ(i)) / 0.7), hy = Math.round((b ? bbc!.getY(i) : pos.getY(i)) / 0.7)
+    const hash = (((hx * 73856093) ^ (hy * 19349663) ^ (hz * 83492791)) >>> 0) / 4294967296
+    const isGold = gold && hash < 0.34
+    const target = isGold ? LEAF_GOLD : LEAF_GREEN
+    c.copy(target).multiplyScalar(Math.min(1.6, Math.max(0.55, lum / 0.12)) * (isGold ? 1 : 0.95))
+    col.setXYZ(i, c.r, c.g, c.b)
   }
+  r.computeBoundingSphere()
+  r.computeBoundingBox()
   return r
 }
 
@@ -788,7 +838,9 @@ export function createTreeLibrary(opts: { tiered?: boolean; leaves?: LeafColours
       if (birch && i >= 0) species[i] = { ...species[i], levels: birch.levels.map((g) => g.clone()) as SpeciesDef['levels'] }
     }
     const broad = new Set<number>([TreeSpecies.Birch, TreeSpecies.Beech, TreeSpecies.Elm, TreeSpecies.Acacia, TreeSpecies.Bamboo, TreeSpecies.Slender, TreeSpecies.Curvy, TreeSpecies.Golden, TreeSpecies.Oak, TreeSpecies.Maple, TreeSpecies.WhiteBirch])
-    for (let i = 0; i < species.length; i++) if (broad.has(species[i].id)) species[i] = { ...species[i], levels: species[i].levels.map(aspenBark) as SpeciesDef['levels'] }
+    // (the golden shades: some of the stands — the golden, maple and curvy kinds — carry gold clumps through their crown)
+    const gilt = new Set<number>([TreeSpecies.Golden, TreeSpecies.Maple, TreeSpecies.Curvy])
+    for (let i = 0; i < species.length; i++) if (broad.has(species[i].id)) species[i] = { ...species[i], levels: species[i].levels.map((g) => softCrown(g, gilt.has(species[i].id))) as SpeciesDef['levels'] }
     // the conifers: full frond-cone pines (frondPine) in the replaced species' own height and colour — the colliders stay
     for (const [id, seed] of [[TreeSpecies.Spruce, 111], [TreeSpecies.Fir, 313], [TreeSpecies.Pine, 414]] as const) {
       const i = species.findIndex((x) => x.id === id)

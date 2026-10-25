@@ -191,6 +191,10 @@ export class PcGame {
     app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW)
     app.setCanvasResolution(pc.RESOLUTION_AUTO)
     window.addEventListener('resize', this.onResize)
+    // (phones: the browser's bars slide in / out and the screen turns without a reliable window resize — the canvas kept
+    //  its old height, a black band under the game; the visual viewport reports both, the turn settles a moment later)
+    window.visualViewport?.addEventListener('resize', this.onResize)
+    window.addEventListener('orientationchange', this.onTurn)
     this.app = app
     createSharedTextures(device)
     app.scene.layers.getLayerById(pc.LAYERID_WORLD)!.opaqueSortMode = pc.SORTMODE_FRONT2BACK
@@ -382,6 +386,7 @@ export class PcGame {
   private readonly studio: PcStudio
   private lampOnAt: number | null = null
   private readonly onResize = () => this.app.resizeCanvas()
+  private readonly onTurn = () => { this.onResize(); setTimeout(this.onResize, 250); setTimeout(this.onResize, 700) }
 
   // ---------------------------------------------------------------- input
 
@@ -642,6 +647,8 @@ export class PcGame {
     f.bloom.intensity = bloom > 0 ? 0.012 * bloom / 0.45 : 0
     f.bloom.threshold = 1.2
     f.bloom.blurLevel = 5 // (5 halvings: the lamps' and headlights' glow; the default 16 was ~10 more tiny passes)
+    // (LIGHTING: the AO shades only the ambient light. COMBINE — no extra depth prepass, ~6 ms less on a Mali-G720 —
+    //  multiplied the whole lit colour: the dense grass and the sunlit ground under the crowns went black, 2026-10-26)
     f.ssao.type = q.ao.samples > 0 ? pc.SSAOTYPE_LIGHTING : pc.SSAOTYPE_NONE
     f.ssao.samples = Math.max(4, q.ao.samples)
     f.ssao.radius = 12 + q.ao.radius * 10
@@ -1209,6 +1216,8 @@ export class PcGame {
   dispose(): void {
     this.app.off('update', this.frame)
     window.removeEventListener('resize', this.onResize)
+    window.visualViewport?.removeEventListener('resize', this.onResize)
+    window.removeEventListener('orientationchange', this.onTurn)
     window.removeEventListener('touchstart', this.onFirstTouch)
     this.input.detach()
     this.mapProps?.dispose()

@@ -67,7 +67,7 @@ import { Destruction } from '../gameplay/destruction/Destruction'
 import { TrailMap } from '../rendering/trails/TrailMap'
 import { WindDrift } from '../rendering/particles/WindDrift'
 import { BiomeMap } from '../rendering/biome/BiomeMap'
-import { applyBiomeAir, applyMapAir, type MapAir } from '../rendering/weather/BiomeAir'
+import { applyBiomeAir, applyMapAir, dayWeight, type MapAir } from '../rendering/weather/BiomeAir'
 import { GameLoop } from './GameLoop'
 import { bakeImpostors, useImpostorAtlas, type ImpostorAtlas } from '../rendering/impostors/Impostors'
 import { TREE_FADE } from '../world/WorldManager'
@@ -1121,7 +1121,7 @@ export class Game {
           const bw = this.world.fields.biome(p.renderPosition.x, p.renderPosition.z, this.bw, p.renderPosition.y)
           const rw = this.world.fields.region(p.renderPosition.x, p.renderPosition.z, this.rw, p.renderPosition.y)
           applyBiomeAir(this.tod.current, bw[0], bw[1], rw[Biome.Autumn], rw[Biome.Mystic])
-          if (this.mapAir) applyMapAir(this.tod.current, this.mapAir)
+          if (this.mapAir) applyMapAir(this.tod.current, this.mapAir, dayWeight(this.tod.sunDir.y))
           // CAVES: how deep in the dark the player stands → the lights dim (sky fill, sun on tiers without shadows),
           // the torch works at full strength; fog / exposure / haze below.
           this.caves.update(dt, time, p.renderPosition, this.lighting.keyStrength * (1 - this.tod.nightmare) * THREE.MathUtils.smoothstep(this.tod.sunDir.y, 0.0, 0.25))

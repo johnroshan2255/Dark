@@ -2,7 +2,7 @@ import * as pc from 'playcanvas'
 import * as THREE from 'three'
 import { TimeOfDay } from '../rendering/lighting/TimeOfDay'
 import { Weather } from '../rendering/weather/Weather'
-import { applyBiomeAir, applyMapAir, type MapAir } from '../rendering/weather/BiomeAir'
+import { applyBiomeAir, applyMapAir, dayWeight, type MapAir } from '../rendering/weather/BiomeAir'
 import { globalUniforms } from '../rendering/shaders/uniforms'
 import { skyUniforms } from '../rendering/sky/skyShader'
 import { ART } from '../rendering/artStyle'
@@ -102,7 +102,7 @@ export class PcEnvironment {
     const rw = this.fields.region(focus.x, focus.z, this.rw, focus.y)
     this.snowHere = Math.min(1, Math.max(0, (bw[1] - 0.22) / 0.2))
     applyBiomeAir(tod.current, bw[0], bw[1], rw[Biome.Autumn], rw[Biome.Mystic])
-    if (this.mapAir) applyMapAir(tod.current, this.mapAir)
+    if (this.mapAir) applyMapAir(tod.current, this.mapAir, dayWeight(tod.sunDir.y))
     if (this.ownsClock) this.weather.update(dt, tod.hours, tod.day)
     const tp = tod.current
     this.weather.apply(tp, globalUniforms.uWind.value)
@@ -144,9 +144,10 @@ export class PcEnvironment {
     // LOW LIGHT, the soft look (2026-10-25, "at evening not good", "too sharp"): a low sun or moon lays long shadows
     // over most of the ground and its shade went near black beside the lit strips — as the key nears the horizon the
     // cast shadow lightens (up to 40 %) and the sky fill rises (up to 60 %): evening shade is full of sky light
-    const lo = this.look.soft ? 1 - THREE.MathUtils.smoothstep(k.y, 0.08, 0.45) : 0
-    this.lighting.key.light!.shadowIntensity = this.look.shadowK * (1 - 0.4 * lo)
-    const fk = this.look.fillK * (1 + 0.6 * lo)
+    // (2026-10-26: the 16:00 evening's sun stands ~25° — the band reached it only half; its shaded slopes still black-green)
+    const lo = this.look.soft ? 1 - THREE.MathUtils.smoothstep(k.y, 0.1, 0.6) : 0
+    this.lighting.key.light!.shadowIntensity = this.look.shadowK * (1 - 0.45 * lo)
+    const fk = this.look.fillK * (1 + 0.9 * lo)
     sc.resolve('uHemiSky').setValue([hs.r * fk, hs.g * fk, hs.b * fk])
     // (the soft look: the ground BOUNCE is at least a share of the sky fill — sides and undersides in shade read)
     const bk = this.look.bounceK

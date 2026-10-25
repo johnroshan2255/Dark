@@ -143,28 +143,42 @@ export interface MapAir {
   light?: { sun?: THREE.Color; fill?: THREE.Color; bounce?: THREE.Color; tint?: THREE.Color; toon?: number; split?: number; saturation?: number }
 }
 
+/** The daylight weight for applyMapAir from the sun's direction (y up): 0.55 with the sun low or down, 1 from ~35° up. */
+export function dayWeight(sunY: number): number {
+  const t = Math.min(1, Math.max(0, (sunY - 0.15) / 0.42))
+  // (a 55 % share stays at a low sun: the dawn's and evening's own salmon alone washed the whole map pink-magenta)
+  return 0.55 + 0.45 * t * t * (3 - 2 * t)
+}
+
 /**
  * MAP AIR: a fixed map's sky (Zhangjiajie's atlas: a clear mid-blue zenith over a soft blue-grey horizon, the far
  * spires and ridges fading into that blue-grey). Each colour is re-hued to the map's at the phase's own brightness,
  * so dawn, dusk and night keep their light; a little more aerial haze, the depth of the atlas's layered spires.
  * After applyBiomeAir (a map's region air is its own). Cost: a few colour ops per frame.
  */
-export function applyMapAir(p: LightingParams, air: MapAir): void {
+export function applyMapAir(p: LightingParams, air: MapAir, day = 1): void {
+  // `day` (0..1, the sun's height — dayWeight): the map's hues are its DAYLIGHT; a low sun keeps the phase's own (the
+  // warm dawn sun, the evening's salmon, the night's blue — pulled 85 % to the map's white sun and pale haze, dawn and
+  // evening went a flat grey-green wash, 2026-10-26)
   const L = air.light
+  const shade = Math.max(day, 0.8)
   if (L) {
-    if (L.sun) hueToward(p.sunColor, L.sun, 0.85)
-    if (L.fill) hueToward(p.hemiSky, L.fill, 0.85)
-    if (L.bounce) hueToward(p.hemiGround, L.bounce, 0.85)
-    if (L.tint) hueToward(p.tint, L.tint, 0.9)
+    if (L.sun) hueToward(p.sunColor, L.sun, 0.85 * day)
+    // (the sun and the sky carry the hour's colour; the shade's fill, the bounce and the white balance stay mostly the
+    //  map's — the evening's own violet fill and tint at full turned the whole map magenta)
+    if (L.fill) hueToward(p.hemiSky, L.fill, 0.85 * shade)
+    if (L.bounce) hueToward(p.hemiGround, L.bounce, 0.85 * shade)
+    if (L.tint) hueToward(p.tint, L.tint, 0.9 * shade)
     if (L.toon !== undefined) p.toon = Math.min(p.toon, L.toon)
     if (L.split !== undefined) p.split = Math.min(p.split, L.split)
-    if (L.saturation !== undefined) p.saturation *= L.saturation
+    if (L.saturation !== undefined) p.saturation *= 1 + (L.saturation - 1) * day
   }
-  if (air.zenith) hueToward(p.skyZenith, air.zenith, 0.8)
+  if (air.zenith) hueToward(p.skyZenith, air.zenith, 0.8 * day)
   if (air.haze) {
-    hueToward(p.fogColor, air.haze, 0.8)
-    hueToward(p.landHaze, air.haze, 0.85)
-    hueToward(p.tint, air.haze, 0.08)
+    const h = 0.25 + 0.75 * day
+    hueToward(p.fogColor, air.haze, 0.8 * h)
+    hueToward(p.landHaze, air.haze, 0.85 * h)
+    hueToward(p.tint, air.haze, 0.08 * shade)
   }
   // the map's valley mist (Zhangjiajie's gorges full of cloud), never thinner than the phase's own (dawn, rain)
   if (air.mist) {

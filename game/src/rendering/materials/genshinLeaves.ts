@@ -427,6 +427,14 @@ export function drawFlakeTuft(g: CanvasRenderingContext2D, ox: number, oy: numbe
     const a = rng.range(0, Math.PI * 2), d = k === 0 ? 0 : rng.range(0.25, 0.48)
     clumps.push([Math.cos(a) * d, Math.sin(a) * d * 0.85, rng.range(0.34, 0.46)])
   }
+  // (2026-10-26, "remove its border from each leaf": the sky between the spaced leaves drew a dark ring round every one
+  //  — each clump now has a SOLID painted heart and its leaves overlap; only the clump's outer edge stays ragged)
+  for (const [qx, qy, qr] of clumps) {
+    g.fillStyle = grey(0.68)
+    g.beginPath()
+    g.ellipse(cx + qx * R, cy + qy * R, qr * R * 0.72, qr * R * 0.64, rng.range(0, Math.PI), 0, Math.PI * 2)
+    g.fill()
+  }
   const sp = new Spacer(R * 0.16)
   for (let n = 0, k = 0; n < 9000 && k < 260; n++) {
     const [qx, qy, qr] = clumps[Math.floor(rng.next() * clumps.length)]
@@ -434,7 +442,7 @@ export function drawFlakeTuft(g: CanvasRenderingContext2D, ox: number, oy: numbe
     const x = qx + Math.cos(a) * d * qr, y = qy + Math.sin(a) * d * qr, rad = rng.range(0.05, 0.075)
     if (Math.hypot(x, y) + rad > 0.97) continue
     if (rng.next() > 1.2 - d * d * 1.1) continue // (thinning toward the clump's rim)
-    if (!sp.ok(cx + x * R, cy + y * R, rad * R, 1.05)) continue
+    if (!sp.ok(cx + x * R, cy + y * R, rad * R, 0.7)) continue
     // (a deep calm tone: the ball-lit clumps read lime-bright at 0.84–1)
     flake(g, cx + x * R, cy + y * R, rad * R, rng.range(0, Math.PI), rng.range(0.64, 0.78))
     k++

@@ -27,6 +27,8 @@ varying vec4 vInst; varying vec3 vPObj; varying vec3 vNObj; varying float vSurf;
 
 /** transformCoreVS: the engine's (no morphing) + DARK's per-vertex motion in getLocalPosition (defined in litUserCodeVS). */
 const TRANSFORM_CORE_VS = /* glsl */ `
+// (the pre-pass and the lit pass must rasterise the very same depth: the lit pass tests EQUAL)
+invariant gl_Position;
 // (every pass — the shadow casters move with the trees: the motion's inputs are declared here, not forward-only)
 uniform float uTime;
 uniform vec2 uWind;
@@ -181,7 +183,9 @@ void getAlbedo() {
   // (far edge of the streamed detail: dissolve with an interleaved-gradient dither — no sorting, no blend)
   float depth = gl_FragCoord.z / gl_FragCoord.w;
   float cf = smoothstep(uCullFade.x, uCullFade.y, depth);
+  #ifndef VEG_PREPASSED
   if (cf > 0.0 && cf >= fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))) discard;
+  #endif
   dAlbedo = material_diffuse.rgb;
   #ifdef STD_DIFFUSE_TEXTURE
     vec4 tx = texture2DBias({STD_DIFFUSE_TEXTURE_NAME}, sprayUv({STD_DIFFUSE_TEXTURE_UV}), {STD_TEXTURE_BIAS} + leafBias({STD_DIFFUSE_TEXTURE_UV}));
@@ -267,6 +271,20 @@ float getLightDiffuse(vec3 worldNormal, vec3 viewDir, vec3 lightDirNorm) {
 }
 `
 /** (after the rim: leaves keep only a trace of it, and glow through against the sun) */
+/**
+ * The PRE-PASSED lit pass's alpha test: none in the forward pass — the depth pre-pass already cut the leaves (and the
+ * far-edge dither) and the lit pass draws only where its depth EQUALS that; a discard left in it turns off the GPU's
+ * early depth test (a phone's tiler — Mali, Adreno — then shades every leaf card's pixels again: ~7 ms a frame on a
+ * Mali-G720). The shadow pass keeps the cut-out.
+ */
+const PREPASSED_ALPHA_TEST_PS = /* glsl */ `
+uniform float alpha_ref;
+void alphaTest(float a) {
+  #ifndef FORWARD_PASS
+    if (a < alpha_ref) discard;
+  #endif
+}
+`
 const LEAF_END = /* glsl */ `
     if (gLeaf > 0.5) gl_FragColor.rgb += uKeyColor * litArgs_albedo * (back * 0.15 - pow(1.0 - ndv, 3.0) * (0.3 + back * 1.4) * uRim * uRimK * 0.8);
 `
@@ -294,7 +312,7 @@ export function createVegetationMaterial(atlas: pc.Texture, o: VegetationOpts = 
   // (the soft look: the blurred cut-out is tested lower — the frond fills out to its painted silhouette)
   m.alphaTest = soft ? 0.3 : 0.42
   m.cull = pc.CULLFACE_NONE
-  applyWorldLook(m, { rim: o.rim ?? 1.1, toon: 1, declVS: DECL_VS, mainEndVS: MAIN_END_VS, declPS: (soft ? '#define SOFT_VEG\n' : '') + declPS(o.stone), endExtra: LEAF_END })
+  applyWorldLook(m, { rim: o.rim ?? 1.1, toon: 1, declVS: DECL_VS, mainEndVS: MAIN_END_VS, declPS: (soft ? '#define SOFT_VEG\n' : '') + (o.prepassed ? '#define VEG_PREPASSED\n' : '') + declPS(o.stone), endExtra: LEAF_END })
   const ch = m.getShaderChunks(pc.SHADERLANGUAGE_GLSL)
   ch.set('transformCoreVS', TRANSFORM_CORE_VS)
   ch.set('transformVS', TRANSFORM_VS)
@@ -308,9 +326,10 @@ export function createVegetationMaterial(atlas: pc.Texture, o: VegetationOpts = 
   m.setAttribute('bbOff', pc.SEMANTIC_ATTR9)
   if (o.prepassed) {
     // (drawn after its DEPTH PRE-PASS twin — createVegetationDepthMaterial: the depth is already there, so only the
-    //  frontmost leaf pixel passes the test and is lit; no depth write of its own)
+    //  frontmost leaf pixel passes the EQUAL test and is lit, once, with no discard; no depth write of its own)
     m.depthWrite = false
-    m.depthFunc = pc.FUNC_LESSEQUAL
+    m.depthFunc = pc.FUNC_EQUAL
+    ch.set('alphaTestPS', PREPASSED_ALPHA_TEST_PS)
   }
   m.update()
   return m

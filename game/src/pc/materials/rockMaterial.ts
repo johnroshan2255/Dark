@@ -99,7 +99,9 @@ void getAlbedo() {
   if (vPlain < 0.5) {
     if (uCliffStone.w > 0.5) {
       float rl = dot(c, vec3(0.2126, 0.7152, 0.0722));
-      c = uCliffStone.rgb * ${cliff ? '0.85' : '0.8'} * clamp(rl / ${cliff ? '0.47' : '0.21'}, 0.75, 1.2);
+      // (the boulders a mid grey: at 0.8 of the pale cliff stone they were ~4× the grass — white blobs under the moon,
+      //  2026-10-26 "at night rocks glow")
+      c = uCliffStone.rgb * ${cliff ? '0.85' : '0.55'} * clamp(rl / ${cliff ? '0.47' : '0.21'}, 0.75, 1.2);
     }
     c *= 0.95 + 0.1 * st_noise(P.xz * 0.05 + vec2(P.y * 0.05));
     // the relief on the three axis planes, weighted by the normal (sharpened: few seams)

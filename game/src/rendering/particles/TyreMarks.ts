@@ -139,8 +139,10 @@ export class TyreMarks {
   private serial = 0
   private clock = 0
   private lastWrite = -1e9
-  private dirtyLo = Infinity
-  private dirtyHi = -1
+  /** the slots written since the last upload (each wheel writes its own, far apart in the ring: one lo…hi span was
+   *  the whole 1.5 MB buffer every frame — ~6 MB/frame of uploads driving, a phone's GPU stalled on it) */
+  private readonly dirtySlots = new Set<number>()
+  private allDirty = false
   private readonly tracks: Track[] = [newTrack(), newTrack(), newTrack(), newTrack()]
   private car: Car | null = null
   private carKey = ''
@@ -271,8 +273,7 @@ export class TyreMarks {
   /** Remove every mark (new world, teleport across the map…). */
   clear(): void {
     this.life.fill(-1e9)
-    this.dirtyLo = 0
-    this.dirtyHi = this.budget.segments - 1
+    this.allDirty = true
     for (const t of this.tracks) Object.assign(t, newTrack())
   }
 
@@ -515,8 +516,7 @@ export class TyreMarks {
   }
 
   private dirty(slot: number): void {
-    if (slot < this.dirtyLo) this.dirtyLo = slot
-    if (slot > this.dirtyHi) this.dirtyHi = slot
+    this.dirtySlots.add(slot)
     this.lastWrite = this.clock
   }
 
@@ -558,18 +558,28 @@ export class TyreMarks {
     u.uTime.value = this.clock
     u.uSerial.value = this.serial
     this.mesh.visible = this.serial > 0 && this.clock - this.lastWrite < this.budget.life + 1
-    if (this.dirtyHi < 0) return
+    if (!this.allDirty && !this.dirtySlots.size) return
+    // the written slots as runs of consecutive slots (a range each: the wheels' strips, a few slots long)
+    const runs: [number, number][] = []
+    if (this.allDirty) runs.push([0, this.budget.segments - 1])
+    else {
+      const slots = [...this.dirtySlots].sort((a, b) => a - b)
+      for (const sl of slots) {
+        const r = runs[runs.length - 1]
+        if (r && sl === r[1] + 1) r[1] = sl
+        else runs.push([sl, sl])
+      }
+    }
     const g = this.mesh.geometry
-    const lo = this.dirtyLo, hi = this.dirtyHi
     const attrs: [string, number][] = [['position', 12], ['aMark', 16], ['aTint', 16], ['aLife', 8]]
     for (const [name, per] of attrs) {
       const a = g.getAttribute(name) as THREE.BufferAttribute
       a.clearUpdateRanges()
-      a.addUpdateRange(lo * per, (hi - lo + 1) * per)
+      for (const [lo, hi] of runs) a.addUpdateRange(lo * per, (hi - lo + 1) * per)
       a.needsUpdate = true
     }
-    this.dirtyLo = Infinity
-    this.dirtyHi = -1
+    this.dirtySlots.clear()
+    this.allDirty = false
   }
 
   dispose(): void {
