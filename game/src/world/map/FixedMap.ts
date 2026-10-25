@@ -102,10 +102,26 @@ interface MapJson {
   /** The map's light (BiomeAir.applyMapAir): hex hues for the sun, sky fill, ground bounce, white balance; cel strength,
    *  split tone, saturation multiplier. */
   light?: { sun?: string; fill?: string; bounce?: string; tint?: string; toon?: number; split?: number; saturation?: number }
+  /** 'soft': the soft look on PlayCanvas (pc/look.ts — smooth light, calm surface colour, no sharpening, grain). */
+  look?: 'soft'
   /** Grass amount (× the meadow density; default 1) — Zhangjiajie's floors are forest, not meadow. */
   grass?: number
+  /** Tree amount (× the forest density; default 1) — the Island's snow forest thinned (2026-10-24). */
+  treeAmount?: number
   /** Cloud sheets in the gorges: [height (m, world), density 0..1] each, lowest first (world/map/MistSheets.ts). */
   mistSheets?: [number, number][]
+  /** Trees shade the ground with IMAGES (rendering/shadows/TreeShadows) on every tier and never enter the sun shadow
+   *  map — a dense forest's thousands of crowns in a 4096² caster pass were the map's GPU cost (Zhangjiajie). */
+  imageTreeShadows?: boolean
+  /** 'autumn': the conifer slots grow the Blender-modelled AUTUMN PINES (treeFactory registerAutumnPines) — green ones and
+   *  about one in five golden-orange — instead of the tiered pines (Zhangjiajie). */
+  pines?: 'autumn'
+  /** Linear RGB multiplier on the Tree It conifers' natural greens: a map's own colour theme (Highlands: the bright
+   *  lime / grass greens of its stylised palette). */
+  pineHue?: [number, number, number]
+  /** 'subtropical': warm and humid — bamboo groves grow on its lower slopes and gorge floors (scatter.ts habitat;
+   *  Zhangjiajie, in Hunan — moso bamboo's home). */
+  climate?: 'subtropical'
   roads: { name: string; class: string; halfWidth: number; closed: boolean; x: number[]; z: number[]; h: number[]; bridge: number[] }[]
   /** Sandstone PILLARS (Zhangjiajie): [x, base y (world), z, radius, height, rotation, variant] per pillar, flat. */
   pillars?: number[]
@@ -206,8 +222,18 @@ export class FixedMap {
   readonly treeLine: number
   readonly aerial?: [number, number, number]
   readonly light?: MapJson['light']
+  readonly look?: MapJson['look']
   readonly grass: number
+  readonly treeAmount: number
   readonly mistSheets?: [number, number][]
+  /** map.json `imageTreeShadows` (see MapJson). */
+  readonly imageTreeShadows: boolean
+  /** map.json `pines: 'autumn'` (see MapJson). */
+  readonly autumnPines: boolean
+  /** map.json `pineHue` (see MapJson). */
+  readonly pineHue?: readonly [number, number, number]
+  /** map.json `climate: 'subtropical'` (see MapJson). */
+  readonly subtropical: boolean
   /** The tiered pines' leaf colours (sRGB hex numbers: palette leafLight / leafMid / leafDark — all three or none). */
   readonly leaves?: { light: number; mid: number; dark: number }
   /** The seed its nature grows from (the chunk scatter: trees, boulders, plants) — the same in every game and for
@@ -231,7 +257,13 @@ export class FixedMap {
   private readonly palmCells = new Set<number>()
   private readonly poolGrid: Int32Array
   private readonly pn: number
-  private readonly h: Float32Array
+  /** the height grid as shipped (Uint16, decoded per sample — half the memory of a float grid, held by the main thread
+   *  AND every chunk worker); the cells the pools carved are a sparse float override (bit set + map) */
+  private readonly raw: Uint16Array
+  private readonly hk: number
+  private readonly ho: number
+  private readonly carvedBits: Uint8Array
+  private readonly carved = new Map<number, number>()
   private readonly n: number
   private readonly step: number
   private readonly ox: number
@@ -256,10 +288,10 @@ export class FixedMap {
     this.step = g.step
     this.ox = g.origin[0]
     this.oz = g.origin[1]
-    const raw = new Uint16Array(heights)
-    this.h = new Float32Array(raw.length)
-    const k = g.range / 65535, off = g.min + meta.heightOffset
-    for (let i = 0; i < raw.length; i++) this.h[i] = raw[i] * k + off
+    this.raw = new Uint16Array(heights)
+    this.hk = g.range / 65535
+    this.ho = g.min + meta.heightOffset
+    this.carvedBits = new Uint8Array((this.raw.length + 7) >> 3)
     for (const [k, v] of Object.entries(meta.palette ?? {})) if (v) this.palette[k] = srgbHex(v)
     this.conifers = meta.trees === 'conifer'
     this.liyue = meta.trees === 'liyue'
@@ -275,8 +307,14 @@ export class FixedMap {
     this.treeLine = meta.treeLine ?? 330
     this.aerial = meta.aerial
     this.light = meta.light
+    this.look = meta.look
     this.grass = meta.grass ?? 1
+    this.treeAmount = meta.treeAmount ?? 1
     this.mistSheets = meta.mistSheets
+    this.imageTreeShadows = !!meta.imageTreeShadows
+    this.autumnPines = meta.pines === 'autumn'
+    this.pineHue = meta.pineHue
+    this.subtropical = meta.climate === 'subtropical'
     const lp = meta.palette
     if (lp?.leafLight && lp.leafMid && lp.leafDark) this.leaves = { light: parseInt(lp.leafLight, 16), mid: parseInt(lp.leafMid, 16), dark: parseInt(lp.leafDark, 16) }
     this.pillars = new Float32Array(meta.pillars ?? [])
@@ -418,9 +456,11 @@ export class FixedMap {
             if (d >= R) continue
             const t = Math.min(1, (R - d) / 4), flat = t * t * (3 - 2 * t)
             const k = j * this.n + i
-            let y = this.h[k] + (h0 - this.h[k]) * flat
+            const hk0 = this.hAt(k)
+            let y = hk0 + (h0 - hk0) * flat
             if (d < rb) { const u = 1 - (d / rb) ** 2; y -= POOL_DEPTH * u * u }
-            this.h[k] = y
+            this.carved.set(k, Math.fround(y))
+            this.carvedBits[k >> 3] |= 1 << (k & 7)
           }
         }
       }
@@ -499,14 +539,20 @@ export class FixedMap {
     return false
   }
 
+  /** The grid height at cell k (exactly the float the old Float32 grid held). */
+  private hAt(k: number): number {
+    if (this.carvedBits[k >> 3] & (1 << (k & 7))) return this.carved.get(k)!
+    return Math.fround(this.raw[k] * this.hk + this.ho)
+  }
+
   /** Terrain height (world y) at (x, z): bilinear on the grid; past the map edge it falls off to the sea floor. */
   height(x: number, z: number): number {
     const cx = Math.min(this.half, Math.max(-this.half, x)), cz = Math.min(this.half, Math.max(-this.half, z))
     const gx = (cx - this.ox) / this.step, gz = (cz - this.oz) / this.step
     const i = Math.min(this.n - 2, Math.floor(gx)), j = Math.min(this.n - 2, Math.floor(gz))
     const fx = gx - i, fz = gz - j
-    const n = this.n, h = this.h
-    const a = h[j * n + i], b = h[j * n + i + 1], c = h[(j + 1) * n + i], d = h[(j + 1) * n + i + 1]
+    const n = this.n
+    const a = this.hAt(j * n + i), b = this.hAt(j * n + i + 1), c = this.hAt((j + 1) * n + i), d = this.hAt((j + 1) * n + i + 1)
     const y = a + (b - a) * fx + (c - a) * fz + (a - b - c + d) * fx * fz
     const out = Math.max(Math.abs(x) - this.half, Math.abs(z) - this.half)
     if (out <= 0) return y

@@ -18,13 +18,13 @@ const edge = (f: number, w: number) => {
  */
 export function stoneOffset(seed: number, x: number, y: number, z: number, amp: number, bed = 2.6): number {
   const yy = bedY(seed, x, y, z)
-  const t = yy / bed, L = Math.floor(t), w = edge(t - L, 0.18)
+  const t = yy / bed, L = Math.floor(t), w = edge(t - L, 0.5) // (2026-10-25 "smooth, not sharp": soft ledges, was 0.18)
   const la = h01(seed, L, 77, 1), lb = h01(seed, L + 1, 77, 1)
   let off = (la + (lb - la) * w - 0.5) * amp
   const ang = h01(seed, 9, 9, 9) * Math.PI
   const c = Math.cos(ang), s = Math.sin(ang)
   const u = (x * c + z * s) / 5.2, v = (-x * s + z * c) / 4.1
-  const iu = Math.floor(u), iv = Math.floor(v), wu = edge(u - iu, 0.2), wv = edge(v - iv, 0.2)
+  const iu = Math.floor(u), iv = Math.floor(v), wu = edge(u - iu, 0.5), wv = edge(v - iv, 0.5) // (was 0.2)
   const j00 = h01(seed, iu, iv, 5), j10 = h01(seed, iu + 1, iv, 5), j01 = h01(seed, iu, iv + 1, 5), j11 = h01(seed, iu + 1, iv + 1, 5)
   const j0 = j00 + (j10 - j00) * wu, j1 = j01 + (j11 - j01) * wu
   off += (j0 + (j1 - j0) * wv - 0.5) * amp * 0.7

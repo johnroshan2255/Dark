@@ -14,7 +14,7 @@ import { vehicleDef, type VehicleTuning } from './catalogue'
 import { CarEntry, type EntryPhase } from './CarEntry'
 import { BoatHull, DRAFT, KEEL } from './BoatHull'
 import { resolveSpec } from './drivetrain/spec'
-import { Cockpit } from './Cockpit'
+import { Cockpit, type WipeGlass } from './Cockpit'
 import { Damage, type DentPart } from './Damage'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { zeroTyre } from '../../assets/loadModels'
@@ -202,7 +202,7 @@ export class Car {
     bodyMesh.setMatrixAt(0, new THREE.Matrix4())
     bodyMesh.frustumCulled = false
     void glassMaterial
-    const glassMesh = new THREE.Mesh(truck.glass.clone(), carGlass()) // (own copy: it dents)
+    const glassMesh = new THREE.Mesh(truck.glass.clone(), this.glassMat) // (own copy: it dents; its own glass: its wipers)
     this.glassGeo = glassMesh.geometry
     bodyMesh.castShadow = true
     glassMesh.renderOrder = 2 // (transparent: after the cabin)
@@ -255,7 +255,7 @@ export class Car {
       skin.frustumCulled = false
       skin.castShadow = true
       pivot.add(skin)
-      const glass = d.glass?.getAttribute('position') ? new THREE.Mesh(d.glass.clone(), carGlass()) : null
+      const glass = d.glass?.getAttribute('position') ? new THREE.Mesh(d.glass.clone(), this.glassMat) : null
       if (glass) (glass.renderOrder = 2), pivot.add(glass)
       this.body.add(pivot)
       this.doorMeshes.push(skin)
@@ -1243,8 +1243,13 @@ export class Car {
     if (this.damage.level >= 100 && !this.damage.wrecked) this.explode()
   }
 
-  /** Wiper speed 0 … 1 (Game: from the rain while you drive). */
+  /** Wiper speed 0 … 1 (Game: the driver's switch, faster in heavy rain / snow). */
   wipers = 0
+  /** The driver's wiper switch (J; off when they get out). */
+  wiperOn = false
+  /** This car's wipers as its glass sees them (Cockpit.wipeGlass) and its own glass material. */
+  private readonly wipeU: WipeGlass = wipeUniforms()
+  private readonly glassMat = makeCarGlass(this.wipeU)
   private readonly cockpit: Cockpit
   private readonly bodyGeo: THREE.BufferGeometry
   private readonly ownBodyGeo: boolean
@@ -1265,12 +1270,14 @@ export class Car {
       wipers: this.driving ? this.wipers : 0,
       visible: this.driving && !this.showDriver,
     })
+    this.cockpit.wipeGlass(this.wipeU)
   }
 
   dispose(): void {
     this.cockpit.dispose()
     if (this.ownBodyGeo) this.bodyGeo.dispose()
     this.glassGeo.dispose()
+    this.glassMat.dispose()
     this.forceOut()
     this.root.removeFromParent()
     this.lamps.geometry.dispose()
@@ -1313,110 +1320,38 @@ export function truckMaterial(truck: TruckModel, paint: { value: THREE.Color }, 
       .replace('#include <common>', `#include <common>
 attribute float paintMask; varying float vPaint;
 attribute float tyreW; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
+attribute vec4 aCar; varying vec4 vCar; varying vec3 vLocalP;
 uniform vec4 uTyre[4]; uniform float uTyreShear[4]; uniform float uTyreR;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
 vPaint = paintMask;
 vTyre = tyreW;
-if (tyreW > 0.0) {
-int wi = min(gl_InstanceID, 3);
-vec4 ty = uTyre[wi];
-float plane = uTyreR - ty.w;
-float d = dot(transformed, ty.xyz);
-transformed -= ty.xyz * max(d - plane, 0.0) * tyreW;                     // flat contact patch
-float band = smoothstep(plane - 0.45 * uTyreR, plane, d);
-transformed.x += sign(transformed.x) * ty.w * 0.45 * band * tyreW;       // sidewall bulge
-transformed.x += uTyreShear[wi] * band * tyreW;                          // cornering shear (0 below HIGH)
-}`)
+vCar = aCar;
+${TYRE_VS}`)
       .replace('#include <worldpos_vertex>', `#include <worldpos_vertex>
 { vec4 wp = vec4(transformed, 1.0);
 #ifdef USE_INSTANCING
 wp = instanceMatrix * wp;
 #endif
-vDirtP = (modelMatrix * wp).xyz;
+vDirtP = (modelMatrix * wp).xyz; vLocalP = transformed;
 vDirtN = (vec4(transformedNormal, 0.0) * viewMatrix).xyz; } // world-space normal (snow settles on up-facing panels)`)
     // Paint REPLACES the panel's hue (keeps its shading/luminance) so a red coat on a blue textured van is red,
     // not black; white = the model's own colours (stock look).
+    const wheelsGlsl = truck.wheelPos.map((w) => `vec3(${w[0].toFixed(3)}, ${w[1].toFixed(3)}, ${w[2].toFixed(3)})`).join(', ')
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\nuniform vec3 uPaint; varying float vPaint; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN;
-uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss; uniform float uSnowCoat; uniform float uSandCoat; uniform float uMudCoat; uniform float uBurn;
-float carCoat = 0.0;
-float dirtHash(vec3 p) { return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
-float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-return mix(mix(mix(dirtHash(i), dirtHash(i + vec3(1,0,0)), f.x), mix(dirtHash(i + vec3(0,1,0)), dirtHash(i + vec3(1,1,0)), f.x), f.y),
-           mix(mix(dirtHash(i + vec3(0,0,1)), dirtHash(i + vec3(1,0,1)), f.x), mix(dirtHash(i + vec3(0,1,1)), dirtHash(i + vec3(1,1,1)), f.x), f.y), f.z); }${truck.paintMap ? '\nuniform sampler2D uPaintMask;' : ''}`)
+      .replace('#include <common>', `#include <common>\nconst vec3 CAR_WHEELS[4] = vec3[4](${wheelsGlsl}); const float CAR_WHEEL_R = ${truck.wheelRadius.toFixed(3)};\nuniform vec3 uPaint; varying float vPaint; varying float vTyre; varying vec3 vDirtP; varying vec3 vDirtN; varying vec4 vCar; varying vec3 vLocalP;
+${TRUCK_COAT_DECL}${truck.paintMap ? '\nuniform sampler2D uPaintMask;' : ''}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
-      { float lum = dot(diffuseColor.rgb, vec3(0.3, 0.59, 0.11));
-        float isWhite = step(2.95, uPaint.r + uPaint.g + uPaint.b);
-        // Textured models: only the body-paint texels (paint mask from the texture's dominant body hue) — rims,
-        // tyres, glass, chrome, lights, seats and rust keep their own colours.
-        float m = vPaint${truck.paintMap ? ' * texture2D(uPaintMask, vMapUv).r' : ''};
-        diffuseColor.rgb = mix(diffuseColor.rgb, uPaint * (lum * 1.3 + 0.08), m * (1.0 - isWhite));
-        // DIRT: thick on the tyres and the lowest 30 cm, fading out by ~0.9 m; splashes broken up by noise.
-        float h = vDirtP.y - uGroundY;
-        float n = dirtNoise(vDirtP * 3.1) * 0.6 + dirtNoise(vDirtP * 9.0) * 0.4;
-        float coat = (1.0 - smoothstep(0.12, 0.9, h + (n - 0.5) * 0.35)) * smoothstep(0.25, 0.65, n + 0.25 * uDirt);
-        coat = max(coat * uDirt, vTyre * 0.3 * uDirt);
-        // Tyres take grey-brown dust, not mud paint.
-        vec3 dcol = mix(uDirtCol, vec3(0.42, 0.4, 0.37), vTyre * 0.6) * (0.75 + 0.35 * n);
-        carCoat = clamp(coat, 0.0, 0.85);
-        diffuseColor.rgb = mix(diffuseColor.rgb, dcol, carCoat);
-        // SAND + SNOW BUILD-UP (over the hill): grows while driving in the desert / snow (Car.updateDirt), melts
-        // and washes off elsewhere. Sand: a fine dust film over the whole car, caked sand low down and dust settled
-        // on the flat tops. Snow: caps on every up-facing panel (roof, hood, rack, bed) spreading in clumps as it
-        // builds, and packed snow sprayed up the sides / arches / bumpers and into the tyres. Both stay matte.
-        if (uMudCoat > 0.003) {
-          // Wet red-brown mud: thrown up the sides from the wheels (splatter blobs climbing with the coat), caked
-          // on the lower body and tyres, a sheen on the wet clumps (kept glossy: carCoat stays low on it).
-          float hM = vDirtP.y - uGroundY;
-          float nM = dirtNoise(vDirtP * 5.0) * 0.6 + dirtNoise(vDirtP * 16.0) * 0.4;
-          float topM = 0.35 + 1.0 * uMudCoat;
-          float cake = (1.0 - smoothstep(topM - 0.25, topM + 0.1, hM + (nM - 0.5) * 0.6)) * smoothstep(0.62 - uMudCoat * 0.45, 0.72 - uMudCoat * 0.45, nM);
-          float blob = step(1.0 - uMudCoat * 0.35 * (1.0 - smoothstep(0.3, 1.8, hM)), dirtHash(floor(vDirtP * 22.0)));
-          float mud = clamp(max(max(cake, blob * 0.9), vTyre * 0.7 * uMudCoat), 0.0, 0.95);
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.2, 0.11, 0.06) * (0.8 + 0.4 * nM), mud);
-          carCoat = max(carCoat, mud * 0.4);
-        }
-        if (uSandCoat + uSnowCoat > 0.003) {
-          float up = normalize(vDirtN).y;
-          float nS = dirtNoise(vDirtP * 4.3) * 0.65 + dirtNoise(vDirtP * 13.0) * 0.35;
-          // Fine speckled grunge (their dusty / muddy trucks): ~2 cm specks, denser low down and as the coat grows.
-          float low = 1.0 - smoothstep(0.0, 1.6, h);
-          // (Specks smaller than ~a pixel fade to their mean coverage — no sparkle at a distance.)
-          float specP = uSandCoat * (0.25 + 0.55 * low) * (0.6 + 0.8 * nS);
-          // ~7 mm round-ish specks (2 hash layers), averaged once they get near pixel size → fine grit, not squares.
-          float specFar = smoothstep(0.45, 1.3, length(fwidth(vDirtP)) * 90.0);
-          vec3 sp = vDirtP * 90.0;
-          float sk = max(step(1.0 - specP * 0.7, dirtHash(sp)), step(1.0 - specP * 0.5, dirtHash(sp * 1.37 + 3.1)));
-          float speck = mix(sk, specP * 0.85, specFar);
-          float sand = uSandCoat * (0.06 + 0.06 * nS) + speck * 0.7;
-          sand += (1.0 - smoothstep(0.1, 0.3 + 0.6 * uSandCoat, h + (nS - 0.5) * 0.4)) * smoothstep(0.35, 0.65, nS + 0.25 * uSandCoat) * uSandCoat;
-          sand += smoothstep(0.5, 0.85, up) * smoothstep(0.35, 0.7, nS) * 0.5 * uSandCoat + vTyre * 0.35 * uSandCoat;
-          sand = clamp(sand, 0.0, 0.85);
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.74, 0.5, 0.34) * (0.85 + 0.25 * nS), sand);
-          float cap = smoothstep(0.45, 0.8, up) * smoothstep(1.0 - uSnowCoat, 1.2 - uSnowCoat, nS + 0.12);
-          // Packed snow up the sides: a solid band whose top edge climbs with the coat (≈ 0.3 m → 1.25 m), ragged.
-          float sTop = 0.25 + 1.0 * uSnowCoat;
-          float spray = (1.0 - smoothstep(sTop - 0.12, sTop + 0.12, h + (nS - 0.5) * 0.5)) * smoothstep(1.0 - uSnowCoat * 1.3, 1.15 - uSnowCoat * 1.3, nS + 0.05);
-          spray = max(spray, mix(step(1.0 - uSnowCoat * 0.6 * low, dirtHash(vDirtP * 90.0)), uSnowCoat * 0.6 * low, specFar)); // flecks thrown up the sides
-          float snow = clamp(max(max(cap, spray), vTyre * 0.55 * uSnowCoat), 0.0, 0.95);
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86, 0.9, 0.97) * (0.9 + 0.12 * nS) * mix(0.85, 1.0, up * 0.5 + 0.5), snow);
-          carCoat = max(carCoat, max(snow, sand * 0.8));
-        }
-        // BURNT (Damage: the wreck after the explosion): charred black paint, soot streaks, bare rusty metal.
-        if (uBurn > 0.003) {
-          float nb = dirtNoise(vDirtP * 6.0) * 0.6 + dirtNoise(vDirtP * 19.0) * 0.4;
-          vec3 burnt = mix(vec3(0.03, 0.028, 0.026), vec3(0.16, 0.08, 0.04), smoothstep(0.62, 0.8, nb));
-          diffuseColor.rgb = mix(diffuseColor.rgb, burnt, uBurn * (0.85 + 0.15 * nb));
-          carCoat = max(carCoat, uBurn);
-        } }`)
+${truckCoatBody(!!truck.paintMap)}`)
       // GLOSS (MEDIUM+): painted metal catches the sun as a SOFT, broad sheen and a little of the sky at grazing
       // angles (Fresnel); rubber and the dirt coat stay matte. (2026-10-23, the user: "reflection is like glitter" —
       // the sharp pow-56 highlight sparkled on every small facet of the models: now pow 14, a third as strong, paint
-      // only.) Fog applies after it, like the rest of the colour.
+      // only.) "Paint" is the masked paint (`carPaint`: on a textured body the per-texel paint mask too — the E30's
+      // trim, rubber, lamps and grille texels shone like its paint), so every car's sheen sits on its paint alone.
+      // Fog applies after it, like the rest of the colour.
       .replace('#include <tonemapping_fragment>', `{
 vec3 Vg = normalize(vViewPosition);
 float fres = pow(1.0 - max(dot(normal, Vg), 0.0), 4.0);
-float shine = uGloss * (0.1 + 0.9 * vPaint) * (1.0 - vTyre) * (1.0 - carCoat);
+float shine = uGloss * (0.1 + 0.9 * carPaint) * (1.0 - vTyre) * (1.0 - carCoat);
 vec3 g = vec3(0.0);
 #if NUM_DIR_LIGHTS > 0
 vec3 Lg = directionalLights[0].direction;
@@ -1429,13 +1364,142 @@ gl_FragColor.rgb += g * shine;
 }
 #include <tonemapping_fragment>`)
   }
-  mat.customProgramCacheKey = () => `truck-paint2-${truck.map ? 'tex' : 'flat'}${truck.paintMap ? '-mask' : ''}`
+  mat.customProgramCacheKey = () => `truck-paint3-${truck.id}-${truck.map ? 'tex' : 'flat'}${truck.paintMap ? '-mask' : ''}`
   // A machine, not a cartoon: a soft terminator (toon 0.3) and a faint rim — real light and the baked AO shape it.
   const m = stylize(mat, { key: 'truck', rim: 0.14, toon: 0.3 })
   m.name = 'lib/truck'
+  // (PlayCanvas build: pc/materials/carMaterials.ts converts it with these)
+  m.userData.pcKind = 'truck'
+  m.userData.pc = { paint, paintMask, tyre, wheelPos: truck.wheelPos, wheelRadius: truck.wheelRadius }
   // Both faces: from inside, the shell's panels are its inner walls (a painted-metal cab).
   m.side = THREE.DoubleSide
   return m
+}
+
+/** The car paint's shared GLSL (three and PlayCanvas builds): the tyre deformation (on `transformed`, per wheel
+ *  instance), the coats' declarations (needs CAR_WHEELS / CAR_WHEEL_R) and body (on `diffuseColor.rgb`; reads vPaint,
+ *  vTyre, vDirtP, vDirtN, vCar, vLocalP, cameraPosition, vMapUv; sets carCoat / carPaint). */
+export const TYRE_VS = /* glsl */ `if (tyreW > 0.0) {
+int wi = min(gl_InstanceID, 3);
+vec4 ty = uTyre[wi];
+float plane = uTyreR - ty.w;
+float d = dot(transformed, ty.xyz);
+transformed -= ty.xyz * max(d - plane, 0.0) * tyreW;                     // flat contact patch
+float band = smoothstep(plane - 0.45 * uTyreR, plane, d);
+transformed.x += sign(transformed.x) * ty.w * 0.45 * band * tyreW;       // sidewall bulge
+transformed.x += uTyreShear[wi] * band * tyreW;                          // cornering shear (0 below HIGH)
+}`
+export const TRUCK_COAT_DECL = /* glsl */ `uniform float uDirt; uniform vec3 uDirtCol; uniform float uGroundY; uniform float uGloss; uniform float uSnowCoat; uniform float uSandCoat; uniform float uMudCoat; uniform float uBurn;
+float carCoat = 0.0; float carPaint = 0.0;
+float dirtHash(vec3 p) { return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+float dirtNoise(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+return mix(mix(mix(dirtHash(i), dirtHash(i + vec3(1,0,0)), f.x), mix(dirtHash(i + vec3(0,1,0)), dirtHash(i + vec3(1,1,0)), f.x), f.y),
+           mix(mix(dirtHash(i + vec3(0,0,1)), dirtHash(i + vec3(1,0,1)), f.x), mix(dirtHash(i + vec3(0,1,1)), dirtHash(i + vec3(1,1,1)), f.x), f.y), f.z); }
+// A round spatter drop in each cell of size 1/k (its own place and size), present with probability prob — never a square.
+float dirtSpat(vec3 p, float k, float prob) {
+  vec3 c = floor(p * k), f = fract(p * k) - 0.5;
+  float r = 0.18 + 0.22 * dirtHash(c + 5.9);
+  vec3 o = (vec3(dirtHash(c + 1.3), dirtHash(c + 2.7), dirtHash(c + 4.1)) - 0.5) * (1.0 - 2.0 * r);
+  return step(dirtHash(c), prob) * (1.0 - smoothstep(r * 0.75, r, length(f - o)));
+}
+// What a tyre throws (car space: −z forward): packed in the ARCH over it, a FAN flung back and up the body side behind it.
+float carSplash(vec3 p) {
+  float s = 0.0;
+  for (int k = 0; k < 4; k++) {
+    vec3 w = CAR_WHEELS[k], d = p - w;
+    float side = 1.0 - smoothstep(0.3, 0.6, abs(abs(p.x) - abs(w.x)));          // on that side of the car
+    float fan = exp(-pow((d.z - 0.85) / 0.95, 2.0) - pow((d.y + 0.05) / (0.55 + 0.25 * max(d.z, 0.0)), 2.0)) * step(-0.2, d.z);
+    float arch = (1.0 - smoothstep(CAR_WHEEL_R * 1.1, CAR_WHEEL_R * 1.45, length(d.yz))) * step(-0.25 * CAR_WHEEL_R, d.y);
+    s = max(s, max(fan * side, arch * side));
+  }
+  return s;
+}`
+export function truckCoatBody(mask: boolean): string {
+  return /* glsl */ `      { float lum = dot(diffuseColor.rgb, vec3(0.3, 0.59, 0.11));
+        float isWhite = step(2.95, uPaint.r + uPaint.g + uPaint.b);
+        // Textured models: only the body-paint texels (paint mask from the texture's dominant body hue) — rims,
+        // tyres, glass, chrome, lights, seats and rust keep their own colours.
+        float m = vPaint${mask ? ' * texture2D(uPaintMask, vMapUv).r' : ''};
+        carPaint = m;
+        diffuseColor.rgb = mix(diffuseColor.rgb, uPaint * (lum * 1.3 + 0.08), m * (1.0 - isWhite));
+        // THE DIRT'S OWN FRAME (2026-10-24, "pixels moving round the car, the inside gets it too"): the noise, the heights
+        // and the splash fans are the panel's car-space rest position (aCar, loadModels carExposure) — locked to the body,
+        // continuous over the door seams — or the tyre's own frame (it turns with the wheel); the world position slid the
+        // pattern over the car as it drove. EXPOSURE: only surfaces open to the outside take mud / dust / snow — never
+        // the inside of a single-skin shell (seen against its normal), the seats, dash, door cards or the cabin.
+        bool hasCar = dot(vCar.xyz, vCar.xyz) > 1e-8;
+        vec3 dP = hasCar ? vCar.xyz : vLocalP;
+        // (and seen from its OUTSIDE — aCar.w's sign: which side of the face that is; the winding and normals are not to
+        //  be trusted, the van's skin faces inward and gl_FrontFacing hid all its mud from outside)
+        float expo = (hasCar ? min(abs(vCar.w), 1.0) : 1.0) * step(0.0, dot(vDirtN * (vCar.w < 0.0 ? -1.0 : 1.0), cameraPosition - vDirtP));
+        // DIRT: thick on the tyres and the lowest 30 cm, fading out by ~0.9 m; splashes broken up by noise.
+        float h = hasCar ? vCar.y : vDirtP.y - uGroundY;
+        float n = dirtNoise(dP * 3.1) * 0.6 + dirtNoise(dP * 9.0) * 0.4;
+        float coat = (1.0 - smoothstep(0.12, 0.9, h + (n - 0.5) * 0.35)) * smoothstep(0.25, 0.65, n + 0.25 * uDirt);
+        coat = max(coat * uDirt, vTyre * 0.3 * uDirt) * expo;
+        // Tyres take grey-brown dust, not mud paint.
+        vec3 dcol = mix(uDirtCol, vec3(0.42, 0.4, 0.37), vTyre * 0.6) * (0.75 + 0.35 * n);
+        carCoat = clamp(coat, 0.0, 0.85);
+        diffuseColor.rgb = mix(diffuseColor.rgb, dcol, carCoat);
+        // SAND + SNOW BUILD-UP (over the hill): grows while driving in the desert / snow (Car.updateDirt), melts
+        // and washes off elsewhere. Sand: a fine dust film over the whole car, caked sand low down and dust settled
+        // on the flat tops. Snow: caps on every up-facing panel (roof, hood, rack, bed) spreading in clumps as it
+        // builds, and packed snow sprayed up the sides / arches / bumpers and into the tyres. Both stay matte.
+        if (uMudCoat > 0.003) {
+          // Wet red-brown mud: thrown up the sides from the wheels (splatter blobs climbing with the coat), caked
+          // on the lower body and tyres, a sheen on the wet clumps (kept glossy: carCoat stays low on it).
+          float hM = h;
+          float nM = dirtNoise(dP * 5.0) * 0.6 + dirtNoise(dP * 16.0) * 0.4;
+          // (the caked band climbs to ~0.95 m at a full coat, its top edge ragged; patchy where it thins out)
+          float topM = 0.3 + 0.75 * uMudCoat;
+          float cake = (1.0 - smoothstep(topM - 0.3, topM + 0.08, hM + (nM - 0.5) * 0.7)) * smoothstep(0.55 - uMudCoat * 0.3 + 0.25 * smoothstep(0.0, topM, hM), 0.63 - uMudCoat * 0.3 + 0.25 * smoothstep(0.0, topM, hM), nM);
+          float blob = dirtSpat(dP, 22.0, uMudCoat * 0.35 * (1.0 - smoothstep(0.3, 1.8, hM)));
+          // what the tyres throw: packed in the ARCHES over them, a FAN flung back and up the side behind each (clumps and
+          // flecks — how real muddy trucks look), thinning out forward and up
+          float fan = carSplash(dP);
+          // (clumps a little longer than tall — thrown back — and a spray of fine flecks round them, thinning out)
+          float clump = dirtNoise(dP * vec3(5.0, 7.0, 3.5)) * 0.65 + nM * 0.35;
+          float fleckM = dirtSpat(dP + 0.37, 60.0, fan * uMudCoat * 0.55);
+          cake = max(cake, max(fan * smoothstep(0.78 - uMudCoat * 0.6, 0.86 - uMudCoat * 0.6, clump), fleckM * 0.85));
+          float mud = clamp(max(max(cake, blob * 0.9), vTyre * 0.7 * uMudCoat), 0.0, 0.95) * expo;
+          // wet and dark low down and in the arches, drying lighter and dustier up the band and in the flecks
+          float dry = clamp(smoothstep(0.1, topM + 0.2, hM) * 0.8 + (nM - 0.5) * 0.5, 0.0, 1.0);
+          diffuseColor.rgb = mix(diffuseColor.rgb, mix(vec3(0.15, 0.085, 0.045), vec3(0.4, 0.3, 0.2), dry) * (0.82 + 0.36 * nM), mud);
+          carCoat = max(carCoat, mud * 0.4);
+        }
+        if (uSandCoat + uSnowCoat > 0.003) {
+          float up = normalize(vDirtN).y;
+          float nS = dirtNoise(dP * 4.3) * 0.65 + dirtNoise(dP * 13.0) * 0.35;
+          // Fine speckled grunge (their dusty / muddy trucks): ~2 cm specks, denser low down and as the coat grows.
+          float low = 1.0 - smoothstep(0.0, 1.6, h);
+          // (Specks smaller than ~a pixel fade to their mean coverage — no sparkle at a distance.)
+          float specP = uSandCoat * (0.25 + 0.55 * low) * (0.6 + 0.8 * nS);
+          // ~7 mm round-ish specks (2 hash layers), averaged once they get near pixel size → fine grit, not squares.
+          float specFar = smoothstep(0.45, 1.3, length(fwidth(vDirtP)) * 90.0);
+          float sk = max(dirtSpat(dP, 90.0, specP * 0.7), dirtSpat(dP * 1.37 + 3.1, 90.0, specP * 0.5));
+          float speck = mix(sk, specP * 0.85, specFar);
+          float sand = uSandCoat * (0.06 + 0.06 * nS) + speck * 0.7;
+          sand += (1.0 - smoothstep(0.1, 0.3 + 0.6 * uSandCoat, h + (nS - 0.5) * 0.4)) * smoothstep(0.35, 0.65, nS + 0.25 * uSandCoat) * uSandCoat;
+          sand += smoothstep(0.5, 0.85, up) * smoothstep(0.35, 0.7, nS) * 0.5 * uSandCoat + vTyre * 0.35 * uSandCoat;
+          sand = clamp(sand, 0.0, 0.85) * expo;
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.74, 0.5, 0.34) * (0.85 + 0.25 * nS), sand);
+          float cap = smoothstep(0.45, 0.8, up) * smoothstep(1.0 - uSnowCoat, 1.2 - uSnowCoat, nS + 0.12);
+          // Packed snow up the sides: a solid band whose top edge climbs with the coat (≈ 0.3 m → 1.25 m), ragged.
+          float sTop = 0.25 + 1.0 * uSnowCoat;
+          float spray = (1.0 - smoothstep(sTop - 0.12, sTop + 0.12, h + (nS - 0.5) * 0.5)) * smoothstep(1.0 - uSnowCoat * 1.3, 1.15 - uSnowCoat * 1.3, nS + 0.05);
+          spray = max(spray, mix(dirtSpat(dP, 90.0, uSnowCoat * 0.6 * low), uSnowCoat * 0.6 * low * 0.4, specFar)); // flecks thrown up the sides
+          spray = max(spray, carSplash(dP) * smoothstep(0.85 - uSnowCoat * 0.6, 0.95 - uSnowCoat * 0.6, nS)); // packed in the arches / behind the tyres
+          float snow = clamp(max(max(cap, spray), vTyre * 0.55 * uSnowCoat), 0.0, 0.95) * expo;
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.86, 0.9, 0.97) * (0.9 + 0.12 * nS) * mix(0.85, 1.0, up * 0.5 + 0.5), snow);
+          carCoat = max(carCoat, max(snow, sand * 0.8));
+        }
+        // BURNT (Damage: the wreck after the explosion): charred black paint, soot streaks, bare rusty metal.
+        if (uBurn > 0.003) {
+          float nb = dirtNoise(dP * 6.0) * 0.6 + dirtNoise(dP * 19.0) * 0.4;
+          vec3 burnt = mix(vec3(0.03, 0.028, 0.026), vec3(0.16, 0.08, 0.04), smoothstep(0.62, 0.8, nb));
+          diffuseColor.rgb = mix(diffuseColor.rgb, burnt, uBurn * (0.85 + 0.15 * nb));
+          carCoat = max(carCoat, uBurn);
+        } }`
 }
 
 /** Per-car uniforms of truckMaterial: per wheel wheel-local down + squash and sideways shear; the dirt coat. */
@@ -1463,7 +1527,7 @@ export function jetCone(): THREE.BufferGeometry {
 
 export function jetMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
-    name: 'CarJets', transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+    name: 'CarJets', userData: { pcKind: 'carJets' }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
     uniforms: { uTime: { value: 0 }, uPower: { value: 0 } },
     vertexShader: /* glsl */ `
       varying float vH; varying float vId;
@@ -1499,7 +1563,19 @@ export function carLamps(truck: TruckModel): { mesh: THREE.Mesh; mat: THREE.Shad
   const tailSize = L?.tailSize ?? (found.tail && !L ? [found.tail.w, found.tail.h] : [0.2, 0.08])
   const headPos = new THREE.Vector3(head[0], head[1], head[2])
   const pos: number[] = [], id: number[] = [], corner: number[] = [], idx: number[] = []
+  // ON THE LENS (2026-10-24): each quad is moved along the car's axis onto the body's own surface there (a ray from
+  // outside the nose / tail), 1.5 cm proud — the catalogue's / found depths floated the E30's heads 12 cm in front of
+  // its grille and the tails 5 cm behind its boot, glowing in the air beside the body. A miss keeps the given depth.
+  const probe = new THREE.Mesh(truck.body, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }))
+  const ray = new THREE.Raycaster()
+  const onBody = (x: number, y: number, z: number, back: boolean): number => {
+    ray.set(_lampO.set(x, y, z + (back ? 0.6 : -0.6)), _lampD.set(0, 0, back ? -1 : 1))
+    ray.far = 1.2
+    const hit = ray.intersectObject(probe, false)[0]
+    return hit ? hit.point.z + (back ? 0.015 : -0.015) : z
+  }
   const quad = (cx: number, cy: number, cz: number, w: number, hh: number, back: boolean, lamp: number) => {
+    cz = onBody(cx, cy, cz, back) + (lamp === 2 ? 0.004 : 0)
     const base = pos.length / 3
     for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
       pos.push(cx + u * w * (back ? -1 : 1), cy + v * hh, cz)
@@ -1512,15 +1588,17 @@ export function carLamps(truck: TruckModel): { mesh: THREE.Mesh; mat: THREE.Shad
     quad(side * head[0], head[1], head[2], headSize[0] * 1.15, headSize[1] * 1.15, false, 0)
     if (L?.head2) quad(side * L.head2[0], L.head2[1], L.head2[2], headSize[0] * 1.15, headSize[1] * 1.15, false, 0)
     quad(side * tail[0], tail[1], tail[2], tailSize[0] * 1.1, tailSize[1] * 1.1, true, 1)
-    quad(side * (tail[0] - tailSize[0] * 0.25), tail[1] - tailSize[1] * 0.55, tail[2] + 0.004, tailSize[0] * 0.5, tailSize[1] * 0.4, true, 2)
+    quad(side * (tail[0] - tailSize[0] * 0.25), tail[1] - tailSize[1] * 0.55, tail[2], tailSize[0] * 0.5, tailSize[1] * 0.4, true, 2)
   }
+  probe.material.dispose()
+  headPos.z = onBody(head[0], head[1], head[2], false)
   const g = new THREE.BufferGeometry()
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
   g.setAttribute('lampId', new THREE.Float32BufferAttribute(id, 1))
   g.setAttribute('corner', new THREE.Float32BufferAttribute(corner, 2))
   g.setIndex(idx)
   const mat = new THREE.ShaderMaterial({
-    name: 'CarLamps', transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+    name: 'CarLamps', userData: { pcKind: 'carLamps' }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
     uniforms: { uHead: { value: 0 }, uTail: { value: 0 }, uBrake: { value: 0 }, uRev: { value: 0 }, uDark: { value: 0 } },
     vertexShader: /* glsl */ `
       attribute float lampId; attribute vec2 corner; varying float vId; varying vec2 vC;
@@ -1602,6 +1680,7 @@ const _m = new THREE.Matrix4()
 const _q = new THREE.Quaternion()
 const _q3 = new THREE.Quaternion()
 const _v = new THREE.Vector3()
+const _lampO = new THREE.Vector3(), _lampD = new THREE.Vector3()
 const _t = new THREE.Vector3()
 const _p = new THREE.Vector3()
 const _c = new THREE.Vector3()
@@ -1622,32 +1701,168 @@ const _s = new THREE.Vector3(1, 1, 1)
  * inside — and no reflections (the art direction's "just real"). UNLIT: real tinted glass darkens what is behind it
  * (a lit pane read as a milky, dirty window in the sun); a little more at grazing angles, as glass does. Both sides,
  * drawn after the cabin without writing depth. One small transparent program.
+ *
+ * RAIN + SNOW ON THE GLASS (2026-10-24, the user: "in rain and snowfall the car's glass — front and sides — gets rain
+ * drops that run down the windows; the front has wipers that wipe it, like reality"). The Game sets the weather each
+ * frame (`glassWeather`). In the glass's own space (the drops stay on the pane):
+ *  - BEADS: a 2.5 cm cell grid of water beads (each its own size and place) filling in with the time since the pane was
+ *    last cleared — a light rim on the top edge (they refract the bright sky upside down);
+ *  - RUNNING DROPS on the side / rear windows: heads sliding down with a thin wet trail, swept back along the window
+ *    the faster the car goes;
+ *  - SNOW: flakes stick as white flecks that build up with time;
+ *  - WIPERS on the windscreen (loadModels `aWiper`: its bounds): two blades from pivots on its lower edge sweep 105°
+ *    every 1.4 s in tandem — a dark rubber blade, the arc behind it cleared, the beads / flecks coming back with the
+ *    time since it passed. Detail under ~2 px averages out (no shimmer far away).
+ * Cost: ~40 ALU per glass fragment while it rains or snows (the pass is drawn anyway), none dry.
  */
+/** The glass's weather + wiper code (shared by the three and PlayCanvas builds): declarations, and the body that
+ *  works on `outgoingLight` (unlit colour) and `diffuseColor.a` from vGlassN / vGlassV (view-space normal and to-eye),
+ *  vGP (aGlassP) and vGNo (object normal). */
+export const GLASS_WEATHER_DECL = /* glsl */ `varying vec3 vGlassN; varying vec3 vGlassV; varying vec3 vGP; varying vec3 vGNo;
+uniform float uRainG, uSnowG, uTimeG, uSpeedG; uniform vec3 uLightG;
+uniform vec3 uWPiv[2]; uniform vec3 uWPark[2]; uniform vec3 uWAxis; uniform vec4 uWReach; uniform vec2 uWSign;
+uniform float uWFrac, uWRate, uWOff, uWOn, uWPrev;
+float gHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float gNoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(gHash(i), gHash(i + vec2(1.0, 0.0)), f.x), mix(gHash(i + vec2(0.0, 1.0)), gHash(i + vec2(1.0, 1.0)), f.x), f.y); }
+// Seconds since a blade swept angle a (rad) of its sweep a(t) = 1.75 sin(π · frac), frac running at uWRate per s.
+float sinceBlade(float a) {
+  float f1 = asin(clamp(a / 1.75, 0.0, 1.0)) / 3.14159265, f2 = 1.0 - f1;
+  return min(fract(uWFrac - f1 + 1.0), fract(uWFrac - f2 + 1.0)) / max(uWRate, 0.05);
+}`
+export const GLASS_WEATHER_BODY = /* glsl */ `{ float g = 1.0 - abs(dot(normalize(vGlassN), normalize(vGlassV)));
+  diffuseColor.a = clamp(diffuseColor.a + 0.45 * g * g * g, 0.0, 0.8); }
+if (uRainG + uSnowG > 0.01) {
+  vec3 an = abs(vGNo);
+  // the pane's own 2D frame: across / up (side windows: along the car; front / rear: across it; roof: x, z)
+  bool side = an.x > max(an.y, an.z);
+  vec2 uv = side ? vGP.zy : an.z > an.y ? vGP.xy : vGP.xz;
+  // AGE: seconds since this spot was last cleared — by a WIPER BLADE (this car's own: its spindles, park directions and
+  // swept bands from the modelled wipers, Cockpit.wipeGlass) on the windscreen, else long ago
+  float age = 60.0, edge = 0.0;
+  if (uWReach.y > 0.0 && abs(dot(normalize(vGNo), uWAxis)) > 0.75 && uWOff < 900.0) {
+    for (int k = 0; k < 2; k++) {
+      vec3 v = vGP - uWPiv[k];
+      // (only the windscreen itself, in the blades' plane — not the rear window, whose normal is parallel too)
+      if (abs(dot(v, uWAxis)) > 0.3) continue;
+      v -= uWAxis * dot(v, uWAxis);
+      float r = length(v);
+      float rin = k == 0 ? uWReach.x : uWReach.z, rout = k == 0 ? uWReach.y : uWReach.w;
+      float a = atan(dot(cross(uWAxis, uWPark[k]), v), dot(uWPark[k], v)) * (k == 0 ? uWSign.x : uWSign.y);
+      if (r > rin && r < rout && a > -0.02 && a < 1.77) {
+        // sweeping: since the blade last passed — once it has reached this spot in this run (J does not clear the glass:
+        // the blade does); parked: since it stopped (+ the half sweep before)
+        float ac = clamp(a, 0.0, 1.75);
+        bool reached = uWOn * uWRate >= asin(ac / 1.75) / 3.14159265;
+        age = min(age, uWOff > 0.0 ? uWOff + 0.5 / max(uWRate, 0.05) : reached ? sinceBlade(ac) : uWPrev + uWOn);
+        // (the blade pushes the snow to the arc's ends and rims: a packed ridge there)
+        edge = max(edge, (1.0 - smoothstep(0.0, 0.05, min(min(r - rin, rout - r), min(a, 1.75 - a) * r))));
+      }
+    }
+  }
+  // RAIN — clear lens drops (1–9 mm in three scattered layers): each holds a little, lighter, upside-down view of the
+  // bright sky (light at its bottom, darker at its top), a thin dark edge where it bends the light away, a small
+  // highlight; they come back with the time since the blade passed. Running drops slide down the side / rear glass.
+  float lens = 0.0, lensLit = 0.0, ring = 0.0, spec = 0.0;
+  for (int L2 = 0; L2 < 3; L2++) {
+    float sc = L2 == 0 ? 45.0 : L2 == 1 ? 110.0 : 260.0;
+    vec2 c = uv * sc + float(L2) * 17.3;
+    vec2 ci = floor(c), cf = fract(c) - 0.5;
+    float h1 = gHash(ci), h2 = gHash(ci + 7.3), h3 = gHash(ci + 3.1);
+    float rr = L2 == 0 ? 0.14 + 0.28 * h3 * h3 : L2 == 1 ? 0.12 + 0.24 * h3 : 0.12 + 0.18 * h3;
+    vec2 off = (vec2(fract(h1 * 7.7), fract(h2 * 5.3)) - 0.5) * (1.0 - 2.0 * rr);
+    vec2 q = (cf - off) / max(rr, 0.01);
+    q.y *= 1.0 + 0.2 * h2;                                     // (sagging a little)
+    float d = length(q);
+    float dens = L2 == 0 ? 0.18 + 0.32 * uRainG : L2 == 1 ? 0.3 + 0.35 * uRainG : 0.35 + 0.3 * uRainG;
+    float here = step(h1 * 2.0 / max(uRainG, 0.05), age) * step(h2, dens) * step(0.01, uRainG);
+    float body = (1.0 - smoothstep(0.82, 1.0, d)) * here;
+    if (body > lens) { lens = body; lensLit = smoothstep(0.7, -0.75, q.y); }
+    ring = max(ring, smoothstep(0.62, 0.9, d) * (1.0 - smoothstep(0.9, 1.02, d)) * here);
+    spec = max(spec, (1.0 - smoothstep(0.0, 0.22, length(q - vec2(-0.32, 0.42)))) * here);
+  }
+  float run = 0.0;
+  if (age > 3.0 && uRainG > 0.01) {
+    vec2 rc = uv + vec2(side ? uv.y * uSpeedG * 0.04 : 0.0, 0.0);
+    float col = floor(rc.x * 14.0), hc = gHash(vec2(col, 1.7));
+    float sp = 0.06 + 0.16 * hc + (side ? uSpeedG * 0.01 : 0.0);
+    float head = fract(-uTimeG * sp + hc * 13.0) * 1.6;
+    float dx = abs(fract(rc.x * 14.0) - 0.5 - (hc - 0.5) * 0.4);
+    float yy = fract(rc.y * 0.6 + hc * 3.0) * 1.6;
+    float trail = (1.0 - smoothstep(0.03, 0.08, dx)) * smoothstep(head + 0.3, head, yy) * step(head, yy + 0.02) * 0.4;
+    float hd = 1.0 - smoothstep(0.12, 0.22, length(vec2(dx * 2.0, (yy - head) * 8.0)));
+    run = max(trail, hd) * step(hc, 0.4 + 0.4 * uRainG) * uRainG;
+  }
+  // SNOW — a granular ICY CRUST: patches grow over the pane with the time since cleared until it is covered (~25 s
+  // of snowfall), translucent white-blue with crystal grain, thinner clear spots, packed ridges at the wiped arcs' edges
+  float gr = gNoise(uv * 32.0) * 0.45 + gNoise(uv * 95.0) * 0.35 + gNoise(uv * 240.0) * 0.2;
+  float cov = clamp(uSnowG * age / 25.0, 0.0, 1.0);
+  float crust = smoothstep(1.0 - cov - 0.12, 1.0 - cov + 0.04, gr) * step(0.01, uSnowG);
+  crust = max(crust, edge * uSnowG * smoothstep(0.0, 4.0, age));
+  float crys = gNoise(uv * 520.0);
+  // (sub-pixel detail averages out: no shimmer far away)
+  float px = length(fwidth(uv)) * 110.0;
+  float far = smoothstep(0.35, 0.9, px);
+  lens = mix(lens, 0.25 * uRainG * min(1.0, age / 3.0), far); ring *= 1.0 - far; spec *= 1.0 - far; run *= 1.0 - far;
+  crys = mix(crys, 0.5, smoothstep(0.2, 0.8, px * 4.0));
+  // (the colour goes on outgoingLight: in this unlit material it is final by here; lit by the sky light)
+  vec3 sky = uLightG;
+  outgoingLight = mix(outgoingLight, sky * (0.35 + 0.55 * lensLit), lens * 0.55);
+  outgoingLight = mix(outgoingLight, vec3(0.02, 0.025, 0.03), ring * 0.6 + run * 0.3);
+  outgoingLight += sky * spec * 1.1;
+  diffuseColor.a = max(diffuseColor.a, clamp(lens * 0.3 + ring * 0.5 + run * 0.35 + spec * 0.6, 0.0, 0.85));
+  vec3 ice = sky * mix(vec3(0.82, 0.9, 1.0), vec3(1.25, 1.28, 1.32), gr) * (0.9 + 0.2 * crys);
+  outgoingLight = mix(outgoingLight, ice, crust * (0.75 + 0.2 * gr));
+  diffuseColor.a = max(diffuseColor.a, crust * (0.62 + 0.3 * gr));
+}`
+export const glassWeather = { uRainG: { value: 0 }, uSnowG: { value: 0 }, uTimeG: { value: 0 }, uSpeedG: { value: 0 }, uLightG: { value: new THREE.Color(0.62, 0.68, 0.75) } }
+/** Per-car wiper uniforms of the glass (Cockpit.wipeGlass fills them each frame; zero reach = no wipers). */
+export function wipeUniforms(): WipeGlass {
+  return {
+    uWPiv: { value: [new THREE.Vector3(), new THREE.Vector3()] },
+    uWPark: { value: [new THREE.Vector3(1, 0, 0), new THREE.Vector3(1, 0, 0)] },
+    uWAxis: { value: new THREE.Vector3(0, 0, -1) },
+    uWReach: { value: new THREE.Vector4() },
+    uWSign: { value: new THREE.Vector2(1, 1) },
+    uWFrac: { value: 0 },
+    uWRate: { value: 0.5 },
+    uWOff: { value: 1e3 },
+    uWOn: { value: 0 },
+    uWPrev: { value: 1e3 },
+  }
+}
 let _glass: THREE.MeshBasicMaterial | null = null
+/** The shared glass of cars without wipers of their own here (remote cars: their blades stay parked). */
 export function carGlass(): THREE.MeshBasicMaterial {
-  if (_glass) return _glass
+  return (_glass ??= makeCarGlass(wipeUniforms()))
+}
+/** A car's own glass: its wipers' uniforms (`wipe`, filled by its Cockpit), the weather shared (`glassWeather`). */
+export function makeCarGlass(wipe: WipeGlass): THREE.MeshBasicMaterial {
   const m = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.035, 0.05, 0.06), transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide })
   m.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, glassWeather, wipe)
     // (MeshBasic has no normals of its own: the attribute, into view space, for the grazing-angle term)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', `#include <common>
-varying vec3 vGlassN; varying vec3 vGlassV;`)
+attribute vec3 aGlassP; // (car-space rest position: loadModels; doors too, wherever they swing)
+varying vec3 vGlassN; varying vec3 vGlassV; varying vec3 vGP; varying vec3 vGNo;`)
       .replace('#include <project_vertex>', `#include <project_vertex>
-vGlassN = normalize(normalMatrix * normal); vGlassV = -mvPosition.xyz;`)
+vGlassN = normalize(normalMatrix * normal); vGlassV = -mvPosition.xyz; vGP = aGlassP; vGNo = normal;`)
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
-varying vec3 vGlassN; varying vec3 vGlassV;`)
-      .replace('#include <opaque_fragment>', `{ float g = 1.0 - abs(dot(normalize(vGlassN), normalize(vGlassV)));
-  diffuseColor.a = clamp(diffuseColor.a + 0.45 * g * g * g, 0.0, 0.8); }
+${GLASS_WEATHER_DECL}`)
+      .replace('#include <opaque_fragment>', `${GLASS_WEATHER_BODY}
 #include <opaque_fragment>`)
   }
   // One pass for both sides: a transparent DoubleSide material is otherwise drawn back faces then front, three
   // flipping `side` + needsUpdate around each draw (a program re-resolve per pane, twice a frame). The tint is one
   // colour, so the two blends commute — the same picture either order.
   m.forceSinglePass = true
-  m.customProgramCacheKey = () => 'car-glass2'
+  m.customProgramCacheKey = () => 'car-glass5'
   m.name = 'lib/carGlass'
-  return (_glass = m)
+  m.userData.pcKind = 'carGlass'
+  m.userData.pc = { wipe }
+  return m
 }
 const _dvel = new THREE.Vector3(), _dq = new THREE.Quaternion()
 const _hm = new THREE.Matrix4()

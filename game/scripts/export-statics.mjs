@@ -90,13 +90,18 @@ const res = await page.evaluate(async () => {
   const probes = []
   pw.world.step() // (scene queries see colliders from the first step on)
   const solid = recs.filter((r) => !r.breakable && r.kind !== 4)
-  for (let i = 0; i < solid.length && probes.length < 400; i += Math.max(1, Math.floor(solid.length / 400))) {
+  for (let i = 0; i < solid.length && probes.length < 400; i += Math.max(1, Math.floor(solid.length / 700))) {
     const t = solid[i].c.translation(), a = (i * 2.399) % (Math.PI * 2)
     const dir = { x: -Math.sin(a), y: 0, z: -Math.cos(a) }
     const org = { x: t.x - dir.x * 6, y: t.y + 0.05, z: t.z - dir.z * 6 }
     const hit = pw.world.castRay(new R.Ray(org, dir), 12, true, undefined, (0xffff << 16) | 0x0002)
     if (hit && !all.has(hit.collider.handle)) continue
     if (hit && all.get(hit.collider.handle).breakable) continue
+    // (a ray grazing a collider's edge — a trunk's bottom face 1 cm above it — flips hit / miss with float precision
+    //  between the game's and the server's Rapier: keep only probes that hit the same 3 cm above and below)
+    const toi = (dy) => pw.world.castRay(new R.Ray({ ...org, y: org.y + dy }, dir), 12, true, undefined, (0xffff << 16) | 0x0002)?.timeOfImpact ?? -1
+    const t0 = hit ? hit.timeOfImpact : -1
+    if (Math.abs(toi(0.03) - t0) > 0.01 || Math.abs(toi(-0.03) - t0) > 0.01) continue
     probes.push([org.x, org.y, org.z, dir.x, dir.y, dir.z, hit ? hit.timeOfImpact : -1])
   }
   const bytes = new Uint8Array(buf)

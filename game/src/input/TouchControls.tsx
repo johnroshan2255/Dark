@@ -21,6 +21,7 @@ export function TouchControls({ game }: { game: Game }) {
   const flying = useStore(game.store, (s) => s.flying)
   const boat = useStore(game.store, (s) => s.boat)
   const lights = useStore(game.store, (s) => s.lights)
+  const wipers = useStore(game.store, (s) => s.wipers)
   const hook = useStore(game.store, (s) => s.hookAction ?? null)
   const base = useRef<HTMLDivElement>(null)
   const knob = useRef<HTMLDivElement>(null)
@@ -152,6 +153,11 @@ export function TouchControls({ game }: { game: Game }) {
         <button style={btn} data-testid="btn-light" onPointerDown={tap('KeyF')}>
           {driving ? (lights ? 'LIGHTS ●' : 'LIGHTS ○') : flashlight ? 'TORCH ●' : 'TORCH ○'}
         </button>
+        {driving && (
+          <button style={btn} data-testid="btn-wipers" onPointerDown={tap('KeyJ')}>
+            {wipers ? 'WIPE ●' : 'WIPE ○'}
+          </button>
+        )}
         <button style={btn} data-testid="btn-bike" onPointerDown={tap('KeyE')}>
           RIDE
         </button>

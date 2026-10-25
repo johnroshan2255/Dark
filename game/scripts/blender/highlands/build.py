@@ -420,7 +420,11 @@ meta = {'id': 'highlands', 'name': 'The Highlands', 'size': 2 * HALF, 'half': HA
         # the guide's palette (its swatches): grass bright / dark, water / deep, dirt road, rock, cliffs, flowers
         'palette': {'grass': 'a8e063', 'grassDark': '5dbb4a', 'water': '3ec1d8', 'waterDeep': '2e7fb8', 'dirt': 'd9c38a',
                     'rock': '8b7f6b', 'cliff': 'b8bcc2', 'flowers': 'ffe08a', 'sand': 'd9c38a'},
-        'trees': 'conifer', 'roads': roads, 'bridges': []}
+        # (trees stay out of the sun shadow map — painted image shadows instead, as Zhangjiajie: the shadow pass was the
+        # forest's biggest cost)
+        'trees': 'conifer', 'imageTreeShadows': True,
+        # the Tree It spruce's natural greens lifted to the palette's bright lime / grass (WorldChunk naturalHues)
+        'pineHue': [2.4, 3.1, 1.6], 'roads': roads, 'bridges': []}
 json.dump(meta, open(os.path.join(OUT, 'map.json'), 'w'))
 json.dump({'chunkSize': 200.0, 'half': HALF, 'stride': 5, 'types': {}, 'placements': placements, 'features': {}, 'clay': []},
           open(os.path.join(OUT, 'props.json'), 'w'))

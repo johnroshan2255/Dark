@@ -7,11 +7,11 @@ import { chunkKey } from '../types'
 import type { WorldChunk } from '../WorldChunk'
 import { LandmarkKind } from '../Landmarks/landmarks'
 import { WorldFields } from '../WorldFields'
-import { createGrassGeometry } from './grass'
+import { createGrassGeometry, createStrapGrassGeometry } from './grass'
 import { FM_TOP } from '../types'
 /** Patch-corner offsets checked on a rock top (GrassField.fillTile). */
 const EDGE_PROBE = [[0.9, 0.9], [-0.9, 0.9], [0.9, -0.9], [-0.9, -0.9]] as const
-import { isGenshin, isOverland } from '../../rendering/artStyle'
+import { isBright, isGenshin, isOverland } from '../../rendering/artStyle'
 import { farmFieldAt, homeYardAt } from '../POI/pois'
 import { Biome, BIOME_COUNT, type BiomeWeights, type RegionWeights } from '../Biomes'
 import { blendBy } from '../biomes/BiomeDefs'
@@ -108,6 +108,8 @@ interface Layer {
   density: THREE.InstancedBufferAttribute | null
   /** Per patch: terrain height gradient in the patch's own (rotated) frame, ÷ its height scale. */
   slope: THREE.InstancedBufferAttribute | null
+  /** BRIGHT: per patch the grass MASS field (value − threshold, and its gradient in the patch's frame) — massField. */
+  mass: THREE.InstancedBufferAttribute | null
   g: number
   slotTx: Int32Array
   slotTz: Int32Array
@@ -120,6 +122,7 @@ interface Layer {
   cols: Float32Array
   dens: Float32Array
   slopes: Float32Array
+  masses: Float32Array
   /** Per slot: patches with blades, centre height and bounding radius (m) of the tile's blades. */
   live: Uint8Array
   tileY: Float32Array
@@ -171,8 +174,8 @@ export class GrassField {
   ) {
     this.root.name = 'grass-field'
     const layer = (mat: THREE.Material, u: GrassUniforms): Layer => ({
-      mat, u, mesh: null, geometry: null, density: null, slope: null, g: 0, slotTx: new Int32Array(0), slotTz: new Int32Array(0), slotOk: new Uint8Array(0), order: [], key: '',
-      mats: new Float32Array(0), cols: new Float32Array(0), dens: new Float32Array(0), slopes: new Float32Array(0), live: new Uint8Array(0), tileY: new Float32Array(0), tileR: new Float32Array(0), inner: 0, reach: 0, drawn: [], dirty: true,
+      mat, u, mesh: null, geometry: null, density: null, slope: null, mass: null, g: 0, slotTx: new Int32Array(0), slotTz: new Int32Array(0), slotOk: new Uint8Array(0), order: [], key: '',
+      mats: new Float32Array(0), cols: new Float32Array(0), dens: new Float32Array(0), slopes: new Float32Array(0), masses: new Float32Array(0), live: new Uint8Array(0), tileY: new Float32Array(0), tileR: new Float32Array(0), inner: 0, reach: 0, drawn: [], dirty: true,
     })
     this.near = layer(nearMat, nearU)
     this.mid = layer(midMat, midU)
@@ -207,11 +210,17 @@ export class GrassField {
     this.mid.reach = R * 0.5 + 0.18 * R * 0.14
     this.far.inner = R * 0.36 - 0.18 * R * 0.14
     this.far.reach = R + 0.18 * R * 0.26
-    this.setupLayer(this.near, this.near.reach, Math.round(s.density), s.blades, s.tall ?? 1, s.wide ?? 1, s.vary ?? 1, s.lean ?? 1)
+    // (BRIGHT strap clumps, 2026-10-25: HIGH / ULTRA's near ring holds 1.2× the blades — the design's full masses;
+    //  the gaps between masses draw nothing, so the field averages about the old count. MEDIUM / LOW as before.)
+    const nearN = isBright() && s.density >= 30 ? Math.round(s.density * 1.2) : Math.round(s.density)
+    this.setupLayer(this.near, this.near.reach, nearN, s.blades, s.tall ?? 1, s.wide ?? 1, s.vary ?? 1, s.lean ?? 1)
     // (a flat triangle covers ¾ of the curved ribbon's area: 1.35× wider keeps the same coverage)
-    if (curved) this.setupLayer(this.mid, this.mid.reach, Math.round(s.density), 1, s.tall ?? 1, (s.wide ?? 1) * 1.35, s.vary ?? 1, s.lean ?? 1)
+    // (bright: the outer rings' blades wider — 1.7× / 2.8× — so the masses stay full out to the field's edge at the
+    //  same vertex count: a few more pixels per blade, no more blades)
+    const bw = isBright() ? [1.7, 2.8] : [1.35, 1.75]
+    if (curved) this.setupLayer(this.mid, this.mid.reach, Math.round(s.density), 1, s.tall ?? 1, (s.wide ?? 1) * bw[0], s.vary ?? 1, s.lean ?? 1)
     else this.disposeLayer(this.mid)
-    this.setupLayer(this.far, this.far.reach, Math.max(4, Math.round(s.density * 0.32)), 1, s.tall ?? 1, (s.wide ?? 1) * 1.75, s.vary ?? 1, s.lean ?? 1)
+    this.setupLayer(this.far, this.far.reach, Math.max(4, Math.round(s.density * 0.32)), 1, s.tall ?? 1, (s.wide ?? 1) * bw[1], s.vary ?? 1, s.lean ?? 1)
     this.instances = this.layers.reduce((n, L) => n + (L.mesh ? L.mats.length / 16 : 0), 0)
     for (const L of this.layers) L.dirty = true
   }
@@ -223,12 +232,15 @@ export class GrassField {
     this.disposeLayer(L)
     L.key = key
     L.g = g
-    L.geometry = createGrassGeometry(blades, segments, tall, wide, vary, lean, isGenshin() ? 4 : 1, L !== this.far) // Genshin: loose tufts of 4
+    L.geometry = isBright()
+      ? createStrapGrassGeometry(blades, segments, tall, wide, L !== this.far) // (bright: strap blades in clumps)
+      : createGrassGeometry(blades, segments, tall, wide, vary, lean, isGenshin() ? 4 : 1, L !== this.far) // Genshin: loose tufts of 4
     const count = g * g * TILE * TILE // one 1 m² patch per cell
     L.mats = new Float32Array(count * 16)
     L.cols = new Float32Array(count * 3)
     L.dens = new Float32Array(count)
     L.slopes = new Float32Array(count * 2)
+    L.masses = new Float32Array(isBright() ? count * 3 : 0)
     L.live = new Uint8Array(g * g)
     L.tileY = new Float32Array(g * g)
     L.tileR = new Float32Array(g * g)
@@ -238,6 +250,10 @@ export class GrassField {
     L.geometry.setAttribute('iDensity', L.density)
     L.slope = new THREE.InstancedBufferAttribute(new Float32Array(count * 2), 2).setUsage(THREE.DynamicDrawUsage)
     L.geometry.setAttribute('iSlope', L.slope)
+    if (isBright()) {
+      L.mass = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3).setUsage(THREE.DynamicDrawUsage)
+      L.geometry.setAttribute('iMass', L.mass)
+    }
     const mesh = new THREE.InstancedMesh(L.geometry, L.mat, count)
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
     mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3).setUsage(THREE.DynamicDrawUsage)
@@ -360,6 +376,7 @@ export class GrassField {
     const cols = mesh.instanceColor!.array as Float32Array
     const dens = L.density!.array as Float32Array
     const slopes = L.slope!.array as Float32Array
+    const masses = L.mass ? (L.mass.array as Float32Array) : null
     let k = 0
     const reach2 = (L.reach + 0.8) ** 2, inner2 = Math.max(0, L.inner - 0.8) ** 2
     for (const slot of list) {
@@ -367,7 +384,7 @@ export class GrassField {
       if (perPatch) {
         // (inlined sphere-vs-frustum test and element copies: no per-patch allocation — this runs for ~2.5 k patches
         // whenever the view moved: 0.62 → 0.10 ms per frame turning, phone emulation CPU ×4)
-        const sm = L.mats, sc = L.cols, sd = L.dens, ss = L.slopes, P = _planes, r = 1.9 + VIEW_SLACK
+        const sm = L.mats, sc = L.cols, sd = L.dens, ss = L.slopes, sms = L.masses, P = _planes, r = 1.9 + VIEW_SLACK
         for (let i = b; i < b + n; i++) {
           if (sd[i] <= 0) continue
           const o = i * 16
@@ -384,6 +401,7 @@ export class GrassField {
           dens[k] = sd[i]
           slopes[k * 2] = ss[i * 2]
           slopes[k * 2 + 1] = ss[i * 2 + 1]
+          if (masses) (masses[k * 3] = sms[i * 3]), (masses[k * 3 + 1] = sms[i * 3 + 1]), (masses[k * 3 + 2] = sms[i * 3 + 2])
           k++
         }
         continue
@@ -392,6 +410,7 @@ export class GrassField {
       cols.set(L.cols.subarray(b * 3, (b + n) * 3), k * 3)
       dens.set(L.dens.subarray(b, b + n), k)
       slopes.set(L.slopes.subarray(b * 2, (b + n) * 2), k * 2)
+      if (masses) masses.set(L.masses.subarray(b * 3, (b + n) * 3), k * 3)
       k += n
     }
     mesh.count = k
@@ -405,10 +424,19 @@ export class GrassField {
     L.density!.clearUpdateRanges()
     L.density!.addUpdateRange(0, k)
     L.density!.needsUpdate = true
+    if (L.mass) {
+      L.mass.clearUpdateRanges()
+      L.mass.addUpdateRange(0, k * 3)
+      L.mass.needsUpdate = true
+    }
     L.slope!.clearUpdateRanges()
     L.slope!.addUpdateRange(0, k * 2)
     L.slope!.needsUpdate = true
   }
+
+  /** A full MEADOW (the PlayCanvas soft look — Over the Hill's dense soft carpets): a high floor under the trees and at
+   *  least 0.85 of the meadow on a map that thins its grass. Set before the first update (the corners are cached). */
+  meadow = false
 
   /** Meadow density at a CORNER-grid point (cached): open ground dense, deep forest sparse; none on snow, little on sand. */
   private corner(ix: number, iz: number): number {
@@ -421,13 +449,13 @@ export class GrassField {
     // in the autumn valleys, sparse dry tufts on sand, none on snow.
     const bare = Math.max(0, blendBy(this.fields.region(x, z, _wn, h), (d) => d.grass))
     // Genshin: a full carpet even near trees (its meadows never show bare soil between the blades).
-    const floor = isGenshin() ? 0.72 : 0.45
+    const floor = isGenshin() || this.meadow ? 0.72 : 0.45
     v = (floor + (1 - floor) * (1 - this.fields.forestDensity(x, z, h))) * bare
     // Fixed maps: no stray tufts on the open desert / beach sand — the desert's grass grows round its pools
     // (FixedMap.poolRing: refs — grass and sedge ring a desert spring's water).
     const map = this.fields.map
     if (map) {
-      v *= map.grass
+      v *= this.meadow ? Math.max(0.85, map.grass) : map.grass
       const sand = this.fields.biome(x, z, _bw)[0]
       if (sand > 0.01) v = v * (1 - sand) + sand * 0.85 * map.poolRing(x, z)
     }
@@ -489,6 +517,7 @@ export class GrassField {
     const dryBiome = centreBw[0] > 0.5
     const bare = Math.max(0, 1 - centreBw[0] * 0.96 - centreBw[1])
     const seed = this.fields.seed
+    const bright = isBright()
     for (let i = 0; i < n; i++) {
       // Jittered 1 m grid (±0.35 m): patches overlap a little and never line up into rows.
       const fx = (i % TILE) + 0.5 + (hashFloat(seed, tx, tz, i * 4 + 1) - 0.5) * 0.7
@@ -511,6 +540,20 @@ export class GrassField {
           density *= 1 - au * 0.85 * (1 - sstepG(0.42, 0.6, this.fields.colorVariation(wx * 24 + 7, wz * 24 - 3)))
           density *= 1 - Math.min(1, this.fields.autumnSnow(wx, wz, au) * 1.6) // per blade: none on the snow patches
         }
+      }
+      // BRIGHT MASSES (the strap-clump design): the grass grows in ~3 m masses with ground between — the local density
+      // sets how much ground they cover (a sparse map: fewer masses, each still full). A patch wholly in a gap is
+      // never drawn (no vertices at all — the masses' gaps are free); the rest carry the field to the shader.
+      let mv = 0, mgx = 0, mgz = 0
+      if (bright && density >= 0.03) {
+        // (≈ 30 % of a full meadow is gaps, like the design — and those patches cost nothing)
+        const thr = 0.62 - 0.36 * Math.sqrt(Math.min(1, density))
+        const m0 = this.massField(wx, wz)
+        mgx = (this.massField(wx + 0.5, wz) - this.massField(wx - 0.5, wz))
+        mgz = (this.massField(wx, wz + 0.5) - this.massField(wx, wz - 0.5))
+        mv = m0 - thr
+        // (the patch's blades reach ~0.9 m from its centre: skip it only if the mass is off over all of that)
+        if (mv + 0.95 * Math.hypot(mgx, mgz) < 0.02) density = 0
       }
       if (!chunk || road < 0.3 || density < 0.03 || nearBridge(this.fields, wx, wz, 0.3)) { // (no grass through a bridge deck)
         ZERO.toArray(mats, (base + i) * 16)
@@ -588,6 +631,13 @@ export class GrassField {
       const ca = Math.cos(ang), sa = Math.sin(ang)
       slopes[(base + i) * 2] = onRock ? 0 : (gx * ca - gz * sa) / sc
       slopes[(base + i) * 2 + 1] = onRock ? 0 : (gx * sa + gz * ca) / sc
+      if (bright) {
+        // (the mass field in the patch's own rotated frame, like the slope; the shader adds root · gradient)
+        const mo = (base + i) * 3
+        L.masses[mo] = mv
+        L.masses[mo + 1] = mgx * ca - mgz * sa
+        L.masses[mo + 2] = mgx * sa + mgz * ca
+      }
       _s.set(1, sc, 1) // XZ stays 1 so patches keep tiling
       _m.compose(_p, _q, _s).toArray(mats, (base + i) * 16)
       const o = (base + i) * 3
@@ -615,6 +665,21 @@ export class GrassField {
     return ok
   }
 
+  /** The bright grass MASS field at (x, z): two octaves of hashed value noise (~3 m and ~1.1 m), 0..1 — on the CPU
+   *  (deterministic, the same on every device; GPU sin-hashes differ between phones). The shader gets it per patch. */
+  private massField(x: number, z: number): number {
+    return this.valueNoise(x * 0.33 + 7.1, z * 0.33 + 7.1, 811) * 0.7 + this.valueNoise(x * 0.9 + 3.3, z * 0.9 + 3.3, 812) * 0.3
+  }
+
+  private valueNoise(x: number, z: number, salt: number): number {
+    const ix = Math.floor(x), iz = Math.floor(z)
+    let fx = x - ix, fz = z - iz
+    fx = fx * fx * (3 - 2 * fx); fz = fz * fz * (3 - 2 * fz)
+    const s = this.fields.seed
+    const a = hashFloat(s, ix, iz, salt), b = hashFloat(s, ix + 1, iz, salt), c = hashFloat(s, ix, iz + 1, salt), d = hashFloat(s, ix + 1, iz + 1, salt)
+    return a + (b - a) * fx + (c - a) * fz + (a - b - c + d) * fx * fz
+  }
+
   get triangles(): number {
     let t = 0
     for (const L of this.layers) if (L.mesh) t += L.mesh.count * (L.geometry!.getAttribute('position').count / 3)
@@ -631,6 +696,7 @@ export class GrassField {
     L.geometry = null
     L.density = null
     L.slope = null
+    L.mass = null
     L.key = ''
   }
 

@@ -15,6 +15,20 @@ import { vehicleDef } from './catalogue'
  * Cost: 1 draw for the dials (unlit, it glows like a backlit cluster at night) + 1 per control (≤ 6 small meshes on
  * the car's own program), CPU < 0.02 ms; the canvas draw ≈ 0.2 ms when it does redraw.
  */
+/** Car carGlass's per-car wiper uniforms (filled by Cockpit.wipeGlass). */
+export interface WipeGlass {
+  uWPiv: { value: THREE.Vector3[] }
+  uWPark: { value: THREE.Vector3[] }
+  uWAxis: { value: THREE.Vector3 }
+  uWReach: { value: THREE.Vector4 }
+  uWSign: { value: THREE.Vector2 }
+  uWFrac: { value: number }
+  uWRate: { value: number }
+  uWOff: { value: number }
+  uWOn: { value: number }
+  uWPrev: { value: number }
+}
+
 export interface CockpitState {
   kmh: number
   rpm: number
@@ -55,6 +69,12 @@ export class Cockpit {
   private drawn = ''
   private drawT = 0
   private wiperT = 0
+  private wiperRate = 0.5
+  /** Seconds since the blades last stopped (parked); 1e3 = never ran. */
+  private wiperOff = 1e3
+  /** Seconds since this run of the wipers began, and how long the swept band had gone uncleared then. */
+  private wiperOn = 0
+  private wiperPrev = 1e3
   private readonly style: 'twin' | 'single' | 'screen'
 
   constructor(truck: TruckModel, material: THREE.Material, private readonly maxKmh: number, private readonly maxRpm: number, private readonly auto: boolean) {
@@ -100,10 +120,51 @@ export class Cockpit {
     }
   }
 
+  /**
+   * The wipers as the GLASS sees them (Car carGlass: the arc each blade clears, the time since it passed): per blade its
+   * spindle (car space), axis, parked direction and swept band (inner / outer radius, from its own geometry: the blade
+   * is centred on the arm tip, 0.9 of the arm long), the sweep's sign; the shared sweep clock. False: no wipers.
+   */
+  wipeGlass(u: WipeGlass): boolean {
+    const ws = this.controls.filter((c) => c.part.kind.startsWith('wiper'))
+    if (ws.length < 2) return false
+    ws.slice(0, 2).forEach((c, i) => {
+      if (!c.pivot.userData.park) {
+        const p = c.part.geo.getAttribute('position'), v = new THREE.Vector3(), best = new THREE.Vector3()
+        let r = 0
+        for (let k = 0; k < p.count; k++) {
+          v.fromBufferAttribute(p, k)
+          v.addScaledVector(c.axis, -v.dot(c.axis))
+          if (v.length() > r) (r = v.length()), best.copy(v)
+        }
+        c.pivot.userData.park = best.normalize()
+        c.pivot.userData.reach = [r * 0.38, r]
+      }
+      u.uWPiv.value[i].copy(c.pivot.position)
+      u.uWPark.value[i].copy(c.pivot.userData.park)
+      u.uWReach.value.setComponent(i * 2, c.pivot.userData.reach[0]).setComponent(i * 2 + 1, c.pivot.userData.reach[1])
+      u.uWSign.value.setComponent(i, c.sign)
+      if (i === 0) u.uWAxis.value.copy(c.axis)
+    })
+    u.uWFrac.value = this.wiperT % 1
+    u.uWRate.value = this.wiperRate
+    u.uWOff.value = this.wiperOff
+    u.uWOn.value = this.wiperOn
+    u.uWPrev.value = this.wiperPrev
+    return true
+  }
+
   update(dt: number, s: CockpitState): void {
     // (one sweep clock for both wipers: they run in step; a sweep in progress finishes when the rain stops)
     const sweeping = s.wipers > 0.02 || this.wiperT % 1 > 0.02
-    if (sweeping) this.wiperT += dt * (0.45 + 0.55 * s.wipers) * 0.5
+    if (sweeping) {
+      this.wiperRate = (0.45 + 0.55 * Math.max(s.wipers, 0.35)) * 0.5
+      // (a new run: the band was last cleared when the blades parked, half a sweep before they stopped)
+      if (this.wiperOff > 0) (this.wiperPrev = Math.min(1e3, this.wiperOff + 0.5 / this.wiperRate)), (this.wiperOn = 0)
+      this.wiperT += dt * this.wiperRate
+      this.wiperOn += dt
+      this.wiperOff = 0
+    } else this.wiperOff = Math.min(1e3, this.wiperOff + dt)
     const sweep = sweeping ? Math.sin((this.wiperT % 1) * Math.PI) * 1.75 : 0
     for (const c of this.controls) {
       const k = c.part.kind

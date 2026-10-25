@@ -244,6 +244,7 @@ export class MapProps {
     const R = this.physics.R, world = this.physics.world
     for (const b of this.map.bridges) {
       const { geo, tris } = mapBridge(b.xs, b.zs, b.ys, b.hw)
+      geo.setAttribute('aPlain', new THREE.BufferAttribute(new Float32Array(geo.getAttribute('position').count).fill(1), 1)) // planks: no rock surface
       geo.computeBoundingSphere()
       const mesh = new THREE.Mesh(geo, mat)
       mesh.castShadow = mesh.receiveShadow = true

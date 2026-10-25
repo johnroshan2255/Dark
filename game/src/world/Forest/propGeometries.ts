@@ -39,18 +39,19 @@ export interface PropGeometries {
 }
 
 /**
- * BOULDERS — SIX natural rock shapes instead of one stamped stone (every boulder used to be the same chiselled
- * polytope, only turned and scaled — "all the stones look the same"). Each shape is the CONVEX HULL of its own
- * seeded point cloud (a rounded boulder, a flat slab, a leaning wedge, a long ridge rock, a split block with
- * chamfered corners, a low lumpy outcrop): irregular flat facets of every size, like a weathered low-poly rock.
- * The near (`rock`) and far (`rockFar`) meshes MERGE all six, each vertex tagged with its shape (`rockVar`); every
- * instance keeps only its own shape (`rockPick`, per instance; the others collapse to a point in the vertex shader —
- * MaterialLibrary `rockVariants`) → still ONE draw per chunk. Physics uses the same point cloud as the convex hull
- * (`ROCK_HULLS[rockPick(k)]`) → the collider IS the visible rock.
- * Cost: near ≈ 6 × 28–36 tris merged (~1.9× the vertices of the old 80-tri stone per instance; the other shapes'
- * triangles are zero-area — never rasterised), far ≈ 6 × 10–16 tris.
+ * BOULDERS — natural rock shapes instead of one stamped stone ("all the stones look the same"). Each shape is the
+ * CONVEX HULL of its own seeded point cloud. The near (`rock`) and far (`rockFar`) meshes MERGE all the shapes, each
+ * vertex tagged with its shape (`rockVar`); every instance keeps only its own (`rockPick`; the others collapse to a
+ * point in the vertex shader — MaterialLibrary `rockVariants`) → ONE draw per chunk. Physics uses the same point
+ * cloud as the convex hull (`ROCK_HULLS[rockPick(k)]`) → the collider IS the visible rock.
+ * (2026-10-25, the user: "the rocks are so sharp — we need smooth shapes", on phones at no extra cost: THREE rounded
+ * shapes — boulder, slab, low outcrop — instead of six (the brick-like split block, the wedge and the long ridge
+ * read as chiselled blocks). Every instance runs all the merged shapes' vertices, so half the shapes buys each one
+ * twice the facets for the same work: ~28 points spread evenly over the visible dome (none wasted under the buried
+ * base), their radius swelling in smooth low lumps (no per-point spikes) → a round, softly lumpy stone.)
+ * Cost: near ≈ 3 × ~60 tris merged (≈ the old 6 × ~32), far ≈ 3 × ~28 (≈ the old 6 × ~16).
  */
-export const ROCK_VARIANTS = 6
+export const ROCK_VARIANTS = 3
 
 /** The rock shape of instance k of a chunk's rock records (the renderer and the physics agree on it). */
 export function rockPick(k: number): number {
@@ -68,20 +69,17 @@ function hash01(k: number, salt: number): number {
 interface RockShape {
   /** Semi-axes (x, y, z) of the cloud (unit rock ≈ 1 m radius, height ≤ ~0.95 so a rock never towers). */
   a: [number, number, number]
-  /** Cloud points (0: the chamfered-box block). */
+  /** Cloud points over the dome (near; the far mesh takes ~45 %). */
   n: number
-  /** Radial jitter (± fraction). */
+  /** Lump depth: the radius swells / dips by up to ± this fraction, smoothly over the stone. */
   j: number
   /** Top slope: y += tilt · x above the base (a leaning / sloped top). */
   tilt: number
 }
 const ROCK_SHAPES: RockShape[] = [
-  { a: [1.15, 0.78, 1.0], n: 18, j: 0.14, tilt: 0 }, // rounded boulder
-  { a: [1.3, 0.42, 1.05], n: 16, j: 0.1, tilt: 0.12 }, // flat slab
-  { a: [0.78, 0.82, 0.85], n: 14, j: 0.08, tilt: 0.32 }, // leaning wedge
-  { a: [1.55, 0.58, 0.68], n: 16, j: 0.12, tilt: 0.1 }, // long ridge rock
-  { a: [0.98, 0.72, 0.92], n: 0, j: 0.1, tilt: 0.06 }, // split block (chamfered box)
-  { a: [1.2, 0.52, 1.15], n: 20, j: 0.2, tilt: 0.22 }, // low lumpy outcrop
+  { a: [1.15, 0.8, 1.0], n: 28, j: 0.1, tilt: 0 }, // rounded boulder
+  { a: [1.3, 0.46, 1.05], n: 28, j: 0.08, tilt: 0.1 }, // flat slab
+  { a: [1.2, 0.56, 1.1], n: 28, j: 0.14, tilt: 0.18 }, // low lumpy outcrop
 ]
 
 /** The point cloud of shape v (unit rock, base at y = −0.25 — buried; +0.2 lift applied by the callers). `far`: a
@@ -95,31 +93,22 @@ function rockCloud(v: number, far: boolean): THREE.Vector3[] {
     if (y > -0.25) y += S.tilt * x // sloped top
     pts.push(new THREE.Vector3(x, Math.max(-0.25, y), z))
   }
-  if (S.n === 0) {
-    // Block: the 8 corners of a box, each cut by a chamfer (3 points pulled in along its edges), jittered.
-    for (let c = 0; c < 8; c++) {
-      const sx = c & 1 ? 1 : -1, sy = c & 2 ? 1 : -1, sz = c & 4 ? 1 : -1
-      const k = (1 + (rnd() - 0.5) * 2 * S.j)
-      const x = sx * S.a[0] * k, y = sy * S.a[1] * k, z = sz * S.a[2] * k
-      if (far) { put(x * 0.92, y * 0.92, z * 0.92); continue }
-      const ch = 0.18 + 0.2 * rnd()
-      put(x * (1 - ch), y, z); put(x, y * (1 - ch * 1.4), z); put(x, y, z * (1 - ch))
-    }
-  } else {
-    const n = far ? Math.ceil(S.n * 0.5) : S.n
-    for (let i = 0; i < n; i++) {
-      // A random direction (normal-ish from 3 uniforms), stretched to the ellipsoid, jittered radially.
-      let dx = rnd() * 2 - 1, dy = rnd() * 2 - 1, dz = rnd() * 2 - 1
-      const l = Math.hypot(dx, dy, dz) || 1
-      dx /= l; dy /= l; dz /= l
-      const k = 1 + (rnd() - 0.5) * 2 * S.j
-      put(dx * S.a[0] * k, dy * S.a[1] * k, dz * S.a[2] * k)
-    }
-    // A ring at the base so the rock always sits on a broad footprint (no balanced spinning tops).
-    for (let i = 0; i < (far ? 4 : 6); i++) {
-      const t = (i / (far ? 4 : 6)) * Math.PI * 2 + rnd() * 0.6
-      put(Math.cos(t) * S.a[0] * (0.8 + 0.15 * rnd()), -0.25, Math.sin(t) * S.a[2] * (0.8 + 0.15 * rnd()))
-    }
+  const n = far ? Math.round(S.n * 0.45) : S.n
+  // EVENLY spread directions over the dome above the base (a jittered Fibonacci cap, y from the top down to just
+  // below the base plane), the radius swelling in smooth lumps (three low sine waves over the direction)
+  const ph0 = rnd() * 6.283, p1 = rnd() * 6.283, p2 = rnd() * 6.283, p3 = rnd() * 6.283
+  const yLow = -0.25 / S.a[1] - 0.1
+  for (let i = 0; i < n; i++) {
+    const fy = 1 - ((1 - yLow) * (i + 0.5)) / n, fr = Math.sqrt(Math.max(0, 1 - fy * fy)), fa = ph0 + i * 2.3999632
+    const dx = Math.cos(fa) * fr, dy = fy, dz = Math.sin(fa) * fr
+    const k = 1 + S.j * (Math.sin(dx * 2.3 + p1) * Math.sin(dz * 2.9 + p2) + 0.5 * Math.sin(dy * 3.1 + p3))
+    put(dx * S.a[0] * k, dy * S.a[1] * k, dz * S.a[2] * k)
+  }
+  // A ring at the base so the rock always sits on a broad footprint (no balanced spinning tops).
+  const nb = far ? 5 : 8
+  for (let i = 0; i < nb; i++) {
+    const t = (i / nb) * Math.PI * 2 + rnd() * 0.3
+    put(Math.cos(t) * S.a[0] * (0.86 + 0.08 * rnd()), -0.25, Math.sin(t) * S.a[2] * (0.86 + 0.08 * rnd()))
   }
   return pts
 }
@@ -141,14 +130,25 @@ function makeRock(far: boolean): THREE.BufferGeometry {
   for (let v = 0; v < ROCK_VARIANTS; v++) {
     const g = new ConvexGeometry(rockCloud(v, far))
     const gp = g.getAttribute('position'), gn = g.getAttribute('normal')
-    // Per-facet tone (±6 %): each plane of the rock its own shade, like broken stone.
+    // SMOOTH shading (2026-10-24, every style): each corner's normal is the area-weighted average of the facets meeting
+    // there, bent a little toward the centre — a rounded weathered stone, no flat triangles; the grain, cracks and relief
+    // come from the material's rock surface (stylize rockDetail). One tone (no per-facet shade: it drew the triangles).
+    const acc = new Map<string, THREE.Vector3>(), key = (q: THREE.Vector3) => `${q.x.toFixed(4)},${q.y.toFixed(4)},${q.z.toFixed(4)}`
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), fn = new THREE.Vector3()
+    for (let i = 0; i < gp.count; i += 3) {
+      a.fromBufferAttribute(gp, i); b.fromBufferAttribute(gp, i + 1); c.fromBufferAttribute(gp, i + 2)
+      fn.subVectors(c, b).cross(a.clone().sub(b)) // (length = 2 × area: area-weighted)
+      if (fn.dot(c.set(gn.getX(i), gn.getY(i), gn.getZ(i))) < 0) fn.negate() // (outward, as the hull's own normal)
+      c.fromBufferAttribute(gp, i + 2)
+      for (const q of [a, b, c]) {
+        const k = key(q)
+        acc.set(k, (acc.get(k) ?? new THREE.Vector3()).add(fn))
+      }
+    }
     for (let i = 0; i < gp.count; i++) {
       p.fromBufferAttribute(gp, i)
-      // Facets read, softened toward the centre so the edges don't sparkle.
-      n.fromBufferAttribute(gn, i).multiplyScalar(over ? 0.35 : 0.62).add(p.clone().setY(p.y - 0.1).normalize().multiplyScalar(over ? 0.65 : 0.38)).normalize()
-      const face = Math.floor(i / 3)
-      const f = 0.94 + 0.12 * hash01(v * 97 + face, 41)
-      tmp.copy(body).lerp(top, THREE.MathUtils.smoothstep(p.y, -0.2, 0.5)).multiplyScalar(f)
+      n.copy(acc.get(key(p))!).normalize().multiplyScalar(0.8).add(p.clone().setY(p.y - 0.1).normalize().multiplyScalar(0.2)).normalize()
+      tmp.copy(body).lerp(top, THREE.MathUtils.smoothstep(p.y, -0.2, 0.5))
       pos.push(p.x, p.y + 0.2, p.z)
       nor.push(n.x, n.y, n.z)
       col.push(tmp.r, tmp.g, tmp.b)
@@ -166,11 +166,11 @@ function makeRock(far: boolean): THREE.BufferGeometry {
   return g
 }
 
-export function createPropGeometries(opts: { tieredPines?: boolean; leaves?: LeafColours } = {}): PropGeometries {
-  const lib = createTreeLibrary({ tiered: opts.tieredPines, leaves: opts.leaves })
+export function createPropGeometries(opts: { tieredPines?: boolean; leaves?: LeafColours; autumnPines?: boolean; softBush?: boolean } = {}): PropGeometries {
+  const lib = createTreeLibrary({ tiered: opts.tieredPines, leaves: opts.leaves, autumn: opts.autumnPines, aspen: opts.softBush })
   const rock = makeRock(false)
   const rockFar = makeRock(true)
-  const { fern, bush } = createUndergrowth()
+  const { fern, bush } = createUndergrowth(opts.softBush)
   const { agave, shrub } = createDesertUndergrowth()
   const { leafPile, glowShroom } = createRegionUndergrowth()
   const pole = createPoleGeometry()

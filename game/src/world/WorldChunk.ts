@@ -27,16 +27,16 @@ const _bw: BiomeWeights = [0, 0]
  * Biome instance tints (linear multipliers): cold dark blue-green conifers under the snow (the snow itself is
  * painted by the material's biome cover), sun-dried desert foliage, sandstone.
  */
-const FROST_TREE = [0.55, 0.72, 0.85] as const
-const DRY_TREE = [1.2, 1.0, 0.62] as const
-const SNOW_ROCK = [1.6, 1.65, 1.85] as const
-const SAND_ROCK = [1.45, 1.2, 0.85] as const
+export const FROST_TREE = [0.55, 0.72, 0.85] as const
+export const DRY_TREE = [1.2, 1.0, 0.62] as const
+export const SNOW_ROCK = [1.6, 1.65, 1.85] as const
+export const SAND_ROCK = [1.45, 1.2, 0.85] as const
 /** Bright: red sandstone boulders (the shader's desert re-tint is off in bright; the tint does it here). */
-const SAND_ROCK_OTH = [2.0, 1.05, 0.62] as const
-const NO_TINT = [1, 1, 1] as const
+export const SAND_ROCK_OTH = [2.0, 1.05, 0.62] as const
+export const NO_TINT = [1, 1, 1] as const
 /** propGeometries makeRock's body colour (sRGB 0x857d74), linear: a map's `stone` tint divides by it. */
-const ROCK_BODY = [0.235, 0.205, 0.175] as const
-function biomeTint(fields: WorldFields, origin: readonly [number, number], data: Float32Array, o: number, snowT: readonly number[], sandT: readonly number[], out: [number, number, number]): void {
+export const ROCK_BODY = [0.235, 0.205, 0.175] as const
+export function biomeTint(fields: WorldFields, origin: readonly [number, number], data: Float32Array, o: number, snowT: readonly number[], sandT: readonly number[], out: [number, number, number]): void {
   const w = fields.biome(origin[0] + data[o], origin[1] + data[o + 2], _bw, data[o + 1])
   const s = w[0], n = w[1]
   out[0] = 1 + (sandT[0] - 1) * s + (snowT[0] - 1) * n
@@ -123,11 +123,16 @@ for (const set of [OVER_HUES, GENSHIN_HUES, GEN_HUES]) {
   set[TreeSpecies.Oak] = [G_FRESH, G_FRESH, G_LIGHT]
   set[TreeSpecies.Curvy] = [G_FRESH, G_LIGHT, G_FRESH, G_YELLOW]
   set[TreeSpecies.Golden] = G_GOLD
+  // the Tree It set (treeit_set.py): Genshin greens painted in their vertex colours — gentle variation only
+  set[TreeSpecies.Beech] = [G_FRESH, G_LIGHT, G_FRESH, [0.96, 1.0, 0.96]]
+  set[TreeSpecies.Elm] = [[1, 1, 1], [0.94, 0.98, 0.95], G_FRESH]
+  set[TreeSpecies.Bamboo] = [[1, 1, 1], [1.06, 1.06, 0.94], [0.94, 0.98, 0.96]]
+  set[TreeSpecies.Acacia] = [[1, 1, 1], [1.05, 1.02, 0.92], [0.95, 0.97, 0.95]]
 }
 const _wn: RegionWeights = new Float32Array(BIOME_COUNT)
 /** Autumn colours on SHARED species (birch / pine) growing in the autumn valleys, faded in with the autumn weight —
  *  the green → yellow → autumn transition of the border (BiomeDefs.sharedHues). Per tree, deterministic. */
-function regionLeafTint(fields: WorldFields, x: number, z: number, h: number, out: [number, number, number]): void {
+export function regionLeafTint(fields: WorldFields, x: number, z: number, h: number, out: [number, number, number]): void {
   const w = fields.region(x, z, _wn, h)
   for (const b of [Biome.Autumn, Biome.Mystic]) {
     const k = w[b], hues = BIOMES[b].sharedHues
@@ -147,9 +152,29 @@ const tieredMap = (fields: WorldFields, id: number) => !!fields.map?.conifers &&
 // Zhangjiajie (map.json trees: 'liyue'): every crown pulled to the deep jade / emerald of the photos (the bright
 // broadleaves' lime and gold read as autumn there), a little variety stand to stand
 const JADE_HUES = [[0.52, 0.74, 0.6], [0.46, 0.68, 0.58], [0.6, 0.8, 0.58], [0.5, 0.66, 0.5]] as const
-const huesOf = (sp: SpeciesDef, fields: WorldFields) => fields.map?.liyue ? JADE_HUES : tieredMap(fields, sp.id) ? TIERED_HUES : (sp.modelled ? GEN_HUES : hueSet())[sp.id] ?? hueSet()[0]
-const farConiferHues = (sp?: SpeciesDef) =>
-  sp?.modelled ? ([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) :
+// A map's own conifer colour (map.json pineHue): the Tree It spruce's natural greens scaled into its theme
+const PINE_HUES = new WeakMap<readonly number[], (readonly [number, number, number])[]>()
+const naturalHues = (fields: WorldFields) => {
+  const k = fields.map?.pineHue
+  if (!k) return TIERED_HUES
+  let h = PINE_HUES.get(k)
+  if (!h) PINE_HUES.set(k, (h = TIERED_HUES.map((c) => [c[0] * k[0], c[1] * k[1], c[2] * k[2]] as const)))
+  return h
+}
+// GOLDEN LARCHES (the PlayCanvas soft look on an autumn-pine map — Over the Hill's all-gold conifers): one tree in five
+// wears a gold that the soft frond shader turns the WHOLE crown into (it recolours by brightness: r > g marks gold)
+const GOLD_HUE = [1.25, 1.0, 0.6] as const
+const GOLD_HUES = new WeakMap<readonly (readonly [number, number, number])[], (readonly [number, number, number])[]>()
+const withGold = (h: readonly (readonly [number, number, number])[]) => {
+  let g = GOLD_HUES.get(h)
+  if (!g) GOLD_HUES.set(h, (g = [...h, GOLD_HUE]))
+  return g
+}
+/** @param gold the soft look's golden larches among the natural conifers (PcChunk, autumn-pine maps) */
+export const huesOf = (sp: SpeciesDef, fields: WorldFields, gold = false) => fields.map?.liyue ? JADE_HUES : sp.natural ? (gold ? withGold(naturalHues(fields)) : naturalHues(fields)) : tieredMap(fields, sp.id) ? TIERED_HUES : (sp.modelled ? GEN_HUES : hueSet())[sp.id] ?? hueSet()[0]
+export const farConiferHues = (sp: SpeciesDef | undefined, fields: WorldFields) =>
+  sp?.natural ? naturalHues(fields) :
+  sp?.modelled ?([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) :
   isOverland() ? ([OVER_GREEN, OVER_DEEP, OVER_GREEN, OVER_LARCH] as const) : isGenshin() ? ([G_TEAL, G_DEEP, G_TEAL, G_FRESH] as const) : ([TEAL, DEEP, FRESH, BRIGHT, LIME, ORANGE] as const)
 
 /**
@@ -157,7 +182,7 @@ const farConiferHues = (sp?: SpeciesDef) =>
  * chunk's world corner) — exactly what the chunk's per-species meshes draw (same hues, tints, shape spread), so
  * an impostor stands where its mesh tree stood and wears its colours. Shared with the far forest.
  */
-export function speciesTreeAttrs(trees: Float32Array, origin: readonly [number, number], fields: WorldFields, species: readonly SpeciesDef[]): { sp: SpeciesDef; attrs: InstanceAttributes }[] {
+export function speciesTreeAttrs(trees: Float32Array, origin: readonly [number, number], fields: WorldFields, species: readonly SpeciesDef[], gold = false): { sp: SpeciesDef; attrs: InstanceAttributes }[] {
   const tint = (o: number, out: [number, number, number]) => {
     const sp = trees[o + 5]
     biomeTint(fields, origin, trees, o, FROST_TREE, sp >= TreeSpecies.Cactus ? NO_TINT : DRY_TREE, out)
@@ -168,7 +193,7 @@ export function speciesTreeAttrs(trees: Float32Array, origin: readonly [number, 
     // Genshin broadleaves: more per-tree shape variety (width / height / lean) — with their lopsided crowns and random
     // rotation, neighbouring trees of one species read as different silhouettes (no extra geometry or draws).
     const spreadSp = isGenshin() && (isBroadleaf(sp.id) || sp.id === TreeSpecies.Maple || sp.id === TreeSpecies.Ancient)
-    const attrs = buildInstanceAttributes(trees, TREE_STRIDE, (o) => trees[o + 5] === sp.id, 0.16, spreadSp ? 0.34 : 0.22, huesOf(sp, fields), origin, tint)
+    const attrs = buildInstanceAttributes(trees, TREE_STRIDE, (o) => trees[o + 5] === sp.id, 0.16, spreadSp ? 0.34 : 0.22, huesOf(sp, fields, gold), origin, tint)
     if (attrs) out.push({ sp, attrs })
   }
   return out
@@ -179,6 +204,8 @@ let _quad: THREE.BufferGeometry | null = null
  * One impostor InstancedMesh for all the given species' trees (atlas slot = the species' index in the library,
  * per instance) — 1 draw. Matrices are re-based by `offset` (far-forest blocks merge several chunks).
  */
+/** Impostor brightness of the natural (Tree It) conifers relative to their mesh (matched by eye at the crossfade, Highlands). */
+const NATURAL_IMPOSTOR_GAIN = 1.85
 export function createImpostorMesh(list: { sp: SpeciesDef; attrs: InstanceAttributes; offset?: [number, number] }[], library: readonly SpeciesDef[], material: THREE.Material): THREE.InstancedMesh | null {
   let count = 0
   for (const l of list) count += l.attrs.count
@@ -188,6 +215,9 @@ export function createImpostorMesh(list: { sp: SpeciesDef; attrs: InstanceAttrib
   for (const { sp, attrs, offset } of list) {
     mat.set(attrs.matrix.array as Float32Array, n * 16)
     col.set(attrs.color.array as Float32Array, n * 3)
+    // The Tree It conifers' impostors match their meshes: the card is plain Lambert on one crown normal, the mesh the
+    // foliage light (wrapped, backlit) on cone normals over dark inner sprays — the cards read ~half as bright
+    if (sp.natural) for (let k = n * 3; k < (n + attrs.count) * 3; k++) col[k] *= NATURAL_IMPOSTOR_GAIN
     slot.fill(library.indexOf(sp), n, n + attrs.count)
     if (offset) for (let k = n; k < n + attrs.count; k++) (mat[k * 16 + 12] += offset[0]), (mat[k * 16 + 14] += offset[1])
     n += attrs.count
@@ -224,6 +254,8 @@ export interface ChunkDetail {
   farRocks: boolean
   /** LOW: only trees + near terrain cast (rocks and LOD2 terrain don't) — shadow-pass draw budget. */
   lean: boolean
+  /** Trees cast into the sun shadow map (false: the map's IMAGE tree shadows stand in — map.json imageTreeShadows). */
+  treeCast: boolean
 }
 
 interface SpeciesMeshes {
@@ -295,7 +327,7 @@ export class WorldChunk implements Cullable, TerrainSource {
   private formation: THREE.Mesh | null = null
   /** Place objects (houses, barns, crops, tents…), one InstancedMesh per type present. */
   private places: { mesh: THREE.Mesh; small: boolean }[] = []
-  private detail: ChunkDetail = { plants: true, treeNear: 0, farRocks: true, lean: false }
+  private detail: ChunkDetail = { plants: true, treeNear: 0, farRocks: true, lean: false, treeCast: true }
   /** Smashed prop records (gameplay/destruction) and the pole / fence instance slot of each record. */
   private readonly broken = new Set<number>()
   private readonly propSlot = new Map<number, { attr: THREE.InstancedBufferAttribute; k: number }>()
@@ -345,6 +377,9 @@ export class WorldChunk implements Cullable, TerrainSource {
       g.setAttribute('normal', new THREE.BufferAttribute(data.fmNor, 3))
       g.setAttribute('color', new THREE.BufferAttribute(data.fmCol, 3))
       g.setIndex(new THREE.BufferAttribute(data.fmIdx, 1))
+      // the bridges' and camps' vertices (appended after the rock) skip the rock surface
+      const nv = data.fmPos.length / 3
+      if (data.fmPlain < nv) g.setAttribute('aPlain', new THREE.BufferAttribute(new Float32Array(nv).fill(1, data.fmPlain), 1))
       g.computeBoundingSphere()
       this.formation = this.add(new THREE.Mesh(g, mats.cliffRock))
       this.formation.name = 'formation'
@@ -384,9 +419,9 @@ export class WorldChunk implements Cullable, TerrainSource {
     // desert chunk has no conifers or birches, so its far draws stay at ≤ 2 like a forest chunk's.
     const farSets = [[conifer, spruce], [only(TreeSpecies.Birch), birch], [only(TreeSpecies.Cactus), byId(TreeSpecies.Cactus)], [only(TreeSpecies.Joshua), byId(TreeSpecies.Joshua)], [only(TreeSpecies.Palm), byId(TreeSpecies.Palm)], [only(TreeSpecies.WhiteBirch), byId(TreeSpecies.WhiteBirch)],
       [only(TreeSpecies.Maple), byId(TreeSpecies.Maple)], [only(TreeSpecies.Ancient), byId(TreeSpecies.Ancient)], [only(TreeSpecies.Shroom), byId(TreeSpecies.Shroom)],
-      ...[TreeSpecies.Oak, TreeSpecies.Slender, TreeSpecies.Golden, TreeSpecies.Curvy].map((id) => [only(id), byId(id)] as const)] as const
+      ...[TreeSpecies.Oak, TreeSpecies.Slender, TreeSpecies.Golden, TreeSpecies.Curvy, TreeSpecies.Beech, TreeSpecies.Elm, TreeSpecies.Juniper, TreeSpecies.Bamboo, TreeSpecies.Acacia].map((id) => [only(id), byId(id)] as const)] as const
     for (const [filter, sp] of farSets) {
-      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === spruce.id && !fields.map?.conifers ? farConiferHues(spruce) : huesOf(sp, fields), this.origin, treeTint)
+      const attrs = buildInstanceAttributes(t, TREE_STRIDE, filter, 0.16, 0.22, sp.id === spruce.id && !fields.map?.conifers ? farConiferHues(spruce, fields) : huesOf(sp, fields), this.origin, treeTint)
       if (!attrs) continue
       this.far.push({
         lod1: this.add(createInstancedMesh(sp.levels[1], mats.vegetation, attrs, `far.${sp.name}.lod1`)),
@@ -395,9 +430,9 @@ export class WorldChunk implements Cullable, TerrainSource {
     }
     const rockAttrs = buildInstanceAttributes(data.rocks, PROP_STRIDE, undefined, 0.12, 0, undefined, this.origin, rockTint)
     if (rockAttrs) {
-      // Each boulder is one of six shapes (propGeometries ROCK_VARIANTS, the physics hull agrees): a per-chunk
+      // Each boulder is one of the boulder shapes (propGeometries ROCK_VARIANTS, the physics hull agrees): a per-chunk
       // geometry SHARING the merged shape buffers + this chunk's per-instance pick; the shadow pass needs the same
-      // pick (mats.rockDepth), or every stone would cast all six shapes.
+      // pick (mats.rockDepth), or every stone would cast every shape.
       const picks = new Float32Array(rockAttrs.count)
       for (let k = 0; k < picks.length; k++) picks[k] = rockPick(k)
       const pick = new THREE.InstancedBufferAttribute(picks, 1)
@@ -538,7 +573,7 @@ export class WorldChunk implements Cullable, TerrainSource {
   /** @param detail tier switches — applied together with LOD. */
   setLod(lod: number, detail: ChunkDetail = this.detail): void {
     const d = this.detail
-    if (lod === this.lod && detail.plants === d.plants && detail.treeNear === d.treeNear && detail.farRocks === d.farRocks && detail.lean === d.lean) return
+    if (lod === this.lod && detail.plants === d.plants && detail.treeNear === d.treeNear && detail.farRocks === d.farRocks && detail.lean === d.lean && detail.treeCast === d.treeCast) return
     this.lod = lod
     this.detail = { ...detail }
     // SHORE CHUNKS keep the full-detail terrain at every LOD: the water is one flat plane, so a coarser bed mesh
@@ -657,7 +692,7 @@ export class WorldChunk implements Cullable, TerrainSource {
       const skip = detail.lean && id === TreeSpecies.Dead // LOW: rare snags cost a draw per chunk → hidden
       m.levels.forEach((mesh, l) => {
         mesh.visible = near && l === detail.treeNear && !skip
-        mesh.castShadow = mesh.visible
+        mesh.castShadow = mesh.visible && detail.treeCast
       })
     }
     const mid = b ? b.mid : lod === 1
@@ -669,7 +704,7 @@ export class WorldChunk implements Cullable, TerrainSource {
       f.lod2.visible = !b && lod === 2
       // LOD1 trees can sit inside the shadow box on LOW/MEDIUM (small LOD0 ring): let them cast so tree
       // shadows don't stop at a chunk border. The shadow frustum culls the far ones.
-      f.lod1.castShadow = mid
+      f.lod1.castShadow = mid && detail.treeCast
     }
     if (this.impostors) {
       if (this.impostorBatch) this.impostorBatch.setVisible(this.key, !!b && b.imp)
@@ -747,7 +782,7 @@ function disposeRockGeometry(g: THREE.BufferGeometry): void {
 const _bm = new THREE.Matrix4()
 const _bc = new THREE.Color()
 /** One instance of `geo` with its matrix and tint applied to the vertices (for static merging). */
-function bakeInstance(geo: THREE.BufferGeometry, a: InstanceAttributes, k: number): THREE.BufferGeometry {
+export function bakeInstance(geo: THREE.BufferGeometry, a: InstanceAttributes, k: number): THREE.BufferGeometry {
   const g = geo.clone()
   _bm.fromArray(a.matrix.array as Float32Array, k * 16)
   g.applyMatrix4(_bm)

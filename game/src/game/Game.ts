@@ -15,7 +15,7 @@ import { PerformanceMonitor } from '../debug/PerformanceMonitor'
 import { PhysicsDebug } from '../debug/PhysicsDebug'
 import { AudioSystem } from '../audio/AudioSystem'
 import { Bike } from '../gameplay/bmx/Bike'
-import { Car } from '../gameplay/vehicle/Car'
+import { Car, glassWeather } from '../gameplay/vehicle/Car'
 import { arcadeTopSpeed } from '../gameplay/vehicle/VehicleSim'
 import { LightBeam } from '../gameplay/flashlight/LightBeam'
 import { MonsterSystem } from '../gameplay/monsters/MonsterSystem'
@@ -286,6 +286,7 @@ export class Game {
       flying: false,
       boat: false,
       lights: false,
+      wipers: false,
       landing: opts.play !== true,
       screen: 'menu',
       worldReady: false,
@@ -493,6 +494,10 @@ export class Game {
       // On foot / bike: the torch. In the truck: the headlights (the torch stays as it was).
       if (this.car.driving) s.set({ lights: (this.car.lights = !this.car.lights) })
       else s.set({ flashlight: this.lighting.toggleFlashlight() })
+    })
+    // J: the windscreen WIPERS on / off — only from the driver's seat (they park when you get out)
+    i.onPress('KeyJ', () => {
+      if (this.car.driving) s.set({ wipers: (this.car.wiperOn = !this.car.wiperOn) })
     })
     i.onPress('KeyE', () => {
       // A cave chest in reach (on foot) opens first: full heal + a treasure.
@@ -703,7 +708,8 @@ export class Game {
     this.world.setQuality(q)
     this.syncImpostors()
     this.lighting.setQuality(q)
-    this.treeShadows.enabled = q.imageShadows
+    // (a map whose trees shade with images on every tier: map.json imageTreeShadows — they never cast into the sun map)
+    this.treeShadows.enabled = q.imageShadows || (!!this.map?.imageTreeShadows && q.features.shadows !== 'off')
     this.monsters.budget = q.monsters
     this.applyCasters()
     this.car.tyreShear = q.name === 'high' || q.name === 'ultra' // tread shear in corners (a few ALU per tyre vertex)
@@ -1055,7 +1061,9 @@ export class Game {
         name: 'car',
         update: (dt) => {
           this.car.showDriver = this.cameraCtl.mode === 'tpp'
-          this.car.wipers = Math.min(1, this.weather.rain * 1.6) // (wipers sweep with the rain)
+          // (the driver's switch: J — faster in heavy rain or snow; parked when off or out of the car)
+          if (!this.car.driving && this.car.wiperOn) this.store.set({ wipers: (this.car.wiperOn = false) })
+          this.car.wipers = this.car.wiperOn ? Math.max(0.35, Math.min(1, (this.weather.rain + glassWeather.uSnowG.value) * 1.4)) : 0
           if (this.wreckClock > 0 && (this.wreckClock -= dt) <= 0) this.respawnCar()
           this.car.update(dt, this.physics.alpha, this.cameraCtl.flashOrigin, this.cameraCtl.flashTarget)
           this.tow.update() // (after the cars are posed: the ropes run between their hooks)
@@ -1181,7 +1189,15 @@ export class Game {
           const allP = precip + leafAmt + sporeAmt
           this.rain.update(time, cam.position, Math.min(1, allP), this.rainBudget, globalUniforms.uWind.value, this.fxLight.copy(tp.hemiSky).multiplyScalar(0.9), this.renderer?.domElement.height ?? 800,
             allP > 0 ? snowFall / allP : 0, allP > 0 ? leafAmt / allP : 0, allP > 0 ? sporeAmt / allP : 0)
-          this.drift.update(time, cam.position, p.renderPosition.y, 0, bw[1] * (1 - region[0]), this.weather.wind, this.quality.fx.drift, globalUniforms.uWind.value, this.fxLight, this.renderer?.domElement.height ?? 800)
+          // Rain / snow on the car glass (Car carGlass: beads, running drops, flecks, the wipers) — none in a cave
+          glassWeather.uRainG.value = this.weather.rain * (1 - bw[0]) * (1 - bw[1]) * (1 - this.caves.inside)
+          glassWeather.uSnowG.value = Math.min(1, snowFall) * (1 - this.caves.inside)
+          glassWeather.uTimeG.value = time
+          glassWeather.uSpeedG.value = this.car.driving ? Math.abs(this.car.sim.speed) : 0
+          glassWeather.uLightG.value.copy(this.fxLight)
+          // (no snow powder either, 2026-10-24: "remove the white things — natural snowfall is there"; its streaks
+          //  skimming the road read as white litter beside the RainParticles snowfall)
+          this.drift.update(time, cam.position, p.renderPosition.y, 0, 0, this.weather.wind, this.quality.fx.drift, globalUniforms.uWind.value, this.fxLight, this.renderer?.domElement.height ?? 800)
           // Heat shimmer over distant desert ground on a sunny day (grading pass).
           this.post.material.uniforms.uHeat.value = (this.quality.fx.heat ? 1 : 0) * region[0] * this.lighting.keyStrength * Math.max(0, this.tod.sunDir.y) * (1 - this.weather.cloud) * (1 - darkness)
           this.fog.color.copy(tp.fogColor)

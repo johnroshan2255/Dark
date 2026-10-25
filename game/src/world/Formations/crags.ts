@@ -25,9 +25,11 @@ const MAIN_DITCH_OUT = MAIN_DITCH_IN + MAIN_DITCH_W
  * Two passes: MASSES (16 m cells, 16–26 m wide, nearly every steep cell) overlap into continuous rock walls; BLOCKS
  * (8 m cells, 5–11 m, a quarter of the cells) break them up. Salts are per pass (cell coords repeat between passes).
  */
+// (2026-10-24, the user: "not a lot of rocks — use the actual terrain": a tor on ~1 steep cell in 4, not on nearly every
+//  one — the hills' own eroded cliffs (terrain shader surfCliff) carry the slopes, outcrops stand out here and there)
 const PASSES = [
-  { cell: 16, ws: 8, wsVar: 5, wd: 5, wdVar: 3.5, keep: 1, base: 0.85, salt: 0 },
-  { cell: 8, ws: 2.6, wsVar: 3, wd: 2.2, wdVar: 2.4, keep: 0.25, base: 0.25, salt: 64 },
+  { cell: 16, ws: 8, wsVar: 5, wd: 5, wdVar: 3.5, keep: 0.32, base: 0.35, salt: 0 },
+  { cell: 8, ws: 2.6, wsVar: 3, wd: 2.2, wdVar: 2.4, keep: 0.08, base: 0.25, salt: 64 },
 ] as const
 /**
  * GENSHIN (palette 2): broad, smooth SLABS — Genshin's cliffs are a few big rounded rock masses with grassy tops, not
@@ -272,7 +274,7 @@ function addCrag(
   // the flat face normal with the vertex's radial (or up) direction → readable planes, but soft painted shading
   // instead of hard toy facets.
   // Facet share of the shading normal: Genshin's rock reads as soft rounded slabs (more radial), else planes.
-  const faceK = fields.palette === 2 ? 0.0 : 0.55 // Genshin: fully rounded (radial) shading — smooth rock, no facets
+  const faceK = 0.0 // fully rounded (radial) shading in every style — smooth rock, no facets (2026-10-24)
   const tri = (a: number, b: number, c: number, ca: number[], cb: number[], cc: number[], ox: number, oz: number, cap: boolean) => {
     let A = a, B = b, C = c, CA = ca, CB = cb, CC = cc
     const px = (i: number) => (i < 0 ? capX : P[i * 3]), py = (i: number) => (i < 0 ? capY : P[i * 3 + 1]), pz = (i: number) => (i < 0 ? capZ : P[i * 3 + 2])
@@ -329,14 +331,15 @@ function addCrag(
  * is its own shape (a jittered 6-sided body, a shoulder and a domed top, leaning its own way), buried in the ground at
  * its own spot; the tops carry MOSS / grass in the green lands (most boulders, varying amounts), snow in the snow,
  * bare sandstone in the desert; a darker foot (painted AO). Shading: face normals bent ~45 % toward the boulder's
- * centre → readable planes with soft, rounded edges.
+ * centre → readable planes with soft, rounded edges. (2026-10-24: jointed rounded-box blocks — superellipse sections, flat crowns, mesh-averaged normals, 10 sides, 4 rings,
+ * colour per vertex — smooth weathered stone; the surface detail is the material's rock surface.)
  * (Replaced the layered slab stacks: they read as one repeated pattern — "every cliff looks the same".)
- * Arithmetic + sqrt only (no trig: angles from a fixed 6-direction table, jittered). Cost: 35 tris per boulder,
- * ~8–12 boulders per mass crag (~300 tris), 1–3 per small one; same draw / collider as before (formation mesh).
+ * Arithmetic + sqrt only (no trig: angles from a fixed 10-direction table, jittered). Cost: 70 tris per boulder,
+ * ~8–12 boulders per mass crag (~700 tris), 1–3 per small one; same draw / collider as before (formation mesh).
  */
-// 7 directions (exact constants), jittered per boulder.
-const SIDES = 7
-const DIR7 = [1, 0, 0.6234898, 0.7818315, -0.2225209, 0.9749279, -0.9009689, 0.4338837, -0.9009689, -0.4338837, -0.2225209, -0.9749279, 0.6234898, -0.7818315]
+// 10 directions (exact constants), jittered per boulder — rounder outlines than the old 7 (2026-10-24: "smooth, not sharp").
+const SIDES = 10
+const DIR7 = [1, 0, 0.809017, 0.5877853, 0.309017, 0.9510565, -0.309017, 0.9510565, -0.809017, 0.5877853, -1, 0, -0.809017, -0.5877853, -0.309017, -0.9510565, 0.309017, -0.9510565, 0.809017, -0.5877853]
 
 function addTor(
   fields: WorldFields, out: CragMesh, lx: number, lz: number, wx: number, wz: number, h0: number,
@@ -360,38 +363,12 @@ function addTor(
   br += (0.36 - br) * snow; bg += (0.39 - bg) * snow; bb += (0.45 - bb) * snow
   const green = (1 - sand) * (1 - snow)
   const MOSS = [0.2, 0.42, 0.03], SNOW = [0.82, 0.86, 0.94]
-  let face = 0
-  const tri = (A: number[], B: number[], C: number[], col: number[], cx: number, cy: number, cz: number, soft: number) => {
-    let bx = B[0], by = B[1], bz = B[2], ex = C[0], ey = C[1], ez = C[2]
-    const ax = A[0], ay = A[1], az = A[2]
-    let nx = (by - ay) * (ez - az) - (bz - az) * (ey - ay)
-    let ny = (bz - az) * (ex - ax) - (bx - ax) * (ez - az)
-    let nz = (bx - ax) * (ey - ay) - (by - ay) * (ex - ax)
-    // outward = away from the boulder's centre
-    const mx = (ax + bx + ex) / 3 - cx, my = (ay + by + ey) / 3 - cy, mz = (az + bz + ez) / 3 - cz
-    if (nx * mx + ny * my + nz * mz < 0) {
-      nx = -nx; ny = -ny; nz = -nz
-      const tx = bx, ty = by, tz = bz; bx = ex; by = ey; bz = ez; ex = tx; ey = ty; ez = tz
-    }
-    const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
-    nx /= nl; ny /= nl; nz /= nl
-    const pts = [ax, ay, az, bx, by, bz, ex, ey, ez]
-    for (let q = 0; q < 3; q++) {
-      const px = pts[q * 3], py = pts[q * 3 + 1], pz = pts[q * 3 + 2]
-      // bent toward the radial direction from the centre: rounded edges, still readable planes
-      let rx = px - cx, ry = py - cy, rz = pz - cz
-      const rl = Math.sqrt(rx * rx + ry * ry + rz * rz) || 1
-      rx = nx * (1 - soft) + (rx / rl) * soft; ry = ny * (1 - soft) + (ry / rl) * soft; rz = nz * (1 - soft) + (rz / rl) * soft
-      const ql = Math.sqrt(rx * rx + ry * ry + rz * rz) || 1
-      out.pos.push(px, py, pz)
-      out.nor.push(rx / ql, ry / ql, rz / ql)
-      out.col.push(col[0], col[1], col[2])
-    }
-    return ny
-  }
   /**
    * One BOULDER standing at (bx, bz) (chunk-local), ground height gy: footprint half-sizes (a along d, b along s),
    * height H above the ground (its foot buried `bury` m), leaning (lx2, lz2) m at the top, hash salt k0.
+   * (2026-10-24, "a lot of balls of hills": a JOINTED GRANITE BLOCK, not an egg — a rounded-RECTANGLE section (a
+   * superellipse through the 10 directions), near-vertical sides, a broad flat-ish crown on a rounded shoulder; normals
+   * are the mesh's own, averaged over the faces at each corner — flat faces read flat, only the edges round off.)
    */
   const boulder = (bx: number, bz: number, gy: number, a: number, b: number, H: number, bury: number, lean: number, k0: number) => {
     const hb = (k: number) => hashFloat(seed, gx, gz, L + 2000 + k0 * 61 + k)
@@ -400,57 +377,87 @@ function addTor(
     const rl = Math.sqrt(rc * rc + rs * rs) || 1
     rc /= rl; rs /= rl
     const lnx = (hb(2) - 0.5) * 2 * lean, lnz = (hb(3) - 0.5) * 2 * lean
-    // crown slope (rise per m of the footprint along a / b): ±0.35
-    const tpa = (hb(7) - 0.5) * 0.7 * (H / Math.max(a, b)) * 0.25, tpb = (hb(8) - 0.5) * 0.7 * (H / Math.max(a, b)) * 0.25
-    // rings: foot (buried), belly, shoulder; then the domed top centre
-    const RINGS = [[-bury, 0.95], [H * (0.42 + 0.18 * hb(4)), 1.03], [H * (0.7 + 0.12 * hb(5)), 0.62 + 0.18 * hb(6)]]
+    // crown slope (rise per m of the footprint along a / b): a gently tilted block top
+    const tpa = (hb(7) - 0.5) * 0.4 * (H / Math.max(a, b)) * 0.25, tpb = (hb(8) - 0.5) * 0.4 * (H / Math.max(a, b)) * 0.25
+    // rings: foot (buried), belly, shoulder, crown ring; then the crown centre — on a ROUNDED profile (2026-10-25, the
+    // user: "so sharp — make it smooth", at no extra cost on phones: the same 4 rings, the shoulder pulled in and the
+    // crown ring low and narrow, so the top rolls over instead of a flat lid on a hard edge)
+    const sh = 0.66 + 0.08 * hb(5)
+    const RINGS = [[-bury, 0.98], [H * (0.32 + 0.12 * hb(4)), 1.0], [H * sh, 0.9], [H * (sh + 0.17), 0.58 + 0.06 * hb(6)]]
     const R: number[][] = []
     for (let r = 0; r < RINGS.length; r++) {
       const [y, sc] = RINGS[r]
       const t = Math.max(0, y) / H
       for (let k = 0; k < SIDES; k++) {
-        // jittered direction + radius → an irregular 7-gon, every boulder its own outline
-        const jx = DIR7[k * 2] + (hb(10 + k) - 0.5) * 0.5, jz = DIR7[k * 2 + 1] + (hb(17 + k) - 0.5) * 0.5
-        const ca = jx * rc - jz * rs, cb = jx * rs + jz * rc
-        const rad = sc * (0.75 + 0.4 * hb(24 + r * 7 + k))
+        // jittered direction → a superellipse (|u|⁴ + |v|⁴ = 1): flat sides, rounded corners, every block its own
+        const jx = DIR7[k * 2] + (hb(10 + k) - 0.5) * 0.2, jz = DIR7[k * 2 + 1] + (hb(17 + k) - 0.5) * 0.2
+        const jl = Math.sqrt(jx * jx + jz * jz) || 1, ux = jx / jl, uz = jz / jl
+        // (70 % of the way to the square: big blocks read jointed, small rubble stays a rounded stone, not a sugar cube)
+        // (2026-10-25: at most 18 % — a soft rounded block, not a box)
+        const box = 1 + (1 / Math.sqrt(Math.sqrt(ux ** 4 + uz ** 4)) - 1) * Math.min(0.18, 0.06 + 0.04 * H)
+        const ca = ux * rc - uz * rs, cb = ux * rs + uz * rc
+        const rad = sc * box * (0.9 + 0.14 * hb(24 + k) + 0.04 * hb(24 + r * 7 + k))
         const pa = ca * a * rad, pb = cb * b * rad
-        // (the shoulder ring tilts with the boulder's top: a sloped, not flat, crown)
-        const vy = gy + y + (hb(45 + r * 7 + k) - 0.5) * 0.14 * H + (r === 2 ? (pa * tpa + pb * tpb) : 0)
+        // (the top rings tilt with the block's crown)
+        const vy = gy + y + (hb(45 + r * 7 + k) - 0.5) * 0.05 * H + (r >= 2 ? (pa * tpa + pb * tpb) * (r === 3 ? 1 : 0.6) : 0)
         const ex = dx * pa + sx * pb, ez = dz * pa + sz * pb
         const e = r === 0 ? 1 : erode(seed, wx - lx + bx + ex, vy, wz - lz + bz + ez, t)
         R.push([bx + ex * e + lnx * t, vy, bz + ez * e + lnz * t])
       }
     }
-    const top = [bx + lnx + (hb(70) - 0.5) * 0.3 * a, gy + H * (0.9 + 0.2 * vnoise3(seed + 3, (wx - lx + bx) / 4, gy / 4, (wz - lz + bz) / 4)), bz + lnz + (hb(71) - 0.5) * 0.3 * b]
-    const cx = bx + lnx * 0.5, cy = gy + H * 0.45, cz = bz + lnz * 0.5
+    R.push([bx + lnx + (hb(70) - 0.5) * 0.2 * a, gy + H * (sh + 0.27 + 0.05 * vnoise3(seed + 3, (wx - lx + bx) / 4, gy / 4, (wz - lz + bz) / 4)), bz + lnz + (hb(71) - 0.5) * 0.2 * b])
+    const TOP = R.length - 1
+    const cx = bx + lnx * 0.5, cy = gy + H * 0.4, cz = bz + lnz * 0.5
     // colour: the boulder's tone, its moss / snow / bare top
     const tone = 0.82 + 0.3 * hb(72)
     const moss = green * (hb(73) < 0.8 ? 0.65 + 0.35 * hb(74) : 0) + snow * 0.9
     const capC = snow > 0.5 ? SNOW : MOSS
-    const shade = (fy: number, up: number) => {
-      const plane = 0.93 + 0.14 * hashFloat(seed, gx, gz, L + 4000 + face++)
-      const k = tone * plane * (0.7 + 0.3 * Math.min(1, Math.max(0, fy)))
+    // per vertex: darker toward the buried foot (painted AO); moss / snow where the crown faces up
+    const shade = (py: number, up: number) => {
+      const k = tone * (0.7 + 0.3 * Math.min(1, Math.max(0, (py - gy) / H)))
       const c = [br * k, bg * k, bb * k]
-      // moss / snow on the up-facing planes (more on flatter ones), a little creeping over the shoulder
-      // (patchy: each plane its own share — no hard green lid; a few lower faces carry a little too)
-      const fr = hashFloat(seed, gx, gz, L + 6000 + face)
-      const m = moss * (Math.min(1, Math.max(0, (up - 0.35) / 0.4)) * (0.45 + 0.55 * fr) + (up < 0.3 && fr > 0.8 ? 0.25 : 0))
+      const m = moss * Math.min(1, Math.max(0, (up - 0.45) / 0.35)) * (0.45 + 0.55 * hb(77))
       if (m > 0) for (let q = 0; q < 3; q++) c[q] += (capC[q] * (0.85 + 0.3 * hb(75)) - c[q]) * m
       return c
     }
-    const V = (r: number, k: number) => R[r * SIDES + (k % SIDES)]
-    for (let r = 0; r < 2; r++) {
+    // the triangles (corner indices into R), each wound outward (away from the block's centre)
+    const tris: number[] = []
+    const add = (i: number, j: number, k: number) => {
+      const A = R[i], B = R[j], C = R[k]
+      const nx = (B[1] - A[1]) * (C[2] - A[2]) - (B[2] - A[2]) * (C[1] - A[1])
+      const ny = (B[2] - A[2]) * (C[0] - A[0]) - (B[0] - A[0]) * (C[2] - A[2])
+      const nz = (B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0])
+      const out = nx * ((A[0] + B[0] + C[0]) / 3 - cx) + ny * ((A[1] + B[1] + C[1]) / 3 - cy) + nz * ((A[2] + B[2] + C[2]) / 3 - cz) >= 0
+      if (out) tris.push(i, j, k)
+      else tris.push(i, k, j)
+    }
+    for (let r = 0; r < RINGS.length - 1; r++) {
       for (let k = 0; k < SIDES; k++) {
-        const A = V(r, k), B = V(r, k + 1), C = V(r + 1, k + 1), D = V(r + 1, k)
-        // (a side plane's "up" from its corner heights: the shoulder band tilts up, the belly is ~vertical)
-        const up = r === 1 ? 0.62 + 0.25 * hb(76 + k) : 0
-        const fy = ((A[1] + C[1]) / 2 - gy) / H
-        const c = shade(fy, up)
-        tri(A, B, C, c, cx, cy, cz, 0.45)
-        tri(A, C, D, c, cx, cy, cz, 0.45)
+        const A = r * SIDES + k, B = r * SIDES + ((k + 1) % SIDES), C = (r + 1) * SIDES + ((k + 1) % SIDES), D = (r + 1) * SIDES + k
+        add(A, B, C)
+        add(A, C, D)
       }
     }
-    for (let k = 0; k < SIDES; k++) tri(top, V(2, k), V(2, k + 1), shade(1, 0.95), cx, cy, cz, 0.35)
+    const last = (RINGS.length - 1) * SIDES
+    for (let k = 0; k < SIDES; k++) add(TOP, last + k, last + ((k + 1) % SIDES))
+    // corner normals: the area-weighted sum of the faces meeting there
+    const N = new Float32Array(R.length * 3)
+    for (let t = 0; t < tris.length; t += 3) {
+      const A = R[tris[t]], B = R[tris[t + 1]], C = R[tris[t + 2]]
+      const nx = (B[1] - A[1]) * (C[2] - A[2]) - (B[2] - A[2]) * (C[1] - A[1])
+      const ny = (B[2] - A[2]) * (C[0] - A[0]) - (B[0] - A[0]) * (C[2] - A[2])
+      const nz = (B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0])
+      for (let q = 0; q < 3; q++) (N[tris[t + q] * 3] += nx), (N[tris[t + q] * 3 + 1] += ny), (N[tris[t + q] * 3 + 2] += nz)
+    }
+    for (const i of tris) {
+      const p = R[i]
+      const nx = N[i * 3], ny = N[i * 3 + 1], nz = N[i * 3 + 2]
+      const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+      out.pos.push(p[0], p[1], p[2])
+      out.nor.push(nx / nl, ny / nl, nz / nl)
+      const c = shade(p[1], ny / nl)
+      out.col.push(c[0], c[1], c[2])
+    }
   }
   const ground = (px: number, pz: number) => fields.height(wx + (px - lx), wz + (pz - lz))
   if (small) {
@@ -479,8 +486,9 @@ function addTor(
     const gy = ground(px, pz)
     // (height ≤ 2.5 × the footprint: a 30 m canyon wall gets a pile of boulders, not 25 m needles)
     const H = Math.max(1.2, Math.min(T * size, 2.5 * Math.min(ws, wd) * (0.7 + 0.5 * hf(150 + i))))
-    // upright: width 30–55 % of the height (the core), squatter at the rim; never wider than the footprint
-    const a = Math.min(wd * 0.7, Math.max(0.7, H * (0.3 + 0.25 * hf(160 + i) + 0.25 * r))), b = Math.min(ws * 0.7, Math.max(0.7, H * (0.3 + 0.25 * hf(180 + i) + 0.25 * r)))
+    // broad blocks: width 50–80 % of the height (the core), squatter at the rim; never wider than the footprint —
+    // neighbouring blocks overlap into ONE jointed outcrop (thin 30 % pillars stood apart as a heap of balls)
+    const a = Math.min(wd * 0.8, Math.max(0.8, H * (0.5 + 0.3 * hf(160 + i) + 0.25 * r))), b = Math.min(ws * 0.8, Math.max(0.8, H * (0.5 + 0.3 * hf(180 + i) + 0.25 * r)))
     boulder(px, pz, gy, a, b, H, 0.6 + g * Math.max(a, b) * 0.8, H * 0.08, 10 + i)
   }
   // RUBBLE: small boulders spilt down the slope below the tor (not below a canyon wall: that's the road side —

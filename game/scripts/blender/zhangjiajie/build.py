@@ -413,6 +413,11 @@ if TERRAIN != '0':
     BASE = np.load(os.path.join(TERRAIN, 'terrain.npy')).astype(np.float64)
     floor = np.load(os.path.join(TERRAIN, 'floor.npy')).astype(np.float64)
     assert BASE.shape == (N, N), f'terrain.npy is {BASE.shape}, the map grid {N}² — run terrain.py with the same HALF'
+    # HILLS (2026-10-23, the user: "reduce the height of each hill to 30 % of what it is now"): every hill's rise over
+    # its valley floor × HILLS — the eroded shapes (walls, gullies, ledges, talus) kept, the valleys and rivers where
+    # they were; the roads below are routed and graded on the lower relief
+    HILLS = float(ARGS.get('HILLS', 0.3))
+    BASE = floor + np.maximum(BASE - floor, 0) * HILLS + np.minimum(BASE - floor, 0)
     cx = cz = np.zeros(0); r_p = np.zeros(0)
 else:
     r_p = np.clip(0.5 * nn, 12, 40)                      # (for the debug render and the road router)
@@ -684,7 +689,9 @@ CELL = 6
 cand = rng.uniform(0, 1, (N // CELL, N // CELL))
 TI, TJ = np.meshgrid(np.arange(0, N - CELL, CELL), np.arange(0, N - CELL, CELL))
 TI = TI + rng.integers(0, CELL, TI.shape); TJ = TJ + rng.integers(0, CELL, TJ.shape)
-keep = cand[:TJ.shape[0], :TJ.shape[1]] < forest[TJ, TI] * 0.8   # (a closed canopy: the photos' forest floor)
+# (was 0.8, a closed canopy; 2026-10-23 the user: "too many trees — reduce them": the lower hills left ~45 % more gentle
+#  ground to plant, every one a full pine near the player, a shade image and a server collider — ~ −37 %)
+keep = cand[:TJ.shape[0], :TJ.shape[1]] < forest[TJ, TI] * float(ARGS.get('TREES', 0.5))
 tx = xs[TI[keep]]; tz = xs[TJ[keep]]
 far = road_dist(tx, tz) > 9
 tx, tz = tx[far], tz[far]
@@ -761,12 +768,18 @@ if OUT:
             # hazy blue sky, jade-blue water; a neutral sun with a cool pale fill and soft shading (`light`)
             'palette': {'grass': '3d6436', 'grassDark': '22422a', 'flowers': '567a3e', 'dirt': '857563', 'rock': '34522e',
                         'cliff': 'b8b1a6', 'stone': '74706a', 'cliffMoss': '2a4e35', 'sand': 'b3a58e', 'water': '3d7f8a', 'waterDeep': '1f5562',
-                        'skyZenith': '86a8c8', 'skyHaze': 'd2dee8'},
+                        'skyZenith': '86a8c8', 'skyHaze': 'd2dee8', 'leafLight': '7fae4a', 'leafMid': '3f8a3a', 'leafDark': '143a1e'},
             'light': {'sun': 'fff4e4', 'fill': 'b4c8dc', 'bounce': '4e5e44', 'tint': 'f6f8fa', 'toon': 0.3, 'split': 0.08, 'saturation': 0.95},
-            # Zhangjiajie's trees (Liyue's twisted flat-crowned pines among broadleaves, jade crowns — WorldChunk), the
-            # forest floor (little grass), the cloud SHEETS in the gorges (MistSheets: height, density) over a light
-            # height haze, the distance layers (`aerial`), a finer horizon, no crags (the walls are the rock)
-            'trees': 'liyue', 'grass': 0.3, 'mist': [0.0015, 25.0, 0.04], 'mistSheets': [[45, 0.6], [90, 0.42], [150, 0.26]],
+            # Zhangjiajie's trees (2026-10-23, the user: "remove all trees and use the pine trees, a bit darker; images
+            # as shadows and for far trees; optimize it"): the TIERED PINES only (`conifer`, the Highlands' — its broad
+            # twisted pines and broadleaves were the frame cost), their leaves ~25 % darker than the default (palette
+            # leafLight / Mid / Dark; default a8e063 5dbb4a 1b4a26), shading the ground with IMAGES on every tier and
+            # never in the sun shadow map (`imageTreeShadows`); far trees are impostor images (every map). The forest
+            # floor (little grass), the cloud SHEETS in the gorges (MistSheets: height, density — lowered with the
+            # hills) over a light height haze, the distance layers (`aerial`), a finer horizon
+            # (then: "make the pine tree like this", the Autumn Pine sheet — the conifer slots grow the Blender
+            #  autumn pines, scripts/blender/autumn_pine.py: green, one in five golden-orange; LOD0 382 tris)
+            'trees': 'conifer', 'pines': 'autumn', 'climate': 'subtropical', 'imageTreeShadows': True, 'grass': 0.3, 'mist': [0.0015, 25.0, 0.04], 'mistSheets': [[32, 0.6], [46, 0.42], [62, 0.26]],
             'horizonRes': 160, 'crags': True, 'cragScale': 0.75, 'rocks': 6, 'bigRocks': 0.06, 'naturalStone': True, 'peakLod': True, 'cliffMoss': 0.38, 'treeLine': 1000, 'aerial': [200, 2600, 0.45],
             'roads': roads, 'bridges': []}
     json.dump(meta, open(os.path.join(OUT, 'map.json'), 'w'))

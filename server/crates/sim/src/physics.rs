@@ -1926,8 +1926,8 @@ mod statics {
     /// boulders and set pieces (cast in the game's scratch world) give the same first hit here.
     #[test]
     fn statics_match_the_game() {
-        // (each map's trunks and boulders: well over this many)
-        for (id, min_solid) in [("island", 40_000), ("highlands", 15_000), ("zhangjiajie", 20_000)] {
+        // (each map's trunks and boulders: well over this many; the Island's forest thinned to 55 % on 2026-10-24 → ~33.6 k)
+        for (id, min_solid) in [("island", 25_000), ("highlands", 15_000), ("zhangjiajie", 20_000)] {
             statics_match(id, min_solid);
         }
     }

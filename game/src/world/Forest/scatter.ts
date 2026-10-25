@@ -73,13 +73,24 @@ function scatter(
       // Landmarks (giant trees, ruins, towers…) stand in a clearing — Genshin frames them, the forest doesn't hide them.
       if (fields.landmarks.near(wx, wz, layer === Layer.Trees ? 24 : 1)) continue
       const edge = fields.anyRoadEdge(wx, wz)
+      // (the soft-look map's rocks are SUNK — below — and their accept already places them round and on the roads)
+      const softRock = layer === Layer.Rocks && fields.map?.look === 'soft'
       // Keep every road clear — a boulder's footprint grows with its scale (unit rock radius ≈ 1.4 m), so big
       // ones stand well back from the edge instead of overhanging the track.
-      if (edge < (layer === Layer.Trees ? 3.5 : layer === Layer.Rocks ? 1.0 + scale * 1.5 : 0.4)) continue
+      if (!softRock && edge < (layer === Layer.Trees ? 3.5 : layer === Layer.Rocks ? 1.0 + scale * 1.5 : 0.4)) continue
       // No bushes in a road's ditch / ruts (Road/RoadDetail) — they'd float over the hollow.
       if (layer === Layer.Plants && edge < 2.5 && fields.roadDetail.query(wx, wz, _di) < -0.03) continue
       out[n] = lx
       out[n + 1] = h
+      if (softRock) {
+        // SUNK ROCKS (2026-10-25, the user: "all rocks are put above the terrain — boring", Over the Hill's paths run
+        // over grey slabs that only show their tops): the unit rock is a ~0.96 m dome (× the instance's vertical
+        // jitter, InstanceBuilder instanceYScale — the collider is scaled alike, so it sinks with it). Off the road
+        // 15–65 % of it under the ground; on a road bed a SLAB whose top stands 5–13 cm proud (drivable).
+        const top = scale * 0.96 * (0.9 + 0.2 * hashFloat(n / stride, 7))
+        const u = hashFloat(seed, gx, gz, layer * 16 + 5)
+        out[n + 1] = edge < 0 ? h - top + 0.05 + 0.08 * u : h - top * (0.15 + 0.5 * u)
+      }
       out[n + 2] = lz
       out[n + 3] = r3 * Math.PI * 2
       out[n + 4] = scale
@@ -110,15 +121,101 @@ export function oasisAt(fields: WorldFields, wx: number, wz: number, h: number):
   return Math.min(1, (sand - 0.35) / 0.3) * (1 - Math.max(0, (wl - 3) / 6))
 }
 
+/**
+ * THE GROUND A TREE STANDS ON (real-world habitats, below): height above the water, slope, RIDGE (+: above its
+ * surroundings 20 m out — a crest / spur; −: a hollow, gully or valley floor) and how much it faces NORTH (−z, the
+ * minimap's up: the cool, moist, shaded side).
+ * Read off a coarse LATTICE of the chunk and a 24 m margin (8 m steps, 15 × 15 height reads, made the first time a
+ * tree of the chunk asks — scatterForest), not 8 reads per tree: the endless world's height is noise and roads, and
+ * per-tree reads made its chunks ~8 × slower to grow. Deterministic: a tree belongs to one chunk.
+ */
+interface Ground { wl: number; slope: number; ridge: number; north: number }
+const _g: Ground = { wl: 0, slope: 0, ridge: 0, north: 0 }
+const LAT = 8, LAT_PAD = 24, LAT_N = (CHUNK_SIZE + 2 * LAT_PAD) / LAT + 1
+const _lat = new Float32Array(LAT_N * LAT_N)
+let _latChunk: { fields: WorldFields; x0: number; z0: number; ready: boolean } | null = null
+function lattice(x: number, z: number): number {
+  const L = _latChunk!
+  if (!L.ready) {
+    for (let j = 0; j < LAT_N; j++) for (let i = 0; i < LAT_N; i++) _lat[j * LAT_N + i] = L.fields.height(L.x0 + i * LAT, L.z0 + j * LAT)
+    L.ready = true
+  }
+  const fx = Math.min(Math.max((x - L.x0) / LAT, 0), LAT_N - 1.001), fz = Math.min(Math.max((z - L.z0) / LAT, 0), LAT_N - 1.001)
+  const ix = Math.floor(fx), iz = Math.floor(fz), tx = fx - ix, tz = fz - iz, k = iz * LAT_N + ix
+  return (_lat[k] * (1 - tx) + _lat[k + 1] * tx) * (1 - tz) + (_lat[k + LAT_N] * (1 - tx) + _lat[k + LAT_N + 1] * tx) * tz
+}
+function ground(fields: WorldFields, wx: number, wz: number, h: number): Ground {
+  const H = _latChunk ? lattice : (x: number, z: number) => fields.height(x, z)
+  const gx = (H(wx + 4, wz) - H(wx - 4, wz)) / 8
+  const gz = (H(wx, wz + 4) - H(wx, wz - 4)) / 8
+  const ring = (H(wx + 20, wz) + H(wx - 20, wz) + H(wx, wz + 20) + H(wx, wz - 20)) / 4
+  _g.wl = h - WorldFields.WATER
+  _g.slope = Math.hypot(gx, gz)
+  _g.ridge = h - ring
+  _g.north = _g.slope > 0.05 ? gz / _g.slope : 0 // rising to the south = the slope faces north
+  return _g
+}
+/** One roll per ~`size` m cell (a grove / stand: the trees of a cell decide together). */
+const stand = (fields: WorldFields, wx: number, wz: number, size: number, salt: number) => regionRoll(fields.seed, Math.floor(wx / size) * size + 3, Math.floor(wz / size) * size + 5, salt)
+
+/**
+ * REAL-WORLD HABITATS of the Tree It set (2026-10-24, from forestry / ecology sources):
+ *  - ELM: moist lowland soils — river banks, floodplains, lake shores (low above the water, in the valley);
+ *  - BEECH: humid, well-drained HILLSIDES (not the wet valley floor, not the dry crest), in dense shady stands that
+ *    crowd other trees out — whole groves of beech;
+ *  - FIR: cool, moist, HIGH ground — the upper slopes, north / east faces and late snow, beside spruce;
+ *  - JUNIPER: dry, sunny, ROCKY RIDGES and steep upper slopes with thin soil — sparse, small, scattered;
+ *  - BAMBOO: warm, humid LOWER hillsides and gorge floors (moso bamboo's Hunan / Zhejiang home — Zhangjiajie) in
+ *    dense clonal groves; never in the cold or the dry;
+ *  - ACACIA: semi-arid SAVANNA — the dry grassland at the desert's edge, lone umbrella trees far apart.
+ * Returns a species, or -1 (the map's / biome's own pick stands). `warm`: bamboo may grow (subtropical maps / the
+ * green lowlands), `snow`/`sand`: the biome weights.
+ */
+function habitat(fields: WorldFields, wx: number, wz: number, r: number, h: number, o: { warm: boolean; sand: number; snow: number; high: number }): number {
+  const g = ground(fields, wx, wz, h)
+  // semi-arid edge of the desert: savanna acacias, junipers on its rocky rises
+  if (o.sand > 0.3 && o.sand < 0.85) {
+    if (g.ridge > 2 && g.slope > 0.25) return r < 0.5 ? TreeSpecies.Juniper : -1
+    return r < 0.6 ? TreeSpecies.Acacia : -1
+  }
+  if (o.sand >= 0.85) return -1
+  // dry rocky crests and steep upper slopes: juniper
+  if ((g.ridge > 3.5 && g.slope > 0.3) || (g.slope > 0.55 && g.wl > o.high * 0.4)) return r < 0.45 ? TreeSpecies.Juniper : -1
+  // high, cold or north-facing upper slopes: fir among the spruce
+  if (o.snow > 0.15 || g.wl > o.high || (g.wl > o.high * 0.6 && g.north > 0.45)) return r < 0.3 ? TreeSpecies.Fir : -1
+  // river banks / lake shores / valley floors: elm (bamboo in the warm lands' wet hollows)
+  if (g.wl < 6 || (g.wl < 14 && g.ridge < -2)) {
+    if (o.warm && stand(fields, wx, wz, 36, 7101) < 0.5) return TreeSpecies.Bamboo
+    return r < 0.55 ? TreeSpecies.Elm : -1
+  }
+  // warm lower hillsides and gorges: bamboo groves
+  if (o.warm && g.wl < o.high * 0.45 && g.ridge < 1 && stand(fields, wx, wz, 44, 7102) < 0.38) return TreeSpecies.Bamboo
+  // humid hillsides: beech stands (the whole stand, a few others mixed in)
+  if (g.slope > 0.1 && g.slope < 0.55 && g.ridge > -2 && g.ridge < 3 && g.wl < o.high * 0.85 && stand(fields, wx, wz, 52, 7103) < 0.3) return r < 0.85 ? TreeSpecies.Beech : -1
+  return -1
+}
+
 function pickSpecies(fields: WorldFields, wx: number, wz: number, r: number, h: number): number {
-  // a conifer map (map.json trees: 'conifer'): spruce, pine and fir stands — the reference's tiered pines
-  if (fields.map?.conifers && fields.biome(wx, wz, _bw, h)[0] < 0.5) return r < 0.5 ? TreeSpecies.Spruce : r < 0.82 ? TreeSpecies.Pine : TreeSpecies.Fir
+  // a conifer map (map.json trees: 'conifer'): spruce, pine and fir stands — the reference's tiered pines — with the
+  // Tree It set where its habitat is (Zhangjiajie: subtropical — bamboo in the gorges)
+  if (fields.map?.conifers && fields.biome(wx, wz, _bw, h)[0] < 0.5) {
+    const hab = habitat(fields, wx, wz, regionRoll(fields.seed, wx, wz, 7100), h, { warm: fields.map.subtropical, sand: 0, snow: _bw[1], high: fields.map.subtropical ? 75 : 95 })
+    if (hab >= 0) return hab
+    return r < 0.5 ? TreeSpecies.Spruce : r < 0.82 ? TreeSpecies.Pine : TreeSpecies.Fir
+  }
   // Zhangjiajie (map.json trees: 'liyue'): Liyue's twisted, flat-crowned pines on the tops and ledges, broadleaf groves
   // in the gorges
   if (fields.map?.liyue) return r < 0.55 ? TreeSpecies.Pine : pickWeighted(LIYUE_BROADLEAF, regionRoll(fields.seed, Math.floor(wx / 40), Math.floor(wz / 40), 6164))
   if (oasisAt(fields, wx, wz, h) > 0.2) return r < 0.85 ? TreeSpecies.Palm : TreeSpecies.Cactus
   if (fields.map && (fields.map.poolRing(wx, wz) > 0.3 || fields.map.palmCell(Math.floor(wx / TREE_CELL), Math.floor(wz / TREE_CELL)))) return TreeSpecies.Palm // a desert pool's palms / the map's kept palms
   if (fields.beach(wx, wz, h) > 0.4) return TreeSpecies.Palm // fixed maps: the few beach trees are palms
+  // the Tree It set by habitat (not in the autumn / mystic regions: their own trees)
+  const wn = fields.region(wx, wz, _wn, h)
+  if (wn[Biome.Autumn] + wn[Biome.Mystic] < 0.3) {
+    const w = fields.biome(wx, wz, _bw, h)
+    const hab = habitat(fields, wx, wz, regionRoll(fields.seed, wx, wz, 7100), h, { warm: w[1] < 0.05, sand: w[0], snow: w[1], high: 80 })
+    if (hab >= 0) return hab
+  }
   const sp = pickBaseSpecies(fields, wx, wz, r, h)
   return sp === TreeSpecies.Birch ? broadleafStand(fields, wx, wz) : sp
 }
@@ -189,7 +286,7 @@ function treeAccept(fields: WorldFields, wx: number, wz: number, r: number, h: n
   // 2026-10-21 ("reduce beach trees to 20 %"): none of its own — only the map's kept palms (below), each with a
   // bush clump round it (beachTreeNear).
   const beach = fields.beach(wx, wz, h)
-  const density = Math.max(fields.forestDensity(wx, wz, h) * (fields.map?.liyue ? 1 : TREE_SHARE), sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - CLEAR_ROAD) / 45) * (fields.palette === 1 ? 0.55 : 1) * (1 - beach) // overland: big trees, spaced
+  const density = Math.max(fields.forestDensity(wx, wz, h) * (fields.map?.liyue ? 1 : TREE_SHARE) * (fields.map?.treeAmount ?? 1), sand * (0.012 + 0.11 * clump)) * Math.min(1, 0.3 + (d - CLEAR_ROAD) / 45) * (fields.palette === 1 ? 0.55 : 1) * (1 - beach) // overland: big trees, spaced
   // Fixed maps: a palm or two at each desert pool (FixedMap.poolRing; pickSpecies makes them palms).
   if (fields.map) {
     const ring = fields.map.poolRing(wx, wz)
@@ -202,8 +299,13 @@ function treeAccept(fields: WorldFields, wx: number, wz: number, r: number, h: n
     const dp = 0.45 * oas
     return r > dp ? 0 : 0.85 + (r / dp) * 0.4
   }
-  if (r > density * 0.9) return 0
-  return 1.0 + (r / Math.max(density, 1e-3)) * 0.65 // tall framing trees (refs)
+  // (the soft-look map: 60 % of its trees — 2026-10-25, "reduce tree counts": more open ground between the groves)
+  if (r > density * 0.9 * (fields.map?.look === 'soft' ? 0.6 : 1)) return 0
+  // The soft-look map (Zhangjiajie): a NATURAL stand of young, grown and old trees — 0.55–2.0, most of them small to
+  // mid, a few giants (2026-10-25, "make trees of different size, small and big"); its own hash, not the density
+  // roll (that one makes the thin edges of a grove all tall). Other maps: tall framing trees (refs).
+  if (fields.map?.look === 'soft') return 0.55 + 1.45 * Math.pow(hashFloat(fields.seed, Math.floor(wx * 8), Math.floor(wz * 8), 977), 1.7)
+  return 1.0 + (r / Math.max(density, 1e-3)) * 0.65
 }
 
 /**
@@ -230,6 +332,7 @@ function beachTreeNear(fields: WorldFields, wx: number, wz: number): number {
 const _di = detailInfo()
 export function scatterForest(fields: WorldFields, cx: number, cz: number, heights: Float32Array, treesOnly = false) {
   const ctx: ScatterCtx = { fields, cx, cz, heights }
+  _latChunk = { fields, x0: cx * CHUNK_SIZE - LAT_PAD, z0: cz * CHUNK_SIZE - LAT_PAD, ready: false }
   const trees = scatter(
     ctx,
     TREE_CELL,
@@ -238,6 +341,7 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     (wx, wz, r, h) => treeAccept(fields, wx, wz, r, h),
     (wx, wz, r, h) => pickSpecies(fields, wx, wz, r, h),
   )
+  _latChunk = null
 
   // Far forest (FarForest): trees only — the impostor ring needs nothing else.
   if (treesOnly) return { trees, rocks: new Float32Array(0), plants: new Float32Array(0) }
@@ -266,6 +370,13 @@ export function scatterForest(fields: WorldFields, cx: number, cz: number, heigh
     // boulders sat on a road bed or within 1.5 m of its edge, where every car ran into them, 2026-10-22)
     if (fields.map) {
       const hit = fields.netRoad(wx, wz, 16)
+      // (the soft-look map's rocks are sunk — scatter: on the bed, a flush SLAB now and then, ~1 per ~45 m of road,
+      //  1.2–2.6 wide; beside it they may line the verge, half-buried)
+      if (fields.map.look === 'soft' && hit) {
+        if (hit.dist < hit.halfWidth - 0.4) return hashFloat(fields.seed, Math.floor(wx), Math.floor(wz), 4711) < 0.2 ? 1.2 + 1.4 * (r / Math.max(p, 1e-3)) : 0
+        if (hit.dist - hit.halfWidth < 0.4 + scale * 0.7) return 0
+        return scale
+      }
       if (hit && hit.dist - hit.halfWidth < 1.5 + scale * 1.5) return 0
     }
     return scale

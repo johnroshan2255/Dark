@@ -1,25 +1,29 @@
 import * as THREE from 'three'
 import { Rng } from '../../world/noise/rng'
+import { drawAcacia, drawBamboo, drawBeech, drawElm, drawFlakeSpray, drawFlakeTuft, drawFrondSpray, drawFanSpray, drawFanTuft, drawFir, drawJuniper, drawPalmateTuft, drawSpruce, type Slot } from './genshinLeaves'
 
 /**
  * Procedural foliage atlas (drawn once on a canvas at startup — no image downloads).
- * 1024² texture, 2×2 cells (512² each), all drawn in GREYSCALE luminance so instance/vertex colours give the
- * hue (one texture tints to spruce, fir, pine, birch, fern):
- *   [0,0] conifer needle spray   [1,0] broadleaf cluster
- *   [0,1] pine needle tuft       [1,1] fern frond
- * plus an opaque white block in the corner of cell [1,1] (`SOLID_UV`) so trunks and canopy cores share the
+ * 2048 × 1024 texture, 4 × 2 cells (512² each), all drawn in GREYSCALE luminance so instance/vertex colours give the
+ * hue. Default (2026-10-25): every cell holds Genshin FAN leaves (genshinLeaves drawFanSpray / drawFanTuft) — the
+ * user's reference; `?leaf=classic` keeps the older one Genshin-painted LEAF SHAPE per species family:
+ *   [0] spruce sheet (2 × 2 slots)  [1] broadleaf cluster  [2] reference leaf tuft (billboards)  [3] fern frond
+ *   [4] conifer sheet: fir, juniper, bamboo, spare (2 × 2 slots)  [5] beech  [6] elm  [7] acacia
+ * plus an opaque white block in the bottom-right corner (cell 7, `SOLID_UV`) so trunks and canopy cores share the
  * same material/program and draw call as the cards.
  * Used with alphaTest (not blending: no sorting, depth-correct, shadows get the cut-outs for free).
- * GPU memory: 1024² RGBA8 + mips ≈ 5.6 MB.
+ * GPU memory: 2048 × 1024 RGBA8 + mips ≈ 11 MB (was 5.6 MB at 1024²: the per-species leaves).
  */
-export const ATLAS_CELLS = { spray: 0, leaves: 1, tuft: 2, fern: 3 } as const
+export const ATLAS_CELLS = { spray: 0, leaves: 1, tuft: 2, fern: 3, conifer: 4, beech: 5, elm: 6, acacia: 7 } as const
+/** Atlas grid: cells per row / rows. */
+const COLS = 4, ROWS = 2
 /** UV rect of a cell: [u0, v0, u1, v1]. */
 export function cellUv(cell: number): [number, number, number, number] {
-  const cx = cell % 2
-  const cy = Math.floor(cell / 2)
-  // Inset avoids bleeding between cells at low mips.
-  const e = 0.01
-  return [cx * 0.5 + e, 1 - (cy + 1) * 0.5 + e, (cx + 1) * 0.5 - e, 1 - cy * 0.5 - e]
+  const cx = cell % COLS
+  const cy = Math.floor(cell / COLS)
+  // Inset (INSET px) avoids bleeding between cells at low mips.
+  const eu = INSET / W, ev = INSET / H
+  return [cx / COLS + eu, 1 - (cy + 1) / ROWS + ev, (cx + 1) / COLS - eu, 1 - cy / ROWS - ev]
 }
 /**
  * Opaque texel region (for solid parts). Its exact U also picks the PAINTED SURFACE the shader draws there
@@ -41,61 +45,21 @@ export const SOLID_UV: readonly [number, number] = SURFACE_UV.plain
  * material or program.
  */
 export const GLOW_UV: readonly [number, number] = [SURFACE_UV.plain[0], 0.031]
+/**
+ * NEEDLE solid (the autumn pines' inner core and leader — foliage, not a surface): opaque like the solids — the block's top rows (v ∈ [0.039, 0.047),
+ * outside the painted-surface range, so stylize's ATLAS_SURF reads it as foliage) — but LIT LIKE LEAVES: soft wrapped
+ * light, a trace of the rim, the backlit glow. As a plain solid every near-horizontal spray edge caught the full warm
+ * rim and the whole tree read gold. No new attribute, material or program.
+ */
+export const NEEDLE_UV: readonly [number, number] = [SURFACE_UV.plain[0], 0.043]
 
-const SIZE = 1024
-const CELL = SIZE / 2
+const CELL = 512
+const W = CELL * COLS, H = CELL * ROWS
+const INSET = 10
 
 function grey(v: number, a = 1): string {
   const c = Math.round(Math.max(0, Math.min(1, v)) * 255)
   return `rgba(${c},${c},${c},${a})`
-}
-
-/**
- * Spruce BRANCH SPRAY (cell 0): one drooping branch seen from the side — stem from the left edge (trunk end)
- * to a ragged tip on the right, dense short needles hanging down and out, a lighter top edge, gaps between
- * twig clusters. Cards of this, stacked irregularly around a trunk, give the painted spruce silhouette.
- */
-function drawSpray(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng): void {
-  const x0 = ox + CELL * 0.02
-  const x1 = ox + CELL * 0.98
-  const stemY = (t: number) => oy + CELL * (0.3 + 0.22 * t * t) // droops toward the tip
-  g.lineCap = 'round'
-  // Twig clusters along the stem; each hangs a fan of needles.
-  const twigs = 40
-  for (let k = 0; k < twigs; k++) {
-    const t = (k + rng.next() * 0.6) / twigs
-    if (rng.next() < 0.12) continue // gaps
-    const x = x0 + (x1 - x0) * t
-    const y = stemY(t)
-    const size = CELL * (0.42 - 0.22 * t) * rng.range(0.75, 1.15)
-    for (let n = 0; n < 40; n++) {
-      const a = Math.PI * 0.5 + rng.range(-1.25, 1.25) // mostly downward
-      const len = size * rng.range(0.35, 1)
-      const top = Math.sin(a) < 0.2
-      g.strokeStyle = grey(top ? rng.range(0.8, 1) : rng.range(0.42, 0.78))
-      g.lineWidth = rng.range(6, 11) // thick enough to survive alphaTest at low mips
-      g.beginPath()
-      g.moveTo(x + rng.range(-4, 4), y)
-      g.lineTo(x + Math.cos(a) * len * 0.6 + size * 0.15, y + Math.sin(a) * len)
-      g.stroke()
-    }
-    // lit upper needles
-    for (let n = 0; n < 8; n++) {
-      g.strokeStyle = grey(rng.range(0.85, 1))
-      g.lineWidth = rng.range(5, 8)
-      const a = -rng.range(0.2, 1.2)
-      g.beginPath()
-      g.moveTo(x, y)
-      g.lineTo(x + Math.cos(a) * size * 0.4, y + Math.sin(a) * size * 0.35)
-      g.stroke()
-    }
-  }
-  g.strokeStyle = grey(0.35)
-  g.lineWidth = 7
-  g.beginPath()
-  g.moveTo(x0, stemY(0))
-  for (let t = 0; t <= 1; t += 0.05) g.lineTo(x0 + (x1 - x0) * t, stemY(t))
-  g.stroke()
 }
 
 /**
@@ -164,91 +128,6 @@ function drawLeaves(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rn
  * Shading is painted for volume: back/lower leaves darker, front/upper leaves lighter (light from above), so
  * overlapping cards blend into one leafy mass. Billboarded over canopies (treeFactory / genshinTrees `tuft`).
  */
-/**
- * GENSHIN LEAF CLUSTER (cell 2, 'genshin' style) — what Genshin's foliage cards are (studied in close-ups of the
- * Windrise oak and a Mondstadt bush): a cut-out of ~45 distinct LOBED leaves (5–7 pointed lobes, oak / maple-like)
- * filling a ragged fan, painted in FLAT tones only — back leaves darker, front leaves lighter, no gradient, no
- * speckle; crisp edges with gaps between leaves (the lacy look from under the canopy). All the light and shade come
- * from the crown's shared normals + vertex colours, not the texture.
- */
-function drawTuftGenshin(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng): void {
-  // GENSHIN LEAF SPRAY (matched to Genshin's ginkgo / broadleaf close-ups — the Blender trees' camera-facing card):
-  //  - 5 thin curving TWIGS fanning out from near the card's middle, leaves ALONG them (no radial rosette: the
-  //    sprays point different ways, the leaves on them alternate sides at random angles);
-  //  - ROUND FAN leaves on short stalks, each its own width (0.45–1.1: some seen at an angle) and size;
-  //  - ONE flat tone per leaf in a narrow range (0.86–1.0), no outlines, no contact shadows (they read as
-  //    paper cut-outs); open GAPS between leaves and sprays (sky shows through, an airy crown);
-  //  - everything inside |x|, |y| ≤ 0.9 of the cell (cards never cut off straight).
-  const cx = ox + CELL / 2, cy = oy + CELL / 2, R = CELL * 0.46
-  const leaf = (x: number, y: number, a: number, len: number, w: number, v: number) => {
-    const ca = Math.cos(a), sa = Math.sin(a)
-    const P = (u: number, vv: number) => [x + ca * u * len - sa * vv * len, y + sa * u * len + ca * vv * len] as const
-    const s0 = P(0, 0), l1 = P(0.18, -0.2 * w), lt = P(0.62, -0.5 * w), lc = P(0.95, -0.42 * w), tip = P(1.0, 0), rc = P(0.95, 0.42 * w), rt = P(0.62, 0.5 * w), r1 = P(0.18, 0.2 * w)
-    g.fillStyle = grey(v)
-    g.beginPath()
-    g.moveTo(s0[0], s0[1])
-    g.quadraticCurveTo(l1[0], l1[1], lt[0], lt[1])
-    g.quadraticCurveTo(lc[0], lc[1], tip[0], tip[1]) // a broad, ROUND top (no corners)
-    g.quadraticCurveTo(rc[0], rc[1], rt[0], rt[1])
-    g.quadraticCurveTo(r1[0], r1[1], s0[0], s0[1])
-    g.fill()
-  }
-  const twigs = 5
-  const rot = rng.range(0, Math.PI * 2)
-  for (let t = 0; t < twigs; t++) {
-    // Each twig starts near the middle and fans out in its own direction (evenly around, jittered), curving.
-    let a = rot + (t / twigs) * Math.PI * 2 + rng.range(-0.35, 0.35)
-    let x = rng.range(-0.12, 0.12), y = rng.range(-0.12, 0.12)
-    const L = rng.range(0.62, 0.78), steps = 7, bend = rng.range(-0.18, 0.18)
-    for (let i = 0; i < steps; i++) {
-      const nx = x + Math.cos(a) * (L / steps), ny = y + Math.sin(a) * (L / steps)
-      if (Math.abs(nx) > 0.8 || Math.abs(ny) > 0.8) break
-      g.strokeStyle = grey(0.62); g.lineWidth = Math.max(1, 3.2 * (1 - i / steps))
-      g.beginPath(); g.moveTo(cx + x * R, cy + y * R); g.lineTo(cx + nx * R, cy + ny * R); g.stroke()
-      x = nx; y = ny; a += bend
-      // Leaves along the twig, alternating sides at random angles; the twig's end gets a small tuft of 3.
-      const n = i === steps - 1 ? 3 : 2
-      for (let k = 0; k < n; k++) {
-        const side = (k + i) % 2 ? 1 : -1
-        const la = a + side * rng.range(0.5, 1.4) + rng.range(-0.3, 0.3)
-        const len = R * rng.range(0.15, 0.21) * (0.85 + 0.25 * (i / steps))
-        // Keep the whole leaf inside the cell.
-        const ex = x + Math.cos(la) * len / R, ey = y + Math.sin(la) * len / R
-        if (Math.abs(ex) > 0.9 || Math.abs(ey) > 0.9) continue
-        leaf(cx + x * R, cy + y * R, la, len, rng.range(0.45, 1.1), rng.range(0.86, 1.0))
-      }
-    }
-  }
-}
-
-/**
- * DOT CLUSTER (bright — over the hill's foliage): the crown is made of ROUND DABS, like pointillist paint — ~70
- * discs of varied size inside a lumpy blob (3 overlapping lobes), each ONE flat tone (0.8–1.0; the lower / back ones
- * a little darker), small gaps between them so the edge is a bumpy scallop of dots, never a leaf shape. All light /
- * shade still comes from the crown's normals + vertex colours.
- */
-function drawDots(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng): void {
-  const cx = ox + CELL / 2, cy = oy + CELL / 2, R = CELL * 0.44
-  const lobes = [0, 1, 2].map(() => [rng.range(-0.3, 0.3), rng.range(-0.25, 0.3), rng.range(0.45, 0.62)] as const)
-  const inside = (x: number, y: number) => lobes.some(([lx, ly, lr]) => (x - lx) ** 2 + (y - ly) ** 2 < lr * lr)
-  const dots: [number, number, number, number][] = []
-  for (let tries = 0; dots.length < 72 && tries < 2000; tries++) {
-    const x = rng.range(-0.9, 0.9), y = rng.range(-0.9, 0.9)
-    if (!inside(x, y)) continue
-    const r = rng.range(0.07, 0.15)
-    if (Math.abs(x) + r > 0.95 || Math.abs(y) + r > 0.95) continue
-    if (dots.some(([dx, dy, dr]) => Math.hypot(dx - x, dy - y) < (dr + r) * 0.72)) continue
-    dots.push([x, y, r, rng.range(0.8, 1.0) - (y > 0.2 ? 0.06 : 0)])
-  }
-  dots.sort((a, b) => b[1] - a[1]) // back / lower first, front / upper painted over them
-  for (const [x, y, r, v] of dots) {
-    g.fillStyle = grey(v)
-    g.beginPath()
-    g.ellipse(cx + x * R, cy + y * R, r * R, r * R * rng.range(0.85, 1.0), rng.range(0, Math.PI), 0, Math.PI * 2)
-    g.fill()
-  }
-}
-
 function drawTuft(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng, round = false): void {
   const cx = ox + CELL / 2, cy = oy + CELL * 0.5, R = CELL * 0.4
   // Lumpy blob: union of lobes (fraction of R).
@@ -318,28 +197,102 @@ function drawFern(g: CanvasRenderingContext2D, ox: number, oy: number, rng: Rng)
 }
 
 /** Draws the atlas ('storybook' art style swaps the conifer spray for brush-stroke fans). */
-function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean, genshin = false, dots = false): void {
+function drawAtlas(canvas: HTMLCanvasElement, storybook: boolean, genshin = false, dots = false, soft = false): void {
   const g = canvas.getContext('2d')!
-  g.clearRect(0, 0, SIZE, SIZE)
+  g.clearRect(0, 0, W, H)
   const rng = new Rng(4242)
   if (storybook) drawBrushSpray(g, 0, 0, rng)
-  else drawSpray(g, 0, 0, rng)
+  else drawSpruceSheet(g, rng)
   drawLeaves(g, CELL, 0, rng)
   // The leaf-cluster cell is the Blender trees' leaf texture (assets/treeModels.ts): the painted Genshin cluster in
   // every style but storybook (its brush look keeps its own tufts).
-  if (dots) drawDots(g, 0, CELL, rng)
-  else if (genshin || !storybook) drawTuftGenshin(g, 0, CELL, rng)
-  else drawTuft(g, 0, CELL, rng)
-  drawFern(g, CELL, CELL, rng)
-  // Opaque white block for solids (bottom-right corner of the fern cell, outside the frond).
+  // (every style but storybook: the reference's palmate leaf clusters — 2026-10-24, "all trees leafs must look like
+  // this"; the bright style's round dabs retired)
+  if (genshin || !storybook || dots) drawPalmateTuft(g, ...origin(ATLAS_CELLS.tuft), CELL, rng)
+  else drawTuft(g, ...origin(ATLAS_CELLS.tuft), rng)
+  drawFern(g, ...origin(ATLAS_CELLS.fern), rng)
+  // the per-species sprays (Tree It cards: stem from the slot's bottom-left corner)
+  const conifer = (i: number) => slot(ATLAS_CELLS.conifer, CONIFER_SLOTS[i])
+  if (fanLeaves()) {
+    // GENSHIN FAN LEAVES — every tree, every map (2026-10-25, the user's reference, "make this the default for every
+    // tree in every map"): separate ginkgo-like fans with gaps between them, a faint lighter rim, no outline. The same
+    // cells, slots and card geometry — only the painted leaf shape changes (same texture size, cost and draws).
+    // `?leaf=classic`: the per-species leaves below.
+    g.clearRect(0, 0, W, H)
+    // (the soft look: the conifers keep NEEDLE fronds — the spruce sheet's green sprays — not fan leaves)
+    for (const k of [0, 1, 2, 3]) {
+      if (soft) drawFrondSpray(g, slot(ATLAS_CELLS.spray, SHEET_SLOTS[k]), rng)
+      else drawFanSpray(g, slot(ATLAS_CELLS.spray, SHEET_SLOTS[k]), rng)
+    }
+    // (the SOFT look, PlayCanvas: the broadleaves, tufts and bushes as ROUND LEAF DISCS — Over the Hill's aspens; the
+    //  conifer fronds stay sprays)
+    if (soft) {
+      drawFlakeTuft(g, CELL, 0, CELL, rng)
+      drawFlakeTuft(g, ...origin(ATLAS_CELLS.tuft), CELL, rng)
+    } else {
+      drawFanTuft(g, CELL, 0, CELL, rng)
+      drawFanTuft(g, ...origin(ATLAS_CELLS.tuft), CELL, rng)
+    }
+    drawFern(g, ...origin(ATLAS_CELLS.fern), rng)
+    if (soft) {
+      for (const k of [0, 1, 2, 3]) drawFrondSpray(g, conifer(k), rng)
+    } else for (const k of [0, 1, 2, 3]) drawFanSpray(g, conifer(k), rng)
+    for (const c of [ATLAS_CELLS.beech, ATLAS_CELLS.elm, ATLAS_CELLS.acacia]) (soft ? drawFlakeSpray : drawFanSpray)(g, slot(c, FULL), rng)
+    const bw = Math.ceil(W * 0.047), bh = Math.ceil(H * 0.047)
+    g.clearRect(W - bw - 8, H - bh - 8, bw + 8, bh + 8)
+    g.fillStyle = '#ffffff'
+    g.fillRect(W - bw, H - bh, bw, bh)
+    return
+  }
+  drawFir(g, conifer(0), rng)
+  drawJuniper(g, conifer(1), rng)
+  drawBamboo(g, conifer(2), rng)
+  drawFir(g, conifer(3), rng)
+  drawBeech(g, slot(ATLAS_CELLS.beech, FULL), rng)
+  drawElm(g, slot(ATLAS_CELLS.elm, FULL), rng)
+  drawAcacia(g, slot(ATLAS_CELLS.acacia, FULL), rng)
+  // Opaque white block for solids (the bottom-right corner — of the acacia cell, which leaves it empty); its top rows
+  // (v ∈ [0.039, 0.047)) are NEEDLE_UV's; u ≥ 0.953 covers paint.ts's surfaces (u ∈ [0.9625, 1)).
+  const bw = Math.ceil(W * 0.047), bh = Math.ceil(H * 0.047)
+  g.clearRect(W - bw - 8, H - bh - 8, bw + 8, bh + 8)
   g.fillStyle = '#ffffff'
-  g.fillRect(SIZE - 40, SIZE - 40, 40, 40)
+  g.fillRect(W - bw, H - bh, bw, bh)
 }
 
-export function createFoliageAtlas(storybook = false, genshin = false, dots = false): THREE.CanvasTexture {
+/** The fan leaves are the default; `?leaf=classic` draws the old per-species leaves. */
+const fanLeaves = () => typeof location === 'undefined' || new URLSearchParams(location.search).get('leaf') !== 'classic'
+
+/** Canvas origin of a cell (its top-left). */
+const origin = (cell: number): [number, number] => [(cell % COLS) * CELL, Math.floor(cell / COLS) * CELL]
+/** A cell's sub-slot (cell-local UV rect, v up — the Blender cards' layout) → canvas pixels, inside the inset and PAD. */
+const PAD = 0.012
+const FULL = [0, 0, 1, 1] as const
+/** 2 × 2 slot sheets (spruce_treeit.py SLOT; treeit_set.py): [s0, t0, s1, t1] — top-left, top-right, bottom-left, bottom-right. */
+export const SHEET_SLOTS = [[0, 0.5, 0.5, 1], [0.5, 0.5, 1, 1], [0, 0, 0.5, 0.5], [0.5, 0, 1, 0.5]] as const
+/** The conifer cell's slots: fir, juniper, bamboo, a second fir. */
+const CONIFER_SLOTS = SHEET_SLOTS
+function slot(cell: number, r: readonly [number, number, number, number]): Slot {
+  const [x0, y0] = origin(cell), iw = CELL - 2 * INSET
+  const s0 = r[0] + PAD, t0 = r[1] + PAD, s1 = r[2] - PAD, t1 = r[3] - PAD
+  return { x: x0 + INSET + s0 * iw, y: y0 + INSET + (1 - t1) * iw, w: (s1 - s0) * iw, h: (t1 - t0) * iw }
+}
+/**
+ * The SPRUCE SHEET (cell 0, the Tree It spruce's card layout — spruce_treeit.py SLOT): green spray, dry spray, twigs,
+ * a spare green spray, Genshin-painted (genshinLeaves drawSpruce). The code-built sprays sample it too.
+ */
+function drawSpruceSheet(g: CanvasRenderingContext2D, rng: Rng): void {
+  drawSpruce(g, slot(ATLAS_CELLS.spray, SHEET_SLOTS[0]), rng, 'green')
+  drawSpruce(g, slot(ATLAS_CELLS.spray, SHEET_SLOTS[1]), rng, 'dry')
+  drawSpruce(g, slot(ATLAS_CELLS.spray, SHEET_SLOTS[2]), rng, 'twig')
+  drawSpruce(g, slot(ATLAS_CELLS.spray, SHEET_SLOTS[3]), rng, 'green')
+}
+
+/** @param soft the PlayCanvas soft look's round-disc broadleaves (pc/look.ts) */
+export function createFoliageAtlas(storybook = false, genshin = false, dots = false, soft = false): THREE.CanvasTexture {
   const canvas = document.createElement('canvas')
-  canvas.width = canvas.height = SIZE
-  drawAtlas(canvas, storybook, genshin, dots)
+  canvas.width = W
+  canvas.height = H
+  drawAtlas(canvas, storybook, genshin, dots, soft)
   const tex = new THREE.CanvasTexture(canvas)
   tex.colorSpace = THREE.SRGBColorSpace
   tex.anisotropy = 4

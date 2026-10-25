@@ -150,7 +150,7 @@ export class PillarField {
   private far = 0
   private body: RAPIER.RigidBody | null = null
 
-  private readonly material = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'pillar', treeShade: true, rim: 0.2, toon: 0.12, wet: true })
+  private readonly material = stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'pillar', treeShade: true, rim: 0.2, toon: 0.12, wet: true, biomeCover: 'rock', rockDetail: 'rock' })
 
   constructor(private readonly map: FixedMap, private readonly physics: PhysicsWorld) {
     this.root.name = 'pillars'

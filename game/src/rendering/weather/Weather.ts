@@ -24,10 +24,11 @@ export class Weather {
   private readonly target = { cloud: 0, rain: 0, wind: 0.5 }
   private readonly baseWind = new THREE.Vector2()
   private readonly fog = new THREE.Color()
-  private readonly grey = new THREE.Color(0.62, 0.64, 0.68)
-  private readonly greyLid = new THREE.Color(0.62, 0.64, 0.68).multiplyScalar(0.72)
-  private readonly greyRain = new THREE.Color(0.62, 0.64, 0.68).multiplyScalar(0.8)
-  private readonly greyRainZenith = new THREE.Color(0.62, 0.64, 0.68).multiplyScalar(0.55)
+  // the overcast / rain greys, scaled each frame to the hour's light (apply: a day grey lit the night's fog pale lavender)
+  private readonly grey = new THREE.Color()
+  private readonly greyLid = new THREE.Color()
+  private readonly greyRain = new THREE.Color()
+  private readonly greyRainZenith = new THREE.Color()
   constructor(private readonly seed: number, baseWind: THREE.Vector2) {
     this.baseWind.copy(baseWind)
   }
@@ -70,6 +71,12 @@ export class Weather {
   /** Modulates the blended time-of-day params in place (after the phase blend, before the systems read them). */
   apply(p: LightingParams, wind: THREE.Vector2): void {
     const c = this.cloud, r = this.rain
+    // How lit the hour's air is (its fog luminance against the day's ≈ 0.6): 1 by day, ~0.1 at night — the greys follow
+    const lvl = Math.min(1, Math.max(0.08, (0.2126 * p.fogColor.r + 0.7152 * p.fogColor.g + 0.0722 * p.fogColor.b) / 0.6))
+    this.grey.setRGB(0.62 * lvl, 0.64 * lvl, 0.68 * lvl)
+    this.greyLid.copy(this.grey).multiplyScalar(0.72)
+    this.greyRain.copy(this.grey).multiplyScalar(0.8)
+    this.greyRainZenith.copy(this.grey).multiplyScalar(0.55)
     if (c > 0.001) {
       // Overcast: a low grey lid — the sky, fog and haze all go to the same grey, the sun goes flat.
       p.clouds = Math.max(p.clouds, (0.35 + c * 0.6) * Math.min(1, c / 0.15)) // ramps in (a trace of cloud jumped to 0.35)

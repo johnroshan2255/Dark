@@ -36,7 +36,13 @@ export class ChunkStreamer {
   ) {
     for (let i = 0; i < workerCount; i++) {
       const w = new Worker(new URL('./chunk.worker.ts', import.meta.url), { type: 'module' })
-      w.onmessage = (e: MessageEvent<{ id: number; data: ChunkData; roads: RoadExport | null }>) => {
+      w.onmessage = (e: MessageEvent<{ id: number; data: ChunkData; roads: RoadExport | null; side?: number }>) => {
+        if (e.data.side !== undefined) {
+          const done = this.sides.get(e.data.side)
+          this.sides.delete(e.data.side)
+          done?.(e.data)
+          return
+        }
         if (e.data.roads) {
           this.onRoads?.(e.data.roads)
           // …and to the OTHER workers: each built the same deterministic roads on its own (a fresh world's first
@@ -50,6 +56,24 @@ export class ChunkStreamer {
       this.workers.push(w)
       this.idle.push(w)
     }
+  }
+
+  private readonly sides = new Map<number, (r: unknown) => void>()
+  private nextSide = 1
+  private sideTurn = 0
+
+  /**
+   * A SIDE JOB on one of the streamer's workers (chunk.worker 'far' / 'landmarks' / 'trees' requests): the horizon and
+   * the landmark placer share these workers instead of each starting its own (every worker holds the map + its own
+   * WorldGenerator: ~15–25 MB each). Answered in the worker's order (behind the chunks already queued there).
+   */
+  side<T>(msg: object): Promise<T> {
+    const ticket = this.nextSide++
+    const w = this.workers[this.sideTurn++ % this.workers.length]
+    return new Promise<T>((resolve) => {
+      this.sides.set(ticket, resolve as (r: unknown) => void)
+      w.postMessage({ ...msg, side: ticket })
+    })
   }
 
   get pending(): number {

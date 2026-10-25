@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { globalUniforms, GUST_GLSL } from '../../rendering/shaders/uniforms'
-import { isGenshin, isOverland } from '../../rendering/artStyle'
+import { isBright, isGenshin, isOverland } from '../../rendering/artStyle'
 
 /**
  * Genshin-style grass: a dense field of INDIVIDUAL blades (no clumps, no alpha cards).
@@ -110,6 +110,116 @@ export function createGrassGeometry(blades: number, segments: number, tall = 1, 
   g.setIndex(index)
   g.computeBoundingSphere()
   g.name = `grass.blades${blades}x${segments}${tall !== 1 ? `.tall${tall}` : ''}${vary !== 1 ? `.vary${vary}` : ''}${leanK !== 1 ? `.lean${leanK}` : ''}`
+  return g
+}
+
+/**
+ * BRIGHT grass — STRAP blades in big CLUMPS (2026-10-25, designed with the user in Blender against their reference,
+ * scripts/blender/grass/design_grass.py, "now it's almost okay — implement it"): soft, full masses of grass instead
+ * of an even bed of spikes. One instance = one 1 m² patch holding clumps of ~32 blades (roots within 0.3 m), each
+ * clump its own height; a blade is a flat STRAP ~1/10 as wide as tall, parallel to ⅔ of its height, then a long soft
+ * taper to a narrow (not pointed) top, standing nearly upright with a gentle bend; each blade its own brightness
+ * (the reference's depth between blades). The big MASSES with ground between them are the shader's (grassMaterial:
+ * a ~3 m noise per blade root). Same attributes as createGrassGeometry → the same material and field.
+ * `segments` ≥ 2: the strap (4 tris, 6 verts); 1: one tapered triangle (the mid / far rings, LOW).
+ */
+export function createStrapGrassGeometry(blades: number, segments: number, tall = 1, wide = 1, flowers = true): THREE.BufferGeometry {
+  const pos: number[] = [], col: number[] = [], tip: number[] = [], root: number[] = [], id: number[] = [], flower: number[] = [], nrm: number[] = []
+  const index: number[] = []
+  let nv = 0
+  let seed = 11
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
+  const push = (p: [number, number, number], t: number, r: [number, number], bid: number, bri: number, f = 0): number => {
+    pos.push(p[0], p[1], p[2])
+    nrm.push(0, 1, 0) // (the field shades as one soft surface)
+    const g = (0.55 + 0.45 * t) * bri
+    col.push(g, g, g)
+    tip.push(t)
+    root.push(r[0], r[1])
+    id.push(bid)
+    flower.push(f)
+    return nv++
+  }
+  // two clumps per patch (32 blades each at ULTRA's near ring; the thinner rings keep two, smaller)
+  // (the outer rings' fewer blades spread wider: their clumps stay clumps, not two tight sprigs a metre apart)
+  // (the far ring's few blades spread over the whole patch — at 10–30 m they read as the masses' fuzz, and two
+  //  tight sprigs a metre apart read as bare ground)
+  const PER = Math.max(4, Math.ceil(blades / 2)), RAD = blades >= 40 ? 0.3 : blades >= 20 ? 0.42 : 0.55
+  // the strap's stations: height fraction, width factor (the top is a narrow edge, 6 % of the root width)
+  const ST: [number, number][] = segments >= 2 ? [[0, 1], [0.62, 0.92], [1, 0.06]] : [[0, 1]]
+  let tx = 0, tz = 0, tallT = 1, ti = 0
+  for (let b = 0; b < blades; b++) {
+    if (b % PER === 0) {
+      // clumps spread evenly over the patch (an R2 sequence + jitter), each its own height
+      tx = ((0.31 + ti * 0.7548777) % 1) - 0.5 + (rnd() - 0.5) * 0.12
+      tz = ((0.17 + ti * 0.5698403) % 1) - 0.5 + (rnd() - 0.5) * 0.12
+      tallT = 0.55 + 0.85 * Math.pow(rnd(), 1.3)
+      ti++
+    }
+    const a = rnd() * Math.PI * 2, r = 0.01 + RAD * Math.sqrt(rnd())
+    const rx = tx + Math.cos(a) * r, rz = tz + Math.sin(a) * r
+    // (the design's metres × 0.6: knee-high clumps, up to ~0.85 m)
+    const h = (0.48 + 0.4 * Math.pow(rnd(), 0.8)) * tallT * 1.15 * 0.6 * tall
+    const w = (0.03 + 0.018 * rnd()) * 0.95 * 0.6 * wide * (segments >= 2 ? 1 : 1.2)
+    const face = rnd() * Math.PI
+    const px = Math.cos(face) * w, pz = Math.sin(face) * w
+    // each blade leans its own way (the wind only a hint), a gentle bend toward the top
+    const oa = a + (rnd() - 0.5) * 1.8
+    let dx = Math.cos(oa) * (0.6 + 0.8 * rnd()) + 0.8 * (0.15 + 0.25 * rnd()), dz = Math.sin(oa) * (0.6 + 0.8 * rnd()) + 0.6 * (0.15 + 0.25 * rnd())
+    const dl = Math.hypot(dx, dz) || 1
+    dx /= dl; dz /= dl
+    const curl = (0.35 + 0.75 * Math.pow(rnd(), 1.2)) * (0.8 + 0.4 * h / 0.48) * 0.3
+    const lean0 = (0.06 + 0.2 * rnd()) * 0.3
+    const bri = 0.78 + 0.32 * rnd()
+    const bid = b / blades
+    const rt: [number, number] = [rx, rz]
+    // points along the arc (fixed length h): each segment at the arc's angle at its middle
+    const ts = segments >= 2 ? [0, 0.62, 1] : [0, 1]
+    const P: [number, number, number][] = [[rx, 0, rz]]
+    for (let i = 0; i + 1 < ts.length; i++) {
+      const ang = lean0 + curl * Math.pow((ts[i] + ts[i + 1]) / 2, 1.5), L = h * (ts[i + 1] - ts[i]), q = P[P.length - 1]
+      P.push([q[0] + dx * Math.sin(ang) * L, q[1] + Math.cos(ang) * L, q[2] + dz * Math.sin(ang) * L])
+    }
+    if (segments >= 2) {
+      const iv: number[] = []
+      for (let s = 0; s < ST.length; s++) {
+        const [t, k] = ST[s], c = P[s]
+        iv.push(push([c[0] + px * k, c[1], c[2] + pz * k], t, rt, bid, bri), push([c[0] - px * k, c[1], c[2] - pz * k], t, rt, bid, bri))
+      }
+      for (let s = 0; s + 1 < ST.length; s++) {
+        const l0 = iv[s * 2], r0 = iv[s * 2 + 1], l1 = iv[s * 2 + 2], r1 = iv[s * 2 + 3]
+        index.push(l0, r0, l1, r0, r1, l1)
+      }
+    } else {
+      const c = P[0], T = P[1]
+      index.push(push([c[0] + px, 0, c[2] + pz], 0, rt, bid, bri), push([c[0] - px, 0, c[2] - pz], 0, rt, bid, bri), push(T, 1, rt, bid, bri))
+    }
+  }
+  if (flowers) {
+    // one small daisy per patch (shown on ~10 % of them), as createGrassGeometry
+    const cx = rnd() * 0.6 - 0.3, cz = rnd() * 0.6 - 0.3, cy = 0.45 * tall, R = 0.045
+    const tilt = 0.7, ct = Math.cos(tilt), st = Math.sin(tilt), rot = rnd() * Math.PI * 2
+    const Pf = (ang: number, r: number): [number, number, number] => {
+      const x = Math.cos(ang) * r, z = Math.sin(ang) * r
+      const y2 = z * st, z2 = z * ct
+      return [cx + x * Math.cos(rot) - z2 * Math.sin(rot), cy + y2, cz + x * Math.sin(rot) + z2 * Math.cos(rot)]
+    }
+    const c0 = push([cx, cy, cz], 0, [cx, cz], 0, 1, 1)
+    const ring: number[] = []
+    for (let k = 0; k < 10; k++) ring.push(push(Pf((k / 10) * Math.PI * 2, k % 2 === 0 ? R : R * 0.42), k % 2 === 0 ? 1 : 0.55, [cx, cz], 0, 1, 1))
+    for (let k = 0; k < 10; k++) index.push(c0, ring[k], ring[(k + 1) % 10])
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3))
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3))
+  g.setAttribute('tip', new THREE.Float32BufferAttribute(tip, 1))
+  g.setAttribute('bladeRoot', new THREE.Float32BufferAttribute(root, 2))
+  g.setAttribute('bladeId', new THREE.Float32BufferAttribute(id, 1))
+  g.setAttribute('flower', new THREE.Float32BufferAttribute(flower, 1))
+  g.setIndex(index)
+  g.computeBoundingSphere()
+  g.name = `grass.strap${blades}x${segments}`
   return g
 }
 
@@ -241,13 +351,14 @@ export function createGrassMaterial(band = { value: new THREE.Vector4(-2, -1, 1e
         `#include <common>
 uniform float uTime; uniform vec2 uWind; uniform vec4 uGrassBand; uniform vec2 uGrassThin; uniform vec3 uCameraPos; uniform vec3 uPlayerPos;
 attribute float tip; attribute float flower; attribute vec2 bladeRoot; attribute float bladeId; attribute float iDensity; attribute vec2 iSlope; varying float vTip;
+${isBright() ? 'attribute vec3 iMass;' : ''}
 ${GUST_GLSL}
 float gHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 float gVN(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
   return mix(mix(gHash(i), gHash(i + vec2(1, 0)), f.x), mix(gHash(i + vec2(0, 1)), gHash(i + vec2(1, 1)), f.x), f.y); }
 // Large soft PATCHES over the field (≈ 25 m + 8 m octaves): lighter / darker tip colour and taller / shorter grass.
 float gPatch(vec2 xz) { return gVN(xz * 0.04) * 0.65 + gVN(xz * 0.13 + 17.0) * 0.35; }
-vec4 gBW; float gGust, gFade, gDist;`,
+vec4 gBW; float gGust, gFade, gDist, gMass = 1.0;`,
       )
       .replace(
         '#include <begin_vertex>',
@@ -264,7 +375,7 @@ vec4 gBW; float gGust, gFade, gDist;`,
           // which stacked into terraced rows across every slope.
           transformed.y += dot(iSlope, rootL);
           // Per-blade height variety (Genshin: a fairly even, lush field).
-          transformed.y *= ${isGenshin() ? '(0.8 + 0.25 * gHash(bw.xz + 3.1)) * (0.7 + 0.6 * gPatch(bw.xz))' : '0.8 + 0.45 * gHash(bw.xz + 3.1)'}; // Genshin: soft height waves
+          transformed.y *= ${isGenshin() ? '(0.8 + 0.25 * gHash(bw.xz + 3.1)) * (0.7 + 0.6 * gPatch(bw.xz))' : isBright() ? '(0.92 + 0.16 * gHash(bw.xz + 3.1)) * (0.25 + 0.95 * gMass)' : '0.8 + 0.45 * gHash(bw.xz + 3.1)'}; // Genshin: soft height waves; bright: the masses (lower toward their edges)
           // Blades thicken with distance (base widens, tip stays a point) so a far blade never thins below a
           // pixel: sub-pixel blades shimmer as the camera pans (the "glitter" on phones).
           transformed.xz = vec2(rootL.x, rootL.y) + (transformed.xz - vec2(rootL.x, rootL.y)) * (1.0 + dist * ${isOverland() ? '0.14' : isGenshin() ? '0.03' : '0.08'});
@@ -303,7 +414,15 @@ vec4 gBW; float gGust, gFade, gDist;`,
           float h2 = gHash(bw.xz + 5.3);
           // Local density 0..1 (meadow vs forest floor vs verge, interpolated per patch — GrassField): a soft
           // threshold, so a patch at 0.4 shows 40 % of its blades instead of all-or-nothing squares.
-          float fade = 1.0 - smoothstep(iDensity - 0.12, iDensity, h);
+          ${isBright() ? `// BRIGHT MASSES (the strap-clump design, 2026-10-25): the grass grows in big soft masses ~3 m across with
+          // plain ground between them. GrassField computes the mass field per patch on the CPU (value − the density's
+          // threshold, + its gradient in the patch frame: iMass) and never sends a patch that lies in a gap — here each
+          // blade reads it at its own root (linear across the patch: soft edges, no squares). The local density (map
+          // grass amount, region, verge) sets how much ground the masses COVER, never how thin they are: inside a mass
+          // every blade stands; toward a mass's edge they shrink (begin_vertex), so the edge thins out.
+          float fade;
+          { gMass = smoothstep(0.0, 0.3, iMass.x + dot(iMass.yz, bladeRoot)) * step(0.02, iDensity);
+            fade = smoothstep(0.06, 0.2, gMass); }` : `float fade = 1.0 - smoothstep(iDensity - 0.12, iDensity, h);`}
           // Band: grow in (far layer) and shrink out (edge), each blade at its own distance (±18 % of the band).
           float jit = (h2 - 0.5) * 0.36;
           fade *= smoothstep(uGrassBand.x, uGrassBand.y, dist + jit * (uGrassBand.y - uGrassBand.x));
@@ -381,6 +500,9 @@ vec4 gBW; float gGust, gFade, gDist;`,
         #include <opaque_fragment>`,
       )
   }
-  m.customProgramCacheKey = () => `grass-v7-blades${isOverland() ? '-over' : isGenshin() ? '-gen' : ''}`
+  // (PlayCanvas build: pc/materials/grassMaterial.ts converts it, its band / thin per layer)
+  m.userData.pcKind = 'grass'
+  m.userData.pc = { band, thin }
+  m.customProgramCacheKey = () => `grass-v8-blades${isOverland() ? '-over' : isGenshin() ? '-gen' : ''}`
   return m
 }

@@ -76,9 +76,12 @@ function key(p: Partial<LightingParams> & Record<string, unknown>): LightingPara
   } as LightingParams
 }
 
+// (2026-10-24: a DARK night — the moon's god rays / light shafts (rays 0.6, shafts 1.1) filled the whole distance with a
+//  pale lavender glow, and the sky fill lit the land like a dim day. Now: no moon shafts, a weaker fill, a lower
+//  exposure — the light comes from the moon, the stars, the torch and the cars' headlights.)
 const NIGHT = key({
-  moonColor: c(0xa8bcff), moonIntensity: 1.6, hemiSky: c(0x3a5a8e), hemiGround: c(0x121a2a), hemiIntensity: 1.5,
-  fogColor: c(0x1a2a48), skyZenith: c(0x070e24), fogStart: 40, fogEnd: 520, exposure: 1.85, stars: 1, rays: 0.6, shafts: 1.1,
+  moonColor: c(0xa8bcff), moonIntensity: 1.6, hemiSky: c(0x3a5a8e), hemiGround: c(0x121a2a), hemiIntensity: 0.85,
+  fogColor: c(0x101a30), skyZenith: c(0x070e24), fogStart: 40, fogEnd: 520, exposure: 1.55, stars: 1, rays: 0, shafts: 0,
   clouds: 0.3,
   tint: c(0xdde8ff), lift: c(0x010206), saturation: 0.9, contrast: 1.06, vignette: 0.32, grain: 0.03,
   haze: 0.35, mistDensity: 0.014, mistBase: 1, mistFalloff: 0.075,

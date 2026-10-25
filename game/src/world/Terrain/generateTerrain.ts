@@ -5,6 +5,7 @@ import { buildRoadSurface, type RoadSurfaceArrays } from './roadSurface'
 import { vertexColor, type VertexAttrs } from './vertexColor'
 
 const P = CHUNK_VERTS + 2 // padded grid for seamless normals
+const P2 = CHUNK_VERTS + 4 // (two samples on every side: the wide, smoothed normals)
 
 export interface TerrainArrays extends RoadSurfaceArrays {
   heights: Float32Array
@@ -28,13 +29,15 @@ export function generateTerrain(fields: WorldFields, cx: number, cz: number): Te
   const ox = cx * CHUNK_SIZE
   const oz = cz * CHUNK_SIZE
 
-  // Padded heights (one extra sample on every side) so normals match across chunk borders.
-  const padded = new Float32Array(P * P)
-  for (let iz = 0; iz < P; iz++) {
-    for (let ix = 0; ix < P; ix++) {
-      padded[iz * P + ix] = fields.height(ox + (ix - 1) * CELL_SIZE, oz + (iz - 1) * CELL_SIZE)
+  // Padded heights (two extra samples on every side) so normals match across chunk borders; `padded` = one.
+  const pad2 = new Float32Array(P2 * P2)
+  for (let iz = 0; iz < P2; iz++) {
+    for (let ix = 0; ix < P2; ix++) {
+      pad2[iz * P2 + ix] = fields.height(ox + (ix - 2) * CELL_SIZE, oz + (iz - 2) * CELL_SIZE)
     }
   }
+  const padded = new Float32Array(P * P)
+  for (let iz = 0; iz < P; iz++) for (let ix = 0; ix < P; ix++) padded[iz * P + ix] = pad2[(iz + 1) * P2 + ix + 1]
 
   const n = CHUNK_VERTS * CHUNK_VERTS
   const heights = new Float32Array(n)
@@ -58,9 +61,14 @@ export function generateTerrain(fields: WorldFields, cx: number, cz: number): Te
       if (h < minY) minY = h
       if (h > maxY) maxY = h
 
-      // Central-difference normal.
-      const dx = padded[pi + 1] - padded[pi - 1]
-      const dz = padded[pi + P] - padded[pi - P]
+      // SMOOTHED normal (2026-10-25, the user: "the terrain is so sharp — make it smooth"): the slope over ±1 and ±2
+      // cells, averaged across the three rows / columns (1 2 1) — a break of slope shades as a soft roll over ~4
+      // cells, not a crease along one grid line. The shape is unchanged (physics, the server); load time only.
+      const q = (iz + 2) * P2 + (ix + 2)
+      const sx = (o: number) => 0.5 * (pad2[q + o + 1] - pad2[q + o - 1]) + 0.25 * (pad2[q + o + 2] - pad2[q + o - 2])
+      const sz = (o: number) => 0.5 * (pad2[q + o + P2] - pad2[q + o - P2]) + 0.25 * (pad2[q + o + 2 * P2] - pad2[q + o - 2 * P2])
+      const dx = (sx(-P2) + 2 * sx(0) + sx(P2)) / 4
+      const dz = (sz(-1) + 2 * sz(0) + sz(1)) / 4
       let nx = -dx
       let ny = 2 * CELL_SIZE
       let nz = -dz

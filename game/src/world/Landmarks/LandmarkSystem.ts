@@ -46,7 +46,9 @@ export class LandmarkSystem {
    *  around it (A* driveways, 0.3–2 s per new area on a phone-class core) — on the main thread that froze the game
    *  for seconds while flying, and for ~5–30 s at load (home + the first ring). The main thread's field is `remote`:
    *  it only reads regions this worker primed. */
-  private readonly worker: Worker
+  private readonly worker: Worker | null
+  /** the request runner: a shared worker pool's side jobs (ChunkStreamer.side), or this system's own worker */
+  private readonly run: (msg: LandmarksRequest) => void
   private nextId = 1
   private inflight = 0
   /** A response arrived: re-evaluate the visible set even without moving. */
@@ -61,21 +63,29 @@ export class LandmarkSystem {
     private readonly physics: PhysicsWorld,
     private readonly seed: number,
     private readonly palette: number,
+    runner?: (msg: LandmarksRequest) => Promise<LandmarksResponse>,
   ) {
     this.geos = createLandmarkGeometries()
     this.group.name = 'landmarks'
     field.remote = true
-    this.worker = new Worker(new URL('../Streaming/chunk.worker.ts', import.meta.url), { type: 'module' })
-    this.worker.onmessage = (e: MessageEvent<LandmarksResponse>) => {
+    const receive = (r: LandmarksResponse) => {
       this.inflight--
       // (only regions not known yet: a known region keeps its objects — the colliders are keyed by them)
-      for (const [i, j, list] of e.data.regions) if (!field.has(i, j)) field.prime(i, j, list)
+      for (const [i, j, list] of r.regions) if (!field.has(i, j)) field.prime(i, j, list)
       if (!this.homeKnown) {
         this.homeKnown = true
-        field.primeHome(e.data.home)
-        this.onHome?.(e.data.home)
+        field.primeHome(r.home)
+        this.onHome?.(r.home)
       }
       this.fresh = true
+    }
+    if (runner) {
+      this.worker = null
+      this.run = (msg) => void runner(msg).then(receive)
+    } else {
+      const w = (this.worker = new Worker(new URL('../Streaming/chunk.worker.ts', import.meta.url), { type: 'module' }))
+      w.onmessage = (e: MessageEvent<LandmarksResponse>) => receive(e.data)
+      this.run = (msg) => w.postMessage(msg)
     }
   }
 
@@ -89,7 +99,7 @@ export class LandmarkSystem {
     if (!missing) return false
     if (this.inflight === 0) {
       this.inflight++
-      this.worker.postMessage({ type: 'landmarks', id: this.nextId++, seed: this.seed, palette: this.palette, i0, j0, i1, j1, map: activeMap() } satisfies LandmarksRequest)
+      this.run({ type: 'landmarks', id: this.nextId++, seed: this.seed, palette: this.palette, i0, j0, i1, j1, map: activeMap() } satisfies LandmarksRequest)
     }
     return true
   }
@@ -207,7 +217,7 @@ export class LandmarkSystem {
   }
 
   dispose(): void {
-    this.worker.terminate()
+    this.worker?.terminate()
     for (const b of this.bodies.values()) this.physics.world.removeRigidBody(b)
     this.bodies.clear()
     this.rebuild([[], [], []], false)

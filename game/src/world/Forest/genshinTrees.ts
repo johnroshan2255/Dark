@@ -619,9 +619,10 @@ export function glowShrooms(rng: Rng): THREE.BufferGeometry {
  * GENSHIN BUSH (close-up reference): the card crown method at bush scale — ~14 fixed leaf-cluster cards over a low
  * dome (0.65 m radius), spherized normals from the dome centre, darker toward the centre and the ground.
  */
-export function cardBush(rng: Rng, dark: THREE.Color, light: THREE.Color, leafy = false): THREE.BufferGeometry {
+/** @param lobes the bush's clump centres and weights (default: one round clump) */
+export function cardBush(rng: Rng, dark: THREE.Color, light: THREE.Color, leafy = false, lobes?: [V3, number][]): THREE.BufferGeometry {
   const s = new Soup()
-  const tips: [V3, number][] = [[[0, 0.35, 0], 1]]
+  const tips: [V3, number][] = lobes ?? [[[0, 0.35, 0], 1]]
   // leafy (bright): made only of leaf cards like the trees' outer leaves — no solid green ball inside; near detail.
   cardCrown(s, tips, { ...MONDSTADT_TREE, clumpR: 0.55, plates: true }, leafy ? 0 : 1, rng, dark, light, 1, { leafy })
   return s.geometry('bush')

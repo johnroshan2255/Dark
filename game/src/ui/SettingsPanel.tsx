@@ -131,7 +131,7 @@ export function SettingsPanel({ game }: { game: Game }) {
         </Row>
         <div style={{ ...label, marginTop: 18, marginBottom: 8 }}>Keys</div>
         <div style={keys}>
-          {[['W A S D', 'Drive / walk (S = brake · reverse)'], ['Space', 'Handbrake: stop · steer + Space = slide turn · jump'], ['Shift', 'Nitro · sprint'], ['E', 'Get in / out'], ['X · Z', 'Gear up / down (manual)'], ['Q', 'Low range'], ['K', '4WD (4H) · lock differentials'], ['F', 'Headlights · torch'], ['V', 'Camera'], ['T · G', 'Day / night · next time'], ['N', 'Nightmare'], ['O', 'Settings'], ['R', 'Weather'], ['F3', 'FPS overlay']].map(([k, v]) => (
+          {[['W A S D', 'Drive / walk (S = brake · reverse)'], ['Space', 'Handbrake: stop · steer + Space = slide turn · jump'], ['Shift', 'Nitro · sprint'], ['E', 'Get in / out'], ['X · Z', 'Gear up / down (manual)'], ['Q', 'Low range'], ['K', '4WD (4H) · lock differentials'], ['F', 'Headlights · torch'], ['J', 'Wipers (driving)'], ['V', 'Camera'], ['T · G', 'Day / night · next time'], ['N', 'Nightmare'], ['O', 'Settings'], ['R', 'Weather'], ['F3', 'FPS overlay']].map(([k, v]) => (
             <div key={k} style={keyRow}><span style={keyCap}>{k}</span><span>{v}</span></div>
           ))}
         </div>

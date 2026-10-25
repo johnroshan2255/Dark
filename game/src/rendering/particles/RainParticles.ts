@@ -5,14 +5,15 @@ import * as THREE from 'three'
  * (no CPU per frame, like the nightmare ash), falling fast and slanting with the wind. Count = the tier's cap
  * (`particles.rain`); invisible when dry. Fogged by the scene fog so distant drops fade. One draw call.
  * SNOW (`snow` = 0..1, the snowfield weight under the player): that share of the particles become soft round
- * flakes that fall ~12× slower, flutter and drift with the wind — the same draw call, the same budget.
+ * flakes that fall ~20× slower and drift with the wind — the same draw call (a 12 k pool of points: rain draws
+ * ~2.6 k of it, snow all of it in a 16 × 10 × 16 m box round the eye, ~3.5 flakes per m³; LOW 35 %).
  * REGION AMBIENCE (world/biomes/BiomeDefs.ts): in the autumn valleys a share become tumbling LEAVES (gold / orange /
  * red, fluttering down), in the mystic woods slow-rising glowing SPORES (cyan / violet) — still one draw.
  */
 export class RainParticles {
   readonly points: THREE.Points
   private readonly material: THREE.ShaderMaterial
-  constructor(count = 2600) {
+  constructor(count = 12000) {
     const pos = new Float32Array(count * 3)
     const seed = new Float32Array(count)
     for (let i = 0; i < count; i++) {
@@ -40,24 +41,38 @@ export class RainParticles {
           float f = fract(seed * 13.71);
           vKind = f < uSnow ? 1.0 : f < uSnow + uLeaf ? 2.0 : f < uSnow + uLeaf + uSpore ? 3.0 : 0.0;
           vFlake = vKind > 0.5 ? 1.0 : 0.0; // anything but rain: slow, soft, fluttering
-          float speed = vKind < 0.5 ? 16.0 + seed * 8.0 : vKind < 1.5 ? 1.1 + seed * 0.9 : vKind < 2.5 ? 1.3 + seed * 0.8 : -(0.22 + seed * 0.3);
+          float speed = vKind < 0.5 ? 16.0 + seed * 8.0 : vKind < 1.5 ? 0.6 + seed * 0.6 : vKind < 2.5 ? 1.3 + seed * 0.8 : -(0.22 + seed * 0.3);
           p.y -= uTime * speed;
-          p.xz += uWind * uTime * (vKind < 0.5 ? 0.6 : vKind > 2.5 ? 0.3 : 1.4) + vec2(seed * 3.0, seed * 7.0);
-          // Flakes / leaves / spores flutter: slow sideways loops, each on its own phase (leaves swing wider).
-          p.xz += vec2(sin(uTime * 0.9 + seed * 40.0), cos(uTime * 0.7 + seed * 31.0)) * (vKind > 1.5 && vKind < 2.5 ? 1.3 : 0.6) * vFlake;
-          vec3 box = vec3(48.0, 26.0, 48.0);
-          vec3 o = uCam - vec3(24.0, 8.0, 24.0);
+          // (snow drifts 0.8 × the wind: it falls ~0.9 m/s now, so this keeps the old slant — 1.4 blew it sideways)
+          p.xz += uWind * uTime * (vKind < 0.5 ? 0.6 : vKind > 2.5 ? 0.3 : vKind < 1.5 ? 0.8 : 1.4) + vec2(seed * 3.0, seed * 7.0);
+          // Leaves / spores flutter: slow sideways loops, each on its own phase (leaves swing wider).
+          p.xz += vec2(sin(uTime * 0.9 + seed * 40.0), cos(uTime * 0.7 + seed * 31.0)) * (vKind > 1.5 && vKind < 2.5 ? 1.3 : 0.6) * step(1.5, vKind);
+          // SNOW (2026-10-24, "white disco lights moving around" — the loops above and 0.15–0.4 m eddies read as dancing
+          // lights): real snow falls nearly straight, drifting with the wind; each flake only sways a few cm, slowly
+          if (vKind > 0.5 && vKind < 1.5) {
+            float s2 = fract(seed * 91.7), s3 = fract(seed * 57.3);
+            p.xz += vec2(sin(uTime * (0.4 + s2 * 0.5) + s3 * 60.0), cos(uTime * (0.35 + s3 * 0.45) + s2 * 45.0)) * (0.04 + 0.08 * s2);
+          }
+          // (snow: a 16 × 10 × 16 m box round the eye and the whole pool — a dense field of small flakes near the camera,
+          //  not a few big blobs; beyond ~8 m the fog carries it)
+          bool snowK = vKind > 0.5 && vKind < 1.5;
+          vec3 box = snowK ? vec3(16.0, 10.0, 16.0) : vec3(48.0, 26.0, 48.0);
+          vec3 o = uCam - (snowK ? vec3(8.0, 4.0, 8.0) : vec3(24.0, 8.0, 24.0));
           vec3 wp = o + mod(p - o, box);
           // Thin the field beyond the tier's amount by dropping seeds (whole drops vanish, no half-alpha rain).
-          if (seed > uAmount) wp = vec3(0.0, -1e4, 0.0);
+          // (rain keeps its old ~2.6 k streaks of the 12 k pool; snow uses it all — real snowfall is a dense field of small flakes)
+          if (seed > uAmount * (vKind < 0.5 ? 0.22 : 1.0)) wp = vec3(0.0, -1e4, 0.0);
           vec4 mvPosition = modelViewMatrix * vec4(wp, 1.0);
           vec4 mv = mvPosition;
           float d = length(wp - uCam);
-          vFade = (1.0 - smoothstep(16.0, 26.0, d)) * smoothstep(0.4, 1.5, d);
+          vFade = snowK ? (1.0 - smoothstep(5.0, 8.0, d)) * smoothstep(0.3, 1.0, d) : (1.0 - smoothstep(16.0, 26.0, d)) * smoothstep(0.4, 1.5, d);
           vSeed = seed;
           // Streak ≈ 0.35 m tall → point size from the distance; the fragment keeps only a thin vertical bar.
-          float sz = vKind < 1.5 ? 0.11 + 0.08 * seed : vKind < 2.5 ? 0.17 + 0.08 * seed : 0.06 + 0.04 * seed;
-          gl_PointSize = mix(clamp(0.7 * uScale / max(-mv.z, 0.5), 2.0, 64.0), clamp(sz * uScale / max(-mv.z, 0.5), 1.5, 32.0), vFlake);
+          float sz = vKind < 1.5 ? 0.02 + 0.035 * seed * seed : vKind < 2.5 ? 0.17 + 0.08 * seed : 0.06 + 0.04 * seed;
+          float px = sz * uScale / max(-mv.z, 0.5);
+          // (a flake under 2 px is drawn at 2 px with its coverage as alpha: a tiny dot no longer twinkles from pixel to pixel)
+          if (snowK && px < 2.0) vFade *= px * px / 4.0;
+          gl_PointSize = mix(clamp(0.7 * uScale / max(-mv.z, 0.5), 2.0, 64.0), clamp(px, snowK ? 2.0 : 1.5, 32.0), vFlake);
           gl_Position = projectionMatrix * mv;
           #include <fog_vertex>
         }`,
@@ -82,9 +97,9 @@ export class RainParticles {
             if (a < 0.02) discard;
             gl_FragColor = vec4((vSeed < 0.5 ? vec3(0.45, 0.95, 1.0) : vec3(0.8, 0.55, 1.0)) * 1.8, a);
           } else if (vFlake > 0.5) {
-            a = smoothstep(0.5, 0.15, length(q)) * 0.95 * vFade; // soft round flake
-            if (a < 0.02) discard;
-            gl_FragColor = vec4(uColor * 1.25 + 0.08, a);
+            a = smoothstep(0.5, 0.05, length(q)) * 0.95 * vFade; // a small soft flake (2–5.5 cm), lit by the sky
+            if (a < 0.01) discard;
+            gl_FragColor = vec4(uColor * 1.05 + 0.03, a);
           } else {
             if (abs(q.x) > 0.035 + 0.025 * vSeed) discard;
             a = (1.0 - abs(q.y) * 2.0) * 0.8 * vFade;

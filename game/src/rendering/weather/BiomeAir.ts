@@ -168,7 +168,10 @@ export function applyMapAir(p: LightingParams, air: MapAir): void {
   }
   // the map's valley mist (Zhangjiajie's gorges full of cloud), never thinner than the phase's own (dawn, rain)
   if (air.mist) {
-    p.mistDensity = Math.max(p.mistDensity, air.mist[0])
+    // (a misty phase — dawn, dusk, rain — THICKENS the map's mist by a share of its extra, never replaces it: its own
+    //  ground-hugging density lifted to the map's 25 m base with the map's slow falloff filled every valley with a grey
+    //  soup — 2026-10-25, "in morning it looks bad, at evening not good")
+    p.mistDensity = air.mist[0] + Math.max(0, p.mistDensity - 0.002) * 0.15
     p.mistBase = Math.max(p.mistBase, air.mist[1])
     p.mistFalloff = air.mist[2]
     // (the mist is the map's depth: the distance tint of the land stays lighter, so the far towers keep their rust and

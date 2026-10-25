@@ -30,6 +30,8 @@ export interface SpeciesDef {
   trunkHalfHeight: number
   /** Blender-modelled (assets/treeModels.ts): its colours are final — always the Genshin hue set, every art style. */
   modelled?: boolean
+  /** Natural colours (the Tree It spruce): gentle per-tree variation only, no stylised hue set. */
+  natural?: boolean
 }
 
 /** A flat card p0→p1 with half-width vector `side`; normals from `centre` (canopy volume). */
@@ -403,6 +405,80 @@ function tieredPine(level: number, rng: Rng, o: TieredOpts): THREE.BufferGeometr
 }
 const TIERED: TieredOpts = { height: 11, radius: 2.7, bare: 1.4, tiers: [7, 5, 3], petals: [9, 7, 5], light: 0xa8e063, mid: 0x5dbb4a, dark: 0x1b4a26, trunk: 0x8b5e3c }
 
+/**
+ * FROND PINE (the PlayCanvas soft look — Over the Hill's spruces, 2026-10-25 "the pine must look like this"): a full,
+ * dense CONE from near the ground to a pointed leader — many short whorls of broad drooping fronds (the atlas's solid
+ * frond blades, drawFrondSpray: lit upper half, shaded lower), each card a diamond laid along the blade's diagonal and
+ * folded on its midrib like a tent (a lit ridge, shaded flanks). NO solid core (it read as a cone with fronds stuck
+ * on): the whorls overlap so densely that the fronds alone close the tree, dark toward the trunk.
+ * `leaf`: the replaced species' own average frond colour (the colour stays the map's). LOD0 / 1 / 2 ≈ 440 / 180 / 70 tris.
+ */
+function frondPine(level: number, rng: Rng, H: number, leaf: THREE.Color): THREE.BufferGeometry {
+  const s = new Soup()
+  const bark = srgb(0x5a3a26)
+  const R = H * 0.26, yb = H * 0.05
+  solid(s, 0, H * 0.5, H * 0.022, H * 0.012, level === 2 ? 4 : 6, bark.clone().multiplyScalar(0.7), bark, 0, SURFACE_UV.bark)
+  // slot 0 of the spray cell (a green frond; stem at the slot's bottom-left corner, tip at its top-right)
+  const [u0, v0, u1, v1] = cellUv(ATLAS_CELLS.spray)
+  // (inset from the slot's edges: the neighbouring slot bled into the cards as streaks)
+  const uvAt = (S: number, T: number): [number, number] => [u0 + (0.02 + S * 0.46) * (u1 - u0), v0 + (0.52 + T * 0.46) * (v1 - v0)]
+  const tiers = [22, 11, 6][level]
+  for (let k = 0; k < tiers; k++) {
+    const t = k / (tiers - 1)
+    const y = yb + (H * 0.88 - yb) * Math.pow(t, 0.9)
+    const r = R * Math.pow(1 - t, 1.0) + H * 0.03
+    const n = Math.max(5, Math.round((level === 0 ? 12 : level === 1 ? 9 : 7) - t * 5))
+    const a0 = rng.next() * Math.PI * 2
+    // dark at the trunk (the tree's own shade inside), the tips the old pine's frond colour; the lower whorls a bit darker
+    const base = leaf.clone().multiplyScalar(0.3 + 0.1 * t), tip = leaf.clone().multiplyScalar(0.95 + 0.12 * t)
+    for (let i = 0; i < n; i++) {
+      const a = a0 + (i / n) * Math.PI * 2 + rng.range(-0.2, 0.2)
+      const dx = Math.cos(a), dz = Math.sin(a)
+      const L = (r * rng.range(1.15, 1.4) + H * 0.025) * (level === 2 ? 1.2 : level === 1 ? 1.1 : 1)
+      const droop = L * (0.5 - 0.22 * t) * rng.range(0.85, 1.15)
+      const B: V3 = [dx * H * 0.01, y + L * 0.08, dz * H * 0.01]
+      const T: V3 = [dx * L, y - droop, dz * L]
+      const M: V3 = [(B[0] + T[0]) / 2, (B[1] + T[1]) / 2, (B[2] + T[2]) / 2]
+      // the diamond's side corners: wide to each side and well below the midrib (a tent: the whorl reads as a skirt)
+      const hw = L * 0.6, fold = L * 0.3
+      const Ls: V3 = [M[0] - dz * hw, M[1] - fold, M[2] + dx * hw]
+      const Rs: V3 = [M[0] + dz * hw, M[1] - fold, M[2] - dx * hw]
+      const nrm = (p: V3): V3 => [p[0], 0.55 * Math.hypot(p[0], p[2]) + 0.2, p[2]]
+      const mid = base.clone().lerp(tip, 0.5)
+      const v = (p: V3, uv: [number, number], c: THREE.Color) => s.vert(p, nrm(p), uv, c)
+      v(B, uvAt(0, 0), base); v(Rs, uvAt(1, 0), mid); v(T, uvAt(1, 1), tip)
+      v(B, uvAt(0, 0), base); v(T, uvAt(1, 1), tip); v(Ls, uvAt(0, 1), mid)
+    }
+  }
+  // the leader: two crossed upright fronds at the top
+  if (level < 2) {
+    const L = H * 0.12, top = leaf.clone().multiplyScalar(0.9)
+    for (const [dx, dz] of [[1, 0], [0, 1]]) {
+      const B: V3 = [0, H * 0.86, 0], T: V3 = [0, H * 0.86 + L, 0], M: V3 = [0, H * 0.86 + L / 2, 0]
+      const Ls: V3 = [M[0] - dz * L * 0.35, M[1], M[2] + dx * L * 0.35], Rs: V3 = [M[0] + dz * L * 0.35, M[1], M[2] - dx * L * 0.35]
+      const nrm: V3 = [0, 1, 0]
+      s.vert(B, nrm, uvAt(0, 0), top); s.vert(Rs, nrm, uvAt(1, 0), top); s.vert(T, nrm, uvAt(1, 1), top)
+      s.vert(B, nrm, uvAt(0, 0), top); s.vert(T, nrm, uvAt(1, 1), top); s.vert(Ls, nrm, uvAt(0, 1), top)
+    }
+  }
+  return s.geometry('frondpine')
+}
+
+/** A species' average leaf vertex colour (its foliage: not the bark / solid texels) and height, from level 0. */
+function foliageOf(g: THREE.BufferGeometry): { leaf: THREE.Color; height: number } {
+  const uv = g.getAttribute('uv'), col = g.getAttribute('color'), pos = g.getAttribute('position')
+  const sum = [0, 0, 0]
+  let n = 0, top = 0
+  for (let i = 0; i < pos.count; i++) {
+    top = Math.max(top, pos.getY(i))
+    if (!uv || !col || (uv.getX(i) > 0.95 && uv.getY(i) < 0.05)) continue
+    sum[0] += col.getX(i); sum[1] += col.getY(i); sum[2] += col.getZ(i); n++
+  }
+  // (as it is: the old pine's colour, not rescaled — a brightened copy read lime)
+  const leaf = n ? new THREE.Color(sum[0] / n, sum[1] / n, sum[2] / n) : srgb(0x3f7a3a)
+  return { leaf, height: top || 11 }
+}
+
 /** The previous pine (straight pole + pads), kept for reference / comparison shots. */
 export function polePine(level: number, rng: Rng): THREE.BufferGeometry {
   const s = new Soup()
@@ -599,7 +675,40 @@ const GIRTH = new Map<number, number>()
 /** A map's own leaf colours for the tiered pines (sRGB hex; FixedMap.leaves — map.json palette leafLight / leafMid / leafDark). */
 export interface LeafColours { light: number; mid: number; dark: number }
 
-export function createTreeLibrary(opts: { tiered?: boolean; leaves?: LeafColours } = {}): { species: SpeciesDef[]; dispose(): void } {
+/**
+ * THE TREE IT SPRUCE (scripts/blender/spruce_treeit.py; the user's Tree It spruce, optimised) is every conifer: its
+ * green variants are registered as the spruce / pine / fir species (treeModels.ts) on every map and the endless world,
+ * in place of the tiered pines too; on an autumn-pine map (map.json `pines: 'autumn'`) the fir slot (18 % of the
+ * scatter) grows the variant with warm autumn tips. Spray cards on the atlas's spray cell, which holds the Tree It
+ * needle sheet (LOD0 512, LOD1 276, LOD2 102 triangles; the tiered pines 264 / 140 / 38).
+ */
+let AUTUMN: { spruce: THREE.BufferGeometry[]; pine: THREE.BufferGeometry[]; fir: THREE.BufferGeometry[] } | null = null
+export function registerAutumnPines(p: NonNullable<typeof AUTUMN>): void {
+  AUTUMN = p
+}
+
+/**
+ * SOFT-LOOK BROADLEAF (the PlayCanvas soft look): the bark vertices (the atlas's bark texel) of a broadleaf take a warm
+ * BROWN, a little darker at the foot (2026-10-25: "its trunk brown not white" — the pale aspen white is gone), and its
+ * leaves (every other vertex, linear colour) LEAF_K darker ("leafs bit darker"; the bushes keep their own).
+ */
+const LEAF_K = 0.8
+function aspenBark(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  const r = g.clone()
+  const uv = r.getAttribute('uv'), col = r.getAttribute('color'), pos = r.getAttribute('position')
+  if (!uv || !col) return r
+  const solid = (u: number, v: number) => u > 0.95 && v < 0.05 // (the atlas's opaque block: bark and other solids)
+  for (let i = 0; i < uv.count; i++) {
+    const u = uv.getX(i), v = uv.getY(i)
+    if (u > 0.9775 && u < 0.985 && v < 0.038) {
+      const k = 0.72 + 0.28 * Math.min(1, Math.max(0, pos.getY(i) / 3))
+      col.setXYZ(i, 0.2 * k, 0.12 * k, 0.07 * k) // (sRGB ≈ #7c5f4a mid-trunk)
+    } else if (!solid(u, v)) col.setXYZ(i, col.getX(i) * LEAF_K, col.getY(i) * LEAF_K, col.getZ(i) * LEAF_K)
+  }
+  return r
+}
+
+export function createTreeLibrary(opts: { tiered?: boolean; leaves?: LeafColours; autumn?: boolean; aspen?: boolean } = {}): { species: SpeciesDef[]; dispose(): void } {
   const build = (fn: (l: number, r: Rng) => THREE.BufferGeometry, seed: number, name: string) =>
     [0, 1, 2].map((l) => {
       const soup = fn(l, new Rng(seed + l))
@@ -633,6 +742,10 @@ export function createTreeLibrary(opts: { tiered?: boolean; leaves?: LeafColours
   const birchDef = species.find((s) => s.id === TreeSpecies.Birch)!
   for (const [id, name] of [[TreeSpecies.Oak, 'oak'], [TreeSpecies.Slender, 'slender'], [TreeSpecies.Golden, 'golden'], [TreeSpecies.Curvy, 'curvy']] as const)
     species.push({ ...birchDef, id, name, levels: birchDef.levels.map((g) => g.clone()) as SpeciesDef['levels'] })
+  // The Tree It set (assets/treeModels.ts): code-built fallbacks — the broadleaves copy the birch, the juniper the fir.
+  const firDef = species.find((s) => s.id === TreeSpecies.Fir)!
+  for (const [id, name, def] of [[TreeSpecies.Beech, 'beech', birchDef], [TreeSpecies.Elm, 'elm', birchDef], [TreeSpecies.Bamboo, 'bamboo', birchDef], [TreeSpecies.Acacia, 'acacia', birchDef], [TreeSpecies.Juniper, 'juniper', firDef]] as const)
+    species.push({ ...def, id, name, levels: def.levels.map((g) => g.clone()) as SpeciesDef['levels'] })
   // Registered species (e.g. GLB models, `registerTreeSpecies`) replace the built-in one with the same id.
   for (const extra of EXTRA_SPECIES) {
     const i = species.findIndex((s) => s.id === extra.id)
@@ -651,8 +764,37 @@ export function createTreeLibrary(opts: { tiered?: boolean; leaves?: LeafColours
     for (const [id, name, seed, o] of tiered) {
       const i = species.findIndex((s) => s.id === id)
       if (i < 0) continue
+      // (with the Tree It spruce loaded — registered as spruce / fir / pine — only the tiered pines' trunk collider is
+      // kept: the server's statics stay those of the scatter)
+      if (AUTUMN) {
+        species[i] = { ...species[i], trunkRadius: 0.26, trunkHalfHeight: 3 }
+        continue
+      }
       if (!EXTRA_SPECIES.includes(species[i])) species[i].levels.forEach((g) => g.dispose())
       species[i] = { id, name, levels: build((l, r) => tieredPine(l, r, o), seed, name), trunkRadius: 0.26, trunkHalfHeight: 3 }
+    }
+  }
+  // Autumn-pine maps: the fir slot grows the gold-tipped Tree It variant (only the mesh — the collider stays)
+  if (opts.autumn && AUTUMN) {
+    const i = species.findIndex((s) => s.id === TreeSpecies.Fir)
+    if (i >= 0) species[i] = { ...species[i], levels: AUTUMN.fir.map((g) => g.clone()) as SpeciesDef['levels'] }
+  }
+  if (opts.aspen) {
+    // (the Tree It broadleaves — sparse sprays on thin stems, they read as bamboo — grow the modelled birch's forked
+    //  trunk and full rounded crown: Over the Hill's aspens; only the mesh, the colliders stay)
+    const birch = species.find((x) => x.id === TreeSpecies.Birch)
+    for (const id of [TreeSpecies.Beech, TreeSpecies.Elm, TreeSpecies.Acacia, TreeSpecies.Bamboo]) {
+      const i = species.findIndex((x) => x.id === id)
+      if (birch && i >= 0) species[i] = { ...species[i], levels: birch.levels.map((g) => g.clone()) as SpeciesDef['levels'] }
+    }
+    const broad = new Set<number>([TreeSpecies.Birch, TreeSpecies.Beech, TreeSpecies.Elm, TreeSpecies.Acacia, TreeSpecies.Bamboo, TreeSpecies.Slender, TreeSpecies.Curvy, TreeSpecies.Golden, TreeSpecies.Oak, TreeSpecies.Maple, TreeSpecies.WhiteBirch])
+    for (let i = 0; i < species.length; i++) if (broad.has(species[i].id)) species[i] = { ...species[i], levels: species[i].levels.map(aspenBark) as SpeciesDef['levels'] }
+    // the conifers: full frond-cone pines (frondPine) in the replaced species' own height and colour — the colliders stay
+    for (const [id, seed] of [[TreeSpecies.Spruce, 111], [TreeSpecies.Fir, 313], [TreeSpecies.Pine, 414]] as const) {
+      const i = species.findIndex((x) => x.id === id)
+      if (i < 0) continue
+      const { leaf, height } = foliageOf(species[i].levels[0])
+      species[i] = { ...species[i], levels: build((l, r) => frondPine(l, r, height, leaf), seed, species[i].name) }
     }
   }
   // Per-tree LOD bands (uniforms.ts uTreeLod): level 0 = band 1 (near), level 1 = band 2 (mid), level 2 = band 3
@@ -740,7 +882,17 @@ export function createRegionUndergrowth(): { leafPile: THREE.BufferGeometry; glo
 }
 
 /** Fern: 6 arched frond cards (fern cell). Bush: blob + leaf cards. */
-export function createUndergrowth(): { fern: THREE.BufferGeometry; bush: THREE.BufferGeometry } {
+/** A bush mesh scaled (w across, h up) — its camera-facing tufts' centres and offsets with it. */
+function scaledBush(g: THREE.BufferGeometry, w: number, h: number): THREE.BufferGeometry {
+  g.scale(w, h, w)
+  const c = g.getAttribute('bbCenter'), o = g.getAttribute('bbOff')
+  if (c) for (let i = 0; i < c.count; i++) c.setXYZ(i, c.getX(i) * w, c.getY(i) * h, c.getZ(i) * w)
+  if (o) for (let i = 0; i < o.count; i++) o.setXY(i, o.getX(i) * w, o.getY(i) * h)
+  g.computeBoundingSphere()
+  return g
+}
+/** @param soft the PlayCanvas soft look's bush: Over the Hill's rich deep-green clumps (round leaf discs), lighter on top */
+export function createUndergrowth(soft = false): { fern: THREE.BufferGeometry; bush: THREE.BufferGeometry } {
   const rng = new Rng(909)
   const s = new Soup()
   // Overland: lighter olive-green undergrowth (their bushes are soft green mounds, not dark spots).
@@ -766,6 +918,8 @@ export function createUndergrowth(): { fern: THREE.BufferGeometry; bush: THREE.B
     tuft(b, [Math.cos(a) * 0.4, u, Math.sin(a) * 0.4], rng.range(0.22, 0.32), [0, 0.2, 0], bd, bl)
   }
   // Genshin: the bush is built like the crowns — leaf-cluster cards with one smooth normal field (genshinTrees).
+  // (soft: their mounds, ~1.5 m — a LUMPY mound of four lobes, wider than tall, not one ball)
+  if (soft) return { fern, bush: scaledBush(cardBush(rng, srgb(0x1c4a2e), srgb(0x72b85a), true, [[[0, 0.42, 0], 1], [[0.42, 0.26, 0.12], 0.8], [[-0.34, 0.24, 0.3], 0.75], [[-0.12, 0.28, -0.4], 0.75]]), 1.45, 1.25) }
   if (isGenshin()) { const gb = cardBush(rng, srgb(0x1e5a44), srgb(0x8cc860)); return { fern, bush: gb } }
   // Bright (over the hill): leafy bushes made like the tree crowns (leaf-cluster cards), warm olive → yellow-green.
   if (isBright()) return { fern, bush: cardBush(rng, srgb(0x3a4c24), srgb(0xa4b25a), true) }

@@ -181,7 +181,10 @@ function CarPhoto({ game, id, tune, busy }: { game: Game; id: string; tune: stri
     if (busy || !ready) return
     const t = window.setTimeout(() => {
       const small = Math.min(window.innerWidth, window.innerHeight) < 600
-      setUrl(game.carPhoto(small ? 800 : 1280, small ? 450 : 720))
+      // (the PlayCanvas build shoots asynchronously: a promise of the URL)
+      const shot = game.carPhoto(small ? 800 : 1280, small ? 450 : 720) as string | null | Promise<string | null>
+      if (shot instanceof Promise) void shot.then((u) => u && setUrl(u))
+      else setUrl(shot)
     }, url ? 90 : 0)
     return () => window.clearTimeout(t)
   }, [game, id, tune, busy, ready]) // eslint-disable-line react-hooks/exhaustive-deps

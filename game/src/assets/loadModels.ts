@@ -825,6 +825,19 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
   const tyreHalfWidth = (wheel.boundingBox!.max.x - wheel.boundingBox!.min.x) / 2
   let mesh: Float32Array | undefined, hulls: Float32Array[] | undefined
   if (doors.length) bb.union(outline)
+  carExposure(bb, [{ g: body }, { g: glass, solidOnly: true }, ...doors.flatMap((d) => [{ g: d.body, at: d.hinge }, { g: d.glass, at: d.hinge, solidOnly: true }])],
+    [cabin, steeringWheel, ...controls.map((c) => c.geo)])
+  // The glass's car-space rest position (Car carGlass: its rain / snow and the wipers' arcs are laid out in it — a door
+  // pane's own position is hinge-local, which put it under the wiper arcs and broke its crust from the body's)
+  const glassRest = (g: THREE.BufferGeometry | null, at = [0, 0, 0]) => {
+    const p = g?.getAttribute('position')
+    if (!g || !p) return
+    const a = new Float32Array(p.count * 3)
+    for (let i = 0; i < p.count; i++) a.set([p.getX(i) + at[0], p.getY(i) + at[1], p.getZ(i) + at[2]], i * 3)
+    g.setAttribute('aGlassP', new THREE.BufferAttribute(a, 3))
+  }
+  glassRest(glass)
+  for (const d of doors) glassRest(d.glass, d.hinge)
   if (map) map.colorSpace = THREE.SRGBColorSpace
   const paintMap = map ? buildPaintMap(map, !!def.whitePaint) : null
   const lamps = map ? findLamps(body, map, bb.min.z, bb.max.z) : { head: null, tail: null }
@@ -873,6 +886,87 @@ function bakeVehicle(scene: THREE.Object3D, def: VehicleDef): Omit<VehicleModel,
     dials,
     controls,
     hooks,
+  }
+}
+
+/**
+ * DIRT ANCHOR + EXPOSURE (2026-10-24, the user: "the mud / snow is like pixels moving round the car, and the inside of the
+ * car gets it too"): every body / door vertex gets `aCar` = (its car-space rest position, its EXPOSURE 0..1). The dirt
+ * shader (Car truckMaterial) draws its mud / dust / snow noise from that position — locked to the panels, continuous
+ * across the door seams (the world position slid the pattern over the car as it drove) — and only where the surface is
+ * open to the outside: the shell (glass counted solid) is voxelised at 8 cm and from each vertex (12 cm off its face)
+ * six axis rays march out from each side of it; an exterior panel sees out along ≥ 3 of them, the seats, dash, floor and
+ * door cards along none (exposure 0). Signed: − when the outside is against the vertex normal (inward-wound skins). The cabin, steering wheel and controls are sheltered outright. ~50–150 ms per model, at load.
+ */
+function carExposure(bb: THREE.Box3, parts: { g: THREE.BufferGeometry | null; at?: [number, number, number]; solidOnly?: boolean }[], sheltered: (THREE.BufferGeometry | null)[]): void {
+  const C = 0.08, M = 0.3
+  const ox = bb.min.x - M, oy = bb.min.y - M, oz = bb.min.z - M
+  const nx = Math.ceil((bb.max.x - bb.min.x + 2 * M) / C), ny = Math.ceil((bb.max.y - bb.min.y + 2 * M) / C), nz = Math.ceil((bb.max.z - bb.min.z + 2 * M) / C)
+  const solid = new Uint8Array(nx * ny * nz)
+  const mark = (x: number, y: number, z: number) => {
+    const i = Math.floor((x - ox) / C), j = Math.floor((y - oy) / C), k = Math.floor((z - oz) / C)
+    if (i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz) solid[(k * ny + j) * nx + i] = 1
+  }
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+  for (const p of parts) {
+    const pos = p.g?.getAttribute('position')
+    if (!pos) continue
+    const idx = p.g!.index, n = idx ? idx.count : pos.count, at = p.at ?? [0, 0, 0]
+    const vi = (k: number) => (idx ? idx.getX(k) : k)
+    for (let t = 0; t + 2 < n; t += 3) {
+      a.fromBufferAttribute(pos, vi(t)); b.fromBufferAttribute(pos, vi(t + 1)); c.fromBufferAttribute(pos, vi(t + 2))
+      const s = Math.max(1, Math.ceil(Math.max(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a)) / (C * 0.7)))
+      for (let u = 0; u <= s; u++) for (let v = 0; u + v <= s; v++) {
+        const w = s - u - v
+        mark((a.x * u + b.x * v + c.x * w) / s + at[0], (a.y * u + b.y * v + c.y * w) / s + at[1], (a.z * u + b.z * v + c.z * w) / s + at[2])
+      }
+    }
+  }
+  const occ = (x: number, y: number, z: number) => {
+    const i = Math.floor((x - ox) / C), j = Math.floor((y - oy) / C), k = Math.floor((z - oz) / C)
+    if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) return -1 // out: escaped
+    return solid[(k * ny + j) * nx + i]
+  }
+  const DIRS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+  const cache = new Map<string, number>()
+  for (const p of parts) {
+    if (!p.g || p.solidOnly) continue
+    const pos = p.g.getAttribute('position'), nor = p.g.getAttribute('normal'), at = p.at ?? [0, 0, 0]
+    if (!pos) continue
+    const out = new Float32Array(pos.count * 4)
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i) + at[0], y = pos.getY(i) + at[1], z = pos.getZ(i) + at[2]
+      const key = `${Math.round(x * 50)},${Math.round(y * 50)},${Math.round(z * 50)},${nor ? Math.round(nor.getX(i) * 4) + ',' + Math.round(nor.getY(i) * 4) + ',' + Math.round(nor.getZ(i) * 4) : ''}`
+      let e = cache.get(key)
+      if (e === undefined) {
+        // both sides of the face (the models' normals are not to be trusted: the van's skin faces inward): the side that
+        // sees out along more axes is the OUTSIDE — its exposure, signed by which side it is (+ along the normal)
+        const ways = (k: number) => {
+          const sx = x + (nor ? nor.getX(i) : 0) * 0.12 * k, sy = y + (nor ? nor.getY(i) : 0) * 0.12 * k, sz = z + (nor ? nor.getZ(i) : 0) * 0.12 * k
+          let free = 0
+          for (const d of DIRS) {
+            for (let s = 1; ; s++) {
+              const o = occ(sx + d[0] * C * s, sy + d[1] * C * s, sz + d[2] * C * s)
+              if (o === -1) { free++; break }
+              if (o === 1) break
+            }
+          }
+          return free
+        }
+        const fp = ways(1), fn = ways(-1)
+        e = Math.min(1, Math.max(0, (Math.max(fp, fn) - 1.5) / 2)) * (fn > fp ? -1 : 1) // 0 (≤ 1 way out) … ±1 (≥ 4)
+        cache.set(key, e)
+      }
+      out.set([x, y, z, e], i * 4)
+    }
+    p.g.setAttribute('aCar', new THREE.BufferAttribute(out, 4))
+  }
+  for (const g of sheltered) {
+    const pos = g?.getAttribute('position')
+    if (!g || !pos) continue
+    const out = new Float32Array(pos.count * 4)
+    for (let i = 0; i < pos.count; i++) out.set([pos.getX(i), pos.getY(i), pos.getZ(i), 0], i * 4)
+    g.setAttribute('aCar', new THREE.BufferAttribute(out, 4))
   }
 }
 

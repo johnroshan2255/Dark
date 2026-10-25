@@ -24,6 +24,7 @@
     "@dimforge/rapier3d-compat": "^0.21.0",
     "@react-three/drei": "^10.7.9",
     "@react-three/fiber": "^9.8.1",
+    "playcanvas": "2.23.2",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "three": "^0.186.1"

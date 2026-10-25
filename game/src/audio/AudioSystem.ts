@@ -504,8 +504,7 @@ export class AudioSystem {
     ng.gain.setValueAtTime(0, t)
     ng.gain.linearRampToValueAtTime(vol * 1.1, t + 0.02)
     ng.gain.exponentialRampToValueAtTime(0.001, t + 2.4)
-    n.connect(lp).connect(ng).connect(this.sfx)
-    n.start(t)
+    n.connect(lp).connect(ng).connect(this.sfx) // (noiseSource has started it)
     n.stop(t + 2.5)
   }
 

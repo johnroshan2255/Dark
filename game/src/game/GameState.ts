@@ -40,6 +40,8 @@ export interface GameStateShape {
   boat: boolean
   /** Headlights on (HUD label while driving). */
   lights: boolean
+  /** Windscreen wipers switched on (J / touch WIPE, only while driving; off when you get out). */
+  wipers: boolean
   /** Front end open (the world idles behind it, camera orbiting the car): the main menu or the garage. */
   landing: boolean
   screen: 'menu' | 'garage' | 'maps'

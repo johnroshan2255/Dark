@@ -11,8 +11,9 @@ import { wireModel } from './NetClient'
  *  - PREDICTION: the local car keeps running the same model immediately (steering stays instant); after each step
  *    its predicted body state is kept by frame number.
  *  - RECONCILIATION: each `VehicleState` (the server's car after frame `ack`) is compared with what we predicted for
- *    that frame. Under DEADBAND nothing happens; up to SNAP_M the error is folded in over a few states (BLEND of it
- *    per state, position, rotation and velocity — and into the later predictions, so it is never counted twice);
+ *    that frame. Under DEADBAND (wider with speed) nothing happens; up to SNAP_M the error is folded in over several
+ *    states (BLEND of it per state: position and rotation; velocity too past VEL_FIX_M — and into the later
+ *    predictions, so it is never counted twice);
  *    past SNAP_M (a crash the client didn't see, a respawn) the car jumps to the server's state plus the motion
  *    predicted since — visibly, not hidden.
  * Not here: boats, flights and arcade handling (client-simulated and validated, as before) — leaving the
@@ -21,10 +22,19 @@ import { wireModel } from './NetClient'
  */
 const INPUT_REDUNDANCY = 4
 const HISTORY = 240
-const DEADBAND_M = 0.02
+// (2026-10-24, the user: "cars shake for no reason, parked and driving — all maps"): the server's answer comes ~7 frames
+// late, and folding 30 % of every 2 cm difference — VELOCITY included — into a car resting on its springs fed back into
+// it: parked, the body swayed 27 cm and rocked at 1.8 rad/s, the server ~9 cm off. Now differences inside the deadband
+// (6 cm parked, growing with speed: the two simulations never agree to the millimetre) are left alone, the rest is
+// folded in gently (12 % per state: position and rotation only), and the velocity only on a real divergence. Parked:
+// 1 cm of sway, 0.03 rad/s, the server 4–5 cm off and steady.
+const DEADBAND_M = 0.06
+const DEADBAND_PER_MS = 0.01
+const DEADBAND_RAD = 0.03
 const SNAP_M = 3
 const SNAP_RAD = 0.6
-const BLEND = 0.3
+const BLEND = 0.12
+const VEL_FIX_M = 0.6
 
 interface Hist {
   seq: number
@@ -181,13 +191,17 @@ export class VehicleSync {
     st.meanErr += (err - st.meanErr) * 0.05
     st.maxErr = Math.max(st.maxErr, err)
     const sv = [s.vel[0] / 100, s.vel[1] / 100, s.vel[2] / 100], sw = [s.angvel[0] / 1000, s.angvel[1] / 1000, s.angvel[2] / 1000]
-    if (err < DEADBAND_M && ang < 0.01) return
+    const speed = Math.hypot(sv[0], sv[1], sv[2])
+    if (err < DEADBAND_M + DEADBAND_PER_MS * speed && ang < DEADBAND_RAD) return
     const k = err > SNAP_M || ang > SNAP_RAD ? 1 : BLEND
     if (k === 1) st.snaps++
     const dp = [ex * k, ey * k, ez * k]
     const dq = slerpId(qe, k)
-    const dv = [(sv[0] - h.v[0]) * k, (sv[1] - h.v[1]) * k, (sv[2] - h.v[2]) * k]
-    const dw = [(sw[0] - h.w[0]) * k, (sw[1] - h.w[1]) * k, (sw[2] - h.w[2]) * k]
+    // (velocities only when the two have really parted — a snap or a sizeable error; small velocity kicks are what set
+    //  the delayed correction rocking)
+    const kv = k === 1 ? 1 : err > VEL_FIX_M ? BLEND : 0
+    const dv = [(sv[0] - h.v[0]) * kv, (sv[1] - h.v[1]) * kv, (sv[2] - h.v[2]) * kv]
+    const dw = [(sw[0] - h.w[0]) * kv, (sw[1] - h.w[1]) * kv, (sw[2] - h.w[2]) * kv]
     // the car now, and every prediction after the acked frame, move by the same correction
     const body = this.game.car.sim.body
     const t = body.translation(), r = body.rotation(), v = body.linvel(), w = body.angvel()

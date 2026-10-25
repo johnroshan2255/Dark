@@ -54,7 +54,7 @@ export class WorldManager {
     grass: { radius: 16, density: 1.1, blades: 5 }, trees: { near: 1, lod1: 45 }, vegDetail: { farRocks: false, lean: true },
     impostors: { start: 70, far: 360, atlas: 1024, blend: false },
   }
-  private detail: ChunkDetail = { plants: false, treeNear: 1, farRocks: false, lean: true }
+  private detail: ChunkDetail = { plants: false, treeNear: 1, farRocks: false, lean: true, treeCast: true }
   /** Dense grass around the player (one draw call). */
   readonly grass: GrassField
   /** Trees beyond the streamed chunks (octahedral impostors) — on once the atlas is baked (setImpostors). */
@@ -89,7 +89,7 @@ export class WorldManager {
     this.fields.palette = groundPalette() // main-thread copy (grass, HUD); the workers get it per request
     // conifer maps (map.json trees: 'conifer') grow the stylised tiered pines of their reference, in the map's own
     // leaf colours when it has them
-    this.geos = createPropGeometries({ tieredPines: !!map?.conifers, leaves: map?.leaves })
+    this.geos = createPropGeometries({ tieredPines: !!map?.conifers, leaves: map?.leaves, autumnPines: map?.autumnPines })
     this.grass = new GrassField(mats.grass, mats.grassMid, mats.grassFar, mats.grassNearU, mats.grassMidU, mats.grassFarU, this.fields, this.chunks)
     this.root.add(this.grass.root)
     // every tree impostor (streamed chunks + far forest) in one draw
@@ -112,7 +112,7 @@ export class WorldManager {
   setQuality(q: WorldQuality): void {
     const radiusChanged = q.renderRadius !== this.q.renderRadius
     this.q = { ...q, lodRings: [...q.lodRings] as [number, number], vegDetail: { ...q.vegDetail } }
-    this.detail = { plants: q.plants, treeNear: q.trees.near, farRocks: q.vegDetail.farRocks, lean: q.vegDetail.lean }
+    this.detail = { plants: q.plants, treeNear: q.trees.near, farRocks: q.vegDetail.farRocks, lean: q.vegDetail.lean, treeCast: !this.fields.map?.imageTreeShadows }
     this.grass.configure(styledGrass(q.grass))
     this.farForest.setRange(q.impostors.far)
     if (radiusChanged) this.centerX = this.centerZ = Number.NaN

@@ -43,7 +43,9 @@ CARS = {
         # model: millimetres, front toward −X; real E30 wheelbase 2.562 m (the model's 2.570: kept as is)
         'unit': 0.001, 'turn': 90, 'wheelbase': 2.57,
         'wheel_mats': ['Tire'],
-        'keep_wheels': 'Tire', 'rim': 0.62,            # its own BBS cross-spoke wheels: split per corner, kept
+        # (its own wheels were a smooth blob with the spokes painted on: built instead, like the G500's — a 205/55 R15
+        #  road tyre on a BBS-style cross-spoke alloy, polished lip and rim bolts, 5 lug nuts)
+        'tyre': {'tread': 'road', 'rim': 'bbs', 'ratio': 0.62, 'rim_rgb': (0.62, 0.63, 0.65), 'segs': 40, 'rows': 56, 'knob': 0.008},
         'texture': 'Body',                              # one base-colour texture kept (the body's 1024²)
         'brake': 'disc',
         # front doors (y, z) outline, front-bottom first; window frame follows the A-pillar
@@ -56,6 +58,7 @@ CARS = {
         # the "ROH3D.COM" watermark on both plates (one UV island): texture pixels (x0, y0, x1, y1, top-down) filled white
         'paint_out': [(76, 238, 94, 336)],
         'lamps': {'head': [(0.586, 0.606), (0.41, 0.606)], 'head_r': 0.075, 'tail': (0.51, 0.655), 'tail_wh': (0.148, 0.078)},
+        'lamp_units': ('head', 'tail', 'exhaust'),
         'exhaust': [(0.40, 0.25), (0.46, 0.25)],
     },
     'carry_van': {
@@ -63,12 +66,24 @@ CARS = {
         # model: metres, front toward −Y; ST90 Carry van wheelbase ~1.84 m (the model's 1.90 scaled down)
         'unit': 1.0, 'turn': 0, 'wheelbase': 1.84,
         'wheel_mats': ['WatanabeMaterial', 'EXT_rim', 'Tyre', 'brakedisc', 'FM3_CALIPER', 'Material_10831'],
-        'tyre': {'tread': 'road', 'rim': 'spoke8', 'ratio': 0.6, 'rim_rgb': (0.8, 0.8, 0.79), 'segs': 32, 'rows': 30},
+        'tyre': {'tread': 'road', 'rim': 'spoke8', 'ratio': 0.6, 'rim_rgb': (0.8, 0.8, 0.79), 'segs': 28, 'rows': 22},
         'brake': 'drum',
         # (heavy source: 158 k tris) — parts the game draws itself or can do without, and the decimation budget
-        'drop_mats': ['AE86_SPRING', 'AE86_SUSP', 'S13TBS', 'Material_11112'],
+        'drop_mats': ['AE86_SPRING', 'AE86_SUSP', 'S13TBS', 'Material_11112', 'focos_front'],   # (headlamp lenses: built, 5b)
         'body_budget': 17000, 'paint_albedo': 0.8,
-        'zfight': [('black.009', 'MAINBODY.007'), ('Black.007', 'MAINBODY.007')],
+        # (2026-10-23, the user: the van "looks like a shining thing": a straight collapse to 0.2 left long slivers
+        #  across the panels — faceted highlights and streaky AO; then "its body blinking", the drip rail above the
+        #  windows "crumbled".) Now: the low mesh's normals are rebuilt (smooth by angle + face-area weighted) — that
+        #  was the faceting, not the triangle count: the paint takes a plain collapse to 0.3 and shades like the
+        #  source; NO planar dissolve on the paint (it bends a gently curved panel into one n-gon: facets), coplanar
+        #  dissolve on the rest; the budget spent where it shows (chassis and cab insides least); the layers decimated
+        #  separately pushed apart so they can't cross (trim out over the paint, the cab's lining in); the old z-fight
+        #  cut (paint faces under the trim deleted) off — it tore the holes in the drip rail; the AO softened, smoothed.
+        'planar': 3, 'no_planar': ['MAINBODY.'],
+        'dec_ratio': {'MAINBODY.': 0.3, 'black.': 0.3, 'Black.': 0.45, 'CHASSIS': 0.06, 'MAINBODY_INT': 0.25, 'SHEET': 0.3, 'DASH': 0.4, 'Gray': 0.3},
+        'separate': {'trim': 0.0015, 'cabin_trim': 0.006},
+        'weighted_normals': 35,
+        'ao': {'distance': 0.35, 'floor': 0.5, 'smooth': 2},
         'door': [(-1.51, 0.56), (-0.475, 0.56), (-0.475, 1.52), (-1.20, 1.52), (-1.45, 1.15), (-1.51, 1.0)], 'door_x': 0.54,
         'build_steering': {'c': (0.33, -1.12, 1.0), 'tilt': 52, 'R': 0.18},
         # (no seats in the source: the squat cab's windscreen is 1.02–1.55 m, so the head sits at 1.38 — catalogue cabin)
@@ -80,6 +95,7 @@ CARS = {
         # the SUZUKI letters on the front panel and the S badge on the rear plate: small islands in these boxes
         'badges': [((-0.32, -1.63, 0.69), (0.32, -1.57, 0.78)), ((-0.05, 1.58, 0.55), (0.05, 1.62, 0.61))],
         'lamps': {'head': [(0.492, 0.752)], 'head_r': 0.078, 'tail': (0.648, 0.758), 'tail_wh': (0.05, 0.069)},
+        'lamp_units': ('head',),
         'exhaust': [(-0.42, 0.22)],
     },
 }
@@ -337,7 +353,7 @@ for box in cfg.get('badges', []):
 
 # Z-FIGHTING: faces of one part lying on another part's surface (the van's black bumper strips on the white body: a
 # black/white flicker) — the lower one ("under", e.g. MAINBODY) loses its faces there
-if cfg.get('zfight'):
+if cfg.get('zfight') and ARGS.get('ZFIGHT', '1') == '1':
     from mathutils.bvhtree import BVHTree
     for top, under in cfg['zfight']:
         to = [o for o in meshes() if o.data.materials and o.data.materials[0] and top in o.data.materials[0].name]
@@ -378,18 +394,38 @@ else:
 
 # ---------------------------------------------------------------- 2c. budget: decimate the body (UVs kept)
 body_budget = cfg.get('body_budget')
+
+
+def apply_mod(o, mod):
+    with bpy.context.temp_override(object=o, active_object=o):
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+
+
 if body_budget:
     parts = [o for o in meshes() if not o.name.startswith('wheel_')]
     t0 = tris(parts)
     if t0 > body_budget:
         big = [o for o in parts if tris([o]) > 600]
-        small = tris(parts) - tris(big)
-        ratio = max(0.12, (body_budget - small) / max(1, tris(big)))
+        if cfg.get('planar'):   # coplanar faces dissolved first: no visible change, fewer tris for the collapse to take
+            for o in big:
+                if o.data.materials and o.data.materials[0] and any(k in o.data.materials[0].name for k in cfg.get('no_planar', [])):
+                    continue   # (a dissolve merges a gently curved panel into one bent n-gon: facets — the collapse alone)
+                mod = o.modifiers.new('planar', 'DECIMATE'); mod.decimate_type = 'DISSOLVE'
+                mod.angle_limit = math.radians(cfg['planar']); mod.delimit = {'UV', 'MATERIAL', 'SEAM', 'SHARP'}
+                apply_mod(o, mod)
+        per = cfg.get('dec_ratio', {})
+        fixed = {o: next((r for k, r in per.items() if o.data.materials and o.data.materials[0] and k in o.data.materials[0].name), None) for o in big}
+        free = [o for o in big if fixed[o] is None]
+        spent = tris(parts) - tris(big) + sum(tris([o]) * r for o, r in fixed.items() if r is not None)
+        ratio = max(0.12, (body_budget - spent) / max(1, tris(free))) if free else 1.0
         for o in big:
-            mod = o.modifiers.new('dec', 'DECIMATE'); mod.ratio = ratio; mod.use_collapse_triangulate = True
-            with bpy.context.temp_override(object=o, active_object=o):
-                bpy.ops.object.modifier_apply(modifier=mod.name)
-        print('decimated body', t0, '→', tris([o for o in meshes() if not o.name.startswith('wheel_')]), 'ratio', round(ratio, 3))
+            r = fixed[o] if fixed[o] is not None else ratio
+            if r >= 1.0:
+                continue
+            mod = o.modifiers.new('dec', 'DECIMATE'); mod.ratio = r; mod.use_collapse_triangulate = True
+            apply_mod(o, mod)
+        print('decimated body', t0, '→', tris([o for o in meshes() if not o.name.startswith('wheel_')]),
+              'ratio', round(ratio, 3), {o.data.materials[0].name: tris([o]) for o in big if o.data.materials})
 
 # ---------------------------------------------------------------- 2d. materials → roles (matte), colours into vertices
 TEX = None
@@ -476,13 +512,23 @@ for o in meshes():
     if not o.name.startswith('wheel_'):
         o.name = 'body_' + (o.data.materials[0].name if o.data.materials else 'x')
 print('materials', sorted({m.name for o in meshes() for m in o.data.materials if m}), 'tris', tris(meshes()))
+# LAYERS APART (cfg `separate`: material → metres along the part's own vertex normals): decimated on their own, the trim
+# strips sink into the paint and the cab's lining pokes through the skin — a flicker (z-fight) in game
+for o in meshes():
+    d = cfg.get('separate', {}).get(o.data.materials[0].name if o.data.materials else '')
+    if d:
+        bm = bmesh.new(); bm.from_mesh(o.data); bm.normal_update()
+        for v in bm.verts:
+            v.co += v.normal * d
+        bm.to_mesh(o.data); bm.free()
+        print('separated', o.name, d)
 
 # ---------------------------------------------------------------- 3. wheels (built) + brake hardware
 class Builder:
     """Faces in wheel-local space: x = outward along the axle, (y, z) the wheel plane (z up) — vehicle_realism.py's."""
 
     def __init__(self):
-        self.bm = bmesh.new(); self.cols = []
+        self.bm = bmesh.new(); self.cols = []; self.smooth = set()
 
     def v(self, x, r, a):
         return self.bm.verts.new((x, r * math.sin(a), r * math.cos(a)))
@@ -493,13 +539,33 @@ class Builder:
         except ValueError:
             pass
 
-    def revolve(self, prof, cols, n, a0=0.0):
+    def revolve(self, prof, cols, n, a0=0.0, smooth=False):
         rings = [[self.v(x, r, a0 + 2 * math.pi * k / n) for k in range(n)] for (x, r) in prof]
         for i in range(len(prof) - 1):
             A, B = rings[i], rings[i + 1]
             for k in range(n):
                 k2 = (k + 1) % n
                 self.face((A[k], A[k2], B[k2], B[k]), cols[i])
+                if smooth:
+                    self.smooth.add(self.cols[-1][0])
+
+    def bar(self, x0, x1, p0, p1, hw, col):
+        """A straight spoke between (y, z) points p0 → p1 in the wheel plane, hw wide each side, x0..x1 deep."""
+        d = Vector((p1[0] - p0[0], p1[1] - p0[1])).normalized(); n = Vector((-d.y, d.x)) * hw
+        q = [(p0[0] - n.x, p0[1] - n.y), (p1[0] - n.x, p1[1] - n.y), (p1[0] + n.x, p1[1] + n.y), (p0[0] + n.x, p0[1] + n.y)]
+        b = [self.bm.verts.new((x0, y, z)) for (y, z) in q]; t = [self.bm.verts.new((x1, y, z)) for (y, z) in q]
+        for f in ((b[3], b[2], b[1], b[0]), (t[0], t[1], t[2], t[3]), (b[0], b[1], t[1], t[0]), (b[1], b[2], t[2], t[1]),
+                  (b[2], b[3], t[3], t[2]), (b[3], b[0], t[0], t[3])):
+            self.face(f, col)
+
+    def nut(self, x0, x1, r, a, size, col):
+        """A hex nut / rim bolt facing out (+x) at radius r, angle a."""
+        cy, cz = r * math.sin(a), r * math.cos(a)
+        hexa = [(cy + size * math.cos(k * math.pi / 3), cz + size * math.sin(k * math.pi / 3)) for k in range(6)]
+        r0 = [self.bm.verts.new((x0, y, z)) for (y, z) in hexa]; r1 = [self.bm.verts.new((x1, y, z)) for (y, z) in hexa]
+        for k in range(6):
+            self.face((r0[k], r0[(k + 1) % 6], r1[(k + 1) % 6], r1[k]), col)
+        self.face(r1, col)
 
     def block(self, x0, x1, r0, r1, a0, a1, col, taper=0.85):
         am, ah = (a0 + a1) / 2, (a1 - a0) / 2 * taper
@@ -517,6 +583,8 @@ class Builder:
             for li in poly.loop_indices:
                 col.data[li].color = (*rgb, 1.0)
         me.color_attributes.active_color = col
+        for poly, (f, _) in zip(me.polygons, self.cols):
+            poly.use_smooth = f in self.smooth
         me.materials.append(mat); me.transform(M)
         ob = bpy.data.objects.new(name, me); sc.collection.objects.link(ob)
         return ob
@@ -527,10 +595,10 @@ RUBBER = (0.028, 0.028, 0.03); TREAD = (0.045, 0.043, 0.04); DARK = (0.012, 0.01
 
 def build_wheel(key, c, R, Wd, out):
     t = cfg['tyre']; b = Builder()
-    Rr = t['ratio'] * R; knob = 0.014 * R; Rb = R - knob; sw = Rb - Rr; W_ = Wd
+    Rr = t['ratio'] * R; knob = t.get('knob', 0.014) * R; Rb = R - knob; sw = Rb - Rr; W_ = Wd
     side = [(-0.40, 0.0), (-0.47, 0.22), (-0.50, 0.5), (-0.485, 0.78), (-0.44, 0.95), (-0.36, 1.0)]
     prof = [(x * W_, Rr + f * sw) for (x, f) in side] + [(0.0, Rb)] + [(-x * W_, Rr + f * sw) for (x, f) in reversed(side)]
-    b.revolve(prof, [RUBBER] * (len(prof) - 1), t['segs'])
+    b.revolve(prof, [RUBBER] * (len(prof) - 1), t['segs'], smooth=True)
     rows = t['rows']; pitch = 2 * math.pi / rows
     for k in range(rows):
         for s_, off in ((-1, 0.0), (1, 0.5)):
@@ -538,6 +606,28 @@ def build_wheel(key, c, R, Wd, out):
             x0, x1 = sorted((s_ * 0.03 * W_, s_ * 0.44 * W_))
             b.block(x0, x1, Rb - 0.004 * R, R, a0, a1, TREAD)
     rc = t['rim_rgb']
+    if t['rim'] == 'bbs':
+        # BBS-style cross-spoke alloy: a polished lip stepping down to the face, rim bolts round the lip, 10 pairs of
+        # thin spokes crossing into a lattice (the brakes show through), a domed centre cap ringed by 5 lug nuts
+        LIP = (0.85, 0.86, 0.88); IN = tuple(v * 0.45 for v in rc); CAP = (0.07, 0.07, 0.075)
+        b.revolve([(x * W_, r) for (x, r) in [(0.42, Rr + 0.014 * R), (0.40, Rr - 0.004 * R), (0.0, Rr - 0.03 * R), (-0.40, Rr - 0.03 * R), (-0.42, Rr + 0.01 * R)]],
+                  [LIP, IN, IN, IN], t['segs'], smooth=True)
+        b.revolve([(0.42 * W_, Rr + 0.014 * R), (0.43 * W_, 0.97 * Rr), (0.42 * W_, 0.9 * Rr), (0.3 * W_, 0.87 * Rr)], [LIP, LIP, rc], t['segs'], smooth=True)
+        for k in range(16):
+            b.nut(0.42 * W_, 0.45 * W_, 0.935 * Rr, (k + 0.5) * 2 * math.pi / 16, 0.016 * Rr, LIP)
+        for k in range(10):
+            a = k * 2 * math.pi / 10
+            for sgn, (x0, x1) in ((1, (0.25, 0.33)), (-1, (0.22, 0.30))):
+                a1 = a + sgn * 0.32
+                b.bar(x0 * W_, x1 * W_, (0.3 * Rr * math.sin(a), 0.3 * Rr * math.cos(a)), (0.88 * Rr * math.sin(a1), 0.88 * Rr * math.cos(a1)), 0.028 * Rr, rc)
+        b.revolve([(0.2 * W_, 0.34 * Rr), (0.33 * W_, 0.34 * Rr), (0.35 * W_, 0.3 * Rr), (0.35 * W_, 0.17 * Rr)], [rc, rc, rc], 30, smooth=True)
+        b.revolve([(0.35 * W_, 0.17 * Rr), (0.39 * W_, 0.15 * Rr), (0.42 * W_, 0.08 * Rr), (0.43 * W_, 0.0)], [LIP, CAP, CAP], 24, smooth=True)
+        for k in range(5):
+            b.nut(0.35 * W_, 0.39 * W_, 0.24 * Rr, k * 2 * math.pi / 5, 0.035 * Rr, LIP)
+        M = Matrix.Translation(c) @ (Matrix.Rotation(math.pi, 4, 'Z') if out < 0 else Matrix.Identity(4))
+        ob = b.to_object('wheel_' + key, MAT['wheel'], M)
+        ob['rim'] = t['ratio']
+        return ob
     b.revolve([(x * W_, r) for (x, r) in [(0.40, Rr + 0.012 * R), (0.37, Rr - 0.004 * R), (0.0, Rr - 0.03 * R), (-0.40, Rr - 0.03 * R), (-0.42, Rr + 0.01 * R)]],
               [rc, rc, tuple(v * 0.6 for v in rc), rc], 32)
     # spoke wheel: a dished centre, 8 spokes, a dark hub, 4 nuts
@@ -784,15 +874,66 @@ else:
 p.finish('dial_' + car_tag, MAT['dial'])
 print('cockpit: dials at', [round(q, 3) for q in c0], 'hit' if loc else 'NO SURFACE')
 
+# ---------------------------------------------------------------- 5b. modelled lamps + exhaust tips (cfg `lamp_units`)
+# (2026-10-23, the user: the BMW needs "more details": its lamps and pipes were paint on a low-poly shell.) Built at
+# the measured lamp / exhaust spots (cfg `lamps`, `exhaust`), seated on the surface found by a ray: headlamps = a
+# chrome bezel, a domed lens and the reflector behind it; tail lamps = red / amber / clear / red segments under one
+# lens; exhaust = a tube with a dark bore (cfg `lamp_units` names which). Vertex colours on the wheels' material;
+# `acc_*` never takes the paint. (The van takes the headlamps only: its own lenses were faceted blobs.)
+LU = cfg.get('lamp_units', ())
+if LU:
+    CHROME = (0.62, 0.63, 0.66); LENS = (0.72, 0.75, 0.79); REFL = (0.42, 0.43, 0.45)
+    RED = (0.42, 0.03, 0.025); AMBER = (0.62, 0.28, 0.02); CLEAR = (0.7, 0.7, 0.72)
+    lm = cfg['lamps']; p = Part()
+    for (x, z) in (lm['head'] if 'head' in LU else []):
+        for sx in (1, -1):
+            hit, nrm = cast(Vector((sx * x, -4.0, z)), Vector((0, 1, 0)))
+            if hit is None:
+                continue
+            n = Vector((0, -1, 0)); r = lm['head_r'] * 0.95
+            p.ring(hit + n * 0.004, n, r, 0.008, CHROME, 24, 6)
+            p.tube(hit - n * 0.01, hit + n * 0.004, r * 0.95, REFL, 20)
+            p.tube(hit + n * 0.004, hit + n * 0.009, r * 0.9, LENS, 20)
+            p.tube(hit + n * 0.009, hit + n * 0.012, r * 0.35, CLEAR, 12)
+    tx, tz = lm['tail']; tw, th = lm['tail_wh']
+    for sx in ((1, -1) if 'tail' in LU else ()):
+        for f, col in ((0.75, RED), (0.25, AMBER), (-0.25, CLEAR), (-0.75, RED)):   # outer → inner, quarters of the lamp
+            x = sx * (tx + f * tw)
+            hit, nrm = cast(Vector((x, 4.0, tz)), Vector((0, -1, 0)))
+            if hit is None:
+                continue
+            w = nrm if nrm.y > 0.3 else Vector((0, 1, 0)); u = Vector((1, 0, 0)); u = (u - w * u.dot(w)).normalized(); v = w.cross(u)
+            p.box(hit + w * 0.004, (tw * 0.5 - 0.004, th * 1.9, 0.008), col, (u, v, w))
+    for (x, z) in (cfg.get('exhaust', []) if 'exhaust' in LU else []):
+        hit, _ = cast(Vector((x, 4.0, z + 0.06)), Vector((0, -1, 0)))
+        yb = (hit.y if hit else 2.1) + 0.02
+        p.tube(Vector((x, yb - 0.2, z)), Vector((x, yb, z)), 0.026, (0.16, 0.16, 0.17), 14)
+        p.tube(Vector((x, yb - 0.01, z)), Vector((x, yb + 0.001, z)), 0.019, BLACK, 14)
+    p.finish('acc_lamps_' + car_tag, MAT['wheel'])
+    print('lamp units + exhaust built')
+
 # ---------------------------------------------------------------- 6. AO into the vertex colours, export
 for o in meshes():
     for m in o.data.materials:
         if m and m.name != 'body_tex':
             pass
+# NORMALS rebuilt on the decimated body and doors: smooth by angle (creases stay hard), then face-area weighted — a
+# flat panel cut into slivers shades flat, a curve shades smooth. (A normal transfer from the source was tried: its
+# stored normals are near-flat per face — it only looks smooth by being dense — so the low mesh came out a mosaic.)
+if cfg.get('weighted_normals'):
+    for o in [o for o in meshes() if o.name.startswith(('body_', 'door_'))]:
+        with bpy.context.temp_override(object=o, active_object=o, selected_objects=[o], selected_editable_objects=[o]):
+            if o.data.has_custom_normals:
+                bpy.ops.mesh.customdata_custom_splitnormals_clear()
+            bpy.ops.object.shade_smooth_by_angle(angle=math.radians(cfg['weighted_normals']))
+        mod = o.modifiers.new('wn', 'WEIGHTED_NORMAL'); mod.keep_sharp = True; mod.weight = 50; mod.mode = 'FACE_AREA'
+        apply_mod(o, mod)
+    print('normals rebuilt (weighted)')
+AO = cfg.get('ao', {})
 sc.render.engine = 'CYCLES'; sc.cycles.samples = int(ARGS.get('SAMPLES', 48)); sc.cycles.device = 'CPU'
 if not sc.world:
     sc.world = bpy.data.worlds.new('ao')
-sc.world.light_settings.distance = 0.6
+sc.world.light_settings.distance = AO.get('distance', 0.6)
 glassy = [o for o in meshes() if o.data.materials and all(m and m.name in ('glass', 'lamp_lens') for m in o.data.materials)]
 skip_ao = [o for o in meshes() if o.name.startswith('dial_')]
 bake = [o for o in meshes() if o not in glassy and o not in skip_ao]
@@ -815,7 +956,18 @@ if ARGS.get('BAKE', '1') == '1':
         cc = np.zeros(len(col.data) * 4, np.float32); col.data.foreach_get('color', cc)
         aa = np.zeros(len(ao.data) * 4, np.float32); ao.data.foreach_get('color', aa)
         cc = cc.reshape(-1, 4); aa = aa.reshape(-1, 4)
-        cc[:, :3] *= (0.25 + 0.75 * aa[:, :1])
+        if AO.get('smooth') and not o.name.startswith(('wheel_', 'caliper_')):
+            # per vertex (corners averaged), then averaged with the edge neighbours: no per-triangle streaks
+            me = o.data; nv = len(me.vertices)
+            lv = np.zeros(len(me.loops), np.int32); me.loops.foreach_get('vertex_index', lv)
+            ev = np.zeros(len(me.edges) * 2, np.int32); me.edges.foreach_get('vertices', ev); ev = ev.reshape(-1, 2)
+            av = np.bincount(lv, aa[:, 0], nv) / np.maximum(1, np.bincount(lv, None, nv))
+            deg = np.bincount(ev.ravel(), None, nv) + 1
+            for _ in range(AO['smooth']):
+                av = (av + np.bincount(ev[:, 0], av[ev[:, 1]], nv) + np.bincount(ev[:, 1], av[ev[:, 0]], nv)) / deg
+            aa[:, 0] = av[lv]
+        fl = AO.get('floor', 0.25)
+        cc[:, :3] *= (fl + (1 - fl) * aa[:, :1])
         col.data.foreach_set('color', cc.ravel()); at.remove(ao); at.active_color = col
     for o in glassy:
         o.hide_render = False

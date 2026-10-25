@@ -147,6 +147,7 @@ export class WorldGenerator {
     // (not on a map without crags — Zhangjiajie: its rock is its towers' walls; a tor on every steep cell hung 150 m
     // curtains of rock down them and grey granite boulders over its wooded slopes)
     if (this.fields.map?.crags !== false) buildCrags(this.fields, cx, cz, heights, crag)
+    const fmPlain = pos.length / 3 + crag.pos.length / 3 // (the rock ends here: bridges and camps follow)
     buildBridges(this.fields, cx, cz, crag) // bright: rope bridges over the river (same mesh + collider)
     buildCamps(this.fields, cx, cz, crag) // bright: oasis camps (white tents, campfire)
     for (let i = 0; i < crag.pos.length; i += 3) {
@@ -161,6 +162,7 @@ export class WorldGenerator {
     return {
       fmPos: new Float32Array(pos), fmNor: new Float32Array(nor), fmCol: new Float32Array(col), fmIdx: new Uint32Array(idx),
       fmBounds: new Float32Array(idx.length ? b : []),
+      fmPlain,
       fmTop: idx.length ? rockTops(pos, idx, roofed) : new Float32Array(0),
     }
   }

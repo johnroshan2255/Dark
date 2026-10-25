@@ -228,7 +228,10 @@ export class RoadDetail {
     const p = [0, 0, 0]
     // ALLOWED rows (checked every 2 m, a row needs both neighbouring checks): no other road's ribbon in reach,
     // not in a place, not at a ford.
-    const nChk = Math.floor(L / 2) + 1
+    // (the soft-look map — Over the Hill's smooth dirt roads, 2026-10-25 "bumps and terrain lifts on roads": NO ribbon
+    //  at all — the road is the ground's own paint on its baked bed (scripts/road-bed.mjs); a ribbon's ruts, berms and
+    //  its ends at every junction drew steps and straight-edged patches. The client then collides like the server.)
+    const nChk = f.map?.look === 'soft' ? 0 : Math.floor(L / 2) + 1
     const chk = new Uint8Array(nChk)
     for (let c = 0; c < nChk; c++) {
       this.at(r, c * 2, p)

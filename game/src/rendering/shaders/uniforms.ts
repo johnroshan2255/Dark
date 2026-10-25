@@ -50,6 +50,15 @@ export const globalUniforms = {
   uScatterAmount: { value: 0.6 },
   /** Genshin cel-shading strength 0..1 (hard two-tone light/shadow terminator), per time of day. */
   uToon: { value: 1 },
+  /** THE MAP'S LOOK (pc/look.ts): wrapped diffuse (0 = Lambert), × every rim light, × the surfaces' fine colour-noise
+   *  contrast, the leaf cards' colour mip bias. */
+  uWrap: { value: 0 },
+  uRimK: { value: 1 },
+  uDetailK: { value: 1 },
+  uLeafBlur: { value: 0 },
+  /** A fixed map's GRASS and DIRT (linear rgb; w = 1 on) — the soft ground redraws the grass / bare-earth edge with them. */
+  uPalGrass: { value: new THREE.Vector4(0, 0, 0, 0) },
+  uPalDirt: { value: new THREE.Vector4(0, 0, 0, 0) },
   /** Distance fog on land: max amount, land tint (× sky colour), horizon-rim fade (start, end m). Per frame. */
   uFogMax: { value: 1 },
   uLandHaze: { value: new THREE.Color(1, 1, 1) },

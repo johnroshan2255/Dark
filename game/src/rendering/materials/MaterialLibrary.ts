@@ -1,6 +1,5 @@
 import * as THREE from 'three'
 import { createGrassMaterial } from '../../world/Forest/grass'
-import { SURFACE } from '../shaders/paint'
 import { stylize } from '../shaders/stylize'
 import { globalUniforms, GUST_GLSL, SWAY_GLSL } from '../shaders/uniforms'
 import { createBrushTexture } from './BrushTexture'
@@ -91,7 +90,7 @@ function billboardable(m: THREE.MeshLambertMaterial): THREE.MeshLambertMaterial 
 }
 
 /**
- * BOULDER SHAPES (propGeometries ROCK_VARIANTS): the boulder mesh holds six rock shapes, each vertex tagged with its
+ * BOULDER SHAPES (propGeometries ROCK_VARIANTS): the boulder mesh holds every rock shape (ROCK_VARIANTS), each vertex tagged with its
  * shape (`rockVar`); an instance keeps only the shape it picked (`rockPick`, per instance) — the others collapse
  * to one point (zero-area triangles, never rasterised). Only in the INSTANCED program (the same material draws the
  * merged cliff meshes in 'bright', which have neither attribute). 2 ALU per vertex.
@@ -185,23 +184,27 @@ export class MaterialLibrary {
   ), { key: 'landmark', rim: isOverland() ? 0.5 : isGenshin() ? 0.45 : 1.1, noFlip: true, surface: 'atlas', wet: true, biomeCover: 'foliage' })
   /** Distant trees: octahedral impostor cards (rendering/impostors) — one program, atlas baked at load. */
   readonly impostor = createImpostorMaterial()
-  /** OVERLAND: soft plain-colour boulders (no stone paint strokes); otherwise smooth painted STONE. */
+  /**
+   * BOULDERS: smooth shading and the ROCK roughness profile in every style (surfaceNoise.ts surfRock — simplex lumps and
+   * grit, Worley fractures, relief tilting the normal; world space, no image, no paint strokes). OVERLAND keeps its gold caps.
+   */
   readonly rock = rockVariants(isOverland()
-    ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', treeShade: true, rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock', erosion: true })
+    ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'rock', treeShade: true, rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock', rockDetail: 'rock', hillTint: true })
     : isBright()
-    // BRIGHT (over the hill): plain flat-colour stone — the facets carry the detail, no paint strokes.
-    ? stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', treeShade: true, rim: 0.2, toon: 0.12, cullFade: true, wet: true, biomeCover: 'rock', erosion: true }) // soft: almost no cel step
-    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', treeShade: true, rim: 0.35, surface: SURFACE.stone, cullFade: true, biomeCover: 'rock', erosion: true }))
+    ? stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', treeShade: true, rim: 0.2, toon: 0.12, cullFade: true, wet: true, biomeCover: 'rock', rockDetail: 'rock', hillTint: true }) // soft: almost no cel step
+    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'rock', treeShade: true, rim: 0.35, cullFade: true, biomeCover: 'rock', rockDetail: 'rock', hillTint: true }))
   /** Boulder shadows: the depth pass with the same shape pick (WorldChunk sets it as the rocks' customDepthMaterial). */
   readonly rockDepth = rockVariants(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }))
   /**
-   * CLIFF ROCK (formations + crags, world-scale merged meshes): the rock look with cliff-sized brush strokes (vertical
-   * streaks on walls) and softer shading than the boulders — Genshin shades scenery softly (hard cel ramps on big
-   * flat facets read as a toy). One extra program, no extra draws (the formation mesh just uses it).
+   * CLIFF ROCK (formations + crags, world-scale merged meshes): the CLIFF roughness profile (surfaceNoise.ts surfCliff —
+   * ridged beds, flutes, jointing, grit: big faces must not feel like the boulders) and, outside the bright / overland
+   * styles, softer shading. One extra program, no extra draws (the formation mesh just uses it).
    */
-  readonly cliffRock = isOverland() || isBright()
-    ? twin(this.rock)
-    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', treeShade: true, rim: 0.25, surface: SURFACE.stone, cliffStone: true, toon: 0.6, cullFade: true, wet: true, biomeCover: 'rock', erosion: true })
+  readonly cliffRock = isOverland()
+    ? stylize(goldCaps(new THREE.MeshLambertMaterial({ vertexColors: true })), { key: 'cliffrock', treeShade: true, rim: 0.3, cullFade: true, wet: true, biomeCover: 'rock', rockDetail: 'cliff', hillTint: true })
+    : isBright()
+    ? stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', treeShade: true, rim: 0.2, toon: 0.12, cullFade: true, wet: true, biomeCover: 'rock', rockDetail: 'cliff', hillTint: true })
+    : stylize(new THREE.MeshLambertMaterial({ vertexColors: true }), { key: 'cliffrock', treeShade: true, rim: 0.25, toon: 0.6, cullFade: true, wet: true, biomeCover: 'rock', rockDetail: 'cliff', hillTint: true })
   /** Grass layers (GrassField): near (dense, curved blades), mid (dense, flat blades) and far (sparse, wide) — same
    *  program, own bands. */
   readonly grassNearU = { band: { value: new THREE.Vector4(-2, -1, 1e4, 1e4 + 1) }, thin: { value: new THREE.Vector2(1e4, 1e4 + 1) } }

@@ -51,6 +51,9 @@ export interface ChunkData {
   fmCol: Float32Array
   fmIdx: Uint32Array
   fmBounds: Float32Array
+  /** First vertex of the formation mesh that is NOT rock (the bridges' planks and ropes, the camps' tents — appended
+   *  last): the rock surface skips it (stylize rockDetail, attribute aPlain). = the vertex count when there are none. */
+  fmPlain: number
   /** ROCK-TOP heights (world y) of the formation / crag mesh's up-facing faces on a 2 m grid covering chunk-local
    *  [−32, 96)² (formations reach past their chunk), −1e9 where none; empty when the chunk has no rock mesh. The grass
    *  grows on these green tops (Forest/GrassField). 64 × 64 floats = 16 KB, only on rocky chunks. */
@@ -69,12 +72,12 @@ export const PROP_STRIDE = 5
  *  (world/biomes/BiomeDefs.ts). Region species REPLACE the forest ones there, so a chunk's draw count stays flat. */
 /** Oak (Windrise), Slender (Mondstadt), Golden (Liyue) and Curvy are the broadleaf STAND types that share the Birch
  *  slot's places (Forest/scatter.ts `broadleafStand`: one type per ~56 m stand, so a chunk adds ≤ 1–2 draws). */
-export const TreeSpecies = { Spruce: 0, Dead: 1, Fir: 2, Pine: 3, Birch: 4, Cactus: 5, Joshua: 6, Maple: 7, Ancient: 8, Shroom: 9, Oak: 10, Slender: 11, Golden: 12, Curvy: 13, Palm: 14, WhiteBirch: 15 } as const
-export const TREE_SPECIES_COUNT = 16
+export const TreeSpecies = { Spruce: 0, Dead: 1, Fir: 2, Pine: 3, Birch: 4, Cactus: 5, Joshua: 6, Maple: 7, Ancient: 8, Shroom: 9, Oak: 10, Slender: 11, Golden: 12, Curvy: 13, Palm: 14, WhiteBirch: 15, Beech: 16, Elm: 17, Juniper: 18, Bamboo: 19, Acacia: 20 } as const
+export const TREE_SPECIES_COUNT = 21
 /** The broadleaf species of the green lands (Birch + its stand types) — they share tints, hues and the autumn turn. */
-export const isBroadleaf = (sp: number): boolean => sp === TreeSpecies.Birch || (sp >= TreeSpecies.Oak && sp <= TreeSpecies.Curvy)
+export const isBroadleaf = (sp: number): boolean => sp === TreeSpecies.Birch || (sp >= TreeSpecies.Oak && sp <= TreeSpecies.Curvy) || sp === TreeSpecies.Beech || sp === TreeSpecies.Elm
 /** Trunk collider radius at scale 1, indexed by species id (see Forest/treeFactory.ts). */
-export const TRUNK_RADIUS = [0.24, 0.22, 0.28, 0.32, 0.3, 0.34, 0.3, 0.3, 0.6, 0.26, 0.62, 0.3, 0.32, 0.34, 0.22, 0.22] as const
+export const TRUNK_RADIUS = [0.24, 0.22, 0.28, 0.32, 0.3, 0.34, 0.3, 0.3, 0.6, 0.26, 0.62, 0.3, 0.32, 0.34, 0.22, 0.22, 0.36, 0.34, 0.2, 0.16, 0.26] as const
 
 export const chunkKey = (cx: number, cz: number): string => `${cx},${cz}`
 

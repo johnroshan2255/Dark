@@ -139,7 +139,7 @@ export const VEHICLES: VehicleDef[] = [
     maker: 'BMW',
     year: '1986',
     blurb: 'The touring-car homologation special: a 2.3 L four that revs to 7250, a limited-slip rear and a box-flared body.',
-    url: bmwUrl, length: 4.3185, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, steering: true, bytes: 1_324_664, dash: 'twin',
+    url: bmwUrl, length: 4.3185, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, steering: true, bytes: 2_126_140, dash: 'twin',
     whitePaint: true,
     cabin: { hip: 0.42, roof: 1.3, behind: 0.42 },
     // quad round headlamps (outer + inner per side), the wide tail lamps (scripts/blender/vehicle_prep.py measure)
@@ -156,7 +156,7 @@ export const VEHICLES: VehicleDef[] = [
     maker: 'Workhorse',
     year: '1983',
     blurb: 'A cab-over 800 cc delivery van: tiny, light, slow — and it goes anywhere a cart track goes.',
-    url: vanUrl, length: 3.3777, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, paintRegex: /^paint/i, axles: true, bytes: 3_258_788, dash: 'single',
+    url: vanUrl, length: 3.3777, forward: '+z', wheelRegex: /wheel_(FL|FR|RL|RR)/i, paintRegex: /^paint/i, axles: true, bytes: 2_603_468, dash: 'single',
     // (a squat cab: windscreen 1.02–1.55 m — the head at 1.38 looks out of it, not into the headliner)
     cabin: { hip: 0.72, roof: 1.5, behind: 0.38 },
     lamps: { head: [0.492, 0.752, -1.62], headSize: [0.075, 0.075], tail: [0.648, 0.758, 1.66], tailSize: [0.05, 0.068] },

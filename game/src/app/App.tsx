@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { DebugHud } from '../debug/DebugHud'
 import { Game, type GameOptions } from '../game/Game'
 import { useStore } from '../game/GameState'
@@ -41,6 +41,26 @@ function readOptions(): GameOptions & { room?: string } {
   }
 }
 
+/** The engine: PlayCanvas (src/pc/PcGame) — the game's renderer; ?engine=three runs the previous three.js build. */
+const PLAYCANVAS = new URLSearchParams(location.search).get('engine') !== 'three'
+
+/** PlayCanvas draws into its own canvas (made before the game: the engine needs it to start), adopted here. */
+let pcCanvas: HTMLCanvasElement | null = null
+function makePcCanvas(): HTMLCanvasElement {
+  const c = (pcCanvas ??= document.createElement('canvas'))
+  c.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none'
+  if (!c.parentElement) document.body.prepend(c)
+  return c
+}
+
+function PcCanvasHost() {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (ref.current && pcCanvas) ref.current.appendChild(pcCanvas)
+  }, [])
+  return <div ref={ref} style={{ position: 'fixed', inset: 0 }} />
+}
+
 export function App() {
   const [game, setGame] = useState<Game | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -50,7 +70,10 @@ export function App() {
     let created: Game | null = null
     bootProgress(0.1, 'Starting…')
     const opts = readOptions()
-    Game.create(opts, bootProgress)
+    const make: Promise<Game> = PLAYCANVAS
+      ? import('../pc/PcGame').then((m) => m.PcGame.create(opts, makePcCanvas(), bootProgress) as unknown as Game)
+      : Game.create(opts, bootProgress)
+    make
       .then((g) => {
         if (cancelled) g.dispose()
         else {
@@ -65,7 +88,7 @@ export function App() {
             })
           } else if (opts.play) void g.net.ensureRoom()
           // Dev-only handle for console debugging / automated checks. Stripped from production builds.
-          if (import.meta.env.DEV) (window as unknown as { __game?: Game }).__game = g
+          if (import.meta.env.DEV || new URLSearchParams(location.search).has('probe')) (window as unknown as { __game?: Game }).__game = g
           // Dev-only remote HUD (phones on the LAN report their frame stats to the dev server: debug/DevTelemetry).
           if (import.meta.env.DEV) void import('../debug/DevTelemetry').then((m) => m.startDevTelemetry(g))
         }
@@ -95,7 +118,7 @@ export function App() {
   if (!game) return null // the loading screen (index.html #boot) is showing
   return (
     <>
-      <GameCanvas game={game} />
+      {PLAYCANVAS ? <PcCanvasHost /> : <GameCanvas game={game} />}
       <MainMenu game={game} />
       <Garage game={game} />
       <MapSelect game={game} />

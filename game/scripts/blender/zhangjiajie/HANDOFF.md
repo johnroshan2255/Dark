@@ -17,7 +17,10 @@ node scripts/export-statics.mjs zhangjiajie        # needs npm run dev (PORT=…
 cd ../server && cargo test
 ```
 terrain.py knobs: `SP` (massif spacing, 300), `TH` (height × the render's, 1.8), `SW0`/`SW1` (wall steepness),
-`GAP` (half gap, 26 m), `CS` (column size, 85), `HALF` (2000). Note: `terrain.py` must run without
+`GAP` (half gap, 26 m), `CS` (column size, 85), `HALF` (2000).
+build.py knobs (2026-10-23): `HILLS` (each hill's rise over its valley floor ×, 0.3 — the user: "30 % of the height"),
+`TREES` (tree placement share, 0.5). The map grows the TIERED PINES only (`trees: 'conifer'`, darker leaves in the
+palette) with IMAGE tree shadows on every tier (`imageTreeShadows`: trees stay out of the sun shadow map). Note: `terrain.py` must run without
 `--factory-startup` (it enables the installed A.N.T. Landscape extension). `terrain/*.npy` are generated (16 MB each).
 
 ## Open

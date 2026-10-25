@@ -93,7 +93,9 @@ function handle(msg: Msg): void {
     gen = new WorldGenerator(msg.seed, msg.palette, want)
     for (const r of early.splice(0)) gen.fields.network.importRoads(r)
   }
-  const post = (self as unknown as DedicatedWorkerGlobalScope).postMessage.bind(self)
+  // (a SIDE job — horizon, landmarks, trees run on the streamer's workers: no worker of their own — echoes its ticket)
+  const side = (msg as { side?: number }).side
+  const post = (d: object, t?: Transferable[]) => (self as unknown as DedicatedWorkerGlobalScope).postMessage(side === undefined ? d : { ...d, side }, t ?? [])
   if ('type' in msg && msg.type === 'landmarks') {
     const lm = gen.fields.landmarks
     const regions: [number, number, Landmark[]][] = []
