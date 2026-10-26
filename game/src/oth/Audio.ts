@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import type { Atmosphere } from './Atmosphere'
+import { ENGINE_WORKLET, VOICES } from './engineSynth'
 import type { MapData } from './MapData'
 import type { Vehicle } from './Vehicle'
 
@@ -9,19 +10,12 @@ import type { Vehicle } from './Vehicle'
  *   BEDS (music, forest, wind in the grass, the night's crickets, streams, waterfalls): <audio> elements STREAMED —
  *     never decoded whole (a 4-minute track would be ~90 MB of samples) — each started only when it's wanted
  *     (`preload: none`), paused again after a while silent;
- *   the ENGINE (idle / mid / high loops of an Iveco 3.0 diesel, recorded at 857 / 1731 / 2647 rpm) and the TYRES
- *     (a squeal on hard ground, a gravel scrub on dirt): small buffers fetched in the background after the start.
- * The engine: the car's idle … redline mapped onto the recordings' 857 … 3000 rpm, the three loops crossfaded and
- * pitched to it; on the throttle (the drivetrain's load) louder and open, off it quieter and muffled (a low-pass).
+ *   the ENGINE: SYNTHESIZED (engineSynth.ts — an AudioWorklet, each car's own engine modelled from its cylinders,
+ *     firing and exhaust) from the sim's rpm, load and throttle; it starts, stops and dips at a gear change;
+ *   the TYRES (a squeal on hard ground, a gravel scrub on dirt): small buffers fetched in the background.
  * Streams and falls fade in as the camera nears them, panned to their side. M mutes everything.
  */
 const BASE = '/oth/audio/'
-const LAYERS = [
-  { file: 'engine_idle.wav', rpm: 857 },
-  { file: 'engine_mid.wav', rpm: 1731 },
-  { file: 'engine_high.wav', rpm: 2647 },
-]
-const SOUND_IDLE = 857, SOUND_TOP = 3000
 const MUSIC = ['music_etirwer.ogg', 'music_middle_of_nowhere.mp3']
 
 /** A streamed, looping bed: an <audio> element through a gain (and a pan), played only while it's heard. */
@@ -60,14 +54,16 @@ export class OthAudio {
   private beds: Record<'forest' | 'wind' | 'night' | 'stream' | 'fall', Bed> | null = null
   private music: HTMLAudioElement | null = null
   private musicIndex = 0
-  // the engine: one looping source per layer, each through its gain; all through the load's low-pass
-  private engine: { src: AudioBufferSourceNode; gain: GainNode; rpm: number }[] = []
+  // the engine: the synth's worklet, through the distance's low-pass and gain
+  private engine: AudioWorkletNode | null = null
   private engineBus!: GainNode
   private engineTone!: BiquadFilterNode
+  /** the car the engine's voice is (a new car: its own voice, started) and the gear last heard (a change: a dip) */
+  private voiceOf = ''
+  private lastGear = ''
   private squeal: { src: AudioBufferSourceNode; gain: GainNode } | null = null
   private gravel: { src: AudioBufferSourceNode; gain: GainNode } | null = null
   private sense = 0
-  private oneShots: { start?: AudioBuffer; stop?: AudioBuffer } = {}
   private near = { stream: 1e9, streamPan: 0, fall: 1e9, fallPan: 0, forest: 0 }
   private readonly mk: [number, number, number, number] = [0, 0, 0, 0]
   private readonly flowPts: number[] = []
@@ -117,13 +113,20 @@ export class OthAudio {
     const next = () => { music.src = BASE + MUSIC[this.musicIndex++ % MUSIC.length]; void music.play().catch(() => {}) }
     music.addEventListener('ended', next)
     next()
-    // the ENGINE + TYRES: fetched now, in the background (a few hundred kB each)
+    // the ENGINE: the synth on the audio thread (its code from a Blob: no file to fetch); the TYRES: fetched now, in
+    // the background (a few hundred kB each)
     this.engineTone = ctx.createBiquadFilter()
     this.engineTone.type = 'lowpass'
-    this.engineTone.frequency.value = 2400
+    this.engineTone.frequency.value = 9000
     this.engineBus = ctx.createGain()
     this.engineBus.gain.value = 0
     this.engineTone.connect(this.engineBus).connect(this.master)
+    void ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([ENGINE_WORKLET], { type: 'application/javascript' }))).then(() => {
+      this.engine = new AudioWorkletNode(ctx, 'oth-engine', { numberOfInputs: 0, outputChannelCount: [1] })
+      this.engine.connect(this.engineTone)
+    })
+    // another car: this engine runs down (the new one gets its voice and starts once it's loaded — update)
+    this.car.onCarChange = () => this.engine?.port.postMessage({ event: 'stop' })
     const load = (f: string) => fetch(BASE + f).then((r) => r.arrayBuffer()).then((b) => ctx.decodeAudioData(b))
     const loopOf = (buf: AudioBuffer, to: AudioNode) => {
       const src = ctx.createBufferSource(), gain = ctx.createGain()
@@ -132,36 +135,8 @@ export class OthAudio {
       src.start()
       return { src, gain }
     }
-    void load('engine_stop.wav').then((b) => (this.oneShots.stop = b))
-    void Promise.all([...LAYERS.map((l) => load(l.file)), load('engine_start.wav')]).then((bufs) => {
-      this.oneShots.start = bufs[LAYERS.length]
-      this.engine = LAYERS.map((l, i) => ({ ...loopOf(bufs[i], this.engineTone), rpm: l.rpm }))
-      this.startEngine(0)
-    })
-    // another car: this engine stops, the next one starts
-    this.car.onCarChange = () => {
-      this.play(this.oneShots.stop, 0, 0.5)
-      this.hold = ctx.currentTime + 2.6
-      this.startEngine(1.4)
-    }
     void load('tyre_squeal.wav').then((b) => (this.squeal = loopOf(b, this.master)))
     void load('tyre_gravel.wav').then((b) => (this.gravel = loopOf(b, this.master)))
-  }
-
-  /** The key turns (after `delay` s): the start, the engine fading in under it. */
-  private startEngine(delay: number): void {
-    this.play(this.oneShots.start, delay, 0.55)
-    this.hold = this.ctx!.currentTime + delay + 1.0
-  }
-  private hold = 0
-  /** A one-shot through the master, `delay` s from now. */
-  private play(buf: AudioBuffer | undefined, delay: number, gain: number): void {
-    const ctx = this.ctx
-    if (!ctx || !buf) return
-    const s = ctx.createBufferSource(), g = ctx.createGain()
-    s.buffer = buf; g.gain.value = gain
-    s.connect(g).connect(this.master)
-    s.start(ctx.currentTime + delay)
   }
 
   /** Each frame (dt in s): the engine, the tyres and the beds follow the car, the light, the camera. */
@@ -172,28 +147,31 @@ export class OthAudio {
     const speed = sim ? Math.abs(sim.speed) : 0
     // the car from the camera: the further, the quieter
     const dCar = camera.position.distanceTo(this.car.pos), near = Math.min(1, Math.max(0.15, 9 / Math.max(dCar, 1)))
-    // ENGINE: the car's rev range mapped onto the recordings', three loops crossfaded (equal power) and pitched
-    if (this.engine.length) {
-      let s: number, onLoad: number
-      if (D) {
-        const idle = (D.R.power.wIdle * 30) / Math.PI, red = (D.R.power.wRedline * 30) / Math.PI
-        s = SOUND_IDLE + Math.min(1.1, Math.max(0, (D.rpm - idle) / Math.max(1, red - idle))) * (SOUND_TOP - SOUND_IDLE)
-        onLoad = Math.max(0, D.load)
-      } else {
-        const thr = Math.max(0, sim?.controls.throttle ?? 0)
-        s = SOUND_IDLE + Math.min(1, speed / 25) * 1700 + thr * 400
-        onLoad = thr
+    // ENGINE: the sim's rpm, load and throttle to the synth (each car's own revs: idle … redline)
+    const E = this.engine
+    if (E && sim) {
+      // a new car (or the first): its voice, and the key turns once it's loaded
+      if (this.voiceOf !== this.car.id && this.car.id) {
+        this.voiceOf = this.car.id
+        E.port.postMessage({ voice: VOICES[this.car.id] ?? VOICES.gwagen })
+        E.port.postMessage({ event: 'start' })
       }
-      const [a, b, c] = LAYERS.map((l) => l.rpm)
-      const w = s <= b ? [(b - s) / (b - a), (s - a) / (b - a), 0] : [0, (c - s) / (c - b), (s - b) / (c - b)]
-      this.engine.forEach((L, i) => {
-        L.gain.gain.setTargetAtTime(Math.sqrt(Math.min(1, Math.max(0, w[i]))), t, 0.05)
-        L.src.playbackRate.setTargetAtTime(Math.min(1.6, Math.max(0.55, s / L.rpm)), t, 0.05)
-      })
-      // on the throttle: open and loud; off it: muffled and quieter
-      this.engineTone.frequency.setTargetAtTime(900 + 5200 * onLoad, t, 0.08)
-      // (silent while a start / stop plays: `hold`)
-      this.engineBus.gain.setTargetAtTime(t < this.hold ? 0 : (0.32 + 0.3 * onLoad) * near, t, t < this.hold ? 0.05 : 0.25)
+      const thr = Math.max(0, sim.controls.throttle)
+      let rpm: number, load: number, idle = 0, red = 0
+      if (D) {
+        rpm = D.rpm; load = D.load
+        idle = (D.R.power.wIdle * 30) / Math.PI; red = (D.R.power.wRedline * 30) / Math.PI
+      } else {
+        rpm = 800 + Math.min(1, speed / 25) * 3500 + thr * 800; load = thr
+      }
+      E.port.postMessage({ set: [rpm, load, thr, idle, red] })
+      // a gear change (a numbered gear to another): the drive dips
+      const gear = this.car.gear
+      if (gear !== this.lastGear && /\d$/.test(gear) && /\d$/.test(this.lastGear)) E.port.postMessage({ event: 'shift' })
+      this.lastGear = gear
+      // the car from the camera: the further, the quieter and the duller
+      this.engineTone.frequency.setTargetAtTime(1500 + 7500 * near, t, 0.2)
+      this.engineBus.gain.setTargetAtTime(0.8 * near, t, 0.2)
     }
     // TYRES: a squeal sliding on hard ground; on dirt and gravel a scrub when sliding, a soft roll when not
     const n = sim?.tyreNoise() ?? null
@@ -228,13 +206,25 @@ export class OthAudio {
     const r = (v: number) => +v.toFixed(3)
     return {
       state: this.ctx?.state ?? 'not started', muted: this.muted,
-      engine: this.engine.map((L) => ({ rpm: L.rpm, gain: r(L.gain.gain.value), rate: r(L.src.playbackRate.value) })),
+      engine: this.engine ? { voice: this.voiceOf, gear: this.lastGear, dB: this.engineLevel() } : null,
       engineBus: this.engineBus ? r(this.engineBus.gain.value) : 0, tone: this.engineTone ? Math.round(this.engineTone.frequency.value) : 0,
       squeal: this.squeal ? r(this.squeal.gain.gain.value) : null, gravel: this.gravel ? r(this.gravel.gain.gain.value) : null,
       beds: this.beds ? Object.fromEntries(Object.entries(this.beds).map(([k, b]) => [k, { target: r(b.target), level: r(b.gain.gain.value), playing: !b.el.paused }])) : null,
       music: this.music ? { src: this.music.src.split('/').pop(), playing: !this.music.paused, t: r(this.music.currentTime) } : null,
       near: { stream: Math.round(this.near.stream), fall: Math.round(this.near.fall), forest: r(this.near.forest) },
     }
+  }
+
+  /** The engine's output level now (dBFS; a meter tapped on the first call — the harness only). */
+  private probe: AnalyserNode | null = null
+  private engineLevel(): number {
+    if (!this.ctx || !this.engineTone) return -999
+    if (!this.probe) { this.probe = this.ctx.createAnalyser(); this.probe.fftSize = 2048; this.engineTone.connect(this.probe) }
+    const x = new Float32Array(this.probe.fftSize)
+    this.probe.getFloatTimeDomainData(x)
+    let e = 0
+    for (const v of x) e += v * v
+    return +(10 * Math.log10(e / x.length + 1e-12)).toFixed(1)
   }
 
   /** The nearest flowing water and waterfall (distance, side), the forest round the camera. */

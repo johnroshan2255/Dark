@@ -100,7 +100,7 @@ The in-game credits screen (when there is one) must list these too.
 | Footsteps (10) | `steps/step0–9.mp3` | https://kenney.nl/assets/rpg-audio | Kenney | CC0 | levelled |
 
 ### Over the Hill (map 3) audio — `public/oth/audio/` (all CC0 — public domain; attribution not required, given anyway)
-Played by `src/oth/Audio.ts`; the loops cut by a crossfade (tail into head), levelled. Long beds are streamed as downloaded.
+Played by `src/oth/Audio.ts`; the loops cut by a crossfade (tail into head), levelled. (The engine is synthesized — `src/oth/engineSynth.ts` — no recordings.) Long beds are streamed as downloaded.
 | Sound | File(s) | Source | Author | Licence | Processing |
 |---|---|---|---|---|---|
 | Music "Etirwer" (nylon guitar, loop) | `music_etirwer.ogg` | https://opengameart.org/content/etirwer | Kistol | CC0 | as downloaded |
@@ -110,9 +110,5 @@ Played by `src/oth/Audio.ts`; the loops cut by a crossfade (tail into head), lev
 | Night meadow (crickets, frogs) | `amb_night.mp3` | https://bigsoundbank.com/campaign-at-night-4-s1880.html | Joseph Sardin (BigSoundBank) | CC0 | as downloaded |
 | Mountain stream | `amb_stream.ogg` | https://bigsoundbank.com/mountain-stream-7-s3222.html | Joseph Sardin (BigSoundBank) | CC0 | as downloaded |
 | Small waterfall | `amb_waterfall.ogg` | https://bigsoundbank.com/small-waterfall-2-s0219.html | Joseph Sardin (BigSoundBank) | CC0 | as downloaded |
-| Engine idle (Iveco Daily 3.0 diesel, 857 rpm) | `engine_idle.wav` | https://bigsoundbank.com/truck-engine-s1145.html | Joseph Sardin (BigSoundBank) | CC0 | 3 s loop from 2.0 s, −18 dB RMS |
-| Engine mid revs (1731 rpm) | `engine_mid.wav` | https://bigsoundbank.com/truck-engine-small-accelerations-s1146.html | Joseph Sardin (BigSoundBank) | CC0 | 1.3 s loop from 17.45 s, −16 dB RMS |
-| Engine high revs on load (2647 rpm) | `engine_high.wav` | https://bigsoundbank.com/truck-engine-big-accelerations-s1147.html | Joseph Sardin (BigSoundBank) | CC0 | 2.6 s loop from 7.4 s, −15 dB RMS |
-| Engine start / stop (Kia 2.9 diesel) | `engine_start.wav`, `engine_stop.wav` | https://bigsoundbank.com/big-diesel-engine-s0967.html | Joseph Sardin (BigSoundBank) | CC0 | 0.3–3.3 s and 46.6–49.5 s, faded |
 | Tyre squeal (sliding on hard ground) | `tyre_squeal.wav` | https://bigsoundbank.com/screeching-tires-4-s2371.html | Joseph Sardin (BigSoundBank) | CC0 | 1.2 s loop from 4.65 s |
 | Gravel scrub / roll (pitched down in game) | `tyre_gravel.wav` | https://bigsoundbank.com/bike-on-gravel-mtb-1-s1284.html | Joseph Sardin (BigSoundBank) | CC0 | 4.6 s loop from 7.5 s |
