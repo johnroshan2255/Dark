@@ -31,6 +31,8 @@ export default defineConfig({
     // Rapier (compat) inlines its wasm as base64 (~2 MB); keep it in its own chunk.
     chunkSizeWarningLimit: 2500,
     rollupOptions: {
+      // two pages: the game, and Over the Hill (its own world + renderer, src/oth/)
+      input: { main: 'index.html', oth: 'oth.html' },
       output: {
         manualChunks(id) {
           if (id.includes('@dimforge/rapier3d')) return 'rapier'

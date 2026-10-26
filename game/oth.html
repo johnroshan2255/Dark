@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#e9c9a8" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Over the Hill</title>
+    <link rel="icon" href="data:," />
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #e9d2bb; overscroll-behavior: none; }
+      body { touch-action: none; user-select: none; -webkit-user-select: none; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
+      canvas { display: block; }
+      #status { position: fixed; inset: 0; display: grid; place-items: center; color: #6b4a33; font-size: 15px; letter-spacing: .08em; }
+      #drive { position: fixed; right: 18px; bottom: 16px; color: #fff; text-shadow: 0 1px 6px rgba(60, 30, 10, .45); pointer-events: none; text-align: right; }
+      #drive .spd b { font-size: 46px; font-weight: 700; letter-spacing: -.02em; }
+      #drive .spd span { font-size: 13px; margin-left: 4px; opacity: .85; }
+      #drive .spd i { display: block; font-style: normal; font-size: 13px; opacity: .8; }
+      #drive .spd em { display: block; font-style: normal; font-size: 12px; opacity: .7; letter-spacing: .06em; }
+      #drive .help { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); font-size: 12px; opacity: .8; white-space: nowrap; }
+      .oth-fs { position: fixed; left: 14px; top: 14px; width: 44px; height: 44px; border-radius: 12px; border: 2px solid rgba(255,255,255,.75); background: rgba(40, 25, 15, .3); color: #fff; font: 700 22px system-ui; line-height: 1; z-index: 5; touch-action: manipulation; }
+      .oth-zoom { position: fixed; left: 14px; top: 66px; display: flex; flex-direction: column; gap: 8px; z-index: 5; }
+      .oth-zoom button { width: 44px; height: 44px; border-radius: 12px; border: 2px solid rgba(255,255,255,.75); background: rgba(40, 25, 15, .3); color: #fff; font: 700 24px system-ui; line-height: 1; touch-action: none; user-select: none; -webkit-user-select: none; }
+      .oth-touch button { position: fixed; bottom: 22px; width: 76px; height: 76px; border-radius: 50%; border: 2px solid rgba(255,255,255,.7); background: rgba(40, 25, 15, .28); color: #fff; font: 700 15px system-ui; touch-action: none; }
+      .oth-touch [data-k=left] { left: 18px; } .oth-touch [data-k=right] { left: 104px; }
+      .oth-touch [data-k=gas] { right: 18px; bottom: 110px; width: 86px; height: 86px; } .oth-touch [data-k=brake] { right: 112px; bottom: 60px; }
+      .oth-touch [data-k=reset] { right: 18px; top: 18px; bottom: auto; width: 48px; height: 48px; }
+      #hud { display: none; position: fixed; left: 10px; top: 10px; padding: 6px 9px; background: rgba(30, 24, 20, .55); color: #f3e8dc; font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre; border-radius: 6px; pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <div id="status">Loading…</div>
+    <div id="hud"></div>
+    <script type="module" src="/src/oth/main.ts"></script>
+  </body>
+</html>

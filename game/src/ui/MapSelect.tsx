@@ -66,6 +66,11 @@ function MapCard({ map, game, compact }: { map: MapInfo; game: Game; compact: bo
 
 /** Start map `id` (null = the endless world): hand over control if it is the loaded world, else reload on it. */
 export function playMap(game: Game, id: string | null): void {
+  const page = MAPS.find((m) => m.id === id)?.page
+  if (page) {
+    location.href = page
+    return
+  }
   if ((game.map?.id ?? null) === id) {
     game.play()
     return

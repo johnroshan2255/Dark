@@ -252,7 +252,7 @@ function RoomSetupModal({ game, onClose }: { game: Game; onClose: () => void }) 
         <Field label="World">
           <div className="fe-segs">
             <Seg on={world === 'world'} onClick={() => setWorld('world')}>Endless world</Seg>
-            {MAPS.map((m) => (
+            {MAPS.filter((m) => !m.page).map((m) => (
               <Seg key={m.id} on={world === m.id} onClick={() => setWorld(m.id)}>{m.name}</Seg>
             ))}
           </div>

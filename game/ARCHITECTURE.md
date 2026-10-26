@@ -736,3 +736,175 @@ and the fps every second (spots below FPS_LOW). HEADLESS=0 is a visible window t
 | touch | left half: joystick (full push = sprint) · right half: look · LIGHT / JUMP / FPS / TIME / fullscreen buttons |
 | `[` / `]` | render scale down / up (within the tier's range) |
 | click | pointer lock; WASD move, Shift sprint, Space jump |
+
+## 10. Over the Hill (`oth.html`, `src/oth/`) — map 3, a world of its own
+
+2026-10-26: map 3 is a NEW project inside this repo — "Over the Hill" stylized realism (painterly ground, art-directed
+PBR-ish light, rolling mountains, warm cinematic air). It shares NOTHING of the game's world / rendering code: no
+React, no WorldManager / stylize / bright style. Planned reuse: the vehicle physics and the vehicle models only.
+The Select-map card (`MapInfo.page`) opens `/oth.html`; it is not a room map (the server doesn't know it yet).
+
+- **Map** (`scripts/oth/terrain.py`, Blender's Python + numpy → `public/oth/valley/`): a 4 km playable box (2 m,
+  `height.bin` Uint16 2049²) inside a 16 km world (16 m, `far.bin`), box mask at 4 m (`mask.bin` RGBA8: rock,
+  dryness, wet — 1 = water + its gravel edge, forest), `meta.json` (grids, lake, river centre line + surface heights,
+  spawn). Macro landform (rolling hills, ranges where a low-frequency mask says, the valley kept open) → vectorised
+  droplet erosion → 2 m detail → valley floor / river channel / lake bowl carved with SLOPED banks (a flat shore turns
+  mesh error into a zigzag water line). `PREVIEW=<dir>` writes top-down hillshades. ~17 s.
+- **Look (2026-10-26, the user: "low poly like stylized", "smooth", "exactly like Over the Hill")**: SMOOTH landforms
+  (light erosion kept only as broad shaping, no 2 m detail noise, soft broad colour fields — no speckle) and LOW-POLY
+  light: the terrain blends each triangle's flat normal (`dFdx/dFdy`) over a soft normal (the normal grid a few mips
+  up) — full facets on rock / snow, gentle on grassy hills — plus a per-facet tone jitter (`facetRand`).
+- **Terrain** (`Terrain.ts`): CDLOD on the GPU — one patch mesh instanced per quadtree node (ONE draw for 16 km), heights
+  from R16UI textures (4 texelFetch, exact), per-vertex geomorph through up to 3 levels (no pops, no cracks), CPU
+  selection with a min/max pyramid + frustum. Fragment: the mask (procedural outside the box) painted by
+  `groundPaint` (`paint.ts`: palette + world-space paint noise from `noiseTex.ts`, generated at boot).
+- **Grass** (`Grass.ts`): the Over-the-Hill CARPET — low-poly tufts of thick pointed blades (6 per tuft, 20 cm wide,
+  quad + tip; the far ring 3-blade triangles), even heights. THE GRASS IS THE GROUND GROWN UP: each blade takes
+  `groundPaint` at its root (green ground → green grass) and the ground's soft normal, so a hill shades as one surface;
+  only a root-to-tip ramp and a per-blade sun-facing nudge separate them. Three rings of world-locked tiles (one
+  instanced draw each); per-tuft rank culls by a distance density curve and widens the survivors (same coverage, no
+  ring edge); LOW = fewer, wider tufts (`uWidthK` vs HIGH's 17 tufts/m²), never a thinner field. None on rock, snow,
+  water's gravel / earth band; thinner under the forest.
+- **Light / air** (`Atmosphere.ts`): one shared uniform set + GLSL (`skyColor`, analytic height-fog aerial
+  perspective toward the sky's horizon colour, wrapped-diffuse + GGX `shade`); sun path by hour (default 17:00).
+  **Terrain sun shadow** (`TerrainShadow.ts` + worker): horizon march over both height grids → R8 textures (box 4 m,
+  world 16 m), soft penumbra, re-baked when the sun moves ~1°; one fetch per pixel / blade root, no shadow-map pass.
+- **Water** (`Water.ts`): lake disc + river ribbon; depth from the height grid in the fragment shader (no depth
+  pre-pass) → see-through shallows → teal, shore line, Fresnel sky, glints, downstream flow.
+- **Post** (`Post.ts`, MEDIUM+): HDR target (MSAA 4) → dual-filter bloom, vignette, Neutral tone map, dither. LOW
+  draws straight to the canvas (same tone map, no bloom).
+- **Tiers** (`quality.ts`, `?tier=`; DEFAULT ULTRA on every device — the user's call, 2026-10-26; with trees, bushes,
+  rocks and the car, M4 1280×720 uncapped: LOW 1.4–1.7 ms GPU, MEDIUM 2.6–2.7, HIGH 4.2–4.6, ULTRA 6.4–7.2, phone
+  viewport ULTRA 6.3–7.2): LOW terrain 16-quad patches / near 80 m, grass 38 m @ 9 tufts/m² × 6 blades,
+  rocks to 900 m; ULTRA 32 / 300 m, 72 m @ 26 × 11, rocks to 2.6 km. Cost (M4, 1280×720, uncapped): LOW 1.0–1.3 ms
+  GPU, 90–130 k tris, 10–13 draws; MEDIUM 2.5–2.7 ms; HIGH 2.6–3.9 ms, 0.3–0.48 M tris; ULTRA 4.9–6.8 ms, ~1 M tris.
+  Phone viewport LOW: 0.6–0.8 ms, 50–63 k tris. Shrub dots / pebbles: one texture fetch each (paint texture's cell
+  channel), no loops.
+- **Verify**: `node scripts/oth-shot.mjs <outdir> <shots.json>` (needs `npm run dev`; PORT, UNCAPPED=1, PHONE=1) —
+  shots at x / z / h / yaw / pitch / hour / tier; prints fps, CPU / GPU ms, draws, tris, patches, blades. Debug:
+  `?stats=1` or F3; fly with drag + WASD / Space / C / Shift.
+- **Erosion** (terrain.py): vectorised droplet erosion, 1.6 M drops in the box (4 m) and 2.4 M in the world (16 m),
+  speed capped and the change per batch clamped (a vectorised batch can pile many drops into one channel cell →
+  runaway → NaN). Kept in full on steep / high ground (gullied mountain faces, drainage networks); the gentle hills
+  keep only its broad shaping (on a soft slope parallel droplet channels read as ripples).
+- **Trails** (terrain.py → `trail.bin`, `meta.trails`): DIRT TRACKS by A* on an 8 m grid (cost len·(1 + 25·grade²) ×
+  a slowly varying field so they wander, > 30 % or the lake a wall, the river a costly ford, cells already on a track
+  cheap so routes merge), spawn ↔ lake, the south exit, the box's prominent hilltops joined to the nearest track;
+  RDP → Catmull-Rom → Chaikin, a smoothed height profile CARVED into the ground (±hw + 5 m). The ground paints
+  packed earth + two ruts with a ragged edge from the distance field; the grass keeps off it (its blades keep the
+  field's colour at the edge).
+- **Rocks** (`Rocks.ts`): chunky chamfered blocks (hull of a jittered box's chamfered corners, creased normals:
+  flat faces, soft edges), light blue-grey; outcrops on steep ground / the rock mask, lone boulders, river stones;
+  never on a track or in water; deterministic; one instanced draw per shape; re-picked only when the camera crosses a
+  128 m cell; their 2 m footprint texture keeps the grass out of them.
+- **Matching Over the Hill** (`scripts/oth/compare.py`, Blender python): pairs of (reference crop, our render crop)
+  scored 0–100 on colour (HSV histogram), tone, texture energy in 3 bands, stroke orientation; writes side-by-sides.
+  2026-10-26: 25 rounds, 53.8 → 64.8 overall (golden slope 86, golden field 75, green 67, trail 59, mountain 58,
+  rock 57, ground 58, far hillside 59). The rest is mostly content OTH has and we don't yet (pines, bushes, snags).
+- **The 4×4s** (`Vehicle.ts`, `Physics.ts`, `ChaseCam.ts`; 2026-10-26): the game's own vehicles — `loadVehicle` models,
+  `TruckSim` + the spec-sheet drivetrain (Simulation handling, full aids, off-road assist) in the game's Rapier
+  `PhysicsWorld` — on this map: the ground as 256 m heightfield tiles of the 2 m grid streamed 3 × 3 round the car,
+  the rocks within 160 m as convex hulls of their drawn shapes, walls 40 m inside the box's edge. Tyres read this
+  map's surfaces (dirt on the tracks, grass, sand / gravel at the water, rock). Drawn with this world's light
+  (`shade`, the terrain's baked sun shadow) + a terrain-hugging contact shadow; paint per car (rust G500, cream E30,
+  orange kei van; `?paint=`). Chase camera with drag-orbit; V = free camera. Keys W A S D / Space / Shift / R / 1 2 3,
+  touch ◀ ▶ GAS BRAKE ⟲. Cost: the car + shadow ≈ 8 draws; LOW 1.45 ms GPU with it.
+- **Trees** (`treeGeometry.ts`, `Trees.ts`; new for this world): the OTH spruce / golden larch — stacked FRILLED
+  SKIRTS (dark apex, raised shoulder, a fringe of hanging saw-teeth gathered into plumes), indexed, **864 vertices**
+  near, 217 mid; snags = the trunk + branch stubs. One instanced draw per LOD for every species. IMPOSTORS beyond
+  `treeMid`: at load each species' near LOD is rendered from 12 azimuths × 3 elevations into a 2-target atlas (albedo ×
+  AO sqrt-encoded, tree-space normal); a far tree is one camera-facing quad picking the nearest view, relit by the sun
+  from the normal image, mip-corrected alpha (alpha-to-coverage on MSAA tiers). Beyond `treeFar` a rank cull thins the
+  forest (survivors grow). Culling: 64 m tiles (distance + frustum), lists rebuilt only when the camera moves 4 m /
+  turns. SHADOWS AS AN IMAGE: every tree stamps a soft ellipse (away from the sun) into a 2 m R8 texture
+  (`TerrainShadow.treeTex`, re-baked when the sun moves 1°) — the ground, grass, water, rocks, bushes, the car and the
+  trees' own lower crowns read it (`sunVisibility`); no shadow-map pass. Trunks near the car are physics cylinders.
+- **Mixed woods** (2026-10-26, the user: "fewer pines, other trees like OTH"): a BROADLEAF family too
+  (`broadleafGeometry`: white trunk + a tall loose oval of 34 jittered leaf clusters, ~320 vertices; leaf speckle in
+  the shader) — gold birch, red / orange aspen, a few green — in DENSE GROVES (a slow noise picks grove vs conifer
+  stand; ~half each; conifers sparser than before). 5 instanced draws: conifer near / mid, broadleaf near / mid, one
+  impostor draw for all species (atlas rows: spruce, larch, birch, aspen, green × 3 elevations).
+- **Trekking hills** (terrain.py `TREK`, the user: "hill-trekking places like OTH"): 4 broad rocky hills; their upper
+  slopes TERRACED into ledges (a grassy shelf + a ~45° rock riser, 4–6 m, the step height wandering), tracks up to
+  each top (A* allows 62 % steps there and the carve keeps 85 % of the ledges: rock crawling). More rock everywhere:
+  slope rock from 25° and EXPOSED-BEDROCK patches on the hillsides (rock 3 % → 12 % of the box), never on a track.
+- **Tracks** (the user: "exact OTH road texture"): one car wide (half width 1.8 m), smooth muted warm brown with a fine
+  speckled grain, faint ruts, darker under the overhanging grass; the edge (`trackMask`, shared by the ground and the
+  grass) pushed in / out by grass CLUMPS a few metres across + a finer fringe — OTH's scalloped grassy edges.
+- **Round-leaf broadleaf + tightness** (2026-10-26 round 6, the user: "trees like a stick with paper — OTH has round
+  leaves growing up and down"; "the spawn feels like a desert for 500 m"; "multiple hills and cliffs"; "rock
+  formations on cliffs and hills, connected roads through them for trucking"): `broadleafGeometry` = a forked white
+  trunk + ~210 ROUND LEAVES (quads cut to discs in the shader, per-leaf tint, one in ten yellow-green) on the
+  surfaces of 7 lumpy clusters (some facing up, some out, the lower ones hanging) + a small dark core; 878 vertices
+  (LOD 1 206). Placement adds clumps round the SPAWN (< 260 m), lining the TRACKS (5–26 m) and the RIVER banks (14–45
+  m, mostly broadleaf) from coarse distance fields (`MapData.trackDist` / `riverDist`, 4 m, built at load); bushes
+  thick along the banks / tracks / spawn; boulders round the spawn and along the tracks. Terrain: knolls + hummocks
+  everywhere, ~30 more hills, ~14 CLIFFS (escarpments: a 12–30 m near-vertical rock step onto a plateau), rock
+  FORMATIONS on 70 % of the hills and every plateau (48 in all), two by the spawn; TRUCKING ROUTES from the network
+  into the 18 nearest formations and on between neighbours (A* may climb the rock there, the carve keeps the blocks)
+  — 33 connected tracks, ~20 km.
+- **Bushes** (`Bushes.ts`): lumpy clumps of icosphere blobs (green / juniper / autumn red), 2 LODs to `bushReach`,
+  thicker at forest edges and in green hollows; beyond, the ground's painted shrub dots take over.
+- **Rock outcrops** (terrain.py, the user: "huge rock — the terrain itself, rock texture, no grass"): 12 sites (2 in
+  sight of the spawn), fused Voronoi BLOCKS raised out of the slope (flat tilted tops, steep sides, rounded crevices)
+  in the HEIGHT GRID — the car climbs and hits them, they cast terrain shadow — painted blue-grey slab (mask R = 1), no
+  grass / trees / bushes / loose boulders on them; tracks route round them. `meta.rocks` lists them.
+- **Runtime**: ADAPTIVE RESOLUTION (PlayCanvas guideline: DPR at runtime) — once a second a slow frame (> 19 ms)
+  lowers the pixel ratio 15 % (to half), a fast one (< 12.5 ms) raises it (`?dpr=fixed` off; F3 shows `res %`).
+  FULL SCREEN button (top-left; Fullscreen API + landscape lock; iPhone: "Add to Home Screen" hint). Default tier
+  ULTRA everywhere.
+- **Score ceiling** (compare.py on OTH against ITSELF): golden grass from two OTH screenshots 70–73, a spruce vs another
+  spruce in the same screenshot 51, the same crop shifted 5 % 89, identical 100 — so 100 means "the same image"; ours
+  (2026-10-26, round oth2d): golden slope 92, golden field 75, spruce 66, rock 64, aspen grove 62, hillside 62,
+  larch 61, overall 63.5.
+- **Leaf cards + day / night** (2026-10-26, the user: "each leaf small and separated, the sky seen between them";
+  "sun, bloom and day-night like OTH"): broadleaf crowns and bushes are LEAF CARDS showing a generated 512² atlas of 4
+  leaf clusters (`leafTexture.ts`: ~80 tiny separate leaves each, gaps between them; R tone, G depth, A coverage —
+  mip-corrected alpha test, alpha-to-coverage on MSAA tiers). `broadleafGeometry`: a low fork + side limbs, clumps of
+  10 cards in 4 rings + a top + 5 dark core cards — the CROWN FILLS THE TOP 70 % of the tree (the user: "70 % leaves,
+  30 % trunk"), each tree its own base (31–40 %) and width (×0.85–1.15) in the vertex shader; ~760 vertices (LOD 1
+  ~190). Bushes: 5 clumps × 6 cards. The clock runs (`Atmosphere.tick`, 24 min a day, nights 3× faster; [ ] an hour,
+  T stops it, `?time=0`): golden hour → pink dusk → night (the light becomes the MOON, stars twinkle, the headlights
+  light every surface through the shared `headlight()`; L toggles them).
+- **Clear near air** (the user: "no fog near us — the colours go dull"): the height fog starts at `FOG_START` = 140 m
+  (`fogAmount` integrates only beyond it) and swallows the far hills by ~1.5 km; the vignette is the faintest
+  darkening (no tint); the bloom keeps to what is brighter than white. In that clear air the sunlit SCREE and rock
+  slabs read as snow, so both are a stone grey now (`paint.ts` SCREE / SLAB). The sky marks itself for the god rays
+  (alpha 0) only when Post draws (LOW renders straight to the canvas: an opaque sky).
+- **God rays + bloom** (`Post.ts`): the bloom's soft knee from 1.0 (the sun, the glowing sky round it, the sunset
+  horizon, glints). GOD RAYS at a quarter of the resolution: the sky marks itself (the sky writes alpha 0, everything
+  else 1 — a leaf card's edge, alpha-to-coverage, lets part through), its pixels near the sun (a tight falloff: the
+  streaks keep their contrast) are the source, blurred RADIALLY toward the sun in 2 passes of 12 taps (the second 13×
+  longer: 144 evenly spaced samples), added tinted as that sky is — light streams round every trunk, crown and ridge
+  against the bright sky. Off (passes skipped) when the sun is behind the camera. `?rays=` strength (2.0), `?rays=-1`
+  shows the rays alone. ≈ 0.1–0.2 ms.
+- **The car, finished** (the user: "the car has no windows and no smoke"): the model's front DOORS (cut out of the body
+  in Blender — `TruckModel.doors`) and the CABIN were never drawn here; now they are, and the glass is see-through
+  (Fresnel sky, sun glint, the cabin behind it). DUST + SMOKE (`Dust.ts`): one instanced draw of soft painterly puffs
+  from a ring (160 LOW … 360 ULTRA) — dust thrown back from each tyre on the ground by what it rolls on (orange-brown
+  off the tracks, grey off rock, pale off gravel, a little off grass; none on a bridge), more with speed and tyre
+  slip; exhaust from the catalogue's tailpipes (haze at idle, grey puffs on the gas). ≈ 0.03 ms CPU.
+- **Camera zoom** (the user): the chase camera's distance 3.5–40 m, eased — mouse wheel, two-finger PINCH, + / − keys,
+  on-screen + / − buttons (held: keeps zooming); in the free camera the buttons change the field of view.
+- **A fuller map** (2026-10-26 round 7, the user: "more bumps and hills, bigger and smaller, some with rocks, some just
+  rock on the ground; proper cliffs; random ponds and lakes with tracks, trees and hills near them; bridges like
+  OTH; make it fuller, all explorable"): terrain.py adds a HILL FIELD (~240 hills: small 18–45 m / 3–12 m, medium
+  45–100 m / 8–28 m, big 100–190 m / 18–50 m, ellipses at their own angles; a third crowned by a rock FORMATION, a
+  third by a cap of BARE ROCK paint, the rest grass; some gathered round the ponds), 420 knolls, 22 PROPER CLIFFS (the
+  big ones 24–46 m tall, up to 320 m long, the edge bending; the face LAYERED into 3–5 strata — near-vertical risers
+  and narrow ledges — a scree apron at the foot), ~16 PONDS and small LAKES (16–110 m; a bowl under the level its own
+  rim allows, a sloped beach; `meta.water.ponds`, a water disc each in `Water.ts`; the trees and bushes line their
+  shores via `MapData.riverDist`; three within ~500 m of the spawn) with TRACKS to their shores (round the lakes), and
+  3 PLANK BRIDGES over the river (`meta.bridges`; `Bridges.ts`: planks on three stringers, log posts + cap beams, curb
+  logs and rails — one merged draw; the deck, curbs and rails are colliders in `Physics.ts`; the track ramps up to
+  each deck and the river runs on under it; `MapData.bridgeAt` → the tyres feel planks, no dust). 74 tracks, ~35 km.
+- **Culling, all of it** (the user: "check we have proper culling, all types"): DISTANCE (every system's tier reach),
+  FRUSTUM (terrain CDLOD nodes, grass tiles, tree tiles, bush tiles, rock cells — the rocks had none before), LOD
+  (CDLOD + geomorph, grass density rank, trees near / mid / impostor + far rank cull, bushes 2 LODs), BACKFACE (all
+  closed meshes; leaf cards are double-sided by nature), SMALL-FEATURE (a rock under ~2 px tall is skipped), and
+  OCCLUSION (`Horizon.ts`: 320 azimuth rays marched over the height grid from the camera each keep the highest slope
+  met — the horizon; a tree / bush tile or rock cell whose top is under it in every azimuth it spans is behind a hill
+  and skipped; conservative — eye +1.2 m, ±1 ray, a margin; rebuilt each 4 m moved ≈ 0.4–0.9 ms; `?occlusion=0`
+  off). No shadow-map passes to cull (shadows are baked images). F3 shows the culled counts.
+- **Not yet**: engine / tyre sounds, tyre tracks, planar reflections.
+

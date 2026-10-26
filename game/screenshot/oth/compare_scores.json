@@ -1,0 +1,397 @@
+{
+ "overall": 63.7,
+ "pairs": [
+  {
+   "name": "golden_field",
+   "score": 74.2,
+   "colour": 99,
+   "tone": 79,
+   "texture": 57,
+   "strokes": 59,
+   "ref": {
+    "mean": 0.787,
+    "std": 0.048,
+    "sat": 0.58,
+    "bands": [
+     0.032,
+     0.022,
+     0.019
+    ]
+   },
+   "ours": {
+    "mean": 0.727,
+    "std": 0.026,
+    "sat": 0.603,
+    "bands": [
+     0.013,
+     0.012,
+     0.014
+    ]
+   }
+  },
+  {
+   "name": "golden_slope",
+   "score": 73.1,
+   "colour": 99,
+   "tone": 74,
+   "texture": 56,
+   "strokes": 59,
+   "ref": {
+    "mean": 0.758,
+    "std": 0.027,
+    "sat": 0.6,
+    "bands": [
+     0.008,
+     0.008,
+     0.01
+    ]
+   },
+   "ours": {
+    "mean": 0.674,
+    "std": 0.043,
+    "sat": 0.679,
+    "bands": [
+     0.012,
+     0.014,
+     0.021
+    ]
+   }
+  },
+  {
+   "name": "golden_tr3",
+   "score": 74.2,
+   "colour": 77,
+   "tone": 85,
+   "texture": 75,
+   "strokes": 59,
+   "ref": {
+    "mean": 0.736,
+    "std": 0.049,
+    "sat": 0.576,
+    "bands": [
+     0.016,
+     0.017,
+     0.024
+    ]
+   },
+   "ours": {
+    "mean": 0.683,
+    "std": 0.041,
+    "sat": 0.67,
+    "bands": [
+     0.011,
+     0.013,
+     0.019
+    ]
+   }
+  },
+  {
+   "name": "green_close",
+   "score": 66.9,
+   "colour": 35,
+   "tone": 93,
+   "texture": 72,
+   "strokes": 81,
+   "ref": {
+    "mean": 0.286,
+    "std": 0.036,
+    "sat": 0.661,
+    "bands": [
+     0.028,
+     0.028,
+     0.03
+    ]
+   },
+   "ours": {
+    "mean": 0.305,
+    "std": 0.03,
+    "sat": 0.692,
+    "bands": [
+     0.06,
+     0.039,
+     0.031
+    ]
+   }
+  },
+  {
+   "name": "hillside_far",
+   "score": 68.4,
+   "colour": 23,
+   "tone": 79,
+   "texture": 92,
+   "strokes": 91,
+   "ref": {
+    "mean": 0.668,
+    "std": 0.139,
+    "sat": 0.314,
+    "bands": [
+     0.032,
+     0.031,
+     0.034
+    ]
+   },
+   "ours": {
+    "mean": 0.687,
+    "std": 0.088,
+    "sat": 0.19,
+    "bands": [
+     0.03,
+     0.026,
+     0.033
+    ]
+   }
+  },
+  {
+   "name": "rock",
+   "score": 69.6,
+   "colour": 30,
+   "tone": 77,
+   "texture": 91,
+   "strokes": 89,
+   "ref": {
+    "mean": 0.637,
+    "std": 0.077,
+    "sat": 0.114,
+    "bands": [
+     0.026,
+     0.022,
+     0.03
+    ]
+   },
+   "ours": {
+    "mean": 0.587,
+    "std": 0.109,
+    "sat": 0.144,
+    "bands": [
+     0.022,
+     0.022,
+     0.032
+    ]
+   }
+  },
+  {
+   "name": "ground",
+   "score": 55.7,
+   "colour": 68,
+   "tone": 70,
+   "texture": 19,
+   "strokes": 78,
+   "ref": {
+    "mean": 0.717,
+    "std": 0.101,
+    "sat": 0.5,
+    "bands": [
+     0.022,
+     0.017,
+     0.023
+    ]
+   },
+   "ours": {
+    "mean": 0.768,
+    "std": 0.048,
+    "sat": 0.396,
+    "bands": [
+     0.003,
+     0.003,
+     0.006
+    ]
+   }
+  },
+  {
+   "name": "trail",
+   "score": 59.0,
+   "colour": 60,
+   "tone": 94,
+   "texture": 36,
+   "strokes": 58,
+   "ref": {
+    "mean": 0.731,
+    "std": 0.02,
+    "sat": 0.547,
+    "bands": [
+     0.003,
+     0.003,
+     0.005
+    ]
+   },
+   "ours": {
+    "mean": 0.742,
+    "std": 0.011,
+    "sat": 0.508,
+    "bands": [
+     0.001,
+     0.001,
+     0.002
+    ]
+   }
+  },
+  {
+   "name": "mountain",
+   "score": 44.1,
+   "colour": 33,
+   "tone": 45,
+   "texture": 21,
+   "strokes": 93,
+   "ref": {
+    "mean": 0.841,
+    "std": 0.086,
+    "sat": 0.124,
+    "bands": [
+     0.005,
+     0.006,
+     0.008
+    ]
+   },
+   "ours": {
+    "mean": 0.715,
+    "std": 0.16,
+    "sat": 0.178,
+    "bands": [
+     0.029,
+     0.025,
+     0.034
+    ]
+   }
+  },
+  {
+   "name": "spruce_near",
+   "score": 60.4,
+   "colour": 36,
+   "tone": 69,
+   "texture": 72,
+   "strokes": 71,
+   "ref": {
+    "mean": 0.399,
+    "std": 0.167,
+    "sat": 0.45,
+    "bands": [
+     0.084,
+     0.08,
+     0.091
+    ]
+   },
+   "ours": {
+    "mean": 0.313,
+    "std": 0.136,
+    "sat": 0.504,
+    "bands": [
+     0.11,
+     0.107,
+     0.139
+    ]
+   }
+  },
+  {
+   "name": "larch_near",
+   "score": 57.5,
+   "colour": 42,
+   "tone": 77,
+   "texture": 56,
+   "strokes": 64,
+   "ref": {
+    "mean": 0.686,
+    "std": 0.113,
+    "sat": 0.449,
+    "bands": [
+     0.031,
+     0.031,
+     0.035
+    ]
+   },
+   "ours": {
+    "mean": 0.634,
+    "std": 0.144,
+    "sat": 0.527,
+    "bands": [
+     0.058,
+     0.052,
+     0.065
+    ]
+   }
+  },
+  {
+   "name": "forest_mid",
+   "score": 47.2,
+   "colour": 20,
+   "tone": 64,
+   "texture": 45,
+   "strokes": 75,
+   "ref": {
+    "mean": 0.769,
+    "std": 0.174,
+    "sat": 0.238,
+    "bands": [
+     0.031,
+     0.026,
+     0.028
+    ]
+   },
+   "ours": {
+    "mean": 0.68,
+    "std": 0.128,
+    "sat": 0.314,
+    "bands": [
+     0.072,
+     0.056,
+     0.059
+    ]
+   }
+  },
+  {
+   "name": "aspen_grove",
+   "score": 65.3,
+   "colour": 39,
+   "tone": 85,
+   "texture": 57,
+   "strokes": 97,
+   "ref": {
+    "mean": 0.439,
+    "std": 0.134,
+    "sat": 0.61,
+    "bands": [
+     0.018,
+     0.035,
+     0.065
+    ]
+   },
+   "ours": {
+    "mean": 0.464,
+    "std": 0.161,
+    "sat": 0.679,
+    "bands": [
+     0.077,
+     0.062,
+     0.071
+    ]
+   }
+  },
+  {
+   "name": "track_above",
+   "score": 76.0,
+   "colour": 75,
+   "tone": 49,
+   "texture": 82,
+   "strokes": 95,
+   "ref": {
+    "mean": 0.648,
+    "std": 0.044,
+    "sat": 0.574,
+    "bands": [
+     0.015,
+     0.014,
+     0.025
+    ]
+   },
+   "ours": {
+    "mean": 0.564,
+    "std": 0.136,
+    "sat": 0.595,
+    "bands": [
+     0.017,
+     0.02,
+     0.028
+    ]
+   }
+  }
+ ]
+}

@@ -27,6 +27,8 @@ export interface MapInfo {
   preview: string
   /** Top-down map (north up, exactly the map's 2·half square) for the in-game minimap. */
   minimap: string
+  /** A world of its own, on its own page (Over the Hill: oth.html, src/oth/) — Play opens it; not a room map. */
+  page?: string
 }
 
 /** Every playable map (the "Select map" screen). Add a folder in public/maps/ + an entry here. */
@@ -50,14 +52,16 @@ export const MAPS: MapInfo[] = [
     minimap: '/maps/highlands/minimap.jpg',
   },
   {
-    id: 'zhangjiajie',
-    name: 'Zhangjiajie & Wulingyuan',
-    blurb: 'A 4 km field of towering sandstone hills, eroded and crowned with forest, flat-topped tables round the edge, a river winding through misty gorges and a scenic loop between the hills.',
+    id: 'valley',
+    name: 'Over the Hill · The Valley',
+    blurb: 'A new world: golden meadows and a turquoise river under a ring of snowy ranges, a mountain lake at the head of the valley, rolling hills to climb.',
     areaKm2: 16,
-    regions: ['Sandstone towers', 'Mesas', 'River gorges', 'Forest'],
-    preview: '/maps/zhangjiajie/preview.jpg',
-    minimap: '/maps/zhangjiajie/minimap.jpg',
+    regions: ['Golden meadows', 'River', 'Mountain lake', 'Rolling hills'],
+    preview: '/oth/valley/preview.jpg',
+    minimap: '/oth/valley/minimap.jpg',
+    page: '/oth.html',
   },
+
 ]
 
 interface MapJson {
