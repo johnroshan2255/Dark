@@ -2,15 +2,16 @@ import * as THREE from 'three'
 import type { MapData } from './MapData'
 
 /**
- * The terrain's SUN SHADOW as two textures (the box at 4 m, the world at 16 m), baked by terrainShadow.worker.ts for
- * the sun's current direction and re-baked when it has moved ~1° (time of day). Until the first bake lands the
+ * The terrain's SUN SHADOW as two textures (the box at 4 m, the world at 16 m) and the FORESTS' shade (2 m), baked
+ * together by terrainShadow.worker.ts for the sun's current direction (off the main thread) and re-baked when it has
+ * moved ~1.5° (time of day). Until the first bake lands the
  * ground is fully lit (`uShadowOn` 0). The ground samples it per pixel, the grass per blade root — one fetch each,
  * no shadow-map pass, the same on every tier.
  */
 export class TerrainShadow {
   readonly box: THREE.DataTexture
   readonly world: THREE.DataTexture
-  /** The FORESTS' shade (R8 on the box's 2 m grid, 255 = lit) — stamped by Trees.bakeShadows. */
+  /** The FORESTS' shade (R8 on the box's 2 m grid, 255 = lit) — stamped by the worker from the trees (setTrees). */
   readonly treeTex: THREE.DataTexture
   readonly uniforms = {
     uShBox: { value: null as THREE.Texture | null },
@@ -59,6 +60,11 @@ export class TerrainShadow {
       ;(this.box.image.data as Uint8Array).set(m.box)
       ;(this.world.image.data as Uint8Array).set(m.world)
       this.box.needsUpdate = this.world.needsUpdate = true
+      if (m.trees) {
+        ;(this.treeTex.image.data as Uint8Array).set(m.trees)
+        this.treeTex.needsUpdate = true
+        this.uniforms.uTreeShOn.value = 1
+      }
       this.uniforms.uShOn.value = 1
       this.onBaked?.()
     }
@@ -66,9 +72,17 @@ export class TerrainShadow {
 
   onBaked?: () => void
 
+  /** The trees (x, z, height, species per tree) whose shade the worker stamps at every bake; crown = crown radius /
+   *  height. Re-bakes at the next update. */
+  setTrees(trees: Float32Array, crown: number): void {
+    this.worker.postMessage({ type: 'trees', trees, crown, grid: { n: this.treeTex.image.width, step: this.treeGrid.y, origin: this.treeGrid.z } })
+    this.baked.set(0, -1, 0)
+  }
+  private get treeGrid(): THREE.Vector4 { return this.uniforms.uTreeShGrid.value }
+
   /** Call each frame with the sun's direction: re-bakes when it has moved. */
   update(sun: THREE.Vector3): void {
-    if (this.busy || sun.angleTo(this.baked) < 0.018) return
+    if (this.busy || sun.angleTo(this.baked) < 0.026) return
     this.busy = true
     this.baked.copy(sun)
     this.worker.postMessage({ type: 'bake', id: ++this.id, sun: [sun.x, sun.y, sun.z], boxN: this.boxN, boxStep: 4 })

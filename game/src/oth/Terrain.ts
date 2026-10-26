@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { ATMOS_GLSL, FRAG_OUT, type Atmosphere } from './Atmosphere'
 import type { MapData } from './MapData'
 import { PAINT_GLSL } from './paint'
+import { ROCK_RELIEF_GLSL } from './rockRelief'
 import type { Tier } from './quality'
 import { SHADOW_GLSL, type TerrainShadow } from './TerrainShadow'
 
@@ -103,7 +104,7 @@ export class Terrain {
     const mat = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
       uniforms: this.uniforms,
-      defines: tier.spec ? { OTH_SPEC: '' } : {},
+      defines: { ...(tier.spec ? { OTH_SPEC: '' } : {}), ...(tier.rockRelief ? { OTH_ROCK_RELIEF: '' } : {}) },
       vertexShader: VERT,
       fragmentShader: FRAG,
     })
@@ -149,7 +150,7 @@ export class Terrain {
   /** Pick this frame's patches. */
   update(camera: THREE.PerspectiveCamera): void {
     this.pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
-    this.frustum.setFromProjectionMatrix(this.pv)
+    this.frustum.setFromProjectionMatrix(this.pv, THREE.WebGLCoordinateSystem, camera.reversedDepth)
     this.cx = camera.position.x
     this.cz = camera.position.z
     const agl = Math.max(0, camera.position.y - this.map.height(this.cx, this.cz))
@@ -251,6 +252,7 @@ void main() {
 const FRAG = /* glsl */ `
 ${FRAG_OUT}
 ${ATMOS_GLSL}
+${ROCK_RELIEF_GLSL}
 ${PAINT_GLSL}
 uniform sampler2D uNIn;
 uniform sampler2D uNFar;
@@ -268,7 +270,7 @@ uniform float uBushR;
 uniform sampler2D uTrail;
 uniform float uTrailHW;
 // where the grass stands (the grass shader's rule: not on rock, not in water, thinner in the forest)
-float grassy0(vec4 m, float rk, float fo) { return (1.0 - rk) * (1.0 - smoothstep(0.9, 0.97, m.b)) * (1.0 - 0.55 * fo); }
+float grassy0(vec4 m, float rk, float fo) { return (1.0 - smoothstep(0.02, 0.1, rk)) * (1.0 - smoothstep(0.9, 0.97, m.b)) * (1.0 - 0.55 * fo); }
 vec2 gridUv(vec4 g, vec2 xz) { return ((xz - g.z) / g.y + 0.5) / g.x; }
 vec3 unpackN(vec2 e) { vec2 n = e * 2.0 - 1.0; return vec3(n.x, sqrt(max(1.0 - dot(n, n), 0.0)), n.y); }
 
@@ -302,24 +304,29 @@ void main() {
   vec3 col = g.col;
   float facet = mix(0.12, 0.42, max(g.rock, g.snow * 0.8));
   vec3 N = normalize(mix(Ns, Nf, facet));
+  // HIGH / ULTRA on PCs: the rock's (and the scree's) crumpled 3D relief — the light only, the colour stays
+  float cav = 1.0;
+#ifdef OTH_ROCK_RELIEF
+  N = rockRelief(vWorld, N, max(g.rock, g.scree * 0.6) * (1.0 - g.trail), dFdx(vWorld), dFdy(vWorld), cav); // (never on a track)
+#endif
   col *= 1.0 + (facetRand(Nf) - 0.5) * 0.1 * facet;
 
   float rough = mix(0.92, 0.62, g.rock);
   rough = mix(rough, 0.45, g.snow);
   float wrap = mix(0.62, 0.2, g.rock);
-  float ao = mix(1.0, 0.7, g.forest) * mix(1.0, 0.85, g.bed);
+  float ao = mix(1.0, 0.7, g.forest) * mix(1.0, 0.85, g.bed) * cav;
   vec3 V = normalize(uCamPos - vWorld);
   float sun = sunVisibility(xz);
   // under the grass the ground lies in the blades' shade (it shows between them); the shade lifts toward the
   // grass's edge, where the ground alone must look like the field from afar
-  float under = grassy0(m, g.rock, g.forest) * (1.0 - g.scree) * (1.0 - g.trail) * (1.0 - smoothstep(uGrassR * 0.3, uGrassR * 0.95, length(vWorld - uCamPos)));
+  float under = grassy0(m, g.rock, g.forest) * (1.0 - smoothstep(0.02, 0.1, g.scree)) * (1.0 - g.trail) * (1.0 - smoothstep(uGrassR * 0.3, uGrassR * 0.95, length(vWorld - uCamPos)));
   col *= 1.0 - 0.14 * under;
   vec3 c = shade(col, N, V, rough, 0.04, ao, sun, wrap);
   c += headlight(col, N, vWorld);
   // the fields' sheen: grass back-lit by a low sun glows warm
   float grassy = (1.0 - g.rock) * (1.0 - g.forest) * (1.0 - g.snow) * (1.0 - g.bed);
   float back = pow(max(dot(-V, uSunDir), 0.0), 3.0);
-  c += g.col * uSunColor * back * 0.22 * grassy * smoothstep(-0.1, 0.4, dot(N, uSunDir)) * sun;
+  c += g.col * uSunColor * back * 0.11 * grassy * smoothstep(-0.1, 0.4, dot(N, uSunDir)) * sun;
   gl_FragColor = vec4(applyAtmos(c, vWorld), 1.0);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>

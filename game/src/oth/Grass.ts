@@ -25,6 +25,9 @@ interface Ring { rin: number; rout: number; tile: number; density: number; blade
 /** HIGH's near tuft density: the reference the lower tiers widen their blades against. */
 const REF_DENSITY = 22
 const REF_FAN = 11
+/** The share of the tier's tufts grown (the user: "reduce grass to 70%" — the amount): a sparser field, the ground
+ *  showing between the tufts. Unlike a lower tier's budget, the blades are NOT widened to make up for it. */
+const AMOUNT = 0.7
 
 export class Grass {
   readonly group = new THREE.Group()
@@ -36,7 +39,7 @@ export class Grass {
   blades = 0
 
   constructor(private readonly map: MapData, atmos: Atmosphere, terrain: Terrain, tier: Tier, rockFootprint: THREE.Texture) {
-    const R = tier.grassRadius, D0 = tier.grassDensity
+    const R = tier.grassRadius, D0 = tier.grassDensity * AMOUNT
     const mg = map.meta.mask
     const t = terrain.uniforms
     const uniforms: Record<string, THREE.IUniform> = {
@@ -53,7 +56,7 @@ export class Grass {
       uD0: { value: D0 },
       uRadius: { value: R },
       // fewer tufts on the lower tiers → each blade wider by the square root: the coverage stays HIGH's
-      uWidthK: { value: Math.max(1, Math.sqrt((REF_DENSITY * REF_FAN) / (D0 * tier.grassFan))) },
+      uWidthK: { value: Math.max(1, Math.sqrt((REF_DENSITY * REF_FAN) / (tier.grassDensity * tier.grassFan))) },
     }
     const bounds = [0, 0.25 * R, 0.55 * R, R]
     const tiles = [4, 8, 16]
@@ -86,7 +89,7 @@ export class Grass {
 
   update(camera: THREE.PerspectiveCamera): void {
     this.pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
-    this.frustum.setFromProjectionMatrix(this.pv)
+    this.frustum.setFromProjectionMatrix(this.pv, THREE.WebGLCoordinateSystem, camera.reversedDepth)
     const cx = camera.position.x, cz = camera.position.z
     this.blades = 0
     for (const ring of this.rings) {
@@ -215,20 +218,30 @@ void main() {
   float trail = textureLod(uTrail, ((root - uInGrid.z) / uInGrid.y + 0.5) / uInGrid.x, 0.0).r * 8.0;
   // (the blade's colour is the FIELD's: painted without the track, so the blades at its edge don't take the earth)
   Ground g = groundPaint(root, m, h, 1.0 - N.y, paintNoise(root), 0.0, 99.0, uTrailHW, 0.0); // (no painted shrub dots under the grass: the bushes are real there)
-  float onTrack = trackMask(root, trail, uTrailHW);
+  float tx = trackEdge(root, trail);
+  float onTrack = 1.0 - smoothstep(uTrailHW - 0.35, uTrailHW + 0.15, tx); // (trackMask, its ragged distance kept)
   // (none on rock, snow, the water's gravel and the earth band along it; thinner under the forest)
-  float grow = (1.0 - smoothstep(0.3, 0.55, g.rock)) * (1.0 - smoothstep(0.855, 0.875, m.b)) * (1.0 - 0.6 * g.forest) * (1.0 - g.snow) * (1.0 - g.scree);
-  grow *= (1.0 - smoothstep(0.3, 0.6, onTrack)); // (off the track; its clumps overhang the edge at full height)
-  grow *= 1.0 - textureLod(uRocks, ((root - uInGrid.z) / uInGrid.y + 0.5) / uInGrid.x, 0.0).r; // (not through the rocks)
+  // (never on rock: none where the ground shows any rock or scree tint at all — the user: "never put grass on rock")
+  float grow = (1.0 - smoothstep(0.02, 0.1, g.rock)) * (1.0 - smoothstep(0.855, 0.875, m.b)) * (1.0 - 0.6 * g.forest) * (1.0 - g.snow) * (1.0 - smoothstep(0.02, 0.1, g.scree));
+  grow *= (1.0 - smoothstep(0.3, 0.6, onTrack)); // (off the track)
+  vec2 inUv = ((root - uInGrid.z) / uInGrid.y + 0.5) / uInGrid.x;
+  grow *= 1.0 - smoothstep(0.0, 0.3, textureLod(uRocks, inUv, 0.0).r); // (none at a boulder's foot)
+  // SHORTER TOWARD BARE GROUND (the user: "when the grass comes to rock or the path, its height must reduce
+  // gradually"): full height a few metres off, a tenth where it stops — the track by its ragged edge's distance (over
+  // 2.5 m), terrain rock / scree by their fields read early (~2–6 m), a boulder by its footprint blurred a mip and a
+  // half up (~3 m round it). (The water's banks keep their edge: the mask can't tell a bank from a wet meadow.)
+  float approach = smoothstep(uTrailHW, uTrailHW + 2.5, tx);
+  approach = min(approach, (1.0 - g.rockNear) * (1.0 - g.screeNear));
+  approach = min(approach, 1.0 - smoothstep(0.02, 0.45, textureLod(uRocks, inUv, 1.5).r));
   float tall = mix(0.95, 1.45, smoothstep(0.2, 0.8, m.g)) * aBlade.z;
   float edge = 1.0 - smoothstep(uRadius * 0.8, uRadius, d);
-  float height = tall * grow * edge * keep;
+  float height = tall * grow * edge * keep * mix(0.1, 1.0, approach);
   // the blade: out of the tuft along its fan angle, leaning out, bending with the wind
   float ang = aBlade.x + aTuft.w * 6.2832;
   vec2 dir = vec2(cos(ang), sin(ang));
   vec2 side = vec2(-dir.y, dir.x);
   float t = aV.x;
-  float width = 0.1 * aBlade.w * uWidthK * widen * (1.0 - t * t) * step(0.001, height);
+  float width = 0.1 * aBlade.w * uWidthK * widen * mix(0.55, 1.0, approach) * (1.0 - t * t) * step(0.001, height);
   vec2 gn = textureLod(uNoise, root * (1.0 / 37.0) - uTime * vec2(0.035, 0.02), 0.0).rg - 0.5;
   float gust = smoothstep(0.45, 0.75, textureLod(uNoise, root * (1.0 / 140.0) - uTime * vec2(0.022, 0.009), 0.0).r);
   vec2 wind = vec2(0.8, 0.35) * ((0.35 + 0.65 * sin(uTime * 1.5 + dot(root, vec2(0.21, 0.13)))) * 0.12 + gust * 0.32) + gn * 0.3;
@@ -269,7 +282,7 @@ void main() {
   c += headlight(albedo, normalize(vN), vWorld);
   // back-lit by a low sun, the tips glow
   float back = pow(max(dot(-V, uSunDir), 0.0), 3.0);
-  c += albedo * uSunColor * back * vT * 0.3 * vSun;
+  c += albedo * uSunColor * back * vT * 0.16 * vSun; // (a soft rim, not a glow)
   gl_FragColor = vec4(applyAtmos(c, vWorld), 1.0);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>

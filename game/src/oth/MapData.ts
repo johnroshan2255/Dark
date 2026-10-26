@@ -22,7 +22,14 @@ export interface MapMeta {
     /** The ponds and small lakes (scripts/oth/terrain.py): each a flat disc of water at its level in its bowl. */
     ponds?: Pond[]
     river: { x: number[]; z: number[]; y: number[]; hw: number[] }
+    /** Mountain STREAMS (scripts/oth/terrain.py): centre line from the mouth (index 0) up to the source, the surface
+     *  height and half width along it — rapids, falling over WATERFALLS where they drop off a step. */
+    streams?: { x: number[]; z: number[]; y: number[]; hw: number[] }[]
+    /** WATERFALLS: the lip (x, z, y top), the foot (bx, bz, by bottom), the sheet's half width. */
+    falls?: { x: number; z: number; y: number; bx: number; bz: number; by: number; hw: number }[]
   }
+  /** The SCENERY pass (scripts/oth/scenery.mjs): the boulder walls along the stream roads ([x, z, size]). */
+  scenery?: { boulders: [number, number, number][] }
   spawn: { x: number; z: number; yaw: number }
   /** Plank bridges over the river: deck ends (x0, z0) → (x1, z1) on the banks, deck top y, width w (m). */
   bridges?: Bridge[]

@@ -75,10 +75,14 @@ export class Vehicle {
     window.addEventListener('blur', () => this.keys.clear())
   }
 
+  /** Called when a car replaces the one driving (not the first): the sound stops one engine, starts the next. */
+  onCarChange?: () => void
+
   /** Load car `id` and put it where the old one was (or on the map's first track at the start). */
   async setCar(id: string): Promise<void> {
     if (this.loading || id === this.id) return
     this.loading = true
+    if (this.sim) this.onCarChange?.()
     const def = vehicleDef(id)
     const truck = await loadVehicle(def.id)
     let at: { x: number; z: number; heading: number }

@@ -117,7 +117,7 @@ export class Bushes {
     if (camera.position.distanceToSquared(this.lastPos) < 9 && dir.dot(this.lastDir) > 0.999) return
     this.lastPos.copy(camera.position); this.lastDir.copy(dir)
     this.pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
-    this.frustum.setFromProjectionMatrix(this.pv)
+    this.frustum.setFromProjectionMatrix(this.pv, THREE.WebGLCoordinateSystem, camera.reversedDepth)
     const cx = camera.position.x, cz = camera.position.z, R = this.reach, d = this.data
     for (const l of this.lods) l.n = 0
     const i0 = Math.floor((cx - R) / TILE), i1 = Math.floor((cx + R) / TILE), j0 = Math.floor((cz - R) / TILE), j1 = Math.floor((cz + R) / TILE)

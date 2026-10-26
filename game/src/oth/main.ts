@@ -1,8 +1,12 @@
 import * as THREE from 'three'
+import { isMobileDevice } from '../rendering/quality/DeviceProfile'
+import { installToneMap } from './toneMap'
 import { Atmosphere } from './Atmosphere'
+import { OthAudio } from './Audio'
 import { Bridges } from './Bridges'
 import { Bushes } from './Bushes'
 import { Dust } from './Dust'
+import { Falls } from './Falls'
 import { ChaseCam } from './ChaseCam'
 import { FlyCam } from './FlyCam'
 import { Grass } from './Grass'
@@ -35,11 +39,17 @@ const tier = pickTier()
 const status = document.getElementById('status')!
 
 async function boot() {
-  const renderer = new THREE.WebGLRenderer({ antialias: tier.msaa && !tier.bloom, powerPreference: 'high-performance', stencil: false })
+  // REVERSED-Z (the user: no Z-fighting far away): depth 1 at the near plane … 0 at the far one, in Post's 32-bit float
+  // depth (Post.ts) — even precision from 0.3 m to the horizon (24-bit standard depth: ~20 cm steps at 1 km, ~7 m at
+  // 6 km). three falls back to standard depth where the browser lacks EXT_clip_control. LOW draws to the canvas's
+  // 24-bit depth: reversed there, no finer than before.
+  const renderer = new THREE.WebGLRenderer({ antialias: tier.msaa && !tier.bloom, powerPreference: 'high-performance', stencil: false, reversedDepthBuffer: true })
   renderer.setPixelRatio(Math.min(devicePixelRatio, tier.dpr))
   renderer.setSize(innerWidth, innerHeight)
-  const tm = q.get('tm') ?? 'neutral'
-  renderer.toneMapping = tm === 'aces' ? THREE.ACESFilmicToneMapping : tm === 'agx' ? THREE.AgXToneMapping : THREE.NeutralToneMapping
+  const tm = q.get('tm') ?? 'neutral-hue'
+  // (the default: Neutral with a hue-keeping toe — toneMap.ts; ?tm=neutral the original, ?tm=aces / agx)
+  installToneMap()
+  renderer.toneMapping = tm === 'aces' ? THREE.ACESFilmicToneMapping : tm === 'agx' ? THREE.AgXToneMapping : tm === 'neutral' ? THREE.NeutralToneMapping : THREE.CustomToneMapping
   renderer.toneMappingExposure = num('exp', 1.0)
   renderer.info.autoReset = false
   document.body.appendChild(renderer.domElement)
@@ -48,6 +58,7 @@ async function boot() {
   const map = await MapData.load('/oth/valley', (f) => (status.textContent = `Loading the valley… ${Math.round(f * 100)}%`))
   const noise = createPaintTexture()
   const atmos = new Atmosphere(noise)
+  atmos.uniforms.uFogRange.value.set(tier.fogNear, tier.fogEnd)
   atmos.hour = num('hour', 15.5)
   // ?time=0 stops the clock (the shot harness); [ / ] an hour back / on, T stops / starts it
   if (q.get('time') === '0') atmos.dayMinutes = 0
@@ -67,7 +78,8 @@ async function boot() {
   const terrain = new Terrain(map, atmos, tier, shadow)
   const rocks = new Rocks(map, atmos, shadow, tier, terrain.uniforms.uFarGrid.value)
   const grass = new Grass(map, atmos, terrain, tier, rocks.footprint)
-  const water = new Water(map, atmos, terrain, tier)
+  const water = new Water(map, atmos, terrain, tier, rocks.footprint)
+  const falls = new Falls(map, atmos)
   const sky = new Sky(atmos, !!tier.bloom) // (the sky marks itself for the god rays when Post draws)
   const trees = new Trees(map, atmos, shadow, tier, rocks)
   trees.bakeImpostors(renderer)
@@ -77,7 +89,7 @@ async function boot() {
   horizon.enabled = q.get('occlusion') !== '0'
   trees.horizon = rocks.horizon = bushes.horizon = horizon
   const bridges = new Bridges(map, atmos, shadow, tier, terrain.uniforms.uFarGrid.value)
-  scene.add(terrain.mesh, grass.group, rocks.group, trees.group, bushes.group, water.group, bridges.group, sky.mesh)
+  scene.add(terrain.mesh, grass.group, rocks.group, trees.group, bushes.group, water.group, falls.group, bridges.group, sky.mesh)
 
   // THE 4×4: the game's vehicle physics on this map's ground and rocks
   status.textContent = 'Loading the 4×4…'
@@ -107,6 +119,8 @@ async function boot() {
     } else chase.snap()
   })
   const ui = driveUi(car)
+  // SOUND: the engine, the tyres, the music and the valley's ambience (starts on the first key / tap — Audio.ts)
+  const audio = new OthAudio(map, car, atmos)
   fullscreenButton()
   // ZOOM buttons (+ / −): the chase camera's distance while driving, the field of view in the free camera
   zoomButtons((k) => {
@@ -117,7 +131,9 @@ async function boot() {
   const post = tier.bloom ? new Post(tier.bloom, tier.msaa ? 4 : 0, num('bloom', 0.42), num('rays', 2.0)) : null
   const baseDpr = Math.min(devicePixelRatio, tier.dpr)
   let dprScale = 1, dprT = performance.now() + 4000
-  const adaptive = q.get('dpr') !== 'fixed' && q.get('adaptive') !== '0'
+  // (phones only: on a PC / laptop the resolution never drops — the user: "don't reduce resolution automatically, turn it
+  //  off on PC / laptop"; ?adaptive=1 forces it on, ?dpr=fixed / ?adaptive=0 off)
+  const adaptive = q.get('adaptive') === '1' || (isMobileDevice() && q.get('dpr') !== 'fixed' && q.get('adaptive') !== '0')
   const size = () => post?.setSize(Math.round(innerWidth * renderer.getPixelRatio()), Math.round(innerHeight * renderer.getPixelRatio()))
   size()
   window.addEventListener('resize', () => {
@@ -141,7 +157,7 @@ async function boot() {
   const frame = () => {
     const now = performance.now()
     frameMs += (now - last - frameMs) * 0.1
-    // ADAPTIVE RESOLUTION (PlayCanvas guidelines: device pixel ratio at runtime): once a second, a slow frame
+    // ADAPTIVE RESOLUTION, phones (PlayCanvas guidelines: device pixel ratio at runtime): once a second, a slow frame
     // (> 19 ms ≈ under 52 fps) lowers the pixel ratio 15 % (down to half the tier's), a fast one (< 12.5 ms) raises
     // it back — the look stays, only the sharpness gives. ?dpr=fixed turns it off.
     if (adaptive && now - dprT > 1000) {
@@ -163,6 +179,7 @@ async function boot() {
     if (driving) chase.update(dt)
     else fly.update(dt)
     ui.update(driving, atmos.clock)
+    audio.update(dt, camera)
     atmos.tick(dt)
     atmos.update(camera.position, clock.elapsedTime)
     shadow.update(atmos.uniforms.uSunDir.value)
@@ -171,7 +188,7 @@ async function boot() {
     terrain.update(camera)
     grass.update(camera)
     rocks.update(camera)
-    trees.update(camera, atmos.uniforms.uSunDir.value)
+    trees.update(camera)
     bushes.update(camera)
     if (timer && query) {
       const ready = gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)
@@ -204,6 +221,8 @@ async function boot() {
     tier: tier.name,
     view: (x: number, z: number, h: number, yaw: number, pitch: number) => { driving = false; fly.place(x, z, h, yaw, pitch) },
     car,
+    /** The sound's state (Audio.ts debug). */
+    audio: () => audio.debug(),
     /** Drive mode on / off (the chase camera). */
     drive: (on: boolean) => { driving = on; if (on) chase.snap() },
     setHour: (h: number) => { atmos.hour = h; atmos.update(camera.position, 0) },
@@ -330,7 +349,7 @@ function fullscreenButton(): void {
 function driveUi(car: Vehicle): { update: (driving: boolean, time: string) => void } {
   const box = document.createElement('div')
   box.id = 'drive'
-  box.innerHTML = '<div class="spd"><b>0</b><span>km/h</span><i></i><em></em></div><div class="help">W A S D drive · Space handbrake · Shift boost · R reset · 1 2 3 car · L lights · V free camera · + − zoom · [ ] time · T stop time · drag to look</div>'
+  box.innerHTML = '<div class="spd"><b>0</b><span>km/h</span><i></i><em></em></div><div class="help">W A S D drive · Space handbrake · Shift boost · R reset · 1 2 3 car · L lights · M sound · V free camera · + − zoom · [ ] time · T stop time · drag to look</div>'
   document.body.appendChild(box)
   const spd = box.querySelector('b')!, gear = box.querySelector('i')!, clk = box.querySelector('em')!, help = box.querySelector('.help') as HTMLElement
   const touch = navigator.maxTouchPoints > 0 && matchMedia('(pointer: coarse)').matches

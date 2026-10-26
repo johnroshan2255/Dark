@@ -3,9 +3,40 @@
  * keep the highest angle the ground rises above the sun's ray — a soft visibility (the sun is a disc: the further the
  * blocker, the wider the penumbra). The box at 4 m (its 2 m heights near, the world's beyond) and the world at 16 m.
  * ~1–2 s per sun position on a desktop core; the main thread swaps the textures in when it's done.
+ * And the FORESTS' shade (moved here from Trees.ts — on the main thread its 100–180 ms at a low sun froze the game every
+ * time the sun or the moon moved): every tree stamps a soft ellipse, offset away from the sun by its height, into the
+ * box's 2 m tree grid.
  */
 interface Grid { h: Float32Array; n: number; step: number; origin: number }
 let inner: Grid, far: Grid
+let trees: Float32Array | null = null, crown = 0.2, treeGrid = { n: 0, step: 2, origin: 0 }
+
+function bakeTrees(sx: number, sy: number, sz: number): Uint8Array {
+  const { n, step, origin } = treeGrid, d = trees!
+  const lit = new Float32Array(n * n).fill(1)
+  const hl = Math.hypot(sx, sz) || 1, ax = -sx / hl, az = -sz / hl // away from the sun
+  const tanE = Math.max(0.12, sy / hl)
+  for (let o = 0; o < d.length; o += 4) {
+    if (d[o + 3] === 2) continue // (a snag: no crown)
+    const H = d[o + 2], cr = crown * H
+    const len = Math.min(34, (0.45 * H) / tanE)
+    const cx = d[o] + ax * len * 0.75, cz = d[o + 1] + az * len * 0.75
+    const la = len * 0.7 + cr, lc = cr * 0.95
+    const ext = la + 2
+    const i0 = Math.max(0, Math.floor((cx - ext - origin) / step)), i1 = Math.min(n - 1, Math.ceil((cx + ext - origin) / step))
+    const j0 = Math.max(0, Math.floor((cz - ext - origin) / step)), j1 = Math.min(n - 1, Math.ceil((cz + ext - origin) / step))
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const rx = origin + i * step - cx, rz = origin + j * step - cz
+      const u = (rx * ax + rz * az) / la, v = (-rx * az + rz * ax) / lc
+      const q = u * u + v * v
+      if (q >= 1) continue
+      lit[j * n + i] *= 1 - 0.6 * (1 - q) * (1 - q * 0.5)
+    }
+  }
+  const out = new Uint8Array(n * n)
+  for (let k = 0; k < n * n; k++) out[k] = Math.round(lit[k] * 255)
+  return out
+}
 
 function sample(g: Grid, x: number, z: number): number {
   const n = g.n
@@ -54,6 +85,12 @@ self.onmessage = (e: MessageEvent) => {
     far = m.far
     return
   }
+  if (m.type === 'trees') {
+    trees = m.trees
+    crown = m.crown
+    treeGrid = m.grid
+    return
+  }
   // sun: unit vector; march along its horizontal direction
   const [sx, sy, sz] = m.sun as number[]
   const hl = Math.hypot(sx, sz) || 1
@@ -62,5 +99,6 @@ self.onmessage = (e: MessageEvent) => {
   const world = { n: far.n, step: far.step, origin: far.origin }
   const a = bake(box, sx / hl, sz / hl, tanE, 3)
   const b = bake(world, sx / hl, sz / hl, tanE, 12)
-  ;(self as unknown as Worker).postMessage({ id: m.id, box: a, world: b }, [a.buffer, b.buffer])
+  const t = trees ? bakeTrees(sx, sy, sz) : null
+  ;(self as unknown as Worker).postMessage({ id: m.id, box: a, world: b, trees: t }, t ? [a.buffer, b.buffer, t.buffer] : [a.buffer, b.buffer])
 }

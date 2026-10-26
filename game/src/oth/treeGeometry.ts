@@ -1,45 +1,49 @@
 import * as THREE from 'three'
 
 /**
- * STYLIZED SPRUCE geometry (unit height, the trunk at the origin, up = +Y) — the Over-the-Hill conifer, new for this
- * world, INDEXED and under 1 000 vertices (the near LOD: 864): a tall cone of stacked TIERS, each a FRILLED SKIRT —
- * dark at its apex (under the tier above), a raised soft shoulder, and an outer FRINGE of fine hanging saw-teeth,
- * light at the tips and tucked-in darker notches between them, the teeth gathered into plumes by a slow wave round
- * the tier (longer and lower at a plume's middle). Up close it reads as OTH's feathered, layered spruce; far away its
- * bands of light fringe over dark gaps carry the same look into the impostors baked from it.
+ * SPRUCE geometry (unit height, the trunk at the origin, up = +Y) — the Over-the-Hill conifer, redesigned after the
+ * user's two references (a realistic spruce: whorls of drooping, feathery branches, light new growth at their tips, a
+ * slender top; a stylized pine: distinct drooping tiers with fingered hanging ends, the warm trunk between them):
+ * a warm brown TRUNK, and up it TIERS of BRANCH FRONDS — each a long card bent out and down from the trunk (the lower
+ * tiers droop most, the top ones point up), folded along its stem like a roof, showing a frond of the FROND TEXTURE
+ * (leafTexture.ts: a stem with needle-covered sprigs, fingers at its end; cut out round the needles in the shader) —
+ * and inside every tier a dark solid COLLAR (the crown's shaded inside: no sky through its middle).
  *
- * Attributes: position, normal (soft: outward + up), color.r = AO (apex 0.16 … tooth tips 1), color.g = 1 foliage /
- * 0 trunk (a snag hides its foliage), color.b = height in the tree (sway). Front faces point up (a back face is an
- * underside, the shader darkens it).
+ * Attributes: position, normal (soft: outward + up), color.r = AO (a frond's base 0.25 … its tip 1, the collars
+ * dark), color.g = 1 foliage / 0 trunk (a snag hides its foliage), color.b = height in the tree (sway),
+ * leaf = (s along the frond 0…1, across −1…1, −(1 + texture tile + tint × 0.9)) on a frond, (0, 0, 0) elsewhere.
+ * Front faces point up (a back face is an underside, the shader darkens it).
  *
- * LODs: 0 = 12 tiers × 28 teeth — 864 vertices, ~1 020 triangles; 1 = 7 × 12 — 217 vertices, 250 triangles. Beyond
- * them the trees are impostors baked from LOD 0 (Trees.ts).
+ * LODs: 0 = 13 tiers, two rings of folded fronds — 2 024 vertices, 2 011 triangles; 1 = 8 tiers, one ring — 476
+ * vertices, 422 triangles. Beyond them the trees are impostors baked from LOD 0 (Trees.ts).
  */
-interface Lod { tiers: number; teeth: number; mid: number; plumes: number; trunkSides: number }
+interface Lod { tiers: number; rows: number; fold: boolean; maxFronds: number; inner: boolean; collar: number; trunkSides: number }
 const LODS: Lod[] = [
-  { tiers: 12, teeth: 28, mid: 14, plumes: 7, trunkSides: 6 },
-  { tiers: 7, teeth: 12, mid: 6, plumes: 6, trunkSides: 0 },
+  { tiers: 16, rows: 4, fold: true, maxFronds: 11, inner: true, collar: 7, trunkSides: 6 },
+  { tiers: 10, rows: 3, fold: true, maxFronds: 8, inner: false, collar: 6, trunkSides: 3 },
 ]
-/** Crown radius at the bottom as a share of the height (OTH spruce ≈ 3 : 1). */
+/** Crown radius at the bottom as a share of the height (OTH spruce ≈ 3 : 1 … the references' broad skirts). */
 export const CROWN = 0.2
 /** Where the crown starts (share of the height): the bare trunk below. */
-const CROWN_BASE = 0.05
+const CROWN_BASE = 0.1
+/** Trunk radius at the foot (share of the height) — the same as the physics' trunk collider. */
+const TRUNK_R = 0.022
 
 function rng(seed: number): () => number {
   let s = seed >>> 0
   return () => ((s = (Math.imul(s ^ (s >>> 15), 2246822519) + 0x6d2b79f5) >>> 0) / 4294967296)
 }
 
+const smooth01 = (x: number) => { const t = Math.min(1, Math.max(0, x)); return t * t * (3 - 2 * t) }
 /** The crown radius at height share y (the cone, a little convex). */
-const crownR = (y: number) => CROWN * Math.pow(Math.max(0, (1 - y) / (1 - CROWN_BASE)), 0.88)
+const crownR = (y: number) => CROWN * Math.pow(Math.max(0, (1 - y) / (1 - CROWN_BASE)), 0.9)
 
 export function spruceGeometry(lod: number, seed = 7): THREE.BufferGeometry {
   const L = LODS[Math.min(lod, LODS.length - 1)], rnd = rng(seed + lod * 101)
-  const pos: number[] = [], nor: number[] = [], col: number[] = [], rimA: number[] = [], idx: number[] = []
-  // rim: 0 at a tier's apex … 0.5 its shoulder … 1 the tooth tips — the shader cuts a NEEDLE FRINGE into the outer edge
-  const v = (x: number, y: number, z: number, nx: number, ny: number, nz: number, ao: number, fol: number, rim = 0): number => {
+  const pos: number[] = [], nor: number[] = [], col: number[] = [], leaf: number[] = [], idx: number[] = []
+  const v = (x: number, y: number, z: number, nx: number, ny: number, nz: number, ao: number, fol: number, ls = 0, lc = 0, lz = 0): number => {
     const l = Math.hypot(nx, ny, nz) || 1
-    pos.push(x, y, z); nor.push(nx / l, ny / l, nz / l); col.push(ao, fol, Math.max(0, Math.min(1, y))); rimA.push(rim, 0, 0)
+    pos.push(x, y, z); nor.push(nx / l, ny / l, nz / l); col.push(ao, fol, Math.max(0, Math.min(1, y))); leaf.push(ls, lc, lz)
     return pos.length / 3 - 1
   }
   const P = (i: number) => new THREE.Vector3(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2])
@@ -52,65 +56,93 @@ export function spruceGeometry(lod: number, seed = 7): THREE.BufferGeometry {
     else idx.push(a, c, b)
   }
 
-  // TRUNK: a thin tapered prism, dark grey-brown (its foot shows under the crown)
+  // TRUNK: a tapered prism, warm brown, to the top — stout below the crown, thinning fast inside it (a glimpse
+  // between the tiers, not a pole up the tree)
   if (L.trunkSides) {
-    const s = L.trunkSides, r0 = 0.013, r1 = 0.003, base = pos.length / 3
+    const s = L.trunkSides, base = pos.length / 3, rings: [number, number, number][] = [[-0.02, TRUNK_R, 0.6], [0.3, TRUNK_R * 0.45, 0.65], [0.97, 0.0015, 0.75]]
     for (let k = 0; k < s; k++) {
       const a = (k / s) * Math.PI * 2, cx = Math.cos(a), sz = Math.sin(a)
-      v(cx * r0, -0.02, sz * r0, cx, 0, sz, 0.5, 0)
-      v(cx * r1, 0.95, sz * r1, cx, 0, sz, 0.5, 0)
+      for (const [y, r, ao] of rings) v(cx * r, y, sz * r, cx, 0, sz, ao, 0)
     }
-    for (let k = 0; k < s; k++) {
-      const a = base + k * 2, b = base + ((k + 1) % s) * 2
+    const nr = rings.length
+    for (let k = 0; k < s; k++) for (let j = 0; j < nr - 1; j++) {
+      const a = base + k * nr + j, b = base + ((k + 1) % s) * nr + j
       idx.push(a, b, a + 1, b, b + 1, a + 1)
     }
   }
 
-  // TIERS: frilled skirts — apex (dark, under the next tier) → a raised mid ring → the outer FRINGE of fine saw-teeth
-  // (tips hang, light; notches tuck in, darker), the teeth grouped into plumes by a slow wave round the tier
-  const T = L.tiers, K = L.teeth, Km = L.mid
+  /**
+   * One BRANCH FROND from the trunk at height y0, out along angle a: its stem rises `up` and droops `droop` over its
+   * reach `len` (y = y0 + up·s − droop·s²), `W` its half width at the widest; folded (LOD 0) its sides hang below the
+   * stem like a roof. AO from its base (dark, by the trunk) to its tip, × the tier's shade.
+   */
+  const frond = (y0: number, a: number, len: number, up: number, droop: number, W: number, shade: number) => {
+    // (each plate rolled a little about its stem: its own light, the faceted look of the references)
+    const ox = Math.cos(a), oz = Math.sin(a), roll = (rnd() - 0.5) * 0.6, sx = -oz * Math.cos(roll), sz = ox * Math.cos(roll), sy = Math.sin(roll)
+    const cols = L.fold ? [-1, 0, 1] : [-1, 1]
+    const lz = -(1 + Math.floor(rnd() * 4) + rnd() * 0.9)
+    const rows: number[][] = []
+    for (let r = 0; r < L.rows; r++) {
+      const s = r / (L.rows - 1)
+      const reach = TRUNK_R * 0.5 + len * s, y = y0 + up * s - droop * s * s
+      const hw = W * (0.75 + 0.25 * smooth01(s / 0.4))
+      const ao = (0.25 + 0.75 * Math.pow(s, 0.7)) * shade
+      const out = 0.35 + 0.35 * s
+      rows.push(cols.map((c) => v(
+        ox * reach + sx * c * hw, y + sy * c * hw - (L.fold ? Math.abs(c) * 0.35 * hw : 0), oz * reach + sz * c * hw,
+        ox * out + sx * c * 0.3, 0.9 + sy * c * 0.3, oz * out + sz * c * 0.3, ao * (c === 0 ? 1 : 0.92), 1, s, c, lz,
+      )))
+    }
+    for (let r = 0; r < L.rows - 1; r++) for (let c = 0; c < cols.length - 1; c++) {
+      const a0 = rows[r][c], a1 = rows[r][c + 1], b0 = rows[r + 1][c], b1 = rows[r + 1][c + 1]
+      tri(a0, a1, b1); tri(a0, b1, b0)
+    }
+  }
+
+  // TIERS, bottom (t 0) to top (t 1): a ring of fronds (bigger tiers more of them), on LOD 0 a second, shorter ring
+  // between them a little higher, and the dark collar inside
+  const T = L.tiers
   for (let i = 0; i < T; i++) {
-    const t0 = i / T, t1 = (i + 1) / T
-    const yb = CROWN_BASE + (1 - CROWN_BASE) * Math.pow(t0, 0.95)
-    const ytn = CROWN_BASE + (1 - CROWN_BASE) * Math.pow(t1, 0.95)
-    const yt = i === T - 1 ? 1.0 : Math.min(1.0, ytn + (ytn - yb) * 0.55) // the apex reaches up under the next tier
-    const R = crownR(yb) * (0.95 + 0.1 * rnd()) + 0.014
-    const droop = (yt - yb) * 0.3 + R * 0.14
-    const shade = 0.74 + 0.26 * Math.pow(t0, 0.7) // lower tiers a little darker
-    const phase = rnd() * Math.PI * 2, plumes = L.plumes, pph = rnd() * Math.PI * 2
-    const A = v(0, yt, 0, 0, 1, 0, (i === T - 1 ? 0.8 : 0.16) * shade, 1)
-    // mid ring: raised, half-way out (the skirt's soft convex shoulder)
-    const mid: number[] = []
-    for (let k = 0; k < Km; k++) {
-      const a = phase + (k / Km) * Math.PI * 2, c = Math.cos(a), z = Math.sin(a)
-      mid.push(v(c * R * 0.5, yt + (yb - yt) * 0.62, z * R * 0.5, c * 0.45, 0.9, z * 0.45, 0.55 * shade, 1, 0.5))
+    const t = i / (T - 1)
+    const y0 = CROWN_BASE + 0.04 + (0.92 - CROWN_BASE - 0.04) * Math.pow(t, 0.95)
+    const R = crownR(y0) * (0.92 + 0.16 * rnd()) + 0.012
+    const n = Math.max(3, Math.min(L.maxFronds, Math.round(3 + (R / CROWN) * (L.maxFronds - 3) + rnd() * 0.8)))
+    const shade = 0.72 + 0.28 * Math.pow(t, 0.7) // (lower tiers a little darker)
+    const phase = i * 2.39996 + rnd() * 0.5
+    // (every tier's fronds DROOP — the stylized reference's hanging skirts, the realistic one's drooping branches —
+    //  the lower ones most; only the top two or three point up: the slender top of both)
+    const upK = 0.12 + 0.9 * Math.pow(t, 4), droopK = 0.85 - 0.35 * t
+    let droopSum = 0
+    for (let k = 0; k < n; k++) {
+      const a = phase + ((k + (rnd() - 0.5) * 0.35) / n) * Math.PI * 2
+      // (irregular: lengths and droops vary, now and then a long branch reaching out — the realistic outline)
+      const len = R * (0.8 + 0.35 * rnd()) * (rnd() < 0.15 ? 1.18 : 1), droop = len * droopK * (0.75 + 0.5 * rnd())
+      droopSum += droop
+      frond(y0, a, len, len * upK, droop, len * (0.36 + 0.06 * t), shade)
     }
-    // the fringe: 2K points — tooth tips (long, hanging) and notches (short, higher), plume groups by a wave
-    const fringe: number[] = []
-    for (let k = 0; k < 2 * K; k++) {
-      const a = phase + (k / (2 * K)) * Math.PI * 2 + (rnd() - 0.5) * (0.5 / K)
-      const c = Math.cos(a), z = Math.sin(a)
-      const wave = 0.5 + 0.5 * Math.cos(plumes * a + pph) // 1 at a plume's middle, 0 between plumes
-      const tooth = k % 2 === 0
-      const r = R * (tooth ? 0.95 + 0.25 * wave + 0.08 * rnd() : 0.72 + 0.12 * wave)
-      const y = yb - (tooth ? droop * (0.75 + 0.45 * wave + 0.2 * rnd()) : droop * 0.25)
-      fringe.push(v(c * r, y, z * r, c * 0.85, tooth ? 0.3 : 0.15, z * 0.85, (tooth ? 0.95 + 0.1 * wave : 0.5) * shade, 1, tooth ? 1 : 0.82))
+    if (L.inner) {
+      const n2 = Math.max(2, Math.round(n * 0.7)), yi = y0 + 0.018 * (1 - t)
+      for (let k = 0; k < n2; k++) {
+        const a = phase + ((k + 0.5 + (rnd() - 0.5) * 0.4) / n2) * Math.PI * 2
+        const len = R * (0.55 + 0.15 * rnd())
+        frond(yi, a, len, len * (upK + 0.1), len * droopK * 0.7, len * 0.38, shade * 0.85)
+      }
     }
-    for (let k = 0; k < Km; k++) tri(A, mid[k], mid[(k + 1) % Km])
-    // strip: each mid segment spans 2K / Km fringe points
-    const per = (2 * K) / Km
-    for (let k = 0; k < Km; k++) {
-      const m0 = mid[k], m1 = mid[(k + 1) % Km]
-      const f0 = Math.round(k * per), f1 = Math.round((k + 1) * per)
-      for (let f = f0; f < f1; f++) tri(m0, fringe[f % (2 * K)], fringe[(f + 1) % (2 * K)])
-      tri(m0, fringe[f1 % (2 * K)], m1)
+    // the collar: a low dark cone inside the tier, half its reach
+    const C = L.collar, yc = y0 - (droopSum / n) * 0.45
+    const apex = v(0, y0 + 0.012, 0, 0, 1, 0, 0.14 * shade, 1)
+    const ring: number[] = []
+    for (let k = 0; k < C; k++) {
+      const a = phase + (k / C) * Math.PI * 2, c = Math.cos(a), z = Math.sin(a)
+      ring.push(v(c * R * 0.62, yc, z * R * 0.62, c * 0.5, 0.85, z * 0.5, 0.2 * shade, 1))
     }
+    for (let k = 0; k < C; k++) tri(apex, ring[k], ring[(k + 1) % C])
   }
   const g = new THREE.BufferGeometry()
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
   g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3))
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3))
-  g.setAttribute('leaf', new THREE.Float32BufferAttribute(rimA, 3)) // (x = rim; z = 0: no leaf cards)
+  g.setAttribute('leaf', new THREE.Float32BufferAttribute(leaf, 3))
   g.setIndex(idx)
   return g
 }

@@ -2,7 +2,8 @@ import * as THREE from 'three'
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js'
 
 /**
- * POST (MEDIUM+): the scene renders linear HDR into a half-float target (MSAA on the tier's word), then one composite
+ * POST (MEDIUM+): the scene renders linear HDR into a half-float target (MSAA on the tier's word; 32-bit float depth,
+ * reversed-Z — main.ts), then one composite
  * to the screen — a soft BLOOM (dual-filter mip chain from the bright parts: the sun, the glowing sky round it, its
  * glare on water), GOD RAYS, the faintest vignette, tone map + sRGB, and a dither (no banding in the sky).
  * LOW draws straight to the screen with the same tone map (the materials apply it) — no bloom, the rest identical.
@@ -29,7 +30,9 @@ export class Post {
 
   constructor(private readonly levels: number, samples: number, readonly strength = 0.14, readonly rayStrength = 0.5) {
     const opts = { type: THREE.HalfFloatType, format: THREE.RGBAFormat, depthBuffer: false, magFilter: THREE.LinearFilter, minFilter: THREE.LinearFilter }
-    this.scene = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples, depthBuffer: true })
+    // (32-bit float depth for the reversed-Z renderer: a FloatType depth texture picks DEPTH_COMPONENT32F; nothing reads
+    //  the depth afterwards, so the MSAA depth is never resolved into it)
+    this.scene = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples, depthBuffer: true, depthTexture: new THREE.DepthTexture(1, 1, THREE.FloatType), resolveDepthBuffer: false })
     for (let i = 0; i < levels; i++) this.mips.push(new THREE.WebGLRenderTarget(1, 1, opts))
     for (let i = 0; i < 2; i++) this.rays.push(new THREE.WebGLRenderTarget(1, 1, { ...opts, wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping }))
     const vert = /* glsl */ `out vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`
@@ -41,9 +44,10 @@ export class Post {
         layout(location = 0) out highp vec4 outColor;
         uniform sampler2D tSrc; uniform vec2 uTexel; uniform float uPrefilter;
         in vec2 vUv;
-        // a SOFT KNEE from 1.0: the sun, the glowing sky round it, the sunset horizon, glints on the water bloom — the
-        // lit ground and leaves don't (no haze over the colours)
-        vec3 pre(vec3 c) { float l = max(c.r, max(c.g, c.b)); float k = clamp((l - 1.0) / 1.2, 0.0, 1.0); return c * k * k; }
+        // a SOFT KNEE on the LUMINANCE from 1.5: the sun, the glowing sky round it, the sunset horizon, glints on the
+        // water bloom — the lit ground, the golden fields (their red alone runs past 1 in a low sun) and the leaves never
+        // do (the user: "fix this glowing effect" — the straw glowed in a peach haze)
+        vec3 pre(vec3 c) { float l = dot(c, vec3(0.2126, 0.7152, 0.0722)); float k = clamp((l - 1.5) / 1.5, 0.0, 1.0); return c * k * k; }
         void main() {
           vec3 c = texture(tSrc, vUv).rgb * 4.0;
           c += texture(tSrc, vUv + uTexel * vec2(-1.0, -1.0)).rgb + texture(tSrc, vUv + uTexel * vec2(1.0, -1.0)).rgb;

@@ -5,16 +5,16 @@ import type { MapData } from './MapData'
 import type { Tier } from './quality'
 import type { Rocks } from './Rocks'
 import { SHADOW_GLSL, type TerrainShadow } from './TerrainShadow'
-import { createLeafTexture, LEAF_GLSL } from './leafTexture'
+import { createFrondTexture, createLeafTexture, FROND_GLSL, LEAF_GLSL } from './leafTexture'
 import { broadleafGeometry, CROWN, spruceGeometry } from './treeGeometry'
 
 /**
- * THE FORESTS — Over-the-Hill mixed woods: open spruce / golden-larch stands (the stylized conifer) and groves of
- * white-trunked birches and red-orange aspens (the broadleaf, treeGeometry.ts), a few bare snags, lone trees on the
- * meadows. Placed once at load, deterministic, from
+ * THE FORESTS — Over-the-Hill woods, four trees in five a green spruce (the stylized conifer); the rest in small groves:
+ * golden larch, white-trunked birches and red-orange aspens (the broadleaf, treeGeometry.ts), a few bare snags; lone
+ * trees on the meadows. Placed once at load, deterministic, from
  * the map's forest mask (a jittered ~6.5 m grid), never on a track, in water, on rock or a boulder.
  *
- * Drawn in 5 instanced draws: per shape family a near LOD (`tier.treeNear`; conifer 864 vertices, broadleaf ~320) and
+ * Drawn in 5 instanced draws: per shape family a near LOD (`tier.treeNear`; conifer ~2 000 vertices, broadleaf ~750) and
  * a mid LOD (to `treeMid`), and for every species together
  * beyond, IMPOSTORS to `treeReach`: at load each species is rendered (its near LOD) from 12 directions × 3 heights
  * into an image atlas — albedo × AO and the tree-space normal (two render targets at once) — and a far tree is one
@@ -51,15 +51,15 @@ export class Trees {
   private readonly lastPos = new THREE.Vector3(1e9, 0, 0)
   private readonly lastDir = new THREE.Vector3()
   private readonly ranges: number[]
-  private bakedSun = new THREE.Vector3(0, -1, 0)
   drawn = [0, 0, 0, 0, 0]
   private readonly impMat: THREE.ShaderMaterial
   private readonly noiseU: THREE.IUniform
   private readonly leafU: THREE.IUniform
+  private readonly frondU: THREE.IUniform
   /** The leaf texture (the bushes are built of the same leaf cards). */
   get leafTexture(): THREE.Texture { return this.leafU.value }
 
-  constructor(private readonly map: MapData, atmos: Atmosphere, private readonly shadow: TerrainShadow, tier: Tier, rocks: Rocks) {
+  constructor(private readonly map: MapData, atmos: Atmosphere, shadow: TerrainShadow, tier: Tier, rocks: Rocks) {
     this.noiseU = atmos.uniforms.uNoise
     this.ranges = [tier.treeNear, tier.treeMid, tier.treeFar, tier.treeReach]
     this.data = this.place(rocks)
@@ -71,10 +71,16 @@ export class Trees {
       l.push(i)
       this.tileMaxH.set(k, Math.max(this.tileMaxH.get(k) ?? 0, this.data[o + 1] + this.data[o + 3]))
     }
+    // the forests' shade: stamped by the terrain shadow's worker at every sun position (off the main thread — at a low
+    // sun every shadow is long: stamping 25 000 of them froze the game 100–180 ms each time, all evening and night)
+    const sh = new Float32Array(this.count * 4)
+    for (let i = 0; i < this.count; i++) { const o = i * TREE_STRIDE; sh.set([this.data[o], this.data[o + 2], this.data[o + 3], this.data[o + 5]], i * 4) }
+    shadow.setTrees(sh, CROWN)
     this.leafU = { value: createLeafTexture() }
+    this.frondU = { value: createFrondTexture() }
     const mat = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
-      uniforms: { ...atmos.uniforms, ...shadow.uniforms, uFarGrid: { value: new THREE.Vector4(map.far.n, map.far.step, map.far.origin, 0) }, uLeafTex: this.leafU },
+      uniforms: { ...atmos.uniforms, ...shadow.uniforms, uFarGrid: { value: new THREE.Vector4(map.far.n, map.far.step, map.far.origin, 0) }, uLeafTex: this.leafU, uFrondTex: this.frondU },
       vertexColors: true,
       defines: { ...(tier.spec ? { OTH_SPEC: '' } : {}), ...(tier.msaa ? { A2C: '' } : {}) },
       vertexShader: VERT,
@@ -138,6 +144,8 @@ export class Trees {
       const u = fx * fx * (3 - 2 * fx), w = fz * fz * (3 - 2 * fz)
       return (h(xi, zi) * (1 - u) + h(xi + 1, zi) * u) * (1 - w) + (h(xi, zi + 1) * (1 - u) + h(xi + 1, zi + 1) * u) * w
     }
+    // a per-spot hash 0..1 (no rnd() draw: picking a species must not move the trees after it)
+    const hash01 = (x: number, z: number) => (((Math.imul(Math.floor(x * 8), 73856093) ^ Math.imul(Math.floor(z * 8), 19349663)) >>> 0) % 1000) / 1000
     for (let gz = -half; gz < half; gz += G) {
       for (let gx = -half; gx < half; gx += G) {
         // (jittered past the cell's edges: no rows — a dense grove's cells all hold a tree, and an even grid shows)
@@ -182,7 +190,14 @@ export class Trees {
           const larch = vn(x / 230, z / 230) + (rnd() - 0.5) * 0.45 > 0.6 ? 1 : 0
           species = rnd() < 0.05 ? 2 : pines && rnd() < 0.8 ? 0 : larch
         }
-        const H = broad ? (7 + 8 * Math.pow(rnd(), 0.8)) * (0.85 + 0.15 * forest) : (6 + 15 * Math.pow(rnd(), 0.8)) * (0.75 + 0.25 * forest)
+        // 80 % PINES (the user: "reduce other trees count and increase our pine tree — 80 % pine, 20 % other"): a green
+        // spruce everywhere but in small groves (~60 m) of the rest, a fifth of the trees (0.7: measured on the placed
+        // trees); there a tree keeps the species picked above (a spruce turns golden larch).
+        // (the picks above still run: the same rnd() draws, so every tree stands where it did)
+        const other = vn(x / 60 - 23, z / 60 + 41) + (hash01(x + 0.37, z + 0.11) - 0.5) * 0.3 > 0.7
+        if (!other) species = 0
+        else if (species === 0) species = 1
+        const H = family(species) === 1 ? (7 + 8 * Math.pow(rnd(), 0.8)) * (0.85 + 0.15 * forest) : (6 + 15 * Math.pow(rnd(), 0.8)) * (0.75 + 0.25 * forest)
         out.push(x, y - 0.3, z, H, rnd() * Math.PI * 2, species, rnd(), rnd())
       }
     }
@@ -246,14 +261,13 @@ export class Trees {
   /** Tiles skipped as hidden at the last rebuild (the HUD). */
   occluded = 0
 
-  update(camera: THREE.PerspectiveCamera, sunDir: THREE.Vector3): void {
-    if (sunDir.angleTo(this.bakedSun) > 0.017) this.bakeShadows(sunDir)
+  update(camera: THREE.PerspectiveCamera): void {
     const dir = camera.getWorldDirection(new THREE.Vector3())
     if (camera.position.distanceToSquared(this.lastPos) < 16 && dir.dot(this.lastDir) > 0.9985) return
     this.lastPos.copy(camera.position)
     this.lastDir.copy(dir)
     this.pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
-    this.frustum.setFromProjectionMatrix(this.pv)
+    this.frustum.setFromProjectionMatrix(this.pv, THREE.WebGLCoordinateSystem, camera.reversedDepth)
     const cx = camera.position.x, cz = camera.position.z, R = this.ranges
     const reach = R[3]
     for (const l of this.lods) l.n = 0
@@ -312,7 +326,7 @@ export class Trees {
     const W = IMP.cols * IMP.fw, Hh = IMP.rows * IMP.fh
     const rt = new THREE.WebGLRenderTarget(W, Hh, { count: 2, type: THREE.UnsignedByteType, depthBuffer: true, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter })
     for (const t of rt.textures) { t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter; t.colorSpace = THREE.NoColorSpace }
-    const bake = new THREE.ShaderMaterial({ glslVersion: THREE.GLSL3, uniforms: { uSpecies: { value: 0 }, uNoise: this.noiseU, uLeafTex: this.leafU }, vertexColors: true, vertexShader: BAKE_VERT, fragmentShader: BAKE_FRAG, side: THREE.DoubleSide })
+    const bake = new THREE.ShaderMaterial({ glslVersion: THREE.GLSL3, uniforms: { uSpecies: { value: 0 }, uNoise: this.noiseU, uLeafTex: this.leafU, uFrondTex: this.frondU }, vertexColors: true, vertexShader: BAKE_VERT, fragmentShader: BAKE_FRAG, side: THREE.DoubleSide })
     const scene = new THREE.Scene(), geos = [spruceGeometry(0), broadleafGeometry(0)], mesh = new THREE.Mesh(geos[0], bake)
     scene.add(mesh)
     const cam = new THREE.OrthographicCamera(-IMP.FW / 2, IMP.FW / 2, IMP.FH / 2, -IMP.FH / 2, 0.01, 10)
@@ -358,38 +372,7 @@ export class Trees {
   /** The impostor atlas (two textures: albedo, normal) — kept for the harness / a debug view. */
   atlas: THREE.WebGLRenderTarget | null = null
 
-  /** Stamp every tree's soft shadow into the terrain shadow's tree texture (2 m grid over the box). */
-  private bakeShadows(sun: THREE.Vector3): void {
-    this.bakedSun.copy(sun)
-    const tex = this.shadow.treeTex, n = tex.image.width, g = this.map.inner, step = g.step
-    const px = tex.image.data as Uint8Array
-    const lit = new Float32Array(n * n).fill(1)
-    const hl = Math.hypot(sun.x, sun.z) || 1, ax = -sun.x / hl, az = -sun.z / hl // away from the sun
-    const tanE = Math.max(0.12, sun.y / hl)
-    const d = this.data
-    for (let t = 0; t < this.count; t++) {
-      const o = t * TREE_STRIDE
-      if (d[o + 5] === 2) continue
-      const H = d[o + 3], cr = CROWN * H
-      const len = Math.min(34, (0.45 * H) / tanE)
-      const cx = d[o] + ax * len * 0.75, cz = d[o + 2] + az * len * 0.75
-      const la = len * 0.7 + cr, lc = cr * 0.95
-      const ext = la + 2
-      const i0 = Math.max(0, Math.floor((cx - ext - g.origin) / step)), i1 = Math.min(n - 1, Math.ceil((cx + ext - g.origin) / step))
-      const j0 = Math.max(0, Math.floor((cz - ext - g.origin) / step)), j1 = Math.min(n - 1, Math.ceil((cz + ext - g.origin) / step))
-      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-        const rx = g.origin + i * step - cx, rz = g.origin + j * step - cz
-        const u = (rx * ax + rz * az) / la, v = (-rx * az + rz * ax) / lc
-        const q = u * u + v * v
-        if (q >= 1) continue
-        const k = j * n + i
-        lit[k] *= 1 - 0.6 * (1 - q) * (1 - q * 0.5)
-      }
-    }
-    for (let k = 0; k < n * n; k++) px[k] = Math.round(lit[k] * 255)
-    tex.needsUpdate = true
-    this.shadow.uniforms.uTreeShOn.value = 1
-  }
+
 }
 
 /** The impostor atlas layout: `cols` azimuths × 3 elevations (rad) × 2 species (rows), frames fw × fh px framing
@@ -416,16 +399,12 @@ vec3 leafMass(vec3 albedo, vec3 p, vec3 n) {
   float tone = texture(uNoise, q.xz * 0.5 + q.y * 0.3).g;
   return albedo * mix(0.68, 1.08, smoothstep(0.6, 0.3, f1)) * (0.88 + 0.24 * tone);
 }
-// a CONIFER's needles (the user: "pine trees need feather-like leaves so they look natural"): fine strokes radiating
-// out from the trunk along each skirt — light needle tips, dark gaps — in the tree's own space; p = object position
-vec3 needles(vec3 albedo, vec3 p) {
-  float ang = atan(p.z, p.x);
-  float r = length(p.xz);
-  vec2 uv = vec2(ang * 9.0, r * 22.0 + p.y * 4.0);
-  float s1 = texture(uNoise, uv * vec2(1.0, 0.12)).b;
-  float s2 = texture(uNoise, uv * vec2(2.3, 0.3) + 0.37).b;
-  float f = 0.6 * s1 + 0.4 * s2;
-  return albedo * mix(0.7, 1.16, smoothstep(0.32, 0.72, f));
+// a conifer BRANCH PLATE (the frond texture: ft = tone, depth, coverage; s 0 its base … 1 its end): one smooth
+// colour, dark by the trunk, lighter out to its spiky end, the end a touch yellower in the sun (a larch's paler gold)
+// (tint 0…1 per plate: each its own shade — the references' layered plates catch the light differently)
+vec3 frondTone(vec3 albedo, vec4 ft, float s, float tint, float species) {
+  albedo *= (0.4 + 0.8 * ft.r) * (0.55 + 0.45 * ft.g) * (0.82 + 0.36 * tint);
+  return albedo * mix(vec3(1.0), species < 0.5 ? vec3(1.15, 1.12, 0.92) : vec3(1.1, 1.06, 0.95), smoothstep(0.5, 1.0, s));
 }
 // a leaf CARD's tint (0…1 per card): a little lighter / darker, one card in eight of a birch still yellow-green
 vec3 leafTone(vec3 albedo, float tint, float species) {
@@ -436,10 +415,11 @@ vec3 leafTone(vec3 albedo, float tint, float species) {
 vec3 treeAlbedo(float species, float fol, float j) {
   if (fol < 0.5) {
     if (species > 2.5) return vec3(0.7, 0.68, 0.62);          // birch / aspen: white bark
-    return species > 1.5 ? vec3(0.16, 0.13, 0.11) : vec3(0.075, 0.05, 0.04);
+    return species > 1.5 ? vec3(0.36, 0.33, 0.29) : vec3(0.1, 0.055, 0.03); // (a snag's weathered silver-grey · the spruce's dark brown)
   }
-  // (calibrated on OTH: a muted olive-green spruce, a gold larch; ss2's aspens: gold, orange, red, a few still green)
-  if (species < 0.5) return mix(vec3(0.045, 0.1, 0.05), vec3(0.15, 0.3, 0.14), 0.5 + j * 0.35);
+  // (the spruce: the user's OTH reference — a clear deep green; a gold larch; ss2's aspens: gold, orange, red, a few
+  //  still green)
+  if (species < 0.5) return mix(vec3(0.03, 0.085, 0.04), vec3(0.11, 0.3, 0.12), 0.5 + j * 0.35);
   if (species < 1.5) return mix(vec3(0.6, 0.33, 0.04), vec3(0.95, 0.66, 0.12), 0.55 + j * 0.4);
   if (species < 3.5) return mix(vec3(0.62, 0.32, 0.02), vec3(0.9, 0.62, 0.06), 0.5 + j * 0.8);
   if (species < 4.5) return mix(vec3(0.42, 0.025, 0.02), vec3(0.85, 0.2, 0.025), 0.5 + j * 0.9);
@@ -457,8 +437,6 @@ in vec4 aT1; // rotation, species, seed, grow
 in vec3 leaf; // a broadleaf leaf's disc coordinates + its tint (0 0 0 elsewhere)
 out vec3 vLeaf;
 out float vFol;
-out vec3 vObj;
-out vec3 vObjN;
 out vec3 vWorld;
 out vec3 vN;
 out vec3 vAlb;
@@ -472,8 +450,9 @@ void main() {
   float species = aT1.y;
   vec3 p = position;
   float fol = color.g;
-  // a snag: the trunk alone (thicker), the foliage collapsed away
-  if (species > 1.5 && species < 2.5) { p = fol > 0.5 ? vec3(0.0) : vec3(p.x * 1.6, p.y * 0.85, p.z * 1.6); }
+  // a snag: the trunk alone, thick and BROKEN OFF under half the height (not a needle up to the sky), the foliage
+  // collapsed away
+  if (species > 1.5 && species < 2.5) { p = fol > 0.5 ? vec3(0.0) : vec3(p.x * 2.2, min(p.y, 0.42) * 0.9, p.z * 2.2); }
   // a broadleaf's own crown: its base raised a little (0.31 → up to 0.4 of the height, the top kept) and its width
   // ×0.85–1.15, from the tree's seed (one geometry, every tree a different outline)
   if (species > 2.5 && leaf.z > 0.5) {
@@ -493,8 +472,6 @@ void main() {
   vN = n;
   vLeaf = leaf;
   vFol = fol;
-  vObj = position;
-  vObjN = normal;
   vAo = color.r;
   vH = h01;
   vSpecies = species;
@@ -512,10 +489,9 @@ ${FRAG_OUT}
 ${ATMOS_GLSL}
 ${SPECIES_GLSL}
 ${LEAF_GLSL}
+${FROND_GLSL}
 in vec3 vLeaf;
 in float vFol;
-in vec3 vObj;
-in vec3 vObjN;
 in vec3 vWorld;
 in vec3 vN;
 in vec3 vAlb;
@@ -546,11 +522,16 @@ void main() {
 #endif
     albedo = leafTone(albedo, fract(vLeaf.z) / 0.9, vSpecies) * (0.55 + 0.6 * lt.r) * (0.62 + 0.38 * lt.g);
   }
-  if (vSpecies < 2.5 && vFol > 0.95) {
-    // the conifer's NEEDLE FRINGE: the outer edge of every tier cut into fine needles (a soft, feathery edge)
-    float nd = fract(atan(vObj.z, vObj.x) * (150.0 / 6.2832) + vObj.y * 9.0);
-    if (vLeaf.x > 0.62 && vLeaf.x > 1.0 - 0.3 * abs(nd - 0.5) * 2.0) discard;
-    if (vSpecies < 1.5) albedo = needles(albedo, vObj);
+  if (vLeaf.z < -0.5) {
+    // a conifer BRANCH FROND: needle-covered sprigs, the gaps between them cut out (feathery edges, fingered ends)
+    vec4 ft = frondCard(vLeaf.x, vLeaf.y, -vLeaf.z);
+#ifdef A2C
+    alpha = clamp((ft.a - 0.35) / 0.3, 0.0, 1.0);
+    if (alpha < 0.02) discard;
+#else
+    if (ft.a < 0.5) discard;
+#endif
+    albedo = frondTone(albedo, ft, vLeaf.x, fract(-vLeaf.z) / 0.9, vSpecies);
   }
   vec3 c = shade(albedo, N, V, 0.85, 0.03, mix(0.55, 1.0, vAo), vSun, 0.3);
   c += headlight(albedo, N, vWorld);
@@ -591,6 +572,7 @@ const BAKE_FRAG = /* glsl */ `
 uniform sampler2D uNoise;
 ${SPECIES_GLSL}
 ${LEAF_GLSL}
+${FROND_GLSL}
 uniform float uSpecies;
 layout(location = 0) out highp vec4 gAlbedo;
 layout(location = 1) out highp vec4 gNormal;
@@ -611,10 +593,10 @@ void main() {
     if (lt.a < 0.5) discard;
     albedo = leafTone(albedo, fract(vLeaf.z) / 0.9, uSpecies) * (0.55 + 0.6 * lt.r) * (0.62 + 0.38 * lt.g);
   }
-  if (uSpecies < 2.5 && vFol > 0.95) {
-    float nd = fract(atan(vP.z, vP.x) * (150.0 / 6.2832) + vP.y * 9.0);
-    if (vLeaf.x > 0.62 && vLeaf.x > 1.0 - 0.3 * abs(nd - 0.5) * 2.0) discard;
-    if (uSpecies < 1.5) albedo = needles(albedo, vP);
+  if (vLeaf.z < -0.5) {
+    vec4 ft = frondCard(vLeaf.x, vLeaf.y, -vLeaf.z);
+    if (ft.a < 0.5) discard;
+    albedo = frondTone(albedo, ft, vLeaf.x, fract(-vLeaf.z) / 0.9, uSpecies);
   }
   gAlbedo = vec4(sqrt(clamp(albedo, 0.0, 1.0)), 1.0);
   gNormal = vec4(normalize(N) * 0.5 + 0.5, vAo);

@@ -1,7 +1,7 @@
 /**
  * THE PALETTE + the ground's paint, shared by the terrain and the grass (a blade takes the colour of the ground it
  * grows from). Colours are linear albedo, CALIBRATED against Over-the-Hill screenshots with scripts/oth/compare.py
- * (region medians, sRGB): golden field ≈ 254 192 105, deep emerald grass, neutral blue-grey rock ≈ 157 167 173,
+ * (region medians, sRGB): golden field ≈ 254 192 105, sage-green grass (#59804A), neutral blue-grey rock ≈ 157 167 173,
  * light warm earth on the trails and banks.
  *
  * `paintNoise(xz)` samples the PAINT texture (noiseTex.ts) at three world scales. `groundPaint` is the ground's
@@ -12,8 +12,10 @@ export const PAINT_GLSL = /* glsl */ `
 const vec3 STRAW      = vec3(0.68, 0.4, 0.115);
 const vec3 STRAW_DEEP = vec3(0.58, 0.32, 0.09);
 const vec3 STRAW_PALE = vec3(0.76, 0.5, 0.24);
-const vec3 GREEN      = vec3(0.032, 0.13, 0.05);
-const vec3 GREEN_DEEP = vec3(0.014, 0.066, 0.024);
+// (the user's grass colour: #59804A ≈ sRGB 89 128 74 on screen, a sunlit field by day — calibrated through the
+//  hue-keeping tone map, toneMap.ts; was an emerald ≈ 40 115 54)
+const vec3 GREEN      = vec3(0.0652, 0.1516, 0.052);
+const vec3 GREEN_DEEP = vec3(0.0286, 0.077, 0.0249);
 const vec3 SHRUB      = vec3(0.05, 0.12, 0.05);
 const vec3 FOREST     = vec3(0.04, 0.07, 0.03);
 const vec3 DIRT       = vec3(0.66, 0.33, 0.15);
@@ -26,8 +28,8 @@ const vec3 SLAB       = vec3(0.115, 0.128, 0.15);
 const vec3 SLAB_DEEP  = vec3(0.053, 0.06, 0.078);
 const vec3 SNOW       = vec3(0.80, 0.85, 0.93);
 const vec3 BED        = vec3(0.6, 0.37, 0.21);
-// (OTH's tracks: a muted warm brown ≈ sRGB 200 140 95, smooth — tr18)
-const vec3 TRAIL      = vec3(0.47, 0.235, 0.11);
+// (the tracks: the user's golden-valley reference — light sandy tan packed earth ≈ sRGB 205 158 121 in the sun)
+const vec3 TRAIL      = vec3(0.40, 0.27, 0.17);
 
 struct Paint { vec4 fine; vec4 mid; vec4 big; vec4 grain; vec4 micro; };
 Paint paintNoise(vec2 xz) {
@@ -52,7 +54,7 @@ float dotsAt(vec2 xz, float cellM, float fill, float rad, float soft) {
   return on * (1.0 - smoothstep(rad - soft, rad + soft, d));
 }
 
-// The grass colour of a field (its sunlit mid-blade albedo): dry 0 deep green … 1 golden straw. No olive in between:
+// The grass colour of a field (its sunlit mid-blade albedo): dry 0 sage green … 1 golden straw. No olive in between:
 // the field is green OR golden, the edge between them a short painted blend.
 vec3 grassPaint(float dry, Paint p) {
   float d = clamp(dry + (p.big.r - 0.5) * 0.35 + (p.mid.g - 0.5) * 0.12, 0.0, 1.0);
@@ -62,19 +64,23 @@ vec3 grassPaint(float dry, Paint p) {
   return mix(green, straw, smoothstep(0.4, 0.56, d));
 }
 
-// THE TRACK'S EDGE, shared by the ground (paints the earth) and the grass (keeps off it): the half width pushed in and
-// out by grass CLUMPS a few metres across (OTH: the field's tufts overhang the track in scallops), a finer ragged
-// fringe on top. 1 on the track … 0 off it. trail = distance to the centre line (m).
-float trackMask(vec2 xz, float trail, float hw) {
+// THE TRACK'S EDGE, shared by the ground (paints the earth) and the grass (keeps off it, shortening toward it): the
+// half width pushed in and out by grass CLUMPS a few metres across (OTH: the field's tufts overhang the track in
+// scallops), a finer ragged fringe on top. trackEdge = that RAGGED distance from the centre line (m; the edge is where
+// it reaches hw), trackMask = 1 on the track … 0 off it. trail = distance to the centre line (m).
+float trackEdge(vec2 xz, float trail) {
   float clumps = texture(uNoise, xz / 9.0 + vec2(0.41, 0.17)).r - 0.5;
   float fringe = texture(uNoise, xz / 2.3 + vec2(0.23, 0.91)).b - 0.5;
-  return 1.0 - smoothstep(hw - 0.35, hw + 0.15, trail + clumps * 1.5 + fringe * 0.45);
+  return trail + clumps * 1.5 + fringe * 0.45;
 }
+float trackMask(vec2 xz, float trail, float hw) { return 1.0 - smoothstep(hw - 0.35, hw + 0.15, trackEdge(xz, trail)); }
 
 // THE GROUND'S COLOUR at xz — the terrain draws it, and every grass blade takes the colour of the ground it grows from.
 // m = mask (rock, dryness, wet — 1 water/gravel, forest), h = height (m), steep = 1 − N.y of the smooth normal,
 // foot = the pixel's footprint (m; 0 in the vertex shaders) — fades the small marks out before they'd shimmer.
-struct Ground { vec3 col; float rock; float forest; float snow; float bed; float scree; float trail; };
+// rockNear / screeNear: the same fields read EARLIER — already 1 where the rock / scree starts, rising over the few
+// metres before it (the grass shortens toward them)
+struct Ground { vec3 col; float rock; float forest; float snow; float bed; float scree; float trail; float rockNear; float screeNear; };
 // trail = distance (m) to the nearest dirt track's centre line, hw its half width
 // far = 0 within the grass's reach … 1 beyond it: the shrub dots are a far-hillside breakup only (near, a bush is a
 // real bush, not a disc painted on the ground)
@@ -95,7 +101,14 @@ Ground groundPaint(vec2 xz, vec4 m, float h, float steep, Paint p, float foot, f
   // blue-grey SCREE patches on the steeper open slopes (the hillsides' grey breakup, seen from afar; no grass on them)
   float sc = p.mid.b + (p.fine.r - 0.5) * 0.35 + (p.grain.b - 0.5) * 0.1 * near + smoothstep(0.08, 0.3, steep) * 0.5 - 0.25;
   g.scree = smoothstep(0.66, 0.7, sc) * (1.0 - smoothstep(0.5, 0.8, wet)) * smoothstep(0.06, 0.14, steep);
-  col = mix(col, SCREE * (0.9 + 0.14 * p.fine.g + 0.08 * p.grain.r), g.scree);
+  g.screeNear = smoothstep(0.56, 0.665, sc) * (1.0 - smoothstep(0.5, 0.8, wet)) * smoothstep(0.06, 0.14, steep);
+  // (where the rock relief shows — HIGH / ULTRA on PCs, rockRelief.ts — the rock, slabs and scree are plain: the relief
+  //  is their detail now; the painted breakup below is for where it doesn't, far away and on the other tiers)
+  float paintK = 1.0;
+#ifdef OTH_ROCK_RELIEF
+  paintK = 1.0 - reliefShow(foot);
+#endif
+  col = mix(col, SCREE * mix(1.0, 0.9 + 0.14 * p.fine.g + 0.08 * p.grain.r, paintK), g.scree);
   // SHRUB DOTS: small dark-green bushes scattered over the open slopes (thicker on the green, sparse on gold)
   // (only on open grass ground: not on the water's earth / gravel, rock or forest floor)
   float open = (1.0 - g.scree) * (1.0 - smoothstep(0.8, 0.86, m.b)) * (1.0 - smoothstep(0.3, 0.5, m.r)) * (1.0 - smoothstep(0.3, 0.6, m.a));
@@ -113,13 +126,15 @@ Ground groundPaint(vec2 xz, vec4 m, float h, float steep, Paint p, float foot, f
   g.forest = smoothstep(0.25, 0.75, m.a + (p.mid.b - 0.5) * 0.3);
   col = mix(col, mix(FOREST, GREEN_DEEP, 0.5), g.forest * 0.2); // (the pines will cover it; until then only a hint)
   // rock: neutral blue-grey in broad tones (the facets do the rest)
-  g.rock = smoothstep(0.42, 0.58, m.r + (p.mid.b - 0.5) * 0.3 + (p.grain.b - 0.5) * 0.1);
-  vec3 rock = mix(ROCK_DEEP, ROCK, 0.7 + (p.mid.r - 0.5) * 0.4 + (p.fine.g - 0.5) * 0.2);
+  float rv = m.r + (p.mid.b - 0.5) * 0.3 + (p.grain.b - 0.5) * 0.1;
+  g.rock = smoothstep(0.42, 0.58, rv);
+  g.rockNear = smoothstep(0.27, 0.433, rv); // (0.433: where g.rock reaches the grass's cut; ~2–6 m before it)
+  vec3 rock = mix(ROCK_DEEP, ROCK, 0.7 + (p.mid.r - 0.5) * 0.4 + (p.fine.g - 0.5) * 0.2 * paintK);
   // the valley's slabs: light blue-grey, soft streaks down the faces, a little lichen; the far ranges stay warm
-  vec3 slab = mix(SLAB_DEEP, SLAB, 0.78 + (p.fine.g - 0.5) * 0.25 + (p.grain.r - 0.5) * 0.12 * near - steep * 0.35);
-  slab = mix(slab, slab * vec3(0.92, 1.0, 0.86), smoothstep(0.62, 0.8, p.mid.b) * 0.5);
+  vec3 slab = mix(SLAB_DEEP, SLAB, 0.78 + ((p.fine.g - 0.5) * 0.25 + (p.grain.r - 0.5) * 0.12 * near) * paintK - steep * 0.35);
+  slab = mix(slab, slab * vec3(0.92, 1.0, 0.86), smoothstep(0.62, 0.8, p.mid.b) * 0.5 * paintK);
   // darker hollows a few metres across, faint cracks between the slabs
-  slab *= (1.0 - 0.1 * smoothstep(0.66, 0.8, p.grain.a) * near) * (0.88 + 0.2 * p.fine.a);
+  slab *= mix(1.0, (1.0 - 0.1 * smoothstep(0.66, 0.8, p.grain.a) * near) * (0.88 + 0.2 * p.fine.a), paintK);
   rock = mix(slab, rock, smoothstep(700.0, 950.0, h)); // (the box's rock: slab grey; the far ranges warm)
   col = mix(col, rock, g.rock);
   // snow on the high peaks, on the gentler faces
@@ -130,25 +145,17 @@ Ground groundPaint(vec2 xz, vec4 m, float h, float steep, Paint p, float foot, f
   g.bed = smoothstep(0.9, 0.97, m.b);
   float peb = g.bed > 0.01 ? dotsAt(xz, 0.6, 0.5, 0.07, max(0.015, foot * 0.5)) * near : 0.0;
   col = mix(col, BED * (0.8 + 0.18 * p.grain.g + 0.12 * p.fine.g + 0.12 * p.grain.b) * grain * (1.0 + 0.25 * peb) * mix(vec3(1.0), vec3(0.9, 0.96, 0.92), p.mid.g), g.bed);
-  // the DIRT TRACKS (OTH): smooth warm-brown packed earth, soft tonal drifts, faint wheel ruts, ragged grassy edges;
-  // over rock (a trekking hill's ledges) the rock shows through
-  g.trail = trackMask(xz, trail, hw) * (1.0 - g.bed) * (1.0 - 0.85 * g.rock);
-  float rut = (1.0 - smoothstep(0.1, 0.35, abs(trail - 0.75))) * near;
-  // (+ OTH's fine speckled grain: a mottle of tiny lighter / darker flecks, only while they're bigger than a pixel)
-  float speck = mix(1.0, 0.88 + 0.24 * p.micro.g * (0.8 + 0.4 * p.grain.r), near);
-  // (the user: "the roads need a ROCK-LIKE pattern, the colour is okay"): packed STONES — a cobble of small stones
-  // (~0.35 m, lighter, dark gaps between) and scattered bigger flat ones (~1.2 m), worn smoother in the wheel ruts
-  float stones = 1.0;
-  if (near > 0.01) {
-    float f1 = texture(uNoise, xz / 5.6).a, f2 = texture(uNoise, xz / 19.0 + 0.31).a;
-    float big = texture(uNoise, xz / 41.0 + 0.7).g;
-    float cob = mix(0.8, 1.07, smoothstep(0.58, 0.26, f1)) * (0.93 + 0.14 * texture(uNoise, xz / 2.1).g);
-    float slab = smoothstep(0.6, 0.66, big) * smoothstep(0.5, 0.3, f2);
-    stones = mix(1.0, mix(cob, 1.1, slab), near * (1.0 - 0.45 * rut));
-  }
-  vec3 track = TRAIL * (0.9 + 0.14 * p.fine.g + 0.08 * p.mid.r) * speck * stones * (1.0 - 0.1 * rut) * (1.0 + 0.05 * (1.0 - smoothstep(0.0, 0.4, trail)));
+  // the DIRT TRACKS — ONE look on every track, anywhere (the user: "the same texture for all paths", after their
+  // golden-valley reference): smooth packed SANDY earth, light tan, soft broad tonal drifts and a faint fine grain, two
+  // worn wheel ruts a touch darker, sparse small pebbles, darker toward the grassy edge. (Over a trekking hill's rock
+  // ledges too: the track is earth there as well.)
+  g.trail = trackMask(xz, trail, hw) * (1.0 - g.bed);
+  float rut = (1.0 - smoothstep(0.15, 0.45, abs(trail - 0.85))) * near; // (a car's wheels ±0.85 m off the middle)
+  float speck = mix(1.0, 0.94 + 0.12 * p.micro.g, near);
+  float tpeb = near > 0.01 ? dotsAt(xz + 0.7, 1.3, 0.22, 0.06, max(0.02, foot * 0.5)) * near : 0.0;
+  vec3 track = TRAIL * (0.93 + 0.1 * p.fine.g + 0.06 * p.mid.r) * speck * (1.0 - 0.08 * rut) * (1.0 + 0.12 * tpeb);
   // the earth darkens a touch toward its edge, where the grass overhangs it
-  track *= 0.88 + 0.12 * smoothstep(hw, hw * 0.4, trail);
+  track *= 0.9 + 0.1 * smoothstep(hw, hw * 0.5, trail);
   col = mix(col, track, g.trail);
   g.col = col;
   return g;

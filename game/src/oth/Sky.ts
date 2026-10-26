@@ -16,7 +16,12 @@ export class Sky {
         void main() {
           vDir = position;
           vec4 p = projectionMatrix * mat4(mat3(viewMatrix)) * vec4(position, 1.0);
-          gl_Position = p.xyww; // on the far plane
+          // on the far plane (reversed-Z: depth 0)
+          #ifdef USE_REVERSED_DEPTH_BUFFER
+          gl_Position = vec4(p.xy, 0.0, p.w);
+          #else
+          gl_Position = p.xyww;
+          #endif
         }`,
       fragmentShader: /* glsl */ `
         ${FRAG_OUT}
@@ -29,7 +34,7 @@ export class Sky {
           float s = dot(d, uSunDir);
           if (uNight < 0.5) {
             // the SUN: a big bright disc (~1.6°) with a hot halo round it — the bloom pass spreads it into a glare
-            c += uSunColor * (3.2 * smoothstep(0.99955, 0.99975, s) + 0.35 * pow(max(s, 0.0), 900.0) + 0.06 * pow(max(s, 0.0), 60.0));
+            c += uSunDisc * (3.2 * smoothstep(0.99955, 0.99975, s) + 0.35 * pow(max(s, 0.0), 900.0) + 0.06 * pow(max(s, 0.0), 60.0));
           } else {
             // the MOON: a pale disc with a soft halo
             c += vec3(0.75, 0.82, 1.0) * (1.4 * smoothstep(0.99975, 0.99988, s) + 0.08 * pow(max(s, 0.0), 300.0)) * uNight;

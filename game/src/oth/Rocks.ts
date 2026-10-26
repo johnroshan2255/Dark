@@ -1,10 +1,11 @@
 import * as THREE from 'three'
 import type { Horizon } from './Horizon'
 import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js'
-import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { mergeVertices, toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { ATMOS_GLSL, FRAG_OUT, type Atmosphere } from './Atmosphere'
 import type { MapData } from './MapData'
 import type { Tier } from './quality'
+import { ROCK_RELIEF_GLSL } from './rockRelief'
 import { SHADOW_GLSL, type TerrainShadow } from './TerrainShadow'
 
 /**
@@ -15,6 +16,8 @@ import { SHADOW_GLSL, type TerrainShadow } from './TerrainShadow'
  * within the tier's reach, in view, not behind a hill and not too small to see (`update`).
  */
 const VARIANTS = 6
+/** + the ROUNDED shapes (after the 6 blocks): the scenery's boulder walls (meta.scenery). */
+const ROUND = 2
 const CELL = 128
 
 export interface Inst { x: number; y: number; z: number; s: number; sy: number; rot: number; tilt: number; v: number }
@@ -27,6 +30,9 @@ export class Rocks {
   private readonly q = new THREE.Quaternion()
   private readonly e = new THREE.Euler()
   private readonly reach: number
+  private readonly near: number
+  /** The rounded shapes' far LOD (rockNear on): one mesh per ROUND variant. */
+  private readonly farMeshes: THREE.InstancedMesh[] = []
   count = 0
   /** Every rock (the physics builds colliders for the ones near the car) and each shape's vertices (unit size). */
   readonly all: Inst[]
@@ -36,16 +42,17 @@ export class Rocks {
 
   constructor(private readonly map: MapData, atmos: Atmosphere, shadow: TerrainShadow, tier: Tier, farGrid: THREE.Vector4) {
     this.reach = tier.rockReach
+    this.near = tier.rockNear
     const mat = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
       uniforms: { ...atmos.uniforms, ...shadow.uniforms, uFarGrid: { value: farGrid } },
-      defines: tier.spec ? { OTH_SPEC: '' } : {},
+      defines: { ...(tier.spec ? { OTH_SPEC: '' } : {}), ...(tier.rockRelief ? { OTH_ROCK_RELIEF: '' } : {}) },
       vertexShader: VERT,
       fragmentShader: FRAG,
     })
     const all = (this.all = this.place())
-    for (let v = 0; v < VARIANTS; v++) {
-      const geo = boulder(0x51ed + v * 977)
+    for (let v = 0; v < VARIANTS + ROUND; v++) {
+      const geo = v < VARIANTS ? boulder(0x51ed + v * 977) : roundBoulder(0x7a3 + v * 131)
       this.shapes.push(geo.attributes.position.array as Float32Array)
       const n = all.filter((r) => r.v === v).length
       const mesh = new THREE.InstancedMesh(geo, mat, Math.max(1, n))
@@ -54,6 +61,14 @@ export class Rocks {
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
       this.meshes.push(mesh)
       this.group.add(mesh)
+      if (v >= VARIANTS) {
+        const far = new THREE.InstancedMesh(roundBoulder(0x7a3 + v * 131, 1), mat, Math.max(1, n))
+        far.count = 0
+        far.frustumCulled = false
+        far.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+        this.farMeshes.push(far)
+        this.group.add(far)
+      }
     }
     const g = map.inner, fp = new Uint8Array(g.n * g.n)
     for (const r of all) {
@@ -66,7 +81,10 @@ export class Rocks {
       }
     }
     this.footprint = new THREE.DataTexture(fp, g.n, g.n, THREE.RedFormat, THREE.UnsignedByteType)
-    this.footprint.minFilter = this.footprint.magFilter = THREE.LinearFilter
+    // (mipmapped: the grass reads it blurred too, shortening round a boulder — Grass.ts)
+    this.footprint.minFilter = THREE.LinearMipmapLinearFilter
+    this.footprint.magFilter = THREE.LinearFilter
+    this.footprint.generateMipmaps = true
     this.footprint.unpackAlignment = 1
     this.footprint.needsUpdate = true
     for (const r of all) {
@@ -156,6 +174,12 @@ export class Rocks {
         add(x, z, 1.2 + rnd() * 2.6, 0.3)
       }
     }
+    // the SCENERY's WALLS (scripts/oth/scenery.mjs): big rounded stones lining the stream roads on their uphill side
+    for (const [x, z, size] of map.meta.scenery?.boulders ?? []) {
+      const r = size * 0.5
+      const y = Math.min(map.height(x - r, z), map.height(x + r, z), map.height(x, z - r), map.height(x, z + r), map.height(x, z))
+      out.push({ x, y: y - size * 0.1, z, s: size, sy: size * (0.85 + 0.3 * rnd()), rot: rnd() * Math.PI * 2, tilt: (rnd() - 0.5) * 0.25, v: VARIANTS + (rnd() < 0.5 ? 0 : 1) })
+    }
     // the RIVER: stones in the shallows and on the banks
     const r = map.meta.water.river
     for (let i = 0; i < r.x.length; i += 2) {
@@ -197,12 +221,14 @@ export class Rocks {
     if (camera.position.distanceToSquared(this.lastPos) < 16 && this.dir.dot(this.lastDir) > 0.9985) return
     this.lastPos.copy(camera.position); this.lastDir.copy(this.dir)
     this.pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
-    this.frustum.setFromProjectionMatrix(this.pv)
+    this.frustum.setFromProjectionMatrix(this.pv, THREE.WebGLCoordinateSystem, camera.reversedDepth)
     const cx = camera.position.x, cz = camera.position.z, R = this.reach
     // (a rock s m big at d m is s / d × this px tall: under 2 px it isn't drawn)
     const pxPerRad = (innerHeight * Math.min(devicePixelRatio, 2)) / (2 * Math.tan((camera.fov * Math.PI) / 360))
     const minRatio = 2 / pxPerRad
     for (const m of this.meshes) m.count = 0
+    for (const m of this.farMeshes) m.count = 0
+    const near2 = this.near * this.near
     this.culled.frustum = this.culled.occluded = this.culled.small = 0
     const i0 = Math.floor((cx - R) / CELL), i1 = Math.floor((cx + R) / CELL), j0 = Math.floor((cz - R) / CELL), j1 = Math.floor((cz + R) / CELL)
     for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
@@ -226,15 +252,44 @@ export class Rocks {
         const dx = r.x - cx, dz = r.z - cz, d2 = dx * dx + dz * dz
         if (d2 > R * R) continue
         if (r.sy * r.sy < minRatio * minRatio * d2) { this.culled.small++; continue }
-        const mesh = this.meshes[r.v]
+        // (a rounded boulder past rockNear: its coarse shape — the fog softens it there)
+        const mesh = r.v >= VARIANTS && d2 > near2 ? this.farMeshes[r.v - VARIANTS] : this.meshes[r.v]
         this.q.setFromEuler(this.e.set(r.tilt, r.rot, r.tilt * 0.6))
         this.m.compose(this.p.set(r.x, r.y, r.z), this.q, this.sc.set(r.s, r.sy, r.s * 0.9))
         mesh.setMatrixAt(mesh.count++, this.m)
       }
     }
     this.count = 0
-    for (const m of this.meshes) { m.instanceMatrix.needsUpdate = true; this.count += m.count }
+    for (const m of [...this.meshes, ...this.farMeshes]) { m.instanceMatrix.needsUpdate = true; this.count += m.count }
   }
+}
+
+/**
+ * A ROUNDED boulder (unit size) — the big smooth stones of the user's reference walling the stream roads: a squashed
+ * icosphere lumped by a few soft waves, its bottom flattened into the ground, smooth normals (the relief does the rest).
+ */
+function roundBoulder(seed: number, detail = 3): THREE.BufferGeometry {
+  let s = seed >>> 0
+  const rnd = () => ((s = (Math.imul(s ^ (s >>> 15), 2246822519) + 0x6d2b79f5) >>> 0) / 4294967296)
+  const waves = Array.from({ length: 5 }, () => {
+    const a = rnd() * Math.PI * 2, b = Math.acos(2 * rnd() - 1)
+    return { d: new THREE.Vector3(Math.sin(b) * Math.cos(a), Math.cos(b), Math.sin(b) * Math.sin(a)), f: 1.5 + 2.5 * rnd(), ph: rnd() * 6.28, amp: 0.03 + 0.04 * rnd() }
+  })
+  let g: THREE.BufferGeometry = new THREE.IcosahedronGeometry(0.5, detail) // (3: 1 280 triangles near; 1: 80 far)
+  g.deleteAttribute('normal'); g.deleteAttribute('uv')
+  g = mergeVertices(g)
+  const p = g.attributes.position as THREE.BufferAttribute, v = new THREE.Vector3()
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i).normalize()
+    let r = 0.5
+    for (const w of waves) r += 0.5 * w.amp * Math.sin(w.f * v.dot(w.d) * Math.PI + w.ph)
+    v.multiplyScalar(r)
+    v.y *= 0.74
+    if (v.y < -0.2) v.y = -0.2 + (v.y + 0.2) * 0.25 // (the bottom flattened: it sits in the ground)
+    p.setXYZ(i, v.x, v.y, v.z)
+  }
+  g.computeVertexNormals()
+  return g
 }
 
 /**
@@ -281,6 +336,7 @@ void main() {
 const FRAG = /* glsl */ `
 ${FRAG_OUT}
 ${ATMOS_GLSL}
+${ROCK_RELIEF_GLSL}
 uniform vec4 uFarGrid;
 ${SHADOW_GLSL}
 in vec3 vWorld;
@@ -291,10 +347,20 @@ float fhash(vec3 n) { return fract(sin(dot(floor(n * 300.0), vec3(12.9898, 78.23
 void main() {
   vec3 N = normalize(vN);
   vec3 V = normalize(uCamPos - vWorld);
-  // light grey, each face a touch different, the tops lighter, a soft darkening into the ground
-  vec3 albedo = STONE * (0.94 + 0.12 * fhash(N)) * mix(0.72, 1.0, smoothstep(0.0, 0.45, vUp)) * (1.0 + 0.06 * N.y);
+  // light grey, each face a touch different, the tops lighter, a soft darkening into the ground (where the relief
+  // shows the faces are one plain grey: the relief is their detail)
+  float paintK = 1.0;
+#ifdef OTH_ROCK_RELIEF
+  paintK = 1.0 - reliefShow(max(length(dFdx(vWorld)), length(dFdy(vWorld))));
+#endif
+  vec3 albedo = STONE * mix(1.0, 0.94 + 0.12 * fhash(N), paintK) * mix(0.72, 1.0, smoothstep(0.0, 0.45, vUp)) * (1.0 + 0.06 * N.y);
+  // HIGH / ULTRA on PCs: the crumpled 3D relief over every face (the light only: the colour above is the face's own)
+  float cav = 1.0;
+#ifdef OTH_ROCK_RELIEF
+  N = rockRelief(vWorld, N, 1.0, dFdx(vWorld), dFdy(vWorld), cav);
+#endif
   float sun = sunVisibility(vWorld.xz);
-  vec3 c = shade(albedo, N, V, 0.75, 0.04, mix(0.6, 1.0, smoothstep(0.0, 0.5, vUp)), sun, 0.05);
+  vec3 c = shade(albedo, N, V, 0.75, 0.04, mix(0.6, 1.0, smoothstep(0.0, 0.5, vUp)) * cav, sun, 0.05);
   c += headlight(albedo, N, vWorld);
   gl_FragColor = vec4(applyAtmos(c, vWorld), 1.0);
   #include <tonemapping_fragment>

@@ -98,3 +98,21 @@ The in-game credits screen (when there is one) must list these too.
 | Rain | `ambience/rain.mp3` | https://opengameart.org/content/rain-loopable | Ylmir | CC0 | 24 s loop crossfaded |
 | Thunder: close clap, two mid claps, far roll | `ambience/thunder_close.mp3`, `thunder_mid1.mp3`, `thunder_mid2.mp3`, `thunder_far.mp3` | https://bigsoundbank.com/thunder-2-s3113.html, …/thunder-3-s3114.html, …/thunder-6-s3179.html, …/thunder-s2718.html | Joseph Sardin & Axeline T. (BigSoundBank) | CC0 | as downloaded (MP3); levelled at runtime (loudest 0.5 s RMS), distance low-pass + delay in AudioSystem |
 | Footsteps (10) | `steps/step0–9.mp3` | https://kenney.nl/assets/rpg-audio | Kenney | CC0 | levelled |
+
+### Over the Hill (map 3) audio — `public/oth/audio/` (all CC0 — public domain; attribution not required, given anyway)
+Played by `src/oth/Audio.ts`; the loops cut by a crossfade (tail into head), levelled. Long beds are streamed as downloaded.
+| Sound | File(s) | Source | Author | Licence | Processing |
+|---|---|---|---|---|---|
+| Music "Etirwer" (nylon guitar, loop) | `music_etirwer.ogg` | https://opengameart.org/content/etirwer | Kistol | CC0 | as downloaded |
+| Music "In the middle of nowhere" (guitar, flute) | `music_middle_of_nowhere.mp3` | https://opengameart.org/content/in-the-middle-of-nowhere | Centurion_of_war | CC0 | as downloaded |
+| Forest by day (birds, wind) | `amb_forest.ogg` | https://bigsoundbank.com/forest-4-s2749.html | Joseph Sardin (BigSoundBank) | CC0 | as downloaded |
+| Wind in tall grass | `amb_wind_grass.ogg` | https://bigsoundbank.com/wind-in-tall-grass-s0908.html | Joseph Sardin (BigSoundBank) | CC0 | as downloaded |
+| Night meadow (crickets, frogs) | `amb_night.mp3` | https://bigsoundbank.com/campaign-at-night-4-s1880.html | Joseph Sardin (BigSoundBank) | CC0 | as downloaded |
+| Mountain stream | `amb_stream.ogg` | https://bigsoundbank.com/mountain-stream-7-s3222.html | Joseph Sardin (BigSoundBank) | CC0 | as downloaded |
+| Small waterfall | `amb_waterfall.ogg` | https://bigsoundbank.com/small-waterfall-2-s0219.html | Joseph Sardin (BigSoundBank) | CC0 | as downloaded |
+| Engine idle (Iveco Daily 3.0 diesel, 857 rpm) | `engine_idle.wav` | https://bigsoundbank.com/truck-engine-s1145.html | Joseph Sardin (BigSoundBank) | CC0 | 3 s loop from 2.0 s, −18 dB RMS |
+| Engine mid revs (1731 rpm) | `engine_mid.wav` | https://bigsoundbank.com/truck-engine-small-accelerations-s1146.html | Joseph Sardin (BigSoundBank) | CC0 | 1.3 s loop from 17.45 s, −16 dB RMS |
+| Engine high revs on load (2647 rpm) | `engine_high.wav` | https://bigsoundbank.com/truck-engine-big-accelerations-s1147.html | Joseph Sardin (BigSoundBank) | CC0 | 2.6 s loop from 7.4 s, −15 dB RMS |
+| Engine start / stop (Kia 2.9 diesel) | `engine_start.wav`, `engine_stop.wav` | https://bigsoundbank.com/big-diesel-engine-s0967.html | Joseph Sardin (BigSoundBank) | CC0 | 0.3–3.3 s and 46.6–49.5 s, faded |
+| Tyre squeal (sliding on hard ground) | `tyre_squeal.wav` | https://bigsoundbank.com/screeching-tires-4-s2371.html | Joseph Sardin (BigSoundBank) | CC0 | 1.2 s loop from 4.65 s |
+| Gravel scrub / roll (pitched down in game) | `tyre_gravel.wav` | https://bigsoundbank.com/bike-on-gravel-mtb-1-s1284.html | Joseph Sardin (BigSoundBank) | CC0 | 4.6 s loop from 7.5 s |

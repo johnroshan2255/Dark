@@ -13,17 +13,27 @@ const C = (r: number, g: number, b: number) => new THREE.Color(r, g, b)
 /** Keyframes by sun height (sin of the elevation): colours are linear, intensities scene-referred. Below the horizon
  *  the sky goes through dusk (−0.08 … −0.18) to NIGHT (deep blue, the moon lights the land). */
 const KEYS = [
-  { s: -0.38, sun: C(0.9, 0.38, 0.24), sunI: 0.0, zen: C(0.006, 0.011, 0.03), hor: C(0.02, 0.032, 0.07), glow: C(0.02, 0.025, 0.05), amb: 0.16, fog: 1.0 },
-  { s: -0.18, sun: C(0.9, 0.38, 0.24), sunI: 0.0, zen: C(0.07, 0.06, 0.15), hor: C(0.34, 0.16, 0.24), glow: C(0.4, 0.12, 0.12), amb: 0.45, fog: 1.3 },
-  { s: -0.08, sun: C(0.9, 0.38, 0.24), sunI: 0.0, zen: C(0.3, 0.24, 0.42), hor: C(1.05, 0.46, 0.5), glow: C(1.1, 0.35, 0.3), amb: 1.05, fog: 1.6 },
+  { s: -0.38, sun: C(0.9, 0.38, 0.24), sunI: 0.0, zen: C(0.006, 0.011, 0.03), hor: C(0.02, 0.032, 0.07), glow: C(0.02, 0.025, 0.05), amb: 0.16 },
+  { s: -0.18, sun: C(0.9, 0.38, 0.24), sunI: 0.0, zen: C(0.07, 0.06, 0.15), hor: C(0.34, 0.16, 0.24), glow: C(0.4, 0.12, 0.12), amb: 0.45 },
+  { s: -0.08, sun: C(0.9, 0.38, 0.24), sunI: 0.0, zen: C(0.3, 0.24, 0.42), hor: C(1.05, 0.46, 0.5), glow: C(1.1, 0.35, 0.3), amb: 1.05 },
   // (golden hour → sunset, after the user's OTH sunset: a pink-violet sky, a red-orange sun, thick pink haze, the land
   //  still lit warm — never black)
-  { s: 0.05, sun: C(1.0, 0.46, 0.28), sunI: 2.2, zen: C(0.42, 0.36, 0.58), hor: C(1.3, 0.62, 0.58), glow: C(1.6, 0.55, 0.35), amb: 1.35, fog: 1.7 },
-  { s: 0.22, sun: C(1.0, 0.66, 0.42), sunI: 2.6, zen: C(0.38, 0.5, 0.78), hor: C(1.12, 0.8, 0.74), glow: C(1.2, 0.66, 0.42), amb: 0.92, fog: 1.25 },
-  { s: 0.5, sun: C(1.0, 0.86, 0.7), sunI: 2.25, zen: C(0.4, 0.62, 0.88), hor: C(0.98, 0.88, 0.88), glow: C(0.95, 0.78, 0.6), amb: 0.8, fog: 1.0 },
-  { s: 1.0, sun: C(1.0, 0.95, 0.88), sunI: 2.3, zen: C(0.32, 0.52, 0.86), hor: C(0.82, 0.88, 0.95), glow: C(0.8, 0.78, 0.7), amb: 0.82, fog: 1.0 },
+  { s: 0.05, sun: C(1.0, 0.46, 0.28), sunI: 2.2, zen: C(0.42, 0.36, 0.58), hor: C(1.3, 0.62, 0.58), glow: C(1.6, 0.55, 0.35), amb: 1.35 },
+  { s: 0.22, sun: C(1.0, 0.66, 0.42), sunI: 2.6, zen: C(0.38, 0.5, 0.78), hor: C(1.12, 0.8, 0.74), glow: C(1.2, 0.66, 0.42), amb: 0.92 },
+  { s: 0.5, sun: C(1.0, 0.86, 0.7), sunI: 2.25, zen: C(0.4, 0.62, 0.88), hor: C(0.98, 0.88, 0.88), glow: C(0.95, 0.78, 0.6), amb: 0.8 },
+  { s: 1.0, sun: C(1.0, 0.95, 0.88), sunI: 2.3, zen: C(0.32, 0.52, 0.86), hor: C(0.82, 0.88, 0.95), glow: C(0.8, 0.78, 0.7), amb: 0.82 },
 ]
 const MOON = C(0.55, 0.68, 1.0)
+/** A colour scaled up (its tint kept) to at least luminance min. */
+function floorLum(c: THREE.Color, min: number): void {
+  const l = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+  if (l < min) c.multiplyScalar(min / Math.max(l, 1e-4))
+}
+/** A colour pulled toward its own grey (its luminance kept): k of its tint left. */
+function keepTint(c: THREE.Color, k: number): THREE.Color {
+  const l = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+  return c.setRGB(l + (c.r - l) * k, l + (c.g - l) * k, l + (c.b - l) * k)
+}
 
 /**
  * DAY AND NIGHT (the user: "sun, bloom and day-night like OTH"): the clock runs — a day takes `dayMinutes` real
@@ -40,12 +50,14 @@ export class Atmosphere {
     uSkyZenith: { value: new THREE.Color() },
     uSkyHorizon: { value: new THREE.Color() },
     uSunGlow: { value: new THREE.Color() },
+    /** The sun's own colour (vivid: its disc in the sky, its glint on the water) — uSunColor is its LIGHT on the land. */
+    uSunDisc: { value: new THREE.Color() },
     uAmbSky: { value: new THREE.Color() },
     uAmbGround: { value: new THREE.Color() },
-    /** x density at sea level (/m), y height falloff (/m), z max opacity, w the haze's brightness. */
-    // (the user: "I don't need the far hills — just fog, I don't need to see that far, like OTH": a thick haze that
-    //  swallows the land by ~2.5 km and reaches high, so the far ranges are gone too)
-    uFog: { value: new THREE.Vector4(0.0013, 0.00022, 1.0, 1.0) },
+    /** The FOG: clear to x m, solid from y m (the tier's fogNear / fogEnd — main.ts) — and its colour (the sky's
+     *  horizon, its tint mostly gone: white by day, pale warm at sunset, dark at night). */
+    uFogRange: { value: new THREE.Vector2(130, 850) },
+    uFogColor: { value: new THREE.Color() },
     uTime: { value: 0 },
     uNoise: { value: null as THREE.Texture | null },
     /** 0 day … 1 full night (stars, the moon's disc, headlights). */
@@ -94,24 +106,34 @@ export class Atmosphere {
     u.uSkyHorizon.value.copy(a.hor).lerp(b.hor, f)
     u.uSunGlow.value.copy(a.glow).lerp(b.glow, f)
     const amb = a.amb + (b.amb - a.amb) * f
-    // the haze thickens toward sunset (OTH's pink evening air), thins again at night
-    u.uFog.value.x = 0.0013 * (a.fog + (b.fog - a.fog) * f)
     const night = THREE.MathUtils.smoothstep(-s, 0.06, 0.2)
     u.uNight.value = night
     if (s > -0.05) {
       u.uSunDir.value.copy(sun)
-      u.uSunColor.value.copy(a.sun).lerp(b.sun, f).multiplyScalar(sunI)
+      u.uSunDisc.value.copy(a.sun).lerp(b.sun, f).multiplyScalar(sunI)
     } else {
       // the MOON: opposite the sun, its light fading in as the sun sinks
       u.uSunDir.value.copy(sun).negate()
       if (u.uSunDir.value.y < 0.15) u.uSunDir.value.y = 0.15
       u.uSunDir.value.normalize()
-      u.uSunColor.value.copy(MOON).multiplyScalar(0.42 * night)
+      u.uSunDisc.value.copy(MOON).multiplyScalar(0.42 * night)
     }
     // sky fill: the sky's average (bluer than its horizon); ground bounce: warm by day, cool and dim by night
     u.uAmbSky.value.copy(u.uSkyZenith.value).lerp(u.uSkyHorizon.value, 0.4).multiplyScalar(0.62 * amb)
     u.uAmbSky.value.lerp(MOON.clone().multiplyScalar(0.07), night * 0.8)
     u.uAmbGround.value.setRGB(0.42, 0.34, 0.22).multiplyScalar(0.55 * amb + 0.12 * sunI).lerp(MOON.clone().multiplyScalar(0.025), night)
+    // the LIGHT ON THE LAND keeps every colour true at every hour (the user: "when the time changes to evening, night,
+    // morning, the terrain, grass and trees all change colour with it"): the sun's, the sky's and the bounce's light
+    // lose most of their tint — a warm / cool hint is left, the brightness still follows the day; the SKY itself (its
+    // colours, the sun's disc, the haze, the glint on the water) stays as vivid as the keyframes paint it
+    keepTint(u.uSunColor.value.copy(u.uSunDisc.value), 0.3)
+    keepTint(u.uAmbSky.value, 0.35)
+    keepTint(u.uAmbGround.value, 0.5)
+    // and never near-black: from dusk through the night the sky's fill keeps a floor (~2/3 of noon's) — the land darker
+    // than by day, its colours still its own (deep in the dark the tone curve would crush them to brown)
+    floorLum(u.uAmbSky.value, 0.22)
+    floorLum(u.uAmbGround.value, 0.09)
+    keepTint(u.uFogColor.value.copy(u.uSkyHorizon.value), 0.3)
   }
 }
 
@@ -126,12 +148,14 @@ export const ATMOS_GLSL = /* glsl */ `
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
+uniform vec3 uSunDisc;
 uniform vec3 uSkyZenith;
 uniform vec3 uSkyHorizon;
 uniform vec3 uSunGlow;
 uniform vec3 uAmbSky;
 uniform vec3 uAmbGround;
-uniform vec4 uFog;
+uniform vec2 uFogRange;
+uniform vec3 uFogColor;
 uniform float uTime;
 uniform sampler2D uNoise;
 uniform float uNight;
@@ -159,32 +183,24 @@ vec3 skyColor(vec3 d) {
   c *= 1.0 - clamp(-y * 1.4, 0.0, 0.18);
   float s = max(dot(d, uSunDir), 0.0);
   c += uSunGlow * (0.3 * pow(s, 4.0) + 0.6 * pow(s, 24.0)) * (0.6 + 0.4 * (1.0 - up));
+  // (the lower sky is the fog: the fogged land melts into it, no horizon line)
+  c = mix(c, uFogColor + uSunGlow * (0.18 * pow(s, 6.0)) * (1.0 - uNight), 1.0 - smoothstep(-0.02, 0.2, y));
   return c;
 }
 
-// What the haze looks like along d: the sky near the horizon in that direction (so far ridges melt into the sky).
-vec3 hazeColor(vec3 d) {
-  vec3 h = normalize(vec3(d.x, clamp(d.y, -0.05, 0.12), d.z));
-  // (exactly the sky's colour at the horizon: whatever the fog swallows dissolves into the sky, no silhouette left)
-  return skyColor(h) * uFog.w;
+// THE FOG (the user: "no far mountains — a white fog hiding everything far, just a filter, not volumetric"): clear
+// round the player (uFogRange.x), thickening with distance into a solid fog by uFogRange.y — nothing beyond is drawn
+// (the tier's far plane and reaches end just past it). Its colour: the sky's horizon with the tint mostly gone (white
+// by day, pale warm at sunset, dark at night), a faint glow toward the sun.
+vec3 fogColor(vec3 d) {
+  return uFogColor + uSunGlow * (0.18 * pow(max(dot(d, uSunDir), 0.0), 6.0)) * (1.0 - uNight);
 }
-
-// Aerial perspective: exponential height fog integrated along the view ray (analytic), toward hazeColor — from
-// FOG_START m on: round the player the air is clear, the colours pure (the user: "no fog near us, it dulls the
-// colours"); the haze builds beyond it and swallows the far hills (~1.5 km).
-const float FOG_START = 140.0;
 float fogAmount(vec3 wpos) {
-  vec3 v = wpos - uCamPos;
-  float dist = length(v);
-  float b = uFog.y;
-  float dy = v.y * b;
-  float k = abs(dy) > 1e-4 ? (1.0 - exp(-dy)) / dy : 1.0;
-  float od = uFog.x * exp(-b * uCamPos.y) * max(dist - FOG_START, 0.0) * k;
-  return (1.0 - exp(-od)) * uFog.z;
+  float t = clamp((length(wpos - uCamPos) - uFogRange.x) / (uFogRange.y - uFogRange.x), 0.0, 1.0);
+  return 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t); // (eases in: the near haze faint, the last stretch solid)
 }
 vec3 applyAtmos(vec3 col, vec3 wpos) {
-  vec3 dir = normalize(wpos - uCamPos);
-  return mix(col, hazeColor(dir), fogAmount(wpos));
+  return mix(col, fogColor(normalize(wpos - uCamPos)), fogAmount(wpos));
 }
 
 // Ambient: sky from above, warm bounce from below.

@@ -668,7 +668,8 @@ SPAWN_XZ = (spawn['x'], spawn['z'])
 # within its half width + 5 m eases onto that profile (no cross slope, a slight dip in the middle).
 import heapq
 log('trails')
-TRAIL_HW = 1.8  # (OTH tracks are one car wide)
+TRAIL_HW = 2.8  # (the user: "the road is too narrow" — 1.8 → 2.8, two cars wide; height.bin is still the 1.8 bake: its
+#  bed is level to ±2.3 m and blends out by 7.3, so the new edge sits a few cm off level until the next bake)
 C8 = 8.0
 Hc = Hi[::4, ::4]
 n8 = Hc.shape[0]
