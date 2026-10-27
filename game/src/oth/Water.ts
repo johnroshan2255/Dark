@@ -135,6 +135,10 @@ const vec3 DEEP = vec3(0.02, 0.17, 0.2);
 const vec3 RUN = vec3(0.26, 0.47, 0.64);
 const vec3 RUN_DEEP = vec3(0.1, 0.27, 0.42);
 const vec3 FOAM = vec3(0.83, 0.89, 0.94);
+// (2026-10-27, the colour pass: the slow wide river was painted as rapids end to end — pale ice-blue under white
+//  hatching. Calm water is clear TEAL, Over the Hill's river colour; the rapids stay on the fast streams)
+const vec3 TEAL = vec3(0.1, 0.4, 0.44);
+const vec3 TEAL_DEEP = vec3(0.025, 0.19, 0.25);
 
 void main() {
   vec2 xz = vWorld.xz;
@@ -156,16 +160,17 @@ void main() {
   // boulders ringed white
   float rocks = textureLod(uRocks, ((xz - uInGrid.z) / uInGrid.y + 0.5) / uInGrid.x, 1.2).r;
   float rough = 0.6 * s1 + 0.4 * s2 + (churn - 0.5) * 0.25 + (1.0 - k) * 0.1 + smoothstep(1.5, 4.0, spd) * 0.1 + rocks * 0.6;
-  float foam = smoothstep(0.57, 0.68, rough);
+  float calm = 1.0 - smoothstep(1.7, 2.6, spd); // (the river ≈ 1.5 m/s: calm; the streams' runs and steps: rapids)
+  float foam = smoothstep(0.57 + 0.1 * calm, 0.68 + 0.1 * calm, rough);
   foam = max(foam, (1.0 - smoothstep(0.03, 0.22, depth)) * (0.6 + 0.4 * s2));
   // (the streaks blur into an even light blue far away: no shimmer)
-  foam = mix(foam, 0.3, smoothstep(60.0, 260.0, dcam));
-  vec3 body = mix(RUN, RUN_DEEP, k * 0.6) * (0.9 + 0.2 * s1);
+  foam = mix(foam, mix(0.3, 0.08, calm), smoothstep(60.0, 260.0, dcam));
+  vec3 body = mix(mix(RUN, RUN_DEEP, k * 0.6), mix(TEAL, TEAL_DEEP, k * 0.75), calm) * (0.9 + 0.2 * s1);
   // a little sky on the blue, none on the foam
   vec3 N = normalize(vec3((s1 - 0.5) * 0.25, 1.0, (s2 - 0.5) * 0.25));
-  float F = 0.02 + 0.3 * pow(1.0 - max(dot(N, V), 0.0), 4.0);
+  float F = 0.02 + (0.3 + 0.12 * calm) * pow(1.0 - max(dot(N, V), 0.0), 4.0);
   vec3 R = reflect(-V, N);
-  vec3 refl = skyColor(normalize(vec3(R.x, max(R.y, 0.02), R.z)));
+  vec3 refl = skyColor(normalize(vec3(R.x, max(R.y, 0.02), R.z))) * mix(vec3(1.0), vec3(0.72, 0.9, 0.95), calm);
   vec3 c = mix(body * light, refl, F * (1.0 - foam));
   c = mix(c, FOAM * (light * 1.15), foam);
   float alpha = clamp(smoothstep(0.0, 0.06, depth) * mix(0.8, 0.98, max(k, foam)), 0.0, 1.0);

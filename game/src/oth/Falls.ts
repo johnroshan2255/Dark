@@ -46,7 +46,7 @@ export class Falls {
         fidx.push(b, b + 1, b + 2, b, b + 2, b + 3)
       }
       quad(f.by + 0.04, f.hw * 1.9, 0)
-      const ms = f.hw * 1.6 + H * 0.35
+      const ms = f.hw * 1.8 + H * 0.4
       quad(f.by + ms * 0.45, ms, 1)
       quad(f.by + ms * 0.8, ms * 0.8, 1.5)
     }
@@ -99,21 +99,36 @@ ${ATMOS_GLSL}
 in vec2 vUV;
 in float vDrop;
 in vec3 vWorld;
-const vec3 RUN = vec3(0.3, 0.52, 0.68);
-const vec3 FOAM = vec3(0.86, 0.91, 0.95);
+// (2026-10-27, "real waterfall effect like in Over the Hill — cheap"): PAINTED in three tones — deep teal where the
+// water is a clear sheet, light aqua, white foam — not a frosted pane. Two noise layers race down at different scales
+// and speeds (big slow ropes of water, fast fine strands); the lip a smooth glassy curl (dark teal, a bright line where
+// it breaks over); whiter as it falls (air beaten into it); the edges torn into strands; the foot lost in white spray.
+const vec3 DEEP = vec3(0.07, 0.25, 0.3);
+const vec3 AQUA = vec3(0.36, 0.66, 0.72);
+const vec3 FOAM = vec3(0.9, 0.95, 0.97);
 void main() {
-  // metres across / down the sheet; the streaks fall at ~6 m/s, stretched down
-  float down = vUV.y * vDrop, across = vUV.x * 2.0;
-  float s1 = texture(uNoise, vec2(across / 0.55, (down - uTime * 6.0) / 4.5)).r;
-  float s2 = texture(uNoise, vec2(across / 0.25 + 0.37, (down - uTime * 7.5) / 2.2)).g;
-  float streak = smoothstep(0.38, 0.66, 0.6 * s1 + 0.4 * s2);
-  // ragged strands at the edges, the top gathering at the lip, the bottom lost in the spray
-  float edge = 1.0 - smoothstep(0.62, 1.0, abs(vUV.x) + (s2 - 0.5) * 0.35);
-  float alpha = edge * mix(0.5, 0.95, streak) * smoothstep(0.0, 0.04, vUV.y) * (1.0 - smoothstep(0.85, 1.0, vUV.y) * 0.6);
+  float down = vUV.y * vDrop, across = vUV.x * 2.2;
+  float t = vUV.y;
+  float a1 = texture(uNoise, vec2(across / 1.1, (down - uTime * 5.0) / 11.0)).r;
+  float a2 = texture(uNoise, vec2(across / 0.32 + 0.37, (down - uTime * 7.5) / 3.2)).g;
+  float v = 0.55 * a1 + 0.45 * a2 + 0.28 * smoothstep(0.05, 0.7, t) - 0.12;
+  // the lip: a smooth glassy curl over the first metre, then it breaks
+  float lip = 1.0 - smoothstep(0.0, min(0.35, 1.2 / vDrop), t);
+  v = mix(v, 0.18 + 0.15 * a1, lip);
+  // three painted tones, a soft step between them
+  vec3 c = mix(DEEP, AQUA, smoothstep(0.36, 0.42, v));
+  c = mix(c, FOAM, smoothstep(0.55, 0.61, v));
+  float brk = (1.0 - smoothstep(0.0, 0.03, abs(t - min(0.3, 1.0 / vDrop)))) * 0.8; // (the bright line where it breaks)
+  c = mix(c, FOAM, brk);
+  // the foot: white spray
+  c = mix(c, FOAM, smoothstep(0.78, 0.97, t));
+  // torn edges (strands), the clear sheet see-through a little, the spray thinning out at the bottom
+  float edge = 1.0 - smoothstep(0.55, 1.0, abs(vUV.x) + (a2 - 0.5) * 0.5 + (a1 - 0.5) * 0.2);
+  float alpha = edge * mix(0.72, 1.0, smoothstep(0.36, 0.6, v)) * smoothstep(0.0, 0.02, t) * (1.0 - smoothstep(0.9, 1.0, t) * (0.5 + 0.5 * a2));
   if (alpha < 0.02) discard;
-  vec3 light = ambient(vec3(0.0, 1.0, 0.0)) * 1.1 + uSunColor * 0.5;
-  vec3 c = mix(RUN, FOAM, 0.45 + 0.55 * streak) * light;
-  gl_FragColor = vec4(applyAtmos(c, vWorld), alpha);
+  // lit like the stylized rock: the sun, the sky, soft (a falling sheet faces every way at once)
+  vec3 light = ambient(vec3(0.0, 1.0, 0.0)) * 1.25 + uSunColor * 0.55;
+  gl_FragColor = vec4(applyAtmos(c * light, vWorld), alpha);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }
@@ -158,11 +173,13 @@ void main() {
     float a = atan(vCorner.y, vCorner.x);
     float n = texture(uNoise, vec2(a * 0.8, r * 1.6 - uTime * 0.7)).g;
     float m = texture(uNoise, vWorld.xz / 2.2 + uTime * vec2(0.08, -0.05)).r;
-    alpha = (1.0 - smoothstep(0.35 + 0.35 * n, 1.0, r)) * (0.55 + 0.45 * m);
+    float ring = 0.5 + 0.5 * sin((r * 7.0 - uTime * 2.2) * 3.1416 + n * 3.0); // (rings of foam running out)
+    alpha = (1.0 - smoothstep(0.3 + 0.35 * n, 1.0, r)) * (0.5 + 0.35 * m + 0.25 * ring * smoothstep(0.2, 0.6, r));
   } else {
-    // MIST: a soft drifting cloud, faint
+    // MIST: a soft white cloud of spray, churning (a painted puff, not a fog)
     float n = texture(uNoise, vCorner * 0.35 + vec2(uTime * 0.03, -uTime * 0.05) + vKind).r;
-    alpha = (1.0 - smoothstep(0.1, 1.0, r)) * (0.12 + 0.12 * n);
+    float n2 = texture(uNoise, vCorner * 0.9 - vec2(uTime * 0.07, uTime * 0.11) + vKind * 0.3).g;
+    alpha = (1.0 - smoothstep(0.15 + 0.25 * n2, 1.0, r)) * (0.16 + 0.2 * n) * (vKind > 1.2 ? 0.8 : 1.0);
   }
   gl_FragColor = vec4(applyAtmos(vec3(0.88, 0.92, 0.95) * light, vWorld), alpha);
   #include <tonemapping_fragment>

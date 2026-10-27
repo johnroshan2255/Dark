@@ -24,8 +24,9 @@ const vec3 ROCK       = vec3(0.52, 0.38, 0.38);
 const vec3 ROCK_DEEP  = vec3(0.34, 0.23, 0.25);
 // the valley's OUTCROPS (OTH: light blue-grey slabs ≈ sRGB 157 167 173), a cooler deeper grey in the crevices
 // (a touch darker than the measured grey: in the clear near air a sunlit slab would read white against the grass)
-const vec3 SLAB       = vec3(0.115, 0.128, 0.15);
-const vec3 SLAB_DEEP  = vec3(0.053, 0.06, 0.078);
+// (2026-10-27: a touch lighter and warmer — with the rock's sky fill (rockFill) the shade reads pale blue-grey)
+const vec3 SLAB       = vec3(0.13, 0.136, 0.15);
+const vec3 SLAB_DEEP  = vec3(0.066, 0.07, 0.084);
 const vec3 SNOW       = vec3(0.80, 0.85, 0.93);
 const vec3 BED        = vec3(0.6, 0.37, 0.21);
 // (the tracks: the user's golden-valley reference — light sandy tan packed earth ≈ sRGB 205 158 121 in the sun)
@@ -149,16 +150,27 @@ Ground groundPaint(vec2 xz, vec4 m, float h, float steep, Paint p, float foot, f
   // golden-valley reference): smooth packed SANDY earth, light tan, soft broad tonal drifts and a faint fine grain, two
   // worn wheel ruts a touch darker, sparse small pebbles, darker toward the grassy edge. (Over a trekking hill's rock
   // ledges too: the track is earth there as well.)
-  g.trail = trackMask(xz, trail, hw) * (1.0 - g.bed);
+  // (the ragged edge reaches ≤ 1.13 m out past hw: farther off, no fetch — exact, 2 reads saved on most pixels)
+  g.trail = trail < hw + 1.2 ? trackMask(xz, trail, hw) * (1.0 - g.bed) : 0.0;
   float rut = (1.0 - smoothstep(0.15, 0.45, abs(trail - 0.85))) * near; // (a car's wheels ±0.85 m off the middle)
   float speck = mix(1.0, 0.94 + 0.12 * p.micro.g, near);
-  float tpeb = near > 0.01 ? dotsAt(xz + 0.7, 1.3, 0.22, 0.06, max(0.02, foot * 0.5)) * near : 0.0;
+  float tpeb = near > 0.01 && g.trail > 0.01 ? dotsAt(xz + 0.7, 1.3, 0.22, 0.06, max(0.02, foot * 0.5)) * near : 0.0;
   vec3 track = TRAIL * (0.93 + 0.1 * p.fine.g + 0.06 * p.mid.r) * speck * (1.0 - 0.08 * rut) * (1.0 + 0.12 * tpeb);
   // the earth darkens a touch toward its edge, where the grass overhangs it
   track *= 0.9 + 0.1 * smoothstep(hw, hw * 0.5, trail);
   col = mix(col, track, g.trail);
   g.col = col;
   return g;
+}
+
+// WILDFLOWERS (mud.bin G): a drift's colour — one kind per patch (a slow noise picks it), a few of the next kind mixed
+// in (pick: a per-plant random). White daisies, buttercups, lilac lupines, pink campion, poppies, cornflowers; linear
+// albedo near the straw's brightness (they read as colour, not as glare).
+vec3 flowerColor(vec2 xz, float pick) {
+  float k = fract(texture(uNoise, xz * (1.0 / 47.0) + vec2(0.29, 0.83)).b * 0.85 + pick * 0.3);
+  // (soft, not candy: daisy white and buttercup the commonest, then lilac, campion pink, a few poppies, cornflowers)
+  return k < 0.27 ? vec3(0.8, 0.79, 0.72) : k < 0.52 ? vec3(0.85, 0.64, 0.12) : k < 0.71 ? vec3(0.47, 0.32, 0.72)
+       : k < 0.83 ? vec3(0.84, 0.43, 0.55) : k < 0.91 ? vec3(0.74, 0.16, 0.08) : vec3(0.3, 0.42, 0.8);
 }
 
 // A per-FACET random (0..1): the same over one flat triangle (its normal), different on the next — low-poly tone.

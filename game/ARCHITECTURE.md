@@ -906,5 +906,88 @@ The Select-map card (`MapInfo.page`) opens `/oth.html`; it is not a room map (th
   met — the horizon; a tree / bush tile or rock cell whose top is under it in every azimuth it spans is behind a hill
   and skipped; conservative — eye +1.2 m, ±1 ray, a margin; rebuilt each 4 m moved ≈ 0.4–0.9 ms; `?occlusion=0`
   off). No shadow-map passes to cull (shadows are baked images). F3 shows the culled counts.
-- **Not yet**: engine / tyre sounds, tyre tracks, planar reflections.
+- **Gap round (2026-10-27, the user: "what are we missing vs Over the Hill — add those"; "fix the bridge colliders";
+  "match the style")**:
+  - **Track junctions** (terrain.py): a track near a bed already carved takes THAT bed's height (`BedH`, eased over
+    40 m) and never re-carves it; a last GRADING pass re-grades any ordinary track step > 35 % over a metre (rock-crawl
+    routes keep their ledges: `meta.trails.rough`). Four tracks met 20 m from the spawn with a 3.4 m step that rolled
+    the car; ordinary tracks with a > 40 % step: 77 → 12. scenery.mjs's stream roads pin to the tracks the same way.
+  - **Bridges**: decks slope y0 → y1 with their road (`meta.bridges`), river ramps as long as ≤ 12 % needs (30–110 m),
+    a stream's deck spans the stream's whole cut, ends offset onto the road over 14 m (no lip, no kink); a bridge at
+    every track × stream crossing. Physics: the deck is GROUND (`Static | StaticMesh` — the drivetrain's wheel rays see
+    only ground: before, the tyres fell through and the car slid on its belly), every piece filtered off the car's
+    exact body mesh (`STATIC_MESH_FILTER`: a curb inside that hollow shell flipped the car), capsule curbs, 1.5 m guard
+    rails. Headless drive test (a steering bot, both ways, 40 km/h): every deck carries the car on its wheels.
+  - **Far view**: the white fog is now AERIAL PERSPECTIVE (`fogAmount`: 1 − e^(−d / haze), ≤ 94 %, bluer colour) and the
+    far plane 4.5–9 km — the 16 km world's layered ranges are seen; past 2 km the terrain reads 2 paint octaves, not 5.
+  - **Weather** (Atmosphere `weather`, K, `?weather=`): clear / cloudy / rain spells; painted CLOUDS (Sky.ts, 3 value
+    bands), RAIN (Rain.ts, one instanced draw), WET shading in `shade()` (darker, glossy by roughness), PUDDLES in the
+    track ruts, wet grip + muddy tracks (Vehicle `wet`), a synthesized rain sound.
+  - **Mud** (`mud.bin`, scenery.mjs): a MARSH ("The Bog"), mud holes in the tracks' dips, slow river banks — painted
+    dark and glossy with standing bog water, reeds at its edge, Surf.Mud under the tyres, dark spray.
+  - **Water**: `MapData.waterLevel()`; fording drags the car by depth; white splashes.
+  - **Tyre tracks** (TyreTracks.ts): dark tread marks on dirt / mud / sand, multiply-blended, fade over 2 min.
+  - **Landmarks** (scenery.mjs → `meta.landmarks`, Landmarks.ts): fire lookouts (red roofs, seen from afar), viewpoints,
+    log cabins, a lakeside shack + dock, a sawmill, a mine adit, a meteorite crater — on levelled earth pads, built from
+    the bridges' kit (`Builder` / `woodMaterial`, windows glow at night), box colliders (the dock is ground);
+    DISCOVERED within ~40 m (localStorage) → a toast.
+  - **Map + compass** (MapView.ts): Tab / MAP — a painted chart (hillshade, 40 m contours, colour fields, tracks — rough
+    routes dashed — bridges, the bog, landmarks: icon + name found, "?" not), the car's arrow; click / Z zooms. The
+    compass strip: heading + landmarks ahead and the nearest's distance.
+  - **Winch** (Winch.ts, E / WINCH): hooks the nearest tree / boulder ahead within 35 m, reels in at 1.5 m/s, pulls
+    while taut (≤ 1.3 g); a sagging cable ribbon.
+  - **Lights**: a painted beam from EACH headlamp (`headlight()`: ellipse in angle space, 3 value bands), soft lens
+    glows, faint beams in the air at night; BRAKE lights on braking (any hour) + a red pool behind at night; nights
+    much darker (the ambient floor gives way to the moon).
+- **No post pass by default (2026-10-27, the user: "400+ fps at 1080p on the laptop so a small phone holds 60+";
+  "even remove post-processing, but keep the ULTRA look")**: every tier draws straight to the canvas with its own MSAA
+  (on a phone's tile GPU resolved on-chip); the bloom and god rays are painted FORWARD (Glow.ts): a sun GLARE sprite
+  (core + wide skirt + faint streaks; hidden by the terrain's horizon from a 32-step CPU march), LIGHT SHAFT cards
+  among the trees toward a low sun, the sky's halo + a warmer haze toward the sun (`uGlow`), a sky dither, a CSS
+  vignette. `?post=1` brings the old pass back (with a phone profile: no MSAA, bloom from ¼, rays at ⅛ — 7.5 → 3.2 ms).
+  Also: grass lit PER VERTEX (the carpet is 3–4 blades deep), culled tufts stop at the top of the vertex shader, the
+  near ring split (½ density 0.12–0.25 R), ULTRA 9 blades a tuft; bushes lit per vertex; the TERRAIN drawn LAST of the
+  opaque things (the depth test skips the ground's paint under the grass: −0.47 ms at 1080p); clouds 2 octaves.
+  Measured (M4, headless, uncapped, 1920 × 1080): ULTRA 3.66 → 2.56 ms (273 → 391 fps), HIGH 402, MEDIUM 411,
+  LOW 611; the old post pass 219. Phone viewport ULTRA: 568 fps at 2× pixel ratio, 408 at native 2.6×. (An EMPTY
+  scene costs ~1.1 ms in headless Chrome: the floor.) Cost tests: `?post=1 ?aa=0 ?maxdpr= ?far= ?samples= ?levels=
+  ?relief=0 ?vignette=gl ?mobile=0|1`; profiling scripts: frame time by rAF count (the GPU timer query overlaps frames
+  in headless Metal and can't split by system).
+- **Hidden places round (2026-10-27, the user: "cliffs, valleys, hills, waterfalls, hidden beautiful places — like OTH
+  and Genshin — the colour is the key, without the cost"; "ours look flat, all places visible — they have something
+  different, and that helps: we don't render what's hidden")**:
+  - LANDFORM (terrain.py): the valley BENDS (±120 m, ~1 km wavelength + a harmonic; the river keeps to its floor) and
+    an INTERLOCKING SPUR reaches into the inside of each bend (7: nose ~70 m off the valley line, 14 → 46 m over the
+    side, flanks ≤ ~45 %, clear of the spawn and the three river bridges); 12 RIDGES (350–800 m, 28–55 m, 1–2
+    saddles) cut the side country into pockets; the hill field's big hills 26 → 40 (22–60 m). Ground in sight from
+    the tracks within 1.5 km (`viewshed`: 360 rays from every ~25th track point, eye 2.2 m): mean 13.7 → 11.7 %,
+    p90 24.2 → 20.5 %.
+  - HIDDEN PLACES (`meta.hidden`, landmarks `falls` ≋ / `meadow` ✿, found from inside): two FALLS BASINS — a bowl
+    60–72 m in radius cut into a hillside, an irregular banded cliff ring (26–44 m, bays and buttresses), the one way
+    in a 24 m GORGE facing downhill (its floor an even ≤ 20 % ramp: a track always reaches it), a spring-fed stream on
+    the rim over the back wall from a notch (the face behind the fall sheer: the sheet clears it) into a turquoise pool
+    (carved with the basin, not the ponds' trim) — "Veil Falls" a 12 m curtain; one FLOWER HOLLOW — a grassy ring
+    of hills (a 42 m bank, never the slope's bare rock, trees round the rim) round a wildflower meadow, a grassy pass.
+    No trees on the hollow's floor or between a basin's gap and its fall; no hills, outcrops or streams inside.
+  - WILDFLOWERS (mud.bin is RG now: G = blossoms; scenery.mjs): carpets on the basins' floors, drifts over the lush
+    meadows (~0.8 km²). In the grass a flower is a blade TURNED OVER (its wide edge up as the head, its tip down as the
+    stem — every tier, the same triangles), one kind per drift (`flowerColor`: daisy, buttercup, lupine, campion,
+    poppy, cornflower); past the grass the ground carries the drift's colour in paint.
+  - COLOUR: rock gets a SKY FILL (`rockFill`: OTH's shade is pale blue-grey — ours lit 8 : 1 went black), the slab a
+    touch lighter; CLIFF FACES layered (strata ~3.4 m, warm / cool bands, soft seams, water streaks, moss on the
+    ledges); the slow river clear TEAL (rapids stay on the fast streams); the FALLS painted in three tones (deep teal
+    sheet, aqua, white foam; a glassy lip, whiter as it falls, torn edges, a white foot) with a thicker mist and foam
+    rings.
+  - TRACK SAFETY (the new relief): a route whose smoothing cut its zig-zag into a straight climb keeps its corners;
+    graded beds are locked (no tug-of-war where two tracks share a stretch); a last JUNCTION RELAX eases any ordinary
+    bed steeper than 36 % (a 1.8 m step where a track's end stopped short of the bed it joined, 140 m from the spawn);
+    stream banks never cut a track's bed (scenery.mjs). Steep spots on ordinary tracks (scan): 8, none > 55 %, the
+    nearest 193 m from the spawn. Bridges: NO CURB COLLIDER — a car drifting to the edge rode up the curb against
+    the guard wall and rolled along the deck; the wall alone keeps it on.
+  - COST: the new look ≈ +0.06 ms; paid for by — terrain patches drawn NEAR → FAR (the early depth test skips what a
+    nearer slope hides) and skipped whole behind the hills (`Horizon`, judged 3 m + 1.5 % of the distance high), the
+    track's ragged edge read only within 1.2 m of a track (terrain) / 3.5 m (grass vertices) — exact, sub-pixel paint
+    octaves skipped (≈ −0.29 ms together, interleaved A/B). 1080p ULTRA: 7 views mean 2.46 ms (406 fps), the
+    round-8 spawn harness 394 fps (was 391); phone 2× 552; LOW 632.
+- **Not yet**: planar reflections; grass flattened by the tyres; Pebbles / upgrades / camping / photo mode / co-op.
 

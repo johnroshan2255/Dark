@@ -153,8 +153,19 @@ def polyline_field(X, Z, L, reach):
         S[j0:j1, i0:i1][m] = (acc[k] + t * np.sqrt(l2))[m]
     return D, S, acc[-1]
 
-VALLEY_L = spline(VALLEY)
-VALLEY_C = spline(VALLEY, 40.0)  # (coarse: wide distance fields)
+# THE VALLEY BENDS (2026-10-27, the user: "ours look flat, all places visible — they have something different"): a
+# straight 3 km corridor showed the whole valley from anywhere in it. It now swings ±120 m (a ~1 km wavelength, a
+# shorter harmonic over it) and a SPUR of the hillside reaches into the inside of every bend (below): rounding each
+# one opens the next reach — Over the Hill's (and every real river valley's) interlocking spurs. The ends stay put.
+def meander(L):
+    t = np.gradient(L, axis=0); t /= np.linalg.norm(t, axis=1)[:, None]
+    nrm = np.stack([-t[:, 1], t[:, 0]], 1)
+    s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(L, axis=0).T))])
+    fade = smoothstep(150, 650, s) * (1 - smoothstep(s[-1] - 520, s[-1] - 120, s))
+    off = (120 * np.sin(s / 1000 * 2 * np.pi + 1.9) + 40 * np.sin(s / 430 * 2 * np.pi + 0.4)) * fade
+    return L + nrm * off[:, None], off, nrm, s
+VALLEY_L, VALLEY_OFF, VALLEY_N, VALLEY_S = meander(spline(VALLEY))
+VALLEY_C = meander(spline(VALLEY, 40.0))[0]  # (coarse: wide distance fields)
 # the river meanders inside the valley floor (two harmonics; flat into the lake)
 def river_line():
     L = VALLEY_L
@@ -162,7 +173,7 @@ def river_line():
     nrm = np.stack([-t[:, 1], t[:, 0]], 1)
     s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(L, axis=0).T))])
     fade = smoothstep(0, 200, s) * (1 - smoothstep(s[-1] - 260, s[-1], s))
-    off = (38 * np.sin(s / 410 * 2 * np.pi + 0.7) + 14 * np.sin(s / 150 * 2 * np.pi + 2.1)) * fade
+    off = (22 * np.sin(s / 410 * 2 * np.pi + 0.7) + 9 * np.sin(s / 150 * 2 * np.pi + 2.1)) * fade  # (the valley bends now: the river keeps to its floor)
     return L + nrm * off[:, None]
 RIVER_L = river_line()
 _racc = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(RIVER_L, axis=0).T))])
@@ -315,6 +326,87 @@ slope = np.hypot(gx, gy)
 del gx, gy
 Hi, Dv, Dr, Lq, Hw = carve(Xi, Zi, Hi)
 
+# INTERLOCKING SPURS: at each bend's apex a ridge runs down from the hillside on the INSIDE of the bend to a rounded
+# nose ~70 m from the valley's line (the river wraps round it): 16 m over the valley side at the nose, ~50 m at the
+# shoulder, 55–100 m half width, bending a little downstream; the alternate sides' spurs overlap in plan, so the valley
+# is never seen end to end. Kept off the water and out of the spawn's surroundings.
+log('valley spurs')
+_ss = np.searchsorted(_racc, RIVER_LEN * 0.38)
+_sp_est = RIVER_L[_ss]
+_ext = [k for k in range(1, len(VALLEY_OFF) - 1) if abs(VALLEY_OFF[k]) > 55
+        and abs(VALLEY_OFF[k]) >= abs(VALLEY_OFF[k - 1]) and abs(VALLEY_OFF[k]) >= abs(VALLEY_OFF[k + 1])
+        and max(abs(VALLEY_L[k, 0]), abs(VALLEY_L[k, 1])) < 1850]
+SPURS = []
+rng_s = np.random.default_rng(SEED + 121)
+spur_add = np.zeros_like(Hi)
+for k in _ext:
+    A = VALLEY_L[k]; side = -np.sign(VALLEY_OFF[k]); n_ = VALLEY_N[k] * side
+    tg = VALLEY_L[min(k + 1, len(VALLEY_L) - 1)] - VALLEY_L[max(k - 1, 0)]; tg = tg / np.linalg.norm(tg)
+    nose_d = rng_s.uniform(62, 85); L_ = rng_s.uniform(380, 520)
+    nose = A + n_ * nose_d
+    root = A + n_ * (nose_d + L_) + tg * rng_s.uniform(-60, 90)  # (the crest leans a little downstream)
+    SPURS.append((float(nose[0]), float(nose[1]), float(root[0]), float(root[1])))
+    W = 140
+    lo = np.minimum(nose, root) - W; hi_ = np.maximum(nose, root) + W
+    i0, i1 = np.searchsorted(Xi[0], lo[0]), np.searchsorted(Xi[0], hi_[0])
+    j0, j1 = np.searchsorted(Zi[:, 0], lo[1]), np.searchsorted(Zi[:, 0], hi_[1])
+    Xw, Zw = Xi[j0:j1, i0:i1], Zi[j0:j1, i0:i1]
+    ax = (root - nose) / np.linalg.norm(root - nose)
+    u = (Xw - nose[0]) * ax[0] + (Zw - nose[1]) * ax[1]          # along the crest, 0 at the nose
+    v = -(Xw - nose[0]) * ax[1] + (Zw - nose[1]) * ax[0]         # across it
+    v = v - 18 * np.sin(np.clip(u / L_, 0, 1) * np.pi) * side    # (the crest bows: no ruler-straight ridge)
+    t = np.clip(u / L_, 0, 1)
+    hs = (14 + 32 * smoothstep(0.0, 0.55, t)) * (0.85 + 0.3 * fbm(Xw / 90, Zw / 90, SEED + 122 + k, 2))
+    w = 70 + 60 * t  # (flanks ≤ ~45 %: rolling, and a track can climb one without switchbacks the smoothing would cut)
+    prof = np.exp(-1.4 * (v / w) ** 2) * smoothstep(-40, 30, u) * (1 - smoothstep(0.78, 1.0, u / L_))
+    spur_add[j0:j1, i0:i1] = np.maximum(spur_add[j0:j1, i0:i1], hs * prof)
+spur_keep = smoothstep(24, 75, Dr) * smoothstep(1.2, 1.7, Lq) * smoothstep(140, 260, np.hypot(Xi - _sp_est[0], Zi - _sp_est[1]))
+# (and clear of the three river bridges (below): their ramps and the tracks up from them stay on the valley floor — a
+#  spur beside one had its connecting track climbing its flank at 78 %)
+for _f in (0.2, 0.47, 0.74):
+    _bp = RIVER_L[np.searchsorted(_racc, RIVER_LEN * _f)]
+    spur_keep = spur_keep * smoothstep(150, 300, np.hypot(Xi - _bp[0], Zi - _bp[1]))
+Hi = Hi + spur_add * spur_keep
+log(f'  {len(SPURS)} spurs')
+
+# RIDGES across the side country (the same ask): long, bending ridges (350–800 m, crests 28–55 m over the ground,
+# 70–120 m half width) that cut the land beside the valley into pockets — each with a SADDLE or two (a dip to ~40 %
+# of its height) where a track goes over: the next pocket only shows from the top of the pass.
+log('ridges')
+rng_r = np.random.default_rng(SEED + 125)
+RIDGES = []
+ridge_add = np.zeros_like(Hi)
+tries = 0
+while len(RIDGES) < 12 and tries < 400:
+    tries += 1
+    cx, cz = rng_r.uniform(-1750, 1750, 2)
+    jj, ii = int(round((cz + HALF) / 2)), int(round((cx + HALF) / 2))
+    if Dv[jj, ii] < 330 or Dr[jj, ii] < 260 or Lq[jj, ii] < 2.0: continue
+    if math.hypot(cx - _sp_est[0], cz - _sp_est[1]) < 420: continue
+    if any(math.hypot(cx - a, cz - b) < 520 for a, b, _ in RIDGES): continue
+    if any(math.hypot(cx - a, cz - b) < R * 1.1 for a, b, _, R in TREK): continue
+    L_ = rng_r.uniform(350, 800); th = rng_r.uniform(0, math.pi)
+    # the crest: 6 points along th, each nudged sideways (a bending ridge)
+    P = []
+    for k in range(6):
+        s_ = (k / 5 - 0.5) * L_
+        P.append((cx + math.cos(th) * s_ - math.sin(th) * rng_r.uniform(-45, 45), cz + math.sin(th) * s_ + math.cos(th) * rng_r.uniform(-45, 45)))
+    crest = spline(np.array(P), 8.0)
+    h_ = rng_r.uniform(28, 55); w_ = max(rng_r.uniform(70, 120), 2.3 * h_)  # (flanks ≤ ~45 %)
+    D_, S_, Lc = polyline_field(Xi, Zi, crest, w_ * 2.2)
+    u = np.clip(S_ / Lc, 0, 1)
+    env = np.sin(np.pi * u) ** 0.6
+    sad = np.ones_like(u)
+    for _ in range(1 + int(rng_r.integers(2))):
+        s0 = rng_r.uniform(0.25, 0.75)
+        sad = sad * (1 - 0.6 * np.exp(-((u - s0) * Lc / 55) ** 2))
+    hc = h_ * env * sad * (0.85 + 0.3 * fbm(Xi / 110, Zi / 110, SEED + 126 + len(RIDGES), 2))
+    ridge_add = np.maximum(ridge_add, np.where(D_ < 1e8, hc * np.exp(-1.3 * (D_ / w_) ** 2), 0))
+    RIDGES.append((cx, cz, L_))
+ridge_keep = smoothstep(60, 200, Dr) * smoothstep(1.5, 2.2, Lq) * smoothstep(300, 450, np.hypot(Xi - _sp_est[0], Zi - _sp_est[1]))
+Hi = Hi + ridge_add * ridge_keep
+log(f'  {len(RIDGES)} ridges')
+
 # KNOLLS + HUMMOCKS (the user: "it's like a desert — nothing around him for 500 m; need more hills, bumps"): OTH's
 # ground is never flat — small rounded knolls (4–14 m, 20–60 m across) scattered over the meadows and hummocks
 # (~1–2.5 m, 10–40 m) everywhere, all kept off the water (the tracks are carved later, over them)
@@ -452,6 +544,159 @@ for R in rng_p.uniform(55, 110, 3): try_pond(float(R), flat=0.06)
 for R in rng_p.uniform(16, 40, 10): try_pond(float(R))
 log(f'  {len(PONDS)} ponds / lakes')
 
+# HIDDEN PLACES (2026-10-27, the user: "cliffs, valleys, waterfalls and hidden beautiful places, like Over the Hill and
+# Genshin"): basins only seen from inside. Two FALLS BASINS — a bowl 60–75 m in radius cut into a hillside, ringed by a
+# cliff wall (a banded rock riser, ~26–44 m at the back), its one way in a narrow GORGE (~24 m) facing downhill; a
+# spring-fed stream on the rim spills over the back wall — from a notch the water has cut, the face behind it sheer —
+# into a turquoise pool, the floor a lush flower meadow. One FLOWER HOLLOW — a soft grassy ring of hills round a meadow
+# of wildflowers, its gap a grassy pass. From outside a basin is a horseshoe hill, grass and forest on its outer slopes;
+# a track reaches each through its gap (below). meta.hidden: { kind, name, x, z, r, ro, open, gw, fall?, stream?, pool? }
+log('hidden places')
+rng_x = np.random.default_rng(SEED + 211)
+HIDDEN = []
+HIDZ = np.zeros_like(Hi)     # inside a basin (floor + walls): no hills, outcrops, streams
+HROCK = np.zeros_like(Hi)    # the cliff walls and the gorge's walls: bare rock
+HLUSH = np.zeros_like(Hi)    # the floors: lush green, no forest
+HMEAD = np.zeros_like(Hi)    # a flower hollow, banks and all: grass, never the slope's bare rock
+HRING = np.zeros_like(Hi)    # its rim: a ring of trees
+Hb16 = blur(Hi[::8, ::8], 3)
+gbz, gbx = np.gradient(Hb16, 16.0)
+X16, Z16 = Xi[::8, ::8], Zi[::8, ::8]
+sl16 = np.hypot(gbx, gbz)
+cand_h = (Dr[::8, ::8] > 280) & (Lq[::8, ::8] > 2.3) & (Dv[::8, ::8] > 230) & (np.maximum(np.abs(X16), np.abs(Z16)) < 1600) \
+    & (blur(CLIFFZ[::8, ::8], 3) < 0.003) & (sl16 > 0.06) & (sl16 < 0.22)
+ch_j, ch_i = np.nonzero(cand_h)
+def seg_dist(x, z, ax_, az_, bx_, bz_):
+    abx, abz = bx_ - ax_, bz_ - az_; l2 = abx * abx + abz * abz or 1.0
+    t = min(1.0, max(0.0, ((x - ax_) * abx + (z - az_) * abz) / l2))
+    return math.hypot(x - ax_ - t * abx, z - az_ - t * abz)
+def site_ok(x, z, Ro):
+    if any(math.hypot(x - a, z - b) < max(rx, rz) + Ro + 120 for a, b, rx, rz, _ in PONDS): return False
+    if any(math.hypot(x - a, z - b) < R * 1.25 + Ro for a, b, _, R in TREK): return False
+    if any(math.hypot(x - a, z - b) < r_ * 0.6 + Ro * 0.6 for a, b, r_ in HILLS): return False
+    if any(math.hypot(x - h['x'], z - h['z']) < 700 for h in HIDDEN): return False
+    if any(seg_dist(x, z, *s_) < Ro + 80 for s_ in SPURS): return False
+    return True
+def basin(x, z, kind, name, Ri, Hb, Ro, seed_, hw_f=3.5):
+    jj, ii = int(round((z + HALF) / 16)), int(round((x + HALF) / 16))
+    gl = math.hypot(gbx[jj, ii], gbz[jj, ii]) or 1.0
+    ox, oz = -gbx[jj, ii] / gl, -gbz[jj, ii] / gl  # (the gap faces downhill)
+    cliff = kind == 'falls'
+    Wr = 4.0 if cliff else 42.0                     # the riser: a banded rock wall, or a grassy bank
+    cw = 16.0 if cliff else 12.0                    # the rim's flat top
+    gw = 12.0 if cliff else 18.0                    # the gap's half width
+    W = Ro + 30
+    i0, i1 = np.searchsorted(Xi[0], x - W), np.searchsorted(Xi[0], x + W)
+    j0, j1 = np.searchsorted(Zi[:, 0], z - W), np.searchsorted(Zi[:, 0], z + W)
+    Xw, Zw = Xi[j0:j1, i0:i1] - x, Zi[j0:j1, i0:i1] - z
+    N_ = Hi[j0:j1, i0:i1].copy()
+    r = np.hypot(Xw, Zw)
+    # (an irregular ring: bays and buttresses, gullies between them — no quarry-round wall)
+    rr = r / (1 + 0.13 * fbm(Xw / 45, Zw / 45, SEED + seed_, 2) + 0.05 * fbm(Xw / 12, Zw / 12, SEED + seed_ + 5, 2))
+    cosd = (Xw * ox + Zw * oz) / np.maximum(r, 1e-3)        # 1 toward the gap, −1 at the back
+    perp = np.abs(-Xw * oz + Zw * ox)                       # off the gap's axis (front) / the fall's (back)
+    back = 0.5 * (1 - cosd)
+    F = float(np.median(N_[r < Ri * 0.5])) - 2.0
+    # (the way out must stay drivable: the floor no more than 20 % of the gorge's length above the hillside at its mouth)
+    ex_ = float(bilinear(Hi, HALF, np.array([x + ox * Ro]), np.array([z + oz * Ro]))[0])
+    F = min(F, ex_ + 0.2 * (Ro - Ri))
+    hvar = lambda a, b: 0.8 + 0.36 * fbm(a / 60, b / 60, SEED + seed_ + 1, 2) + 0.1 * fbm(a / 17, b / 17, SEED + seed_ + 4, 2)
+    Hw = Hb * (0.6 + 0.4 * back) * hvar(Xw, Zw)  # (the rim's height wandering: crags and dips, not a level ring)
+    # the waterfall's NOTCH (falls only): the floor runs on under the fall, the face behind it sheer
+    alc = (1 - smoothstep(hw_f + 2, hw_f + 5, perp)) * smoothstep(-0.8, -0.95, cosd) if cliff else np.zeros_like(r)
+    Rin = Ri + (Wr + 2.0) * alc
+    Wre = Wr - (Wr - 1.0) * alc
+    t_ = np.clip((rr - Rin) / Wre, 0, 1)
+    if cliff:
+        st_ = t_ * 3; fl_ = np.floor(st_)
+        face = np.minimum(1.0, (fl_ + smoothstep(0.45, 0.85, st_ - fl_)) / 3)
+    else:
+        face = smoothstep(0, 1, t_)
+    Rc = Rin + Wre + cw
+    o_ = smoothstep(Rc, Ro, rr)
+    wall = np.where(rr < Rc, F + Hw * face, N_ + (F + Hw - N_) * (1 - o_) ** 1.3)
+    wall = wall + 2.5 * fbm(Xw / 14, Zw / 14, SEED + seed_ + 6, 2) * smoothstep(Rin + Wre * 0.8, Rin + Wre + 3, rr) * (1 - o_)
+    floor = F - 0.8 * np.clip(1 - (rr / Ri) ** 2, 0, 1) + 0.5 * fbm(Xw / 25, Zw / 25, SEED + seed_ + 2, 2)
+    # (the riser climbs from the floor to the rim OR the hillside, whichever stands higher — dug into a slope, the
+    #  uphill bank is a steeper climb, never a sheer cut at the floor's edge; a cliff's riser is near-vertical anyway)
+    top_ = np.maximum(N_, F + Hw)
+    tgt = np.where(rr < Rin, floor, np.where(rr < Rin + Wre, F + (top_ - F) * face, np.maximum(N_, wall)))
+    # the GAP: a gorge (sheer walls) or a grassy pass, its floor easing from the basin's down to the hillside's
+    G = (1 - smoothstep(gw, gw + (4.0 if cliff else 22.0), perp)) * smoothstep(0.05, 0.35, cosd) * smoothstep(Ri * 0.4, Ri * 0.8, rr)
+    gf = F + (np.minimum(N_, F) - F) * np.clip((rr - Ri) / (Ro - Ri), 0, 1)  # (an even grade: ≤ 20 %, never a 1.5× steeper middle)
+    tgt = tgt + (np.where(rr < Rin, floor, gf) - tgt) * G
+    wgt = 1 - smoothstep(Ro - 5, Ro + 15, rr)
+    Hi[j0:j1, i0:i1] = N_ + (tgt - N_) * wgt
+    HIDZ[j0:j1, i0:i1] = np.maximum(HIDZ[j0:j1, i0:i1], 1 - smoothstep(Ro - 20, Ro + 10, rr))
+    HLUSH[j0:j1, i0:i1] = np.maximum(HLUSH[j0:j1, i0:i1], np.maximum(1 - smoothstep(Rin - 3, Rin + 1, rr), G * (1 - smoothstep(Ro - 30, Ro, rr))))
+    if not cliff:
+        HMEAD[j0:j1, i0:i1] = np.maximum(HMEAD[j0:j1, i0:i1], 1 - smoothstep(Ro - 30, Ro, rr))
+        HRING[j0:j1, i0:i1] = np.maximum(HRING[j0:j1, i0:i1], smoothstep(Rin + Wre * 0.6, Rin + Wre + 4, rr) * (1 - smoothstep(Rc + 10, Rc + 40, rr)) * (1 - G))
+    if cliff:
+        riser = smoothstep(Rin - 1.5, Rin, rr) * (1 - smoothstep(Rin + Wre + 1, Rin + Wre + 4, rr)) * (1 - G)
+        gorge = smoothstep(gw - 1, gw + 1, perp) * (1 - smoothstep(gw + 7, gw + 10, perp)) * smoothstep(0.15, 0.35, cosd) \
+            * smoothstep(Ri - 4, Ri, rr) * (1 - smoothstep(Ro - 45, Ro - 15, rr))
+        HROCK[j0:j1, i0:i1] = np.maximum(HROCK[j0:j1, i0:i1], np.maximum(riser, gorge))
+    h = {'kind': kind, 'name': name, 'x': round(x, 1), 'z': round(z, 1), 'r': round(Ri, 1), 'ro': round(Ro, 1),
+         'open': round(math.atan2(ox, oz), 3), 'ox': ox, 'oz': oz, 'gw': gw, 'F': round(F, 2)}
+    if cliff:
+        # the POOL under the fall (in the notch), carved here — not with the ponds: their trim would cut the wall
+        hb_ = float(Hb)
+        lipr = Ri + Wr + 3.3  # (the notch's sheer face: 2 … 3 m behind the wall's foot; the sheet clears it)
+        px_, pz_ = x - ox * (Ri + Wr - 6), z - oz * (Ri + Wr - 6)
+        rx_, rz_ = 12.0, 8.0                     # across the axis, along it
+        rot_ = math.atan2(oz, ox)                # (the ellipse's x axis along the gap's axis)
+        level = F - 0.45
+        c_, s_ = math.cos(rot_), math.sin(rot_)
+        lx = (Xi[j0:j1, i0:i1] - px_) * c_ + (Zi[j0:j1, i0:i1] - pz_) * s_
+        lz = -(Xi[j0:j1, i0:i1] - px_) * s_ + (Zi[j0:j1, i0:i1] - pz_) * c_
+        q = np.hypot(lx / rz_, lz / rx_) * (1 + 0.08 * fbm(Xw / 9, Zw / 9, SEED + seed_ + 3, 2))
+        d = (q - 1) * math.sqrt(rx_ * rz_)
+        cut = level - 0.5 - 2.4 * smoothstep(-1.5, -6, d) + 0.9 * smoothstep(-1.5, 3, d) + 0.6 * smoothstep(3, 9, d)
+        hw2 = Hi[j0:j1, i0:i1]
+        Hi[j0:j1, i0:i1] = hw2 + (np.minimum(hw2, cut) - hw2) * (1 - smoothstep(5, 9, d))
+        PQ_HIDDEN.append((j0, j1, i0, i1, q))
+        h['pool'] = {'cx': round(px_, 1), 'cz': round(pz_, 1), 'rx': round(rz_ * 1.16, 1), 'rz': round(rx_ * 1.16, 1), 'rot': round(rot_, 3), 'level': round(level, 2)}
+        # the FALL: from the rim's edge in the notch down into the pool; the spring-fed STREAM on the rim behind it
+        lx_, lz_ = x - ox * lipr, z - oz * lipr
+        top = F + hb_ * float(hvar(np.array([-ox * lipr]), np.array([-oz * lipr]))[0])
+        sx, sz, sy = [], [], []
+        y_ = top
+        for k in range(15):
+            # (the stream's last point 1.2 m short of the lip: its ribbon doesn't jut out over the edge)
+            qx, qz = lx_ - ox * (4 * k + 1.2), lz_ - oz * (4 * k + 1.2)
+            g_ = float(bilinear(Hi, HALF, np.array([qx]), np.array([qz]))[0])
+            if k > 3 and g_ < y_ - 0.2: break  # (where the rim falls away behind: the spring)
+            y_ = max(y_, g_ - 0.5)
+            sx.append(qx); sz.append(qz); sy.append(y_)
+        # carve the channel (a flat bed 0.5 m under the water, banks 1.4 m) and set the lip at the water
+        T_ = np.array([sx, sz]).T
+        if len(T_) >= 2:
+            Dc, Sc, _ = polyline_field(Xi, Zi, T_, 12)
+            ss_ = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(T_, axis=0).T))])
+            yb = np.interp(Sc, ss_, np.array(sy)) - 0.5
+            kk = (1 - smoothstep(hw_f * 0.9, hw_f * 0.9 + 1.4, Dc)) * (Sc > 0.5)
+            Hi[:] = np.where(kk > 0, Hi + (np.minimum(Hi, yb) - Hi) * kk, Hi)
+        h['fall'] = {'x': round(lx_, 1), 'z': round(lz_, 1), 'y': round(sy[0] + 0.05, 2), 'bx': round(px_, 1), 'bz': round(pz_, 1), 'by': round(level, 2), 'hw': hw_f}
+        # (index 0 downstream — the lip — like every stream run)
+        h['stream'] = {'x': [round(v, 1) for v in sx], 'z': [round(v, 1) for v in sz], 'y': [round(v, 2) for v in sy], 'hw': [hw_f / 1.6] * len(sx)}  # (the renderer widens a stream 1.6×: as wide as the fall at the lip)
+    HIDDEN.append(h)
+    log(f'  {kind} "{name}" at ({x:.0f}, {z:.0f}) r {Ri:.0f}, walls {Hb:.0f} m, floor {F:.1f}, {math.hypot(x - SP0[0], z - SP0[1]):.0f} m from the spawn')
+PQ_HIDDEN = []
+for kind, name, dmin, dmax in (('falls', 'Hidden Falls', 450, 950), ('meadow', 'Flower Hollow', 500, 1400), ('falls', 'Veil Falls', 900, 1900)):
+    Ri = float(rng_x.uniform(60, 72)) if kind == 'falls' else float(rng_x.uniform(70, 85))
+    Ro = Ri + (125 if kind == 'falls' else 100)
+    for k in rng_x.permutation(len(ch_j)):
+        x, z = float(X16[ch_j[k], ch_i[k]]), float(Z16[ch_j[k], ch_i[k]])
+        if not (dmin < math.hypot(x - SP0[0], z - SP0[1]) < dmax) or not site_ok(x, z, Ro): continue
+        basin(x, z, kind, name, Ri, float(rng_x.uniform(30, 40)) if kind == 'falls' else float(rng_x.uniform(14, 19)), Ro, 230 + len(HIDDEN) * 10,
+              hw_f=6.0 if name == 'Veil Falls' else 3.6)  # (Veil Falls: a wide curtain)
+        break
+    else:
+        log(f'  no site for {name}')
+def basin_clear(x, z, R):
+    return all(math.hypot(x - h['x'], z - h['z']) > h['ro'] + R * 1.2 + 10 for h in HIDDEN)
+
 # THE HILL FIELD (the user, 2026-10-26: "more bumps and small hills all over the place — bit bigger hills and smaller;
 # some with rocks, some just the rock texture on the ground — the congested feel of OTH"): ~250 more hills, small
 # (18–45 m across, 3–12 m), medium (45–100 m, 8–28 m) and big (100–190 m, 18–50 m), each an ellipse at its own angle
@@ -466,7 +711,9 @@ ROCKTEX = np.zeros_like(Hi)
 FIELD = []  # (x, z, R, kind)
 def pond_clear(x, z, R):
     return all(math.hypot(x - a, z - b) > max(rx, rz) + R * 0.85 + 12 for a, b, rx, rz, _ in PONDS)
-want = [(18, 45, 3, 12)] * 140 + [(45, 100, 8, 28)] * 85 + [(100, 190, 18, 50)] * 26
+# (2026-10-27, "ours look flat, all places visible": more and taller big hills — the ground between you and the far
+#  side of the box rises often enough to hide it)
+want = [(18, 45, 3, 12)] * 140 + [(45, 100, 8, 28)] * 95 + [(100, 190, 22, 60)] * 40
 spots = []
 for a, b, rx, rz, _ in PONDS:  # (hills by some of the ponds: 1–3 each, 40–130 m from the shore)
     if rng_f.random() < 0.75:
@@ -478,7 +725,7 @@ for k_, (rmin, rmax, hmin, hmax) in enumerate(want):
     if k_ < len(spots) and rmin < 100: x, z = spots[k_]
     else:
         kk = rng_f.integers(len(okfj)); x, z = float(Xi[0, okfi[kk] * 8]), float(Zi[okfj[kk] * 8, 0])
-    if not pond_clear(x, z, R): continue
+    if not pond_clear(x, z, R) or not basin_clear(x, z, R): continue
     if not (-1880 < x < 1880 and -1880 < z < 1880): continue
     th = rng_f.uniform(0, math.pi); asp = rng_f.uniform(0.6, 1.0)
     W = R * 2.2
@@ -543,6 +790,10 @@ for pi2, (cx, cz, rx, rz, rot) in enumerate(PONDS):
     Hi[j0:j1, i0:i1] = hw_ + (np.minimum(hw_, cut) - hw_) * k
     PQ[j0:j1, i0:i1] = np.minimum(PQ[j0:j1, i0:i1], q)
     PONDW.append({'cx': round(cx, 1), 'cz': round(cz, 1), 'rx': round(rx * 1.16, 1), 'rz': round(rz * 1.16, 1), 'rot': round(rot, 3), 'level': round(level, 2)})
+# the hidden basins' pools (carved with their basins): water to the masks, the trails' walls and the renderer
+for j0, j1, i0, i1, q in PQ_HIDDEN: PQ[j0:j1, i0:i1] = np.minimum(PQ[j0:j1, i0:i1], q)
+for h in HIDDEN:
+    if 'pool' in h: PONDW.append(h['pool'])
 
 # ---------------------------------------------------------------------------------------------------------- rocks
 # ROCK OUTCROPS (the user, 2026-10-26: "places with huge rock — the terrain itself, rock texture, no grass there"):
@@ -596,6 +847,7 @@ for cx, cz, R, kind in FIELD:
     if kind == 'rock':
         a = rng_o.random() * 2 * math.pi; off = R * 0.3 * rng_o.random()
         sites.append((cx + math.cos(a) * off, cz + math.sin(a) * off, min(60.0, 10 + 0.45 * R)))
+sites = [s_ for s_ in sites if basin_clear(s_[0], s_[1], s_[2])]  # (no rock formation inside a hidden basin)
 add = np.zeros_like(Hi)
 ROCKZ = np.zeros_like(Hi)
 for si_, (sx, sz, R) in enumerate(sites):
@@ -781,6 +1033,9 @@ LAKE_SHORE = (LAKE['cx'] + 60.0, LAKE['cz'] + LAKE['rz'] + 70.0)
 SOUTH = (330.0, HALF - 140.0)
 TRAILS = []
 TREKS = []
+def steepest(T):
+    hs = bilinear(Hi, HALF, T[:, 0], T[:, 1])
+    return float(np.max(np.abs(hs[2:] - hs[:-2])) / 8.0) if len(hs) > 2 else 0.0
 def build(a, b, trek=False, rocky=False):
     # (a trucking track — up a trekking hill, through a rock formation — may climb ledges and blocks: steeper steps
     #  allowed, the rock not a wall, and it isn't graded smooth below)
@@ -788,9 +1043,16 @@ def build(a, b, trek=False, rocky=False):
     path = astar(ca, cb, 0.62 if (trek or rocky) else 0.3, wall_basic if rocky else None)
     trek = trek or rocky
     if not path: log('  no route', a, b); return
+    if len(path) < 2: return  # (already on the network: nothing to build)
     for u in path: mult[u] = 0.4
     P = np.array([[X8[u // n8, u % n8], Z8[u // n8, u % n8]] for u in path], float)
-    TRAILS.append(resample(smooth_path(P)))
+    T_ = resample(smooth_path(P))
+    # (on steep ground the route zig-zags to keep ≤ 30 %; the smoothing can cut the zig-zag into a straight climb —
+    #  then keep the route's own corners, only rounded)
+    if not trek and steepest(T_) > 0.36:
+        T2 = resample(chaikin(P, 3))
+        if steepest(T2) < steepest(T_): T_ = T2
+    TRAILS.append(T_)
     TREKS.append(trek)
 
 build(SPAWN_XZ, LAKE_SHORE)
@@ -819,6 +1081,15 @@ for i_, (x, z, R) in enumerate(rs):
 BRIDGES = []
 BRIDGE_T = set()
 BRIDGE_SEG = []
+BRIDGE_R = []  # (each bridge's two ramp lengths)
+def ramp_len(E, dv, deck):
+    # (2026-10-27: a fixed 30 m ramp came down a 10 m bank at 42 % and flipped the car onto its nose: as long as
+    #  the height it climbs needs for ≤ 12 % on average — ≤ 18 % at the steepest — 30 … 110 m)
+    r = 30.0
+    for _ in range(4):
+        g = float(bilinear(Hi, HALF, np.array([E[0] + dv[0] * r]), np.array([E[1] + dv[1] * r]))[0])
+        r = float(np.clip(abs(g - deck) / 0.12, 30.0, 110.0))
+    return r
 for frac in (0.2, 0.47, 0.74):
     s_ = RIVER_LEN * frac
     k_ = int(np.searchsorted(_racc, s_))
@@ -830,7 +1101,9 @@ for frac in (0.2, 0.47, 0.74):
     line_ = np.linspace(0, 1, 60)[:, None] * (E2 - E1) + E1
     under_ = bilinear(Hi, HALF, line_[:, 0], line_[:, 1])  # (the banks under the deck never poke through it)
     deck = float(max(y1, y2, river_surface(s_) + 1.6, under_.max() + 0.3))
-    A1 = E1 - n_ * 30; A2 = E2 + n_ * 30
+    r1_, r2_ = ramp_len(E1, -n_, deck), ramp_len(E2, n_, deck)
+    BRIDGE_R.append((r1_, r2_))
+    A1 = E1 - n_ * r1_; A2 = E2 + n_ * r2_
     BRIDGES.append({'x0': round(float(E1[0]), 2), 'z0': round(float(E1[1]), 2), 'x1': round(float(E2[0]), 2), 'z1': round(float(E2[1]), 2),
                     'y': round(deck, 2), 'w': 4.6})
     BRIDGE_SEG.append((E1.copy(), E2.copy()))
@@ -844,7 +1117,7 @@ for frac in (0.2, 0.47, 0.74):
         if not (0 <= ii < n8 and 0 <= jj < n8): continue
         v = jj * n8 + ii
         tt = math.hypot(x_ - A1[0], z_ - A1[1])
-        Hl[v] = ha1 + (deck - ha1) * min(1.0, tt / 30.0) if tt < 30 else (ha2 + (deck - ha2) * min(1.0, (LA - tt) / 30.0) if tt > LA - 30 else deck)
+        Hl[v] = ha1 + (deck - ha1) * min(1.0, tt / r1_) if tt < r1_ else (ha2 + (deck - ha2) * min(1.0, (LA - tt) / r2_) if tt > LA - r2_ else deck)
         ford[v] = False; mult[v] = 0.4
     for A in (A1, A2):
         pts = np.concatenate([T for t_i, T in enumerate(TRAILS) if t_i not in BRIDGE_T])
@@ -863,12 +1136,21 @@ for pi2, (cx, cz, rx, rz, rot) in enumerate(PONDS):
     if max(rx, rz) > 50:
         S2 = (cx - dx_ / L_ * off, cz - dz_ / L_ * off)
         build(S1, S2)
+# TRACKS INTO THE HIDDEN BASINS: from a point on the floor in front of the pool out through the gap to the network
+# (the walls are too steep for a route: it can only come in through the gorge / the pass)
+for h in HIDDEN:
+    pts = np.concatenate(TRAILS)
+    ex, ez = h['x'] + h['ox'] * (h['ro'] + 40), h['z'] + h['oz'] * (h['ro'] + 40)
+    k = int(np.argmin(np.hypot(pts[:, 0] - ex, pts[:, 1] - ez)))
+    build((h['x'] + h['ox'] * h['r'] * 0.25, h['z'] + h['oz'] * h['r'] * 0.25), (float(pts[k, 0]), float(pts[k, 1])))
 log(f'  {len(TRAILS)} trails, {sum(len(t) for t in TRAILS) * 4 / 1000:.1f} km, {len(BRIDGES)} bridges, tops {[(round(a), round(b)) for a, b in tops]}')
 # carve them (2 m grid), and the distance-to-track field the ground shader paints with
 Dt = np.full(Hi.shape, 99.0)
+BedH = np.zeros(Hi.shape)  # (each carved cell: its nearest track's bed height — the junctions match it)
 # UNDER A BRIDGE no track carves the river (a route that crosses on the bridge would fill the channel in: a sandbar
 # under the deck); the deck's footprint on the banks is track earth (no grass up through the planks)
 UNDER = np.zeros(Hi.shape, bool); DECK = np.zeros(Hi.shape, bool)
+ROUGHB = np.zeros(Hi.shape, bool)  # (the rock-crawling routes' beds: their ledges are meant)
 for (E1_, E2_), B_ in zip(BRIDGE_SEG, BRIDGES):
     Db, Sb, Lb = polyline_field(Xi, Zi, np.array([E1_, E2_]), 14)
     on = (Db < TRAIL_HW + 6.5) & (Sb > 0.5) & (Sb < Lb - 0.5)  # (≥ a track's carving reach, hw + 5.5 m)
@@ -880,13 +1162,24 @@ for ti_, (T, trek) in enumerate(zip(TRAILS, TREKS)):
     if ti_ in BRIDGE_T:
         # A → E: an earth ramp from the ground up to the deck; E → E: the deck (no carving: the river runs under it)
         B_ = BRIDGES[sorted(BRIDGE_T).index(ti_)]
-        e0 = 30.0; e1 = ss[-1] - 30.0
+        r1_, r2_ = BRIDGE_R[sorted(BRIDGE_T).index(ti_)]
+        e0 = r1_; e1 = ss[-1] - r2_
         # (the ramp ends 15 cm under the deck's top: the planks lie on it, no ground shows through them)
         hc = np.where(ss < e0, hs_[0] + (B_['y'] - 0.15 - hs_[0]) * smoothstep(0, e0, ss),
                       np.where(ss > e1, hs_[-1] + (B_['y'] - 0.15 - hs_[-1]) * smoothstep(ss[-1], e1, ss), B_['y'] - 0.3))
     else:
         k = 9
         hc = np.convolve(np.pad(hs_, k, mode='edge'), np.ones(2 * k + 1) / (2 * k + 1), mode='same')[k:-k]
+        # JUNCTIONS (2026-10-27: four tracks met 20 m from the spawn, each carving its own smoothed profile over the
+        # last — a 3.4 m step and a 2.3 m side lean that rolled the car): near a bed already carved (within reach of
+        # this track's shoulders: crossing, joining or running beside it) its profile takes THAT bed's height (BedH:
+        # every carved cell keeps the height of its nearest track's bed), easing back to its own over 40 m along it
+        pin = 1 - smoothstep(TRAIL_HW + 1, TRAIL_HW + 7, bilinear(Dt, HALF, T[:, 0], T[:, 1]))
+        if (pin > 0).any():
+            src = np.nonzero(pin > 0)[0]; Bs = bilinear(BedH, HALF, T[src, 0], T[src, 1])
+            Wm = pin[src][None, :] * (1 - smoothstep(0, 40, np.abs(ss[:, None] - ss[src][None, :])))
+            j_ = Wm.argmax(1); P_ = Wm[np.arange(len(ss)), j_]
+            hc = hc + (Bs[j_] - hc) * P_
     D, S, _ = polyline_field(Xi, Zi, T, 16)
     target = np.interp(S, ss, hc) - 0.12 * (1 - smoothstep(0, TRAIL_HW, D))
     w = 1 - smoothstep(TRAIL_HW + 0.5, TRAIL_HW + 5.5, D)
@@ -894,11 +1187,59 @@ for ti_, (T, trek) in enumerate(zip(TRAILS, TREKS)):
     under = UNDER | ((Dr < Hw * 2.05) if ti_ in BRIDGE_T else False)  # (the channel and its banks under the deck)
     w = np.where(under, 0, w)
     D = np.where(under, 99.0, D)
-    if trek: w = w * (1 - 0.85 * np.maximum(TREKZ, ROCKZ))  # (over ledges and blocks the track keeps them: rock crawling)
+    if trek:
+        w = w * (1 - 0.85 * np.maximum(TREKZ, ROCKZ))  # (over ledges and blocks the track keeps them: rock crawling)
+        ROUGHB |= (D < TRAIL_HW + 1) & (np.maximum(TREKZ, ROCKZ) > 0.1)  # (only where it crawls rock: not its way there)
+    # (a bed already carved is never carved again: this track's shoulders can't tilt it, its bed joins it level)
+    if ti_ not in BRIDGE_T: w = w * smoothstep(TRAIL_HW - 0.5, TRAIL_HW + 1.5, Dt)
     Hi = Hi + (target - Hi) * w
+    BedH = np.where(D < Dt, target, BedH)
     Dt = np.minimum(Dt, D)
 Dt = np.where(DECK & ~UNDER, np.minimum(Dt, 0.4), Dt)
-k0 = int(round((FAR_HALF - HALF) / 16))
+# GRADING, a last pass: where an ordinary track's bed still steps (> 35 % over a metre — a switchback's legs carving
+# each other, a pond's bowl, two beds meeting at an angle) that stretch is re-graded onto its own bed smoothed ±16 m,
+# easing out over 12 m; the rock-crawling routes keep their ledges, the water its banks
+graded = 0
+# (a bed once graded is LOCKED: two tracks sharing a stretch each graded the shared cells onto their own smoothed
+#  profile in turn — a 0.6 m step where the second one's reach ended; now the later one keeps the earlier's bed)
+GL = np.zeros(Hi.shape, bool)
+for ti_, (T, trek) in enumerate(zip(TRAILS, TREKS)):
+    if trek or ti_ in BRIDGE_T: continue
+    T1 = resample(T, 1.0)
+    if len(T1) < 8: continue
+    hs_ = bilinear(Hi, HALF, T1[:, 0], T1[:, 1])
+    bad = np.abs(np.diff(hs_, append=hs_[-1])) > 0.35
+    if not bad.any(): continue
+    graded += 1
+    k = 16
+    sm = np.convolve(np.pad(hs_, k, mode='edge'), np.ones(2 * k + 1) / (2 * k + 1), mode='same')[k:-k]
+    near_bad = np.convolve(bad.astype(float), np.ones(2 * k + 1), mode='full')[k:k + len(bad)] > 0  # (a track shorter than the window too)
+    ss1 = np.arange(len(T1), dtype=float)
+    src = ss1[near_bad]
+    gap = np.abs(ss1[:, None] - src[None, :]).min(1)
+    along = 1 - smoothstep(0, 12, gap)
+    D, S, _ = polyline_field(Xi, Zi, T1, 10)
+    w = (1 - smoothstep(TRAIL_HW + 0.3, TRAIL_HW + 3.5, D)) * np.interp(S, ss1, along)
+    w = np.where((Lq < 1.05) | (PQ < 1.02) | UNDER | GL, 0, w)
+    Hi = Hi + (np.interp(S, ss1, sm) - Hi) * w
+    GL |= (w > 0.5) & (D < TRAIL_HW)
+log(f'  graded {graded} tracks')
+# JUNCTION RELAX, the very last: where two beds still meet at different heights (a track's end stops a few metres short
+# of the bed it joins — 1.8 m over 2 m, 140 m from the spawn, 2026-10-27) the step is eased out: on the ordinary beds
+# only, wherever the bed is steeper than 36 %, toward its 3 × 3 neighbourhood, until none is (a ramp over ~10–15 m)
+bedm = (Dt < TRAIL_HW + 0.5) & ~ROUGHB & ~UNDER & ~DECK & (Lq >= 1.05) & (PQ >= 1.02)
+relaxed = 0
+for it_ in range(60):
+    gz_, gx_ = np.gradient(Hi, 2.0)
+    st_ = bedm & (np.hypot(gx_, gz_) > 0.36)
+    if not st_.any(): break
+    relaxed = max(relaxed, int(st_.sum()))
+    st_ = np.pad(st_, 1)[1:-1, 1:-1] | np.roll(st_, 1, 0) | np.roll(st_, -1, 0) | np.roll(st_, 1, 1) | np.roll(st_, -1, 1)
+    st_ &= bedm
+    avg = blur(Hi, 1)
+    Hi = np.where(st_, Hi + (avg - Hi) * 0.7, Hi)
+log(f'  junction relax: {relaxed} steep bed cells, {it_ + 1} rounds')
+k0 =int(round((FAR_HALF - HALF) / 16))
 Hf[k0:k0 + 257, k0:k0 + 257] = Hi[::8, ::8]
 
 log('masks (4 m)')
@@ -948,6 +1289,15 @@ rock = rock * (1 - (1 - np.maximum(TZ4, ROCKZ[::2, ::2])) * smoothstep(TRAIL_HW 
 rock = np.maximum(rock, np.clip(blur(ROCKTEX[::2, ::2], 1), 0, 1) * (1 - smoothstep(TRAIL_HW + 4, TRAIL_HW + 1, Dt4)))
 # the outcrops: rock, a ragged painted edge
 rock = np.maximum(rock, np.maximum(ROCKZ[::2, ::2], ROCKZ[1::2, 1::2] if ROCKZ[1::2, 1::2].shape == ROCKZ[::2, ::2].shape else ROCKZ[::2, ::2]))
+# the hidden basins: sheer rock walls, a lush floor (green, never straw, no forest — a clearing), the gorge rock too
+HL4 = HLUSH[::2, ::2]
+rock = np.maximum(rock * (1 - HL4), HROCK[::2, ::2])
+dry = dry * (1 - 0.9 * HL4)
+forest = forest * (1 - HL4)
+HM4 = HMEAD[::2, ::2]
+rock = rock * (1 - HM4)
+dry = dry * (1 - 0.6 * HM4)
+forest = np.maximum(forest, np.clip(HRING[::2, ::2] * 1.2, 0, 1))
 
 # ---------------------------------------------------------------------------------------------------------- write
 os.makedirs(OUT, exist_ok=True)
@@ -980,8 +1330,11 @@ meta = {
                   'y': [round(float(v), 3) for v in river_surface(rs)], 'hw': [round(float(v), 2) for v in river_halfwidth(rs)]},
     },
     'spawn': spawn,
+    'hidden': [{k_: v_ for k_, v_ in h.items() if k_ not in ('ox', 'oz')} for h in HIDDEN],
+    'spurs': [[round(v, 1) for v in s_] for s_ in SPURS],
     'bridges': BRIDGES,
-    'trails': {'hw': TRAIL_HW, 'lines': [[[round(float(a), 1), round(float(b), 1)] for a, b in T[::2]] for T in TRAILS]},
+    'trails': {'hw': TRAIL_HW, 'lines': [[[round(float(a), 1), round(float(b), 1)] for a, b in T[::2]] for T in TRAILS],
+               'rough': [i for i, t in enumerate(TREKS) if t]},  # (the rock-crawling routes: ledges and blocks kept)
 }
 with open(os.path.join(OUT, 'meta.json'), 'w') as f: json.dump(meta, f)
 log(f'wrote {OUT}: box {in_min:.1f}..{in_min + in_range:.1f} m, world {far_min:.1f}..{far_min + far_range:.1f} m, spawn {spawn}')

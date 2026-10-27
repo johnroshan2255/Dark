@@ -119,12 +119,15 @@ export class Vehicle {
     this.sim.place(t.x, this.map.height(t.x, t.z) + 0.8, t.z, this.sim.heading)
   }
 
+  /** How wet the land is (main.ts: the weather's uWet): the tyres lose grip (each surface's own `wet`), the tracks
+   *  turn half to MUD in the rain. */
+  wet = 0
   /** What the tyres are on: dirt on the tracks, sand / gravel at the water, rock on the rock mask, else grass. */
   private readonly mk: [number, number, number, number] = [0, 0, 0, 0]
   private surfaceAt(x: number, z: number, out: SurfaceMix): void {
     const w = out.w
     w.fill(0)
-    out.wet = 0
+    out.wet = this.wet
     out.wash = 0
     // on a BRIDGE's planks (above the water under it): a hard, slightly rough surface
     const deck = this.map.bridgeAt(x, z)
@@ -138,11 +141,15 @@ export class Vehicle {
     const water = m[2] > 0.9 ? 1 : 0
     const rock = Math.min(1, m[0] * 1.5) * (1 - track)
     const rest = Math.max(0, 1 - track - water - rock)
-    w[Surf.Dirt] = track
+    w[Surf.Dirt] = track * (1 - 0.5 * this.wet)
+    w[Surf.Mud] = track * 0.5 * this.wet
     w[Surf.Sand] = water
     w[Surf.Asphalt] = rock * 0.6 // (bare rock grips like a hard surface; rougher, see below)
     w[Surf.Dirt] += rock * 0.4
     w[Surf.Grass] = rest
+    // the MUD of the marsh, the mud holes and the banks (mud.bin): it takes over what's under it
+    const mud = this.map.mudAt(x, z) * (1 - water)
+    if (mud > 0.01) { for (let k = 0; k < w.length; k++) w[k] *= 1 - mud; w[Surf.Mud] += mud }
     blendRoughness(out)
     out.stones *= 1 + rock
   }
@@ -235,6 +242,16 @@ export class Vehicle {
     this.readPose(this.prevP, this.prevQ)
     this.sim.step(dt)
     this.sim.keepAbove(this.map.height(t.x, t.z))
+    // FORDING (a river, a stream, a pond's edge): the water drags the car back by its depth (and holds it up a little
+    // when it's deep) — a crossing is slow, a deep one a struggle
+    const lvl = this.map.waterLevel(t.x, t.z)
+    if (lvl !== null) {
+      const depth = lvl - this.map.height(t.x, t.z)
+      if (depth > 0.15) {
+        const b = this.sim.body, v = b.linvel(), m = b.mass(), k = Math.min(1.2, depth) * 0.9
+        b.applyImpulse({ x: -v.x * m * k * dt, y: m * 3 * Math.max(0, Math.min(1, depth - 0.6)) * dt, z: -v.z * m * k * dt }, true)
+      }
+    }
   }
 
   private readPose(p: THREE.Vector3, q: THREE.Quaternion): void {
@@ -276,39 +293,64 @@ export class Vehicle {
   /** L: headlights on / off / auto (auto = on from dusk). */
   private lightMode: 'auto' | 'on' | 'off' = 'auto'
   private lampMesh: THREE.InstancedMesh | null = null
-  private readonly lampMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(1, 0.92, 0.75), toneMapped: false })
-  private readonly tailMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.9, 0.05, 0.02), toneMapped: false })
   private tailMesh: THREE.InstancedMesh | null = null
-  /** Headlights: the shared uniforms (every material lights its surface with them) + the lamps' glow. */
-  lights(atmos: Atmosphere): void {
+  private beams: THREE.Mesh | null = null
+  private readonly lampMat = glowMaterial(new THREE.Color(1, 0.9, 0.72))
+  private readonly tailMat = glowMaterial(new THREE.Color(1, 0.07, 0.03))
+  private readonly beamMat = beamMaterial()
+  private brakeK = 0
+  private readonly lampL = new THREE.Vector3()
+  private readonly lampR = new THREE.Vector3()
+  /** The car's lights (2026-10-27, the user: "the headlight comes from the centre of the front, not the headlamps; the
+   *  back light should light when we brake; use a light like paint"): the shared uniforms put a painted BEAM from each
+   *  lamp on every surface (Atmosphere `headlight()`) and the brake lights' red pool behind; the lenses GLOW (soft
+   *  painted halos, above white: the bloom takes them), at night a faint painted cone of light in the air ahead. The
+   *  BRAKE LIGHTS burn whenever the brake is on while rolling forward (S / BRAKE; S at a standstill is reverse) or the
+   *  handbrake is pulled, day or night; with the headlights on the tail lamps glow dim. */
+  lights(atmos: Atmosphere, dt = 1 / 60): void {
     if (!this.sim || !this.model) return
     const on = this.lightMode === 'on' || (this.lightMode === 'auto' && atmos.uniforms.uNight.value > 0.25)
-    const u = atmos.uniforms, lamp = this.model.lamps.head
-    const hp = new THREE.Vector3(0, lamp ? lamp.c[1] : 0.9, lamp ? lamp.c[2] - 0.2 : -this.model.half.z).applyQuaternion(this.root.quaternion).add(this.root.position)
-    u.uHeadPos.value.set(hp.x, hp.y, hp.z, on ? 1 : 0)
-    u.uHeadDir.value.set(0, -0.07, -1).normalize().applyQuaternion(this.root.quaternion)
+    const u = atmos.uniforms, head = this.model.lamps.head, tail = this.model.lamps.tail, hz = this.model.half, q = this.root.quaternion
+    const h = head ? head.c : [hz.x * 0.7, 0.9, -hz.z], t = tail ? tail.c : [hz.x * 0.75, 0.9, hz.z]
+    this.lampL.set(-Math.abs(h[0]), h[1], h[2] - 0.05).applyQuaternion(q).add(this.root.position)
+    this.lampR.set(Math.abs(h[0]), h[1], h[2] - 0.05).applyQuaternion(q).add(this.root.position)
+    u.uHeadL.value.set(this.lampL.x, this.lampL.y, this.lampL.z, on ? 1 : 0)
+    u.uHeadR.value.copy(this.lampR)
+    u.uHeadDir.value.set(0, 0, -1).applyQuaternion(q)
+    u.uHeadUp.value.set(0, 1, 0).applyQuaternion(q)
+    const c = this.sim.controls, braking = (c.brake && this.sim.speed > 0.4) || c.handbrake
+    this.brakeK = braking ? Math.min(1, this.brakeK + dt / 0.06) : Math.max(0, this.brakeK - dt / 0.12)
+    const tc = new THREE.Vector3(0, t[1], t[2] + 0.1).applyQuaternion(q).add(this.root.position)
+    u.uTail.value.set(tc.x, tc.y, tc.z, this.brakeK)
     if (!this.lampMesh) {
-      const g = new THREE.CircleGeometry(1, 16)
+      const g = new THREE.PlaneGeometry(2, 2)
       this.lampMesh = new THREE.InstancedMesh(g, this.lampMat, 2)
       this.tailMesh = new THREE.InstancedMesh(g, this.tailMat, 2)
       this.lampMesh.frustumCulled = this.tailMesh.frustumCulled = false
-      this.root.add(this.lampMesh, this.tailMesh)
-      const m = new THREE.Matrix4(), q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI)
-      const head = this.model.lamps.head, tail = this.model.lamps.tail, hz = this.model.half
+      this.lampMesh.renderOrder = this.tailMesh.renderOrder = 2
+      this.beams = new THREE.Mesh(beamGeometry(Math.abs(h[0]), h[1], h[2] - 0.05), this.beamMat)
+      this.beams.frustumCulled = false
+      this.beams.renderOrder = 3
+      this.root.add(this.lampMesh, this.tailMesh, this.beams)
+      const m = new THREE.Matrix4(), back = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI)
       for (let k = 0; k < 2; k++) {
         const sx = k ? 1 : -1
-        const h = head ? head.c : [hz.x * 0.7, 0.9, -hz.z], hr = head ? Math.max(0.06, Math.min(head.w, head.h)) : 0.1
-        m.compose(new THREE.Vector3(Math.abs(h[0]) * sx, h[1], h[2] - 0.02), q, new THREE.Vector3(hr, hr, 1))
+        // (each glow 3× its lens: the lens a bright core, round it a soft halo)
+        const hr = (head ? Math.max(0.06, Math.min(head.w, head.h)) : 0.1) * 3
+        m.compose(new THREE.Vector3(Math.abs(h[0]) * sx, h[1], h[2] - 0.03), back, new THREE.Vector3(hr, hr, 1))
         this.lampMesh.setMatrixAt(k, m)
-        const t = tail ? tail.c : [hz.x * 0.75, 0.9, hz.z], tr = tail ? Math.max(0.05, Math.min(tail.w, tail.h)) : 0.08
-        m.compose(new THREE.Vector3(Math.abs(t[0]) * sx, t[1], t[2] + 0.02), new THREE.Quaternion(), new THREE.Vector3(tr, tr, 1))
+        const tr = (tail ? Math.max(0.05, Math.min(tail.w, tail.h)) : 0.08) * 3
+        m.compose(new THREE.Vector3(Math.abs(t[0]) * sx, t[1], t[2] + 0.03), new THREE.Quaternion(), new THREE.Vector3(tr, tr, 1))
         this.tailMesh!.setMatrixAt(k, m)
       }
     }
-    // (the lamps glow above the tone-map white: the bloom makes them shine)
-    this.lampMesh.visible = this.tailMesh!.visible = on
-    this.lampMat.color.setRGB(6, 5.4, 4.2)
-    this.tailMat.color.setRGB(3.5, 0.2, 0.1)
+    this.lampMesh.visible = on
+    this.lampMat.uniforms.uK.value = 5.5
+    const tailK = Math.max(on ? 0.3 : 0, this.brakeK)
+    this.tailMesh!.visible = tailK > 0.01
+    this.tailMat.uniforms.uK.value = 5.0 * tailK
+    this.beams!.visible = on && u.uNight.value > 0.05
+    this.beamMat.uniforms.uK.value = u.uNight.value
   }
 
   get speedKmh(): number { return this.sim ? Math.abs(this.sim.speed) * 3.6 : 0 }
@@ -393,3 +435,86 @@ void main() {
   #include <colorspace_fragment>
 }
 `
+
+/** A lamp's GLOW: a camera-side quad, a bright core (the lens) and a soft painted halo round it, added above white
+ *  (the bloom spreads it). uK: brightness (0 = off). */
+function glowMaterial(color: THREE.Color): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: color }, uK: { value: 0 } },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor;
+      uniform float uK;
+      varying vec2 vUv;
+      void main() {
+        float d = length(vUv - 0.5) * 2.0;
+        float core = 1.0 - smoothstep(0.26, 0.34, d), halo = pow(max(1.0 - d, 0.0), 2.2) * 0.32;
+        gl_FragColor = vec4(uColor * uK * (core + halo), 1.0);
+      }`,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    transparent: true,
+    toneMapped: false,
+  })
+}
+
+/** The headlights' BEAMS in the air: an open cone from each lamp (wide, low, 12 m), car space. Its `t` attribute: 0 at
+ *  the lamp … 1 at the far rim. */
+function beamGeometry(x: number, y: number, z: number): THREE.BufferGeometry {
+  const pos: number[] = [], tt: number[] = [], idx: number[] = []
+  const S = 14, R = 12, Lb = 12
+  for (const sx of [-1, 1]) {
+    const base = pos.length / 3
+    for (let i = 0; i <= R; i++) {
+      const f = i / R
+      for (let k = 0; k < S; k++) {
+        const a = (k / S) * Math.PI * 2, along = f * Lb
+        pos.push(x * sx + Math.cos(a) * along * 0.4, y - along * 0.07 + Math.sin(a) * along * 0.17, z - along)
+        tt.push(f)
+      }
+    }
+    for (let i = 0; i < R; i++) for (let k = 0; k < S; k++) {
+      const a0 = base + i * S + k, a1 = base + i * S + ((k + 1) % S), b0 = a0 + S, b1 = a1 + S
+      idx.push(a0, b0, a1, a1, b0, b1)
+    }
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setAttribute('t', new THREE.Float32BufferAttribute(tt, 1))
+  g.setIndex(idx)
+  g.computeVertexNormals()
+  return g
+}
+
+/** The beams' look: warm light painted in the air — strongest by the lamp, gone by 12 m, soft at the cone's silhouette
+ *  (faces seen edge-on fade), only at night (uK = the night). */
+function beamMaterial(): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { uK: { value: 0 } },
+    vertexShader: /* glsl */ `
+      attribute float t;
+      varying float vT;
+      varying float vFace;
+      void main() {
+        vT = t;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vFace = abs(dot(normalize(normalMatrix * normal), normalize(-mv.xyz)));
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float uK;
+      varying float vT;
+      varying float vFace;
+      void main() {
+        // (max: vT interpolates a hair past 1 at the rim — pow() of a negative is NaN, a dashed white ring in the bloom)
+        float a = pow(max(1.0 - vT, 0.0), 2.0) * smoothstep(0.0, 0.08, vT) * smoothstep(0.1, 0.7, vFace);
+        gl_FragColor = vec4(vec3(1.0, 0.86, 0.62) * a * 0.035 * uK, 1.0);
+      }`,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    transparent: true,
+    side: THREE.DoubleSide,
+  })
+}

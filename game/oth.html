@@ -27,6 +27,22 @@
       .oth-touch [data-k=left] { left: 18px; } .oth-touch [data-k=right] { left: 104px; }
       .oth-touch [data-k=gas] { right: 18px; bottom: 110px; width: 86px; height: 86px; } .oth-touch [data-k=brake] { right: 112px; bottom: 60px; }
       .oth-touch [data-k=reset] { right: 18px; top: 18px; bottom: auto; width: 48px; height: 48px; }
+      .oth-touch [data-k=winch] { right: 18px; top: 76px; bottom: auto; width: 64px; height: 42px; border-radius: 12px; font-size: 12px; }
+      .oth-map { position: fixed; inset: 0; display: none; place-items: center; align-content: center; gap: 8px; background: rgba(30, 20, 12, .45); z-index: 8; }
+      .oth-map.on { display: grid; }
+      .oth-map canvas { border-radius: 10px; box-shadow: 0 8px 40px rgba(20, 10, 5, .55); border: 3px solid #f4e6cc; cursor: zoom-in; }
+      .oth-map-title { color: #fff6ea; font: 600 13px system-ui; letter-spacing: .04em; text-shadow: 0 1px 4px rgba(40, 20, 10, .6); }
+      .oth-mapbtn { position: fixed; left: 14px; top: 172px; width: 44px; height: 44px; border-radius: 12px; border: 2px solid rgba(255,255,255,.75); background: rgba(40, 25, 15, .3); color: #fff; font: 700 11px system-ui; z-index: 5; touch-action: manipulation; }
+      .oth-compass { position: fixed; left: 50%; top: 10px; width: 420px; max-width: calc(100vw - 140px); transform: translateX(-50%); pointer-events: none; z-index: 4; }
+      .oth-compass-strip { position: relative; height: 28px; overflow: hidden; border-radius: 14px; background: linear-gradient(90deg, rgba(40,25,15,0), rgba(40,25,15,.35) 18%, rgba(40,25,15,.35) 82%, rgba(40,25,15,0)); }
+      .oth-compass-strip::after { content: ''; position: absolute; left: 50%; top: 2px; width: 2px; height: 6px; margin-left: -1px; background: #ffd9a8; }
+      .oth-tick, .oth-mark { position: absolute; left: 0; top: 0; width: 30px; margin-left: -15px; text-align: center; line-height: 28px; color: rgba(255, 246, 234, .55); font: 600 11px system-ui; }
+      .oth-tick-l { color: #fff6ea; font-size: 13px; }
+      .oth-mark { top: 0; color: #ffcf94; font-size: 15px; text-shadow: 0 0 6px rgba(40, 20, 10, .8); }
+      .oth-mark.found { color: #fff; }
+      .oth-compass-near { margin-top: 3px; text-align: center; color: #fff6ea; font: 600 11px system-ui; letter-spacing: .04em; text-shadow: 0 1px 4px rgba(40, 20, 10, .6); }
+      .oth-toast { position: fixed; left: 50%; top: 64px; transform: translate(-50%, -8px); padding: 9px 18px; border-radius: 22px; background: rgba(40, 25, 15, .55); color: #fff6ea; font: 600 15px system-ui; letter-spacing: .03em; opacity: 0; transition: opacity .35s, transform .35s; pointer-events: none; z-index: 6; white-space: nowrap; }
+      .oth-toast.on { opacity: 1; transform: translate(-50%, 0); }
       #hud { display: none; position: fixed; left: 10px; top: 10px; padding: 6px 9px; background: rgba(30, 24, 20, .55); color: #f3e8dc; font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre; border-radius: 6px; pointer-events: none; }
     </style>
   </head>

@@ -28,7 +28,7 @@ export class Post {
   private readonly sunClip = new THREE.Vector4()
   private readonly camDir = new THREE.Vector3()
 
-  constructor(private readonly levels: number, samples: number, readonly strength = 0.14, readonly rayStrength = 0.5) {
+  constructor(private readonly levels: number, samples: number, readonly strength = 0.14, readonly rayStrength = 0.5, private readonly bloomStart = 1, private readonly rayDiv = 4) {
     const opts = { type: THREE.HalfFloatType, format: THREE.RGBAFormat, depthBuffer: false, magFilter: THREE.LinearFilter, minFilter: THREE.LinearFilter }
     // (32-bit float depth for the reversed-Z renderer: a FloatType depth texture picks DEPTH_COMPONENT32F; nothing reads
     //  the depth afterwards, so the MSAA depth is never resolved into it)
@@ -152,9 +152,10 @@ export class Post {
 
   setSize(w: number, h: number): void {
     this.scene.setSize(w, h)
-    let mw = w, mh = h
+    // (the chain starts at 1 / 2^bloomStart of the screen; each level half the last)
+    let mw = Math.max(1, w >> (this.bloomStart - 1)), mh = Math.max(1, h >> (this.bloomStart - 1))
     for (const m of this.mips) { mw = Math.max(1, mw >> 1); mh = Math.max(1, mh >> 1); m.setSize(mw, mh) }
-    for (const r of this.rays) r.setSize(Math.max(1, w >> 2), Math.max(1, h >> 2))
+    for (const r of this.rays) r.setSize(Math.max(1, Math.round(w / this.rayDiv)), Math.max(1, Math.round(h / this.rayDiv)))
     ;(this.comp.uniforms.uRes.value as THREE.Vector2).set(w, h)
   }
 
@@ -168,7 +169,10 @@ export class Post {
     let sw = this.scene.width, sh = this.scene.height
     for (let i = 0; i < this.levels; i++) {
       this.down.uniforms.tSrc.value = src
-      ;(this.down.uniforms.uTexel.value as THREE.Vector2).set(0.5 / sw, 0.5 / sh)
+      // (four bilinear taps half a texel out cover 2 × 2 → the next level; the first level a quarter of the screen
+      //  away takes them a texel out: 4 × 4)
+      const k = i === 0 ? 0.5 * (1 << (this.bloomStart - 1)) : 0.5
+      ;(this.down.uniforms.uTexel.value as THREE.Vector2).set(k / sw, k / sh)
       this.down.uniforms.uPrefilter.value = i === 0 ? 1 : 0
       this.quad.material = this.down
       renderer.setRenderTarget(this.mips[i])

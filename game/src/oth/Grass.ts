@@ -49,6 +49,7 @@ export class Grass {
       uShBox: t.uShBox, uShWorld: t.uShWorld, uShBoxGrid: t.uShBoxGrid, uShOn: t.uShOn,
       uTreeSh: t.uTreeSh, uTreeShGrid: t.uTreeShGrid, uTreeShOn: t.uTreeShOn,
       uMask: { value: map.maskTex },
+      uMud: { value: map.mudTex },
       uRocks: { value: rockFootprint },
       uTrail: { value: map.trailTex },
       uTrailHW: { value: map.meta.trails.hw },
@@ -58,11 +59,14 @@ export class Grass {
       // fewer tufts on the lower tiers → each blade wider by the square root: the coverage stays HIGH's
       uWidthK: { value: Math.max(1, Math.sqrt((REF_DENSITY * REF_FAN) / (tier.grassDensity * tier.grassFan))) },
     }
-    const bounds = [0, 0.25 * R, 0.55 * R, R]
-    const tiles = [4, 8, 16]
-    const blades = [tier.grassFan, Math.max(4, Math.round(tier.grassFan * 0.7)), Math.max(3, Math.round(tier.grassFan * 0.45))]
-    const segs = [tier.grassSegments, 1, 1]
-    for (let r = 0; r < 3; r++) {
+    // (2026-10-27, 400 fps at 1080p: each ring is built at its INNER edge's density and the rank cull thins it outward —
+    //  the culled tufts still cost a vertex each; the near ring (to 0.25 R) split in two halves those: its outer half
+    //  built at half the density, straight blades)
+    const bounds = [0, 0.12 * R, 0.25 * R, 0.55 * R, R]
+    const tiles = [4, 4, 8, 16]
+    const blades = [tier.grassFan, tier.grassFan, Math.max(4, Math.round(tier.grassFan * 0.7)), Math.max(3, Math.round(tier.grassFan * 0.45))]
+    const segs = [tier.grassSegments, 1, 1, 1]
+    for (let r = 0; r < 4; r++) {
       const density = densityAt(D0, bounds[r])
       const geo = tuftTile(tiles[r], density, blades[r], segs[r], 0x9e37 + r * 101)
       const max = Math.ceil(((2 * bounds[r + 1]) / tiles[r] + 2) ** 2)
@@ -73,7 +77,7 @@ export class Grass {
       const mat = new THREE.ShaderMaterial({
         glslVersion: THREE.GLSL3,
         uniforms: { ...uniforms, uBuild: { value: density }, uRin: { value: bounds[r] }, uRout: { value: bounds[r + 1] }, uFan: { value: blades[r] } },
-        defines: tier.spec ? { OTH_SPEC: '' } : {},
+        defines: {}, // (no specular: on blades of roughness 0.85 it never showed)
         vertexShader: VERT,
         fragmentShader: FRAG,
         side: THREE.DoubleSide,
@@ -81,7 +85,7 @@ export class Grass {
       const mesh = new THREE.Mesh(geo, mat)
       mesh.frustumCulled = false
       mesh.matrixAutoUpdate = false
-      mesh.renderOrder = 1 - r // nearest ring first: it hides the most
+      mesh.renderOrder = -30 + r // nearest ring FIRST (it hides the most; 1 − r had drawn the far ring first), all before the terrain
       this.group.add(mesh)
       this.rings.push({ rin: bounds[r], rout: bounds[r + 1], tile: tiles[r], density, blades: blades[r], mesh, geo, tiles: attr, max })
     }
@@ -181,6 +185,7 @@ ${HEIGHT_GLSL}
 ${PAINT_GLSL}
 ${SHADOW_GLSL}
 uniform sampler2D uMask;
+uniform sampler2D uMud;
 uniform sampler2D uNIn;
 uniform sampler2D uRocks;
 uniform sampler2D uTrail;
@@ -211,6 +216,14 @@ void main() {
   float share = (uD0 / (1.0 + pow(d / 9.0, 1.5))) / uBuild;
   float keep = step(aTuft.z, share) * step(uRin - 0.5, d) * step(d, uRout + 0.5);
   float widen = inversesqrt(clamp(share, 0.05, 1.0));
+  // (2026-10-27, 400 fps at 1080p: a tuft the rank cull drops — ~9 in 10 at 36 m — used to run the whole shader below
+  //  (the ground's paint, the wind, the shadow: ~20 texture reads a vertex) only to end at height 0; now it stops here,
+  //  its vertices outside the clip volume: the triangle is discarded)
+  if (keep < 0.5) {
+    vWorld = vec3(0.0); vColor = vec3(0.0); vT = 0.0; vN = vec3(0.0, 1.0, 0.0); vSun = 0.0;
+    gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
+    return;
+  }
   // THE GROUND HERE: height, mask, soft normal, and its colour — the blade's colour
   float h = terrainHeight(root);
   vec4 m = textureLod(uMask, ((root - uMaskGrid.z) / uMaskGrid.y + 0.5) / uMaskGrid.x, 0.0);
@@ -218,12 +231,18 @@ void main() {
   float trail = textureLod(uTrail, ((root - uInGrid.z) / uInGrid.y + 0.5) / uInGrid.x, 0.0).r * 8.0;
   // (the blade's colour is the FIELD's: painted without the track, so the blades at its edge don't take the earth)
   Ground g = groundPaint(root, m, h, 1.0 - N.y, paintNoise(root), 0.0, 99.0, uTrailHW, 0.0); // (no painted shrub dots under the grass: the bushes are real there)
-  float tx = trackEdge(root, trail);
+  float tx = trail < uTrailHW + 3.5 ? trackEdge(root, trail) : trail; // (beyond its reach the edge changes nothing: exact)
   float onTrack = 1.0 - smoothstep(uTrailHW - 0.35, uTrailHW + 0.15, tx); // (trackMask, its ragged distance kept)
   // (none on rock, snow, the water's gravel and the earth band along it; thinner under the forest)
   // (never on rock: none where the ground shows any rock or scree tint at all — the user: "never put grass on rock")
   float grow = (1.0 - smoothstep(0.02, 0.1, g.rock)) * (1.0 - smoothstep(0.855, 0.875, m.b)) * (1.0 - 0.6 * g.forest) * (1.0 - g.snow) * (1.0 - smoothstep(0.02, 0.1, g.scree));
   grow *= (1.0 - smoothstep(0.3, 0.6, onTrack)); // (off the track)
+  vec2 mudB = textureLod(uMud, ((root - uMaskGrid.z) / uMaskGrid.y + 0.5) / uMaskGrid.x, 0.0).rg;
+  float mud = mudB.r;
+  // WILDFLOWERS (mud.bin G): where the field blossoms, one blade in ~3 is a flower — a thin stem, a coloured head at
+  // its tip (below), standing a little over the grass
+  float flower = step(fract(aTuft.w * 71.37 + aBlade.x * 5.71), mudB.g * 0.22);
+  grow *= 1.0 - smoothstep(0.25, 0.55, mud); // (none in the mud: a reedy fringe round it, below)
   vec2 inUv = ((root - uInGrid.z) / uInGrid.y + 0.5) / uInGrid.x;
   grow *= 1.0 - smoothstep(0.0, 0.3, textureLod(uRocks, inUv, 0.0).r); // (none at a boulder's foot)
   // SHORTER TOWARD BARE GROUND (the user: "when the grass comes to rock or the path, its height must reduce
@@ -233,15 +252,24 @@ void main() {
   float approach = smoothstep(uTrailHW, uTrailHW + 2.5, tx);
   approach = min(approach, (1.0 - g.rockNear) * (1.0 - g.screeNear));
   approach = min(approach, 1.0 - smoothstep(0.02, 0.45, textureLod(uRocks, inUv, 1.5).r));
+  approach = max(approach * (1.0 - smoothstep(0.1, 0.3, mud)), smoothstep(0.08, 0.25, mud) * 1.15); // (REEDS: the marsh's edge tall)
   float tall = mix(0.95, 1.45, smoothstep(0.2, 0.8, m.g)) * aBlade.z;
   float edge = 1.0 - smoothstep(uRadius * 0.8, uRadius, d);
-  float height = tall * grow * edge * keep * mix(0.1, 1.0, approach);
+  float height = tall * grow * edge * keep * mix(0.1, 1.0, approach) * (1.0 + 0.12 * flower);
   // the blade: out of the tuft along its fan angle, leaning out, bending with the wind
   float ang = aBlade.x + aTuft.w * 6.2832;
   vec2 dir = vec2(cos(ang), sin(ang));
   vec2 side = vec2(-dir.y, dir.x);
   float t = aV.x;
   float width = 0.1 * aBlade.w * uWidthK * widen * mix(0.55, 1.0, approach) * (1.0 - t * t) * step(0.001, height);
+  // A FLOWER is the blade turned over (every tier: one triangle on LOW … HIGH, a quad + a triangle on ULTRA): its
+  // wide root edge lifted to the top — the blossom, ~9 cm across — its tip brought down to the root — the stem (on
+  // ULTRA the middle pair narrows under the head: a small cup on a thin stem)
+  float stem = step(0.999, t);
+  if (flower > 0.5) {
+    width = 0.09 * aBlade.w * min(widen, 2.5) * (1.0 - stem) * (1.0 - 1.3 * t) * step(0.001, height);
+    t = (1.0 - stem) * (1.0 - 0.28 * t);
+  }
   vec2 gn = textureLod(uNoise, root * (1.0 / 37.0) - uTime * vec2(0.035, 0.02), 0.0).rg - 0.5;
   float gust = smoothstep(0.45, 0.75, textureLod(uNoise, root * (1.0 / 140.0) - uTime * vec2(0.022, 0.009), 0.0).r);
   vec2 wind = vec2(0.8, 0.35) * ((0.35 + 0.65 * sin(uTime * 1.5 + dot(root, vec2(0.21, 0.13)))) * 0.12 + gust * 0.32) + gn * 0.3;
@@ -257,9 +285,22 @@ void main() {
   // (one blade in eight stands in its neighbours' shade: the field's darker strokes)
   float br = fract(aTuft.w * 31.7 + aBlade.x * 3.1);
   vColor = g.col * (1.0 + face * 0.04 + (br - 0.5) * 0.1) * (br < 0.12 ? 0.8 : 1.0) * (1.0 + gust * 0.08);
+  if (flower > 0.5) vColor = mix(flowerColor(root, fract(aTuft.w * 13.1)) * (0.9 + 0.2 * br), vColor * 0.85, max(stem, (1.0 - stem) * step(0.3, aV.x) * 0.35));
   // the ground's light: its soft normal, leaning a little with the blade
   vN = normalize(N + vec3(dir.x, 0.0, dir.y) * 0.18);
   vSun = sunVisibility(root);
+  // THE LIGHT, PER VERTEX (2026-10-27, 400 fps at 1080p: the carpet is several blades deep — every pixel was lit 3–4
+  // times over): a blade has one soft normal its whole length, so its light only varies along it — lit here at its
+  // ~5 vertices (the sun, the sky, the headlights' paint, the back-lit tips, the haze) and interpolated; the pixel
+  // only tone-maps it
+  vec3 Vv = normalize(uCamPos - p);
+  float ao = mix(0.8, 1.0, smoothstep(0.0, 0.85, t));
+  vec3 albedo = vColor * mix(0.9, 1.08, t);
+  vec3 c = shade(albedo, vN, Vv, 0.85, 0.03, ao, vSun, 0.62);
+  c += headlight(albedo, vN, p);
+  float back = pow(max(dot(-Vv, uSunDir), 0.0), 3.0);
+  c += albedo * uSunColor * back * t * 0.16 * vSun; // (back-lit by a low sun, the tips glow: a soft rim)
+  vColor = applyAtmos(c, p);
   gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
 }
 `
@@ -274,16 +315,8 @@ in vec3 vN;
 in float vSun;
 
 void main() {
-  vec3 V = normalize(uCamPos - vWorld);
-  // the ground's colour, a little deeper at the root (the carpet's depth), a little brighter at the tip
-  float ao = mix(0.8, 1.0, smoothstep(0.0, 0.85, vT));
-  vec3 albedo = vColor * mix(0.9, 1.08, vT);
-  vec3 c = shade(albedo, normalize(vN), V, 0.85, 0.03, ao, vSun, 0.62);
-  c += headlight(albedo, normalize(vN), vWorld);
-  // back-lit by a low sun, the tips glow
-  float back = pow(max(dot(-V, uSunDir), 0.0), 3.0);
-  c += albedo * uSunColor * back * vT * 0.16 * vSun; // (a soft rim, not a glow)
-  gl_FragColor = vec4(applyAtmos(c, vWorld), 1.0);
+  // (lit per vertex: the vertex shader's colour, interpolated — the pixel only tone-maps it)
+  gl_FragColor = vec4(vColor, 1.0);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }

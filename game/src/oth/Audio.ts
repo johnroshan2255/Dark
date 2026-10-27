@@ -68,6 +68,8 @@ export class OthAudio {
   private readonly mk: [number, number, number, number] = [0, 0, 0, 0]
   private readonly flowPts: number[] = []
   private readonly right = new THREE.Vector3()
+  /** RAIN (no recording: synthesized): looped noise through a soft band-pass, its level the weather's rain. */
+  private rainGain: GainNode | null = null
 
   constructor(private readonly map: MapData, private readonly car: Vehicle, private readonly atmos: Atmosphere) {
     // every point of the flowing water (the river, the streams) — the camera's nearest, a few times a second
@@ -104,6 +106,22 @@ export class OthAudio {
       stream: new Bed(ctx, BASE + 'amb_stream.ogg', amb),
       fall: new Bed(ctx, BASE + 'amb_waterfall.ogg', amb),
     }
+    // the RAIN: 2 s of noise (each sample a little toward the last: a soft hiss, not a white one) looped through a
+    // band-pass — the hiss of rain on grass and the car's roof; silent (0 gain) until it rains
+    const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), nd = nb.getChannelData(0)
+    let last = 0
+    for (let i = 0; i < nd.length; i++) { last = last * 0.55 + (Math.random() * 2 - 1) * 0.45; nd[i] = last }
+    const ns = ctx.createBufferSource()
+    ns.buffer = nb
+    ns.loop = true
+    const bp = ctx.createBiquadFilter()
+    bp.type = 'bandpass'
+    bp.frequency.value = 1800
+    bp.Q.value = 0.45
+    this.rainGain = ctx.createGain()
+    this.rainGain.gain.value = 0
+    ns.connect(bp).connect(this.rainGain).connect(amb)
+    ns.start()
     // the MUSIC: the two tracks one after the other, quietly under the world
     const music = (this.music = new Audio())
     music.preload = 'auto'
@@ -193,7 +211,8 @@ export class OthAudio {
     const night = this.atmos.uniforms.uNight.value, day = 1 - night, B = this.beds
     B.forest.target = day * (0.16 + 0.42 * this.near.forest)
     B.wind.target = day * (0.1 + 0.22 * (1 - this.near.forest))
-    B.night.target = night * 0.5
+    B.night.target = night * 0.5 * (1 - 0.7 * this.atmos.uniforms.uRain.value)
+    if (this.rainGain) this.rainGain.gain.value += (0.5 * this.atmos.uniforms.uRain.value - this.rainGain.gain.value) * Math.min(1, dt * 1.5)
     B.stream.target = 0.65 * smooth(70, 8, this.near.stream)
     B.stream.pan.pan.value = this.near.streamPan * 0.7
     B.fall.target = 0.85 * smooth(110, 10, this.near.fall)

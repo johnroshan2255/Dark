@@ -43,6 +43,13 @@ export class Terrain {
   private cx = 0
   private cz = 0
   private agl2 = 0
+  /** This frame's picks before the near → far sort: x0, z0, size, level, distance (m). */
+  private readonly picked = new Float32Array(2048 * 5)
+  private readonly order: number[] = []
+  /** What the hills hide (main.ts: the trees' and rocks' Horizon) — whole patches behind a ridge are skipped. */
+  horizon: { hidden(x0: number, z0: number, x1: number, z1: number, top: number): boolean } | null = null
+  /** Patches skipped behind the hills this frame (the HUD). */
+  occluded = 0
   readonly uniforms: Record<string, THREE.IUniform>
 
   constructor(private readonly map: MapData, atmos: Atmosphere, tier: Tier, shadow: TerrainShadow) {
@@ -85,6 +92,7 @@ export class Terrain {
       uNIn: { value: map.inner.normalTex },
       uNFar: { value: map.far.normalTex },
       uMask: { value: map.maskTex },
+      uMud: { value: map.mudTex },
       uInGrid: { value: g(map.inner) },
       uFarGrid: { value: g(map.far) },
       uInScale: { value: sc(map.inner) },
@@ -111,6 +119,10 @@ export class Terrain {
     this.mesh = new THREE.Mesh(this.geo, mat)
     this.mesh.frustumCulled = false // the selection culls per node
     this.mesh.matrixAutoUpdate = false
+    // LAST of the opaque things (2026-10-27, 400 fps at 1080p): the grass, rocks, trees, bushes and the car draw first
+    // and the depth test then skips the ground's paint under them — drawn first, every pixel under the carpet was
+    // painted and then covered
+    this.mesh.renderOrder = 10
   }
 
   /** Min / max heights per leaf cell (from both grids), then reduced 2 × 2 up the levels. */
@@ -157,7 +169,17 @@ export class Terrain {
     this.agl2 = agl * agl
     this.uniforms.uAgl2.value = this.agl2
     this.count = 0
+    this.occluded = 0
     this.select(0, 0, this.levels)
+    // NEAR → FAR (2026-10-27, the hidden valleys): the patches draw in one instanced call in the order written, so the
+    // nearest ground fills the depth buffer first and everything it hides fails the early depth test — the ground
+    // behind a ridge costs no shading (it was quadtree order: a far patch could be shaded, then painted over)
+    const P = this.picked, ord = this.order
+    ord.length = this.count
+    for (let n = 0; n < this.count; n++) ord[n] = n
+    ord.sort((u, v) => P[u * 5 + 4] - P[v * 5 + 4])
+    const a = this.nodes.array as Float32Array
+    for (let n = 0; n < this.count; n++) { const o = ord[n] * 5; a[n * 4] = P[o]; a[n * 4 + 1] = P[o + 1]; a[n * 4 + 2] = P[o + 2]; a[n * 4 + 3] = P[o + 3] }
     this.geo.instanceCount = this.count
     this.nodes.addUpdateRange(0, this.count * 4)
     this.nodes.needsUpdate = true
@@ -171,9 +193,14 @@ export class Terrain {
     this.box.min.set(x0, this.minH[level][k] - 1, z0)
     this.box.max.set(x0 + size, this.maxH[level][k] + 1, z0 + size)
     if (!this.frustum.intersectsBox(this.box)) return
+    const dx = Math.max(x0 - this.cx, 0, this.cx - x0 - size), dz = Math.max(z0 - this.cz, 0, this.cz - z0 - size)
+    const dh = Math.sqrt(dx * dx + dz * dz)
+    // BEHIND THE HILLS: a node whose highest point stays under the horizon (Horizon.ts) is skipped with all it holds —
+    // judged with its top raised 3 m + 1.5 % of its distance (the horizon is rebuilt every 4 m the camera moves: a
+    // ridge's far side must never open as a hole between two rebuilds)
+    if (this.horizon && dh > 60 && this.horizon.hidden(x0, z0, x0 + size, z0 + size, this.maxH[level][k] + 3 + dh * 0.015)) { this.occluded++; return }
     if (level > 0) {
-      const dx = Math.max(x0 - this.cx, 0, this.cx - x0 - size), dz = Math.max(z0 - this.cz, 0, this.cz - z0 - size)
-      const d = Math.sqrt(dx * dx + dz * dz + this.agl2)
+      const d = Math.sqrt(dh * dh + this.agl2)
       if (d < this.near * 2 ** (level - 1)) {
         this.select(2 * i, 2 * j, level - 1); this.select(2 * i + 1, 2 * j, level - 1)
         this.select(2 * i, 2 * j + 1, level - 1); this.select(2 * i + 1, 2 * j + 1, level - 1)
@@ -181,8 +208,8 @@ export class Terrain {
       }
     }
     if (this.count >= this.maxNodes) return
-    const a = this.nodes.array as Float32Array, o = this.count++ * 4
-    a[o] = x0; a[o + 1] = z0; a[o + 2] = size; a[o + 3] = level
+    const o = this.count++ * 5, P = this.picked
+    P[o] = x0; P[o + 1] = z0; P[o + 2] = size; P[o + 3] = level; P[o + 4] = Math.sqrt(dh * dh + this.agl2)
   }
 
   get patches(): number { return this.count }
@@ -257,6 +284,7 @@ ${PAINT_GLSL}
 uniform sampler2D uNIn;
 uniform sampler2D uNFar;
 uniform sampler2D uMask;
+uniform sampler2D uMud;
 uniform vec4 uInGrid;
 uniform vec4 uFarGrid;
 uniform vec4 uMaskGrid;
@@ -283,7 +311,25 @@ void main() {
   vec3 Ns = box ? unpackN(texture(uNIn, gridUv(uInGrid, xz), 0.8).rg) : unpackN(texture(uNFar, gridUv(uFarGrid, xz), 0.0).rg);
   vec3 Nf = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
   if (Nf.y < 0.0) Nf = -Nf;
-  Paint p = paintNoise(xz);
+  // THE FAR GROUND, CHEAP (2026-10-27, phones at full resolution): past 2 km the haze has taken half and the fine marks
+  // are under a pixel — only the paint's two broad octaves are read there (2 fetches, not 5) and no shrub dots
+  float dcam = length(vWorld.xz - uCamPos.xz);
+  bool farG = dcam > 2000.0;
+  // the pixel's footprint on the ground (m): the paint's small marks fade before they'd shimmer
+  float foot = max(length(fwidth(xz)), 0.001);
+  Paint p;
+  if (farG) {
+    p.mid = texture(uNoise, xz * (1.0 / 71.0));
+    p.big = texture(uNoise, xz * (1.0 / 389.0) + vec2(0.37, 0.59));
+    p.fine = p.grain = p.micro = vec4(0.5);
+  } else if (foot > 1.6) {
+    // (2026-10-27, the cost of the new look: an octave whose marks are under ~2 pixels reads its mip's average —
+    //  ≈ 0.5, and every use of the grain / micro already fades by near there: skip the fetch, keep the look)
+    p.mid = texture(uNoise, xz * (1.0 / 71.0));
+    p.big = texture(uNoise, xz * (1.0 / 389.0) + vec2(0.37, 0.59));
+    p.fine = foot > 8.0 ? vec4(0.5) : texture(uNoise, xz * (1.0 / 13.0) + vec2(0.71, 0.13));
+    p.grain = p.micro = vec4(0.5);
+  } else p = paintNoise(xz);
   float h = vWorld.y;
   float steep = 1.0 - Ns.y; // 0 flat … 0.3 ≈ 45°
 
@@ -296,11 +342,8 @@ void main() {
     float forest = smoothstep(0.52, 0.62, p.big.r + p.mid.g * 0.25) * (1.0 - smoothstep(560.0, 820.0, h + (p.mid.r - 0.5) * 160.0));
     m = vec4(clamp(rock, 0.0, 1.0), 0.6 + (p.big.g - 0.5) * 0.6, 0.0, forest);
   }
-  // the pixel's footprint on the ground (m): the paint's small marks fade before they'd shimmer
-  float foot = max(length(fwidth(xz)), 0.001);
   float trail = box ? texture(uTrail, gridUv(uInGrid, xz)).r * 8.0 : 8.0;
-  float dcam = length(vWorld.xz - uCamPos.xz);
-  Ground g = groundPaint(xz, m, h, steep, p, foot, trail, uTrailHW, smoothstep(uBushR * 0.7, uBushR, dcam)); // (painted shrub dots only beyond the real bushes)
+  Ground g = groundPaint(xz, m, h, steep, p, foot, trail, uTrailHW, farG ? 0.0 : smoothstep(uBushR * 0.7, uBushR, dcam)); // (painted shrub dots only beyond the real bushes)
   vec3 col = g.col;
   float facet = mix(0.12, 0.42, max(g.rock, g.snow * 0.8));
   vec3 N = normalize(mix(Ns, Nf, facet));
@@ -310,9 +353,44 @@ void main() {
   N = rockRelief(vWorld, N, max(g.rock, g.scree * 0.6) * (1.0 - g.trail), dFdx(vWorld), dFdy(vWorld), cav); // (never on a track)
 #endif
   col *= 1.0 + (facetRand(Nf) - 0.5) * 0.1 * facet;
+  // CLIFF FACES (2026-10-27, "cliffs … the colour is the key"): a steep rock face reads as LAYERED stone — horizontal
+  // strata ~3.4 m apart (their lines wandering), each band its own tone between a warm sandy grey and a cool blue
+  // grey, a dark seam where two meet; darker water streaks running down from the ledges; moss and grass on the ledges
+  // (the facets that face up). Rock only, large marks (every tier: no texture, one noise fetch).
+  float cliffK = g.rock * smoothstep(0.22, 0.5, steep) * (1.0 - g.trail);
+  if (cliffK > 0.01) {
+    float hb = h / 3.4 + (p.mid.g - 0.5) * 1.8 + (p.fine.r - 0.5) * 0.45;
+    float bi = floor(hb), bf = hb - bi;
+    float bh = fract(sin(bi * 12.9898 + 4.1) * 43758.5453);
+    vec3 band = mix(vec3(1.1, 1.03, 0.9), vec3(0.9, 0.97, 1.07), bh) * (0.9 + 0.2 * fract(bh * 7.13));
+    float seam = (1.0 - smoothstep(0.0, 0.07 + foot * 0.05, bf)) * (1.0 - smoothstep(1.5, 4.0, foot));
+    float streak = smoothstep(0.55, 0.8, texture(uNoise, vec2(dot(xz, vec2(0.71, 0.7)) / 4.5, h / 55.0)).g);
+    col *= mix(vec3(1.0), band * (1.0 - 0.17 * seam) * (1.0 - 0.16 * streak), cliffK);
+    col = mix(col, mix(GREEN, GREEN_DEEP, p.fine.g) * 1.1, cliffK * smoothstep(0.8, 0.95, Nf.y) * 0.75);
+  }
 
   float rough = mix(0.92, 0.62, g.rock);
   rough = mix(rough, 0.45, g.snow);
+  // MUD (the marsh, the tracks' mud holes, the slow banks — mud.bin): dark wet earth in soft painted patches, glossy,
+  // dragged into streaks; the thickest of it holds standing water (below, with the rain's puddles)
+  vec2 mudB = box ? texture(uMud, gridUv(uMaskGrid, xz)).rg : vec2(0.0);
+  float mud = mudB.r;
+  // WILDFLOWERS seen from beyond the grass (the blades draw them near): the field speckled with its drift's colour,
+  // the speckle melting into a tint where it would shimmer
+  if (mudB.g > 0.02) {
+    float beyond = smoothstep(uGrassR * 0.55, uGrassR * 0.9, dcam) * (1.0 - g.trail) * (1.0 - g.rock);
+    // (seen low across a meadow the heads stand over the blades and hide them: far off, the drift is mostly its colour —
+    //  LOW's grass ends at 38 m, ULTRA's at 72: past that the paint carries the same band)
+    float spk = mix(dotsAt(xz, 1.6, 0.42, 0.42, max(0.12, foot * 0.45)), 0.62, smoothstep(0.4, 1.6, foot));
+    col = mix(col, flowerColor(xz, 0.5), min(1.0, mudB.g * 1.15) * beyond * min(1.0, spk * 1.6) * 0.8);
+  }
+  float mudA = 0.0;
+  if (mud > 0.01) {
+    mudA = smoothstep(0.1, 0.45, mud + (p.mid.r - 0.5) * 0.3);
+    vec3 MUDC = mix(vec3(0.075, 0.056, 0.038), vec3(0.135, 0.1, 0.066), texture(uNoise, xz * vec2(0.31, 0.11)).b);
+    col = mix(col, MUDC, mudA);
+    rough = mix(rough, 0.3, mudA);
+  }
   float wrap = mix(0.62, 0.2, g.rock);
   float ao = mix(1.0, 0.7, g.forest) * mix(1.0, 0.85, g.bed) * cav;
   vec3 V = normalize(uCamPos - vWorld);
@@ -322,7 +400,18 @@ void main() {
   float under = grassy0(m, g.rock, g.forest) * (1.0 - smoothstep(0.02, 0.1, g.scree)) * (1.0 - g.trail) * (1.0 - smoothstep(uGrassR * 0.3, uGrassR * 0.95, length(vWorld - uCamPos)));
   col *= 1.0 - 0.14 * under;
   vec3 c = shade(col, N, V, rough, 0.04, ao, sun, wrap);
+  c += rockFill(col, N) * g.rock * ao;
   c += headlight(col, N, vWorld);
+  // PUDDLES (the rain): pools in the tracks' ruts and dips, a still dark mirror of the sky, spreading as it gets wetter
+  float bog = smoothstep(0.8, 0.92, mud + (texture(uNoise, xz * 0.05).g - 0.5) * 0.3);
+  if ((uWet > 0.05 && g.trail > 0.2) || bog > 0.0) {
+    float pud = smoothstep(0.71, 0.76, texture(uNoise, xz * 0.085).g + texture(uNoise, xz * 0.31).r * 0.16 + (uWet - 1.0) * 0.35) * g.trail * step(0.05, uWet);
+    pud = max(pud, bog * 0.85);
+    float fr = 0.12 + 0.6 * pow(1.0 - max(V.y, 0.0), 4.0);
+    // (dark muddy water: the bed shows through, the sky in it at a glance — a bright mirror read as snow)
+    vec3 mirror = col * 0.32 + skyColor(reflect(-V, vec3(0.0, 1.0, 0.0))) * fr * 0.55 + headlight(vec3(0.5), vec3(0.0, 1.0, 0.0), vWorld) * 0.6;
+    c = mix(c, mirror, pud * 0.9);
+  }
   // the fields' sheen: grass back-lit by a low sun glows warm
   float grassy = (1.0 - g.rock) * (1.0 - g.forest) * (1.0 - g.snow) * (1.0 - g.bed);
   float back = pow(max(dot(-V, uSunDir), 0.0), 3.0);

@@ -10,7 +10,10 @@ import * as THREE from 'three'
  */
 export interface Grid { n: number; step: number; origin: number; min: number; range: number }
 export interface Pond { cx: number; cz: number; rx: number; rz: number; rot: number; level: number }
-export interface Bridge { x0: number; z0: number; x1: number; z1: number; y: number; w: number }
+/** A LANDMARK (scripts/oth/scenery.mjs, Landmarks.ts): a place to find — its kind, name, pad centre / height, the way
+ *  its front faces (rad: local +z turned by rot about +y) and its pad's radius (m). */
+export interface Landmark { id: number; kind: 'tower' | 'view' | 'cabin' | 'shack' | 'sawmill' | 'mine' | 'meteorite' | 'falls' | 'meadow'; name: string; x: number; z: number; y: number; rot: number; r: number }
+export interface Bridge { x0: number; z0: number; x1: number; z1: number; y: number; y0: number; y1: number; w: number }
 export interface MapMeta {
   id: string
   name: string
@@ -31,10 +34,20 @@ export interface MapMeta {
   /** The SCENERY pass (scripts/oth/scenery.mjs): the boulder walls along the stream roads ([x, z, size]). */
   scenery?: { boulders: [number, number, number][] }
   spawn: { x: number; z: number; yaw: number }
-  /** Plank bridges over the river: deck ends (x0, z0) → (x1, z1) on the banks, deck top y, width w (m). */
+  /** Plank bridges over the river and the streams: deck ends (x0, z0) → (x1, z1) on the banks, the deck's top there
+   *  y0 → y1 (on the road at each end: a stream's deck slopes with its road; y = the higher), width w (m). */
   bridges?: Bridge[]
   /** The dirt tracks: half width (m) and their centre lines ([x, z] every ~8 m). */
-  trails: { hw: number; lines: [number, number][][] }
+  /** The dirt tracks: centre lines; `rough` = the indices of the rock-crawling routes (trekking hills, formations). */
+  trails: { hw: number; lines: [number, number][][]; rough?: number[] }
+  landmarks?: Landmark[]
+  /** MUD + WILDFLOWERS (mud.bin: RG8 on the mask's grid — R mud, G blossoms, 0 … 1) and the marsh's centre / radius. */
+  mud?: { n: number; step: number; origin: number; marsh: { x: number; z: number; r: number } | null }
+  /** HIDDEN PLACES (terrain.py): basins seen only from inside — a falls basin (cliff ring, gorge, its fall into a pool)
+   *  or a flower hollow; the floor's radius r, the outer foot's ro, the gap facing `open` (rad), its half width gw. */
+  hidden?: { kind: 'falls' | 'meadow'; name: string; x: number; z: number; r: number; ro: number; open: number; gw: number; F: number }[]
+  /** The valley's spurs ([nose x, z, root x, z]). */
+  spurs?: [number, number, number, number][]
 }
 
 class HeightGrid {
@@ -100,11 +113,15 @@ export class MapData {
   /** Distance to the nearest track's centre line (R8 on the box's 2 m grid, 0..8 m) — the ground paints the dirt, the
    *  grass keeps off it. */
   readonly trailTex: THREE.DataTexture
+  /** MUD over the box (the mask's 4 m grid, RG: R mud 0 … 1 — the ground paints it, the grass keeps off, the tyres
+   *  sink — G wildflowers: the grass blossoms). */
+  readonly mud: Uint8Array
+  readonly mudTex: THREE.DataTexture
   /** The playable box's half size (m) and the world's. */
   readonly half: number
   readonly farHalf: number
 
-  private constructor(readonly meta: MapMeta, inner: Uint16Array, far: Uint16Array, mask: Uint8Array, trail: Uint8Array) {
+  private constructor(readonly meta: MapMeta, inner: Uint16Array, far: Uint16Array, mask: Uint8Array, trail: Uint8Array, mud: Uint8Array) {
     this.inner = new HeightGrid(meta.inner, inner)
     this.far = new HeightGrid(meta.far, far)
     this.half = -meta.inner.origin
@@ -123,6 +140,43 @@ export class MapData {
     this.trailTex.generateMipmaps = true
     this.trailTex.unpackAlignment = 1
     this.trailTex.needsUpdate = true
+    this.mud = mud.length === mn * mn * 2 ? mud : new Uint8Array(mn * mn * 2)
+    this.mudTex = new THREE.DataTexture(this.mud, mn, mn, THREE.RGFormat, THREE.UnsignedByteType)
+    this.mudTex.minFilter = THREE.LinearMipmapLinearFilter
+    this.mudTex.magFilter = THREE.LinearFilter
+    this.mudTex.generateMipmaps = true
+    this.mudTex.unpackAlignment = 1
+    this.mudTex.needsUpdate = true
+  }
+
+  /** The WATER's surface at (x, z) (m), or null on dry ground: the lake, a pond, else the nearest river / stream point
+   *  where the mask says open water (the splashes, the drag on a car fording it). */
+  waterLevel(x: number, z: number): number | null {
+    const mk = this.maskAt(x, z, this._wk)
+    if (mk[2] < 0.86) return null
+    const W = this.meta.water, L = W.lake
+    const inEllipse = (cx: number, cz: number, rx: number, rz: number, rot: number) => {
+      const c = Math.cos(rot), s = Math.sin(rot), dx = x - cx, dz = z - cz
+      return ((dx * c + dz * s) / rx) ** 2 + ((-dx * s + dz * c) / rz) ** 2 < 1
+    }
+    if (inEllipse(L.cx, L.cz, L.rx * 1.08, L.rz * 1.08, L.rot)) return L.level
+    for (const P of W.ponds ?? []) if (inEllipse(P.cx, P.cz, P.rx * 1.1, P.rz * 1.1, P.rot)) return P.level
+    let best = 1e9, y: number | null = null
+    for (const R of [W.river, ...(W.streams ?? [])]) for (let i = 0; i < R.x.length; i++) {
+      const d = (R.x[i] - x) ** 2 + (R.z[i] - z) ** 2
+      if (d < best && d < (R.hw[i] * 1.6 + 6) ** 2) { best = d; y = R.y[i] }
+    }
+    return y
+  }
+  private readonly _wk: [number, number, number, number] = [0, 0, 0, 0]
+
+  /** Mud at (x, z), 0 … 1 (bilinear on the 4 m grid). */
+  mudAt(x: number, z: number): number {
+    const g = this.meta.mask, n = g.n
+    const fx = (x - g.origin) / g.step, fz = (z - g.origin) / g.step
+    if (fx < 0 || fz < 0 || fx >= n - 1 || fz >= n - 1) return 0
+    const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j, k = (j * n + i) * 2, M = this.mud, r = n * 2
+    return ((M[k] * (1 - u) + M[k + 2] * u) * (1 - v) + (M[k + r] * (1 - u) + M[k + r + 2] * u) * v) / 255
   }
 
   static async load(base: string, onProgress?: (f: number) => void): Promise<MapData> {
@@ -130,11 +184,11 @@ export class MapData {
     let done = 0
     const get = async (f: string) => {
       const b = await (await fetch(`${base}/${f}`)).arrayBuffer()
-      onProgress?.(++done / 4)
+      onProgress?.(++done / 5)
       return b
     }
-    const [h, f, m, t] = await Promise.all([get('height.bin'), get('far.bin'), get('mask.bin'), get('trail.bin')])
-    return new MapData(meta, new Uint16Array(h), new Uint16Array(f), new Uint8Array(m), new Uint8Array(t))
+    const [h, f, m, t, u] = await Promise.all([get('height.bin'), get('far.bin'), get('mask.bin'), get('trail.bin'), meta.mud ? get('mud.bin') : Promise.resolve(new ArrayBuffer(0))])
+    return new MapData(meta, new Uint16Array(h), new Uint16Array(f), new Uint8Array(m), new Uint8Array(t), new Uint8Array(u))
   }
 
   /** Inside the playable box's 2 m grid (with a cell of margin). */
@@ -202,7 +256,7 @@ export class MapData {
       const t = ((x - b.x0) * dx + (z - b.z0) * dz) / L2
       if (t < -0.02 || t > 1.02) continue
       const ox = x - b.x0 - t * dx, oz = z - b.z0 - t * dz
-      if (ox * ox + oz * oz <= (b.w * 0.5 + 0.3) ** 2) return b.y
+      if (ox * ox + oz * oz <= (b.w * 0.5 + 0.3) ** 2) return b.y0 + (b.y1 - b.y0) * Math.min(1, Math.max(0, t))
     }
     return null
   }

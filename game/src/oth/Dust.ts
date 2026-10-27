@@ -110,6 +110,9 @@ export class Dust {
     this.aC.needsUpdate = true
   }
 
+  /** How wet the land is (main.ts): the rain lays the dust. */
+  wet = 0
+
   private emit(dt: number, car: Vehicle): void {
     const sim = car.sim, model = car.model, q = car.root.quaternion, p = car.root.position
     if (car.id !== this.carId) {
@@ -130,28 +133,47 @@ export class Dust {
       const c = this.v.set(hx, hy + wk.lift - model.wheelRadius * 0.85, hz).applyQuaternion(q).add(p)
       const deck = this.map.bridgeAt(c.x, c.z)
       if (deck !== null && c.y > deck - 0.6) { this.acc[k] = 0; continue } // (planks: no dust)
+      // WATER (a ford, a pond's edge): SPLASHES — white spray thrown up and out, more with speed and depth; no dust
+      const lvl = this.map.waterLevel(c.x, c.z), ground = this.map.height(c.x, c.z)
+      if (lvl !== null && lvl > ground + 0.05) {
+        const depth = Math.min(1, lvl - ground)
+        this.acc[k] += (go * 24 + 4 * Math.min(1, speed / 2)) * (0.4 + depth) * dt
+        while (this.acc[k] >= 1) {
+          this.acc[k] -= 1
+          const jx = (this.rnd() - 0.5) * 0.6, jz = (this.rnd() - 0.5) * 0.6
+          this.spawn(c.x + jx, lvl + 0.05, c.z + jz,
+            lv.x * 0.35 + jx * 5 + (this.rnd() - 0.5) * 2, 1.0 + this.rnd() * 1.8 * (0.5 + go), lv.z * 0.35 + jz * 5 + (this.rnd() - 0.5) * 2,
+            0.35 + this.rnd() * 0.4, 0.18 + 0.2 * go, (0.5 + this.rnd() * 0.7) * (0.6 + go),
+            0.86, 0.91, 0.95, Math.min(0.42, 0.2 + 0.22 * go))
+        }
+        continue
+      }
       const m = this.map.maskAt(c.x, c.z, this.mk)
       const track = Math.max(0, Math.min(1, (hw + 0.8 - this.map.trailDist(c.x, c.z)) / 1.2))
       const bank = m[2] > 0.75 ? 1 - track : 0
       const rock = Math.min(1, m[0] * 1.6) * (1 - track) * (1 - bank)
       const grass = Math.max(0, 1 - track - bank - rock)
-      const amt = track * 1.0 + bank * 0.55 + rock * 0.3 + grass * 0.16
+      // MUD (mud.bin; and the tracks in the rain): dark wet clods, low and short — the wet lays the dust
+      const wet = this.wet
+      const mud = Math.max(this.map.mudAt(c.x, c.z), track * wet * 0.7)
+      const amt = (track * 1.0 + bank * 0.55 + rock * 0.3 + grass * 0.16) * (1 - 0.75 * wet) * (1 - mud) + mud * 1.3
       const slip = sim.wheelSlip[k] ?? 0
       this.acc[k] += amt * (go * 20 + slip * 42) * dt
       if (this.acc[k] < 1) continue
-      // the colour: track dust (the dirt's orange-brown, paler), gravel, rock grey, dry grass-earth
-      const r = track * 0.68 + bank * 0.72 + rock * 0.56 + grass * 0.5
-      const g = track * 0.47 + bank * 0.67 + rock * 0.54 + grass * 0.45
-      const b = track * 0.32 + bank * 0.58 + rock * 0.5 + grass * 0.32
-      const big = 0.7 + 0.6 * go + 0.5 * slip
+      // the colour: track dust (the dirt's orange-brown, paler), gravel, rock grey, dry grass-earth — or the mud's
+      const dry = 1 - mud
+      const r = (track * 0.68 + bank * 0.72 + rock * 0.56 + grass * 0.5) * dry + 0.2 * mud
+      const g = (track * 0.47 + bank * 0.67 + rock * 0.54 + grass * 0.45) * dry + 0.14 * mud
+      const b = (track * 0.32 + bank * 0.58 + rock * 0.5 + grass * 0.32) * dry + 0.09 * mud
+      const big = (0.7 + 0.6 * go + 0.5 * slip) * (1 - 0.5 * mud)
       while (this.acc[k] >= 1) {
         this.acc[k] -= 1
         const jx = (this.rnd() - 0.5) * 0.5, jz = (this.rnd() - 0.5) * 0.5
-        // thrown back and out from the tyre, carried a little with the car, lifting
+        // thrown back and out from the tyre, carried a little with the car, lifting (mud: lower, shorter lived)
         this.spawn(c.x + jx, c.y + 0.1 + this.rnd() * 0.2, c.z + jz,
-          lv.x * 0.25 + jx * 3 + (this.rnd() - 0.5) * 1.2, 0.4 + this.rnd() * 1.1 + slip * 0.8, lv.z * 0.25 + jz * 3 + (this.rnd() - 0.5) * 1.2,
-          1.6 + this.rnd() * 1.8, (0.5 + this.rnd() * 0.4) * big, (2.2 + this.rnd() * 2.0) * big,
-          r, g, b, Math.min(0.55, 0.3 * amt + 0.12 * slip))
+          lv.x * 0.25 + jx * 3 + (this.rnd() - 0.5) * 1.2, (0.4 + this.rnd() * 1.1 + slip * 0.8) * (1 - 0.5 * mud), lv.z * 0.25 + jz * 3 + (this.rnd() - 0.5) * 1.2,
+          (1.6 + this.rnd() * 1.8) * (1 - 0.55 * mud), (0.5 + this.rnd() * 0.4) * big, (2.2 + this.rnd() * 2.0) * big,
+          r, g, b, Math.min(0.55, 0.3 * amt + 0.12 * slip) + 0.25 * mud)
       }
     }
     // EXHAUST: a thin haze at idle, a grey puff on the gas, from every tip

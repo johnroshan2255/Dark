@@ -146,6 +146,16 @@ export class Trees {
     }
     // a per-spot hash 0..1 (no rnd() draw: picking a species must not move the trees after it)
     const hash01 = (x: number, z: number) => (((Math.imul(Math.floor(x * 8), 73856093) ^ Math.imul(Math.floor(z * 8), 19349663)) >>> 0) % 1000) / 1000
+    // the HIDDEN PLACES' floors stay open (meta.hidden): a flower hollow's meadow clear to its banks, a falls basin's
+    // view of its fall clear — no tree on the pool's shore or between the way in and the fall
+    const hid = map.meta.hidden ?? []
+    const hiddenClear = (x: number, z: number) => hid.some((h) => {
+      const dx = x - h.x, dz = z - h.z, d = Math.hypot(dx, dz)
+      if (d > h.r) return false
+      if (h.kind === 'meadow') return d < h.r - 6
+      const ox = Math.sin(h.open), oz = Math.cos(h.open), along = dx * ox + dz * oz, across = Math.abs(dx * oz - dz * ox)
+      return across < 22 || along < -h.r * 0.45
+    })
     for (let gz = -half; gz < half; gz += G) {
       for (let gx = -half; gx < half; gx += G) {
         // (jittered past the cell's edges: no rows — a dense grove's cells all hold a tree, and an even grid shows)
@@ -172,6 +182,7 @@ export class Trees {
         if (mk[2] > 0.75 || mk[0] > 0.45) continue // water / its banks, rock
         if (map.trailDist(x, z) < hw + 3) continue
         if ((x - sp.x) ** 2 + (z - sp.z) ** 2 < 16 * 16) continue
+        if (hiddenClear(x, z)) continue
         const gi = Math.round((x - g.origin) / g.step), gj = Math.round((z - g.origin) / g.step)
         if (fp[gj * g.n + gi] > 40) continue // a boulder
         const y = map.height(x, z)

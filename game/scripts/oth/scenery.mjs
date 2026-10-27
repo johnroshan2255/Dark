@@ -182,6 +182,7 @@ log('streams: trace')
 const HB = blur(H0, N, 3, 2) // (~12 m smoothing: the trace follows the valleys, not the 2 m bumps)
 const hb = (x, z) => sample(HB, N, STEP, ORG, x, z)
 const SP = meta.spawn
+const HIDDEN = meta.hidden ?? [] // (terrain.py: the hidden basins — their own fall, stream and pool, built there)
 function trace(x, z) {
   const P = [[x, z]]
   let gx = hb(x + 4, z) - hb(x - 4, z), gz = hb(x, z + 4) - hb(x, z - 4), gl = Math.hypot(gx, gz) || 1
@@ -211,6 +212,7 @@ for (let gz = -1880; gz <= 1880; gz += 56) for (let gx = -1880; gx <= 1880; gx +
   if (maskAt(x, z, 0) > 0.6 || trailDist(x, z) < 7.5 || inEllipse(LAKE, x, z, 1.4)) continue // (the trail field tops out at 8 m)
   const t = trace(x, z)
   if (!t) continue
+  if (HIDDEN.some((h) => t.P.some((p, k) => k % 3 === 0 && Math.hypot(p[0] - h.x, p[1] - h.z) < h.ro + 25))) continue // (not through a hidden basin)
   const s = arcs(t.P), L = s[s.length - 1]
   if (L < 260 || L > 2400) continue
   const drop = height0(x, z) - t.mouth.level
@@ -331,14 +333,20 @@ const ROAD_LINES = STREAMS.filter((S) => S.road).map((S) => S.road.line)
 for (const Lr of ROAD_LINES) {
   const gr = Lr.map((q) => height0(q[0], q[1]))
   const k = 9, hc = gr.map((_, i) => { let a = 0, w = 0; for (let d = -k; d <= k; d++) { a += gr[clamp(i + d, 0, gr.length - 1)]; w++ } return a / w })
-  const s = arcs(Lr)
+  // JUNCTIONS (as terrain.py's tracks): where the road runs on a track's bed its profile IS that bed's height, easing
+  // back to its own over 40 m along it; a bed already carved is never carved again (below)
+  const s = arcs(Lr), on = Lr.map((q) => trailDist(q[0], q[1]) < ROAD_HW)
+  if (on.some(Boolean)) for (let i = 0; i < Lr.length; i++) {
+    let bd = 1e9, bh = 0
+    for (let j = 0; j < Lr.length; j++) if (on[j] && Math.abs(s[j] - s[i]) < bd) { bd = Math.abs(s[j] - s[i]); bh = height(Lr[j][0], Lr[j][1]) }
+    hc[i] = bh + (hc[i] - bh) * smoothstep(0, 40, bd)
+  }
   overLine(Lr, ROAD_HW + 6, (cell, d, sv, seg) => {
     const i = clamp(Math.floor(seg), 0, Lr.length - 2), t = seg - i
     const target = hc[i] + (hc[i + 1] - hc[i]) * t - 0.12 * (1 - smoothstep(0, ROAD_HW, d))
-    const w = 1 - smoothstep(ROAD_HW + 0.5, ROAD_HW + 5.5, d)
+    const w = (1 - smoothstep(ROAD_HW + 0.5, ROAD_HW + 5.5, d)) * smoothstep(ROAD_HW - 0.5, ROAD_HW + 1.5, (TR[cell] / 255) * 8)
     H[cell] += (target - H[cell]) * w
     TR[cell] = Math.min(TR[cell], Math.round(Math.min(1, d / 8) * 255))
-    void s
   })
   TRAIL_LINES.push(Lr.filter((_, i) => i % 2 === 0).map((q) => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10]))
 }
@@ -347,28 +355,33 @@ for (const Lr of ROAD_LINES) {
 log('bridges')
 const BW = ROAD_HW * 2 + 1
 const bridges = (meta.bridges ?? []).map((b) => ({ ...b, w: Math.round(BW * 100) / 100 }))
+// (2026-10-27: one bridge per stretch of stream near a track missed a second track crossing a few metres off — the
+//  car dropped into the channel beside the bridge): a bridge at EVERY crossing of a track's line with a stream's line
+//  (segment intersections), one per crossing (another within 12 m is the same one)
+const cross = (a, b, c, d) => {
+  const rx = b[0] - a[0], rz = b[1] - a[1], sx = d[0] - c[0], sz = d[1] - c[1], den = rx * sz - rz * sx
+  if (Math.abs(den) < 1e-9) return null
+  const t = ((c[0] - a[0]) * sz - (c[1] - a[1]) * sx) / den, u = ((c[0] - a[0]) * rz - (c[1] - a[1]) * rx) / den
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : null
+}
 for (const S of STREAMS) {
   const P = S.line
-  let k = 0
-  while (k < P.length) {
-    if (trailDist(P[k][0], P[k][1]) >= ROAD_HW + 1) { k++; continue }
-    let k1 = k
-    while (k1 + 1 < P.length && trailDist(P[k1 + 1][0], P[k1 + 1][1]) < ROAD_HW + 1) k1++
-    const m = Math.round((k + k1) / 2), [cx, cz] = P[m]
-    // the track's direction there: the nearest two points of its line
-    let best = null, bd = 1e9
-    for (const L of TRAIL_LINES) for (let i = 0; i < L.length - 1; i++) {
-      const d = Math.hypot(L[i][0] - cx, L[i][1] - cz)
-      if (d < bd) { bd = d; best = [L[i], L[i + 1]] }
-    }
-    if (best && bd < 30) {
-      let dx = best[1][0] - best[0][0], dz = best[1][1] - best[0][1]
+  for (const L of TRAIL_LINES) {
+    if (S.road && L === S.road.line) continue
+    for (let i = 0; i < L.length - 1; i++) for (let k = 0; k < P.length - 1; k++) {
+      const t = cross(L[i], L[i + 1], P[k], P[k + 1])
+      if (t === null) continue
+      const cx = L[i][0] + (L[i + 1][0] - L[i][0]) * t, cz = L[i][1] + (L[i + 1][1] - L[i][1]) * t
+      if (mouthAt(cx, cz) !== null || bridges.some((B) => Math.hypot((B.x0 + B.x1) / 2 - cx, (B.z0 + B.z1) / 2 - cz) < 12)) continue
+      // (the track's direction over ±2 points: the deck lies along it)
+      const p0 = L[Math.max(0, i - 2)], p1 = L[Math.min(L.length - 1, i + 3)]
+      let dx = p1[0] - p0[0], dz = p1[1] - p0[1]
       const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l
+      const m = Math.abs(P[k][0] - cx) + Math.abs(P[k][1] - cz) < Math.abs(P[k + 1][0] - cx) + Math.abs(P[k + 1][1] - cz) ? k : k + 1
       const half = S.hw[m] * 1.8 + 4
-      bridges.push({ x0: +(cx - dx * half).toFixed(2), z0: +(cz - dz * half).toFixed(2), x1: +(cx + dx * half).toFixed(2), z1: +(cz + dz * half).toFixed(2), y: +(height(cx, cz) + 0.25).toFixed(2), w: Math.round(BW * 100) / 100 })
+      bridges.push({ x0: +(cx - dx * half).toFixed(2), z0: +(cz - dz * half).toFixed(2), x1: +(cx + dx * half).toFixed(2), z1: +(cz + dz * half).toFixed(2), y: +(height(cx, cz) + 0.25).toFixed(2), w: Math.round(BW * 100) / 100, water: S.c[m] })
       bridgesNew.push(bridges.at(-1))
     }
-    k = k1 + 1
   }
 }
 
@@ -383,9 +396,57 @@ for (const S of STREAMS) {
     const pool = below < 10 ? 1 - below / 10 : 0
     const w = hw * (1 + 0.5 * pool), depth = DEPTH * (1 + 0.9 * pool)
     const bank = below < 28 ? GORGE : BANK
+    // (a track's bed is never cut by the banks — only by the water's own channel, where a bridge spans it: a gorge's
+    //  wall cut 2 m into the end of a track beside a fall, 2026-10-27)
+    if (d > w + 1.5 && TR[cell] < ((ROAD_HW + 1) / 8) * 255) return
     const bed = c - depth + (depth + 0.25) * smooth01(d / w) + Math.max(0, d - w) * bank
     if (bed < H[cell]) H[cell] = bed
   })
+}
+
+// ------------------------------------------------------------------------------------------------- bridge ends
+// (2026-10-27, the user: "fix the collider issues for bridges" — the car stopped dead at a deck's edge, fell off one
+// side or rolled: a level deck at its middle's height on a sloping track left its ends up to a metre off the road,
+// the river decks a 15 cm lip): every deck's ENDS sit on the road — y0 / y1, the ground 2 m beyond each (a stream's
+// deck sloping with its road, ≥ 1 m over the water; the river decks keep their level height) — the ground eases
+// onto each end over 14 m along the deck's line, and under the deck stays 35 cm below the planks (no bank through them)
+log('bridge ends')
+const heightR = (x, z) => sample(HR, N, STEP, ORG, x, z)
+for (const b of bridges) {
+  let dx = b.x1 - b.x0, dz = b.z1 - b.z0, L = Math.hypot(dx, dz)
+  const ux = dx / L, uz = dz / L
+  if (b.water !== undefined) {
+    // (a stream's deck SPANS its cut: from the middle out along the road until the stream's carving no longer lowered
+    //  the ground — HR, before the streams — so its ends sit on the uncut road; ends inside a gorge's walls left the
+    //  road diving into it at 60 °)
+    const cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2
+    const reach = (sg) => { let t = 2; while (t < 40 && heightR(cx + ux * sg * t, cz + uz * sg * t) - height(cx + ux * sg * t, cz + uz * sg * t) > 0.15) t += 0.5; return t + 1.5 }
+    const t0 = reach(-1), t1 = reach(1)
+    b.x0 = +(cx - ux * t0).toFixed(2); b.z0 = +(cz - uz * t0).toFixed(2); b.x1 = +(cx + ux * t1).toFixed(2); b.z1 = +(cz + uz * t1).toFixed(2)
+    dx = b.x1 - b.x0; dz = b.z1 - b.z0; L = Math.hypot(dx, dz)
+    b.y0 = height(b.x0 - ux, b.z0 - uz); b.y1 = height(b.x1 + ux, b.z1 + uz)
+    const lift = Math.max(0, b.water + 1.0 - (b.y0 + b.y1) / 2)
+    b.y0 += lift; b.y1 += lift
+  } else b.y0 = b.y1 = b.y
+  // (the road keeps its own slope: the gap between the deck and the ground at each end is closed by an OFFSET that
+  //  fades out over 14 m — pulling the ground flat onto the deck height kinked a sloping approach into a 55 % pitch —
+  //  and only the last 3 m are levelled across, to the deck's square end)
+  const A = 14, hw = b.w / 2
+  const off0 = b.y0 - 0.04 - height(b.x0, b.z0), off1 = b.y1 - 0.04 - height(b.x1, b.z1)
+  overLine([[b.x0 - ux * A, b.z0 - uz * A], [b.x1 + ux * A, b.z1 + uz * A]], hw + 4, (cell, d, sv) => {
+    const s = sv - A
+    if (s > 0.3 && s < L - 0.3) {
+      if (d < hw + 0.6) H[cell] = Math.min(H[cell], b.y0 + ((b.y1 - b.y0) * s) / L - 0.35)
+      return
+    }
+    const first = s <= 0.3, top = first ? b.y0 : b.y1, out = Math.max(0, first ? -s : s - L)
+    const across = 1 - smoothstep(hw + 0.3, hw + 4, d)
+    H[cell] += (first ? off0 : off1) * across * (1 - smoothstep(0, A, out))
+    H[cell] += (top - 0.04 - H[cell]) * across * (1 - smoothstep(1, 3, out))
+    if (d < hw + 1) TR[cell] = Math.min(TR[cell], Math.round(Math.min(1, d / 8) * 255))
+  })
+  b.y0 = +b.y0.toFixed(2); b.y1 = +b.y1.toFixed(2); b.y = +Math.max(b.y0, b.y1).toFixed(2)
+  delete b.water
 }
 
 // --------------------------------------------------------------------------------------------------- the mask
@@ -464,6 +525,265 @@ for (const S of STREAMS) {
 }
 log(`  ${boulders.length} boulders`)
 
+// ------------------------------------------------------------------------------------------------------ landmarks
+// LANDMARKS (2026-10-27, the user: "add those" — OTH's Canada has fire-watch towers, cabins, sawmills, mines, fishing
+// shacks, viewpoints, fallen meteorites: places seen from afar and driven to): sites picked from the finished ground —
+// the two highest track ends (FIRE LOOKOUTS), two more high ends with a long drop round them (VIEWPOINTS), track ends
+// by the ponds and a track deep in a forest (CABINS), the lake track's shore (a FISHING SHACK + its dock), a flat forest
+// edge in the valley (the SAWMILL), a rock formation beside a track (a MINE's portal), a meadow far from every track (a
+// METEORITE in its crater). Each on a levelled PAD painted packed earth (the trail field: trees, bushes, rocks and the
+// grass keep off it). `meta.landmarks`: { id, kind, name, x, z, y, rot (rad: the way its front faces, local +z), r }.
+log('landmarks')
+const LM = []
+// (the HIDDEN PLACES first — terrain.py built them: the others keep their distance; found from inside: no pad)
+for (const h of HIDDEN) LM.push({ id: LM.length, kind: h.kind, name: h.name, x: h.x, z: h.z, y: h.F, rot: h.open, r: Math.round(h.r * 0.6) })
+const slopeAt = (x, z) => Math.hypot(height(x + 2, z) - height(x - 2, z), height(x, z + 2) - height(x, z - 2)) / 4
+const isWater = (x, z) => maskAt(x, z, 2) > 0.9
+const farFromLM = (x, z, d) => LM.every((l) => Math.hypot(l.x - x, l.z - z) > d)
+const face = (x, z, tx, tz) => Math.atan2(tx - x, tz - z)
+const count = (k) => LM.filter((l) => l.kind === k).length
+const ends = []
+for (const L of TRAIL_LINES) for (const q of [L[0], L.at(-1)]) if (inBox(q[0], q[1], 150)) ends.push({ x: q[0], z: q[1], y: height(q[0], q[1]) })
+const TRP = [] // (every track point, coarse: the distance to the nearest track)
+for (const L of TRAIL_LINES) for (const q of L) TRP.push(q[0], q[1])
+const trackFar = (x, z) => { let b = 1e9; for (let i = 0; i < TRP.length; i += 2) { const d = (TRP[i] - x) ** 2 + (TRP[i + 1] - z) ** 2; if (d < b) b = d } return Math.sqrt(b) }
+function pad(x, z, r, y) {
+  if (y === undefined) {
+    const hs = []
+    for (let a = 0; a < 12; a++) for (const f of [0, 0.5, 1]) hs.push(height(x + Math.cos((a / 12) * 6.283) * r * f, z + Math.sin((a / 12) * 6.283) * r * f))
+    hs.sort((a, b) => a - b); y = hs[hs.length >> 1]
+  }
+  overLine([[x, z], [x + 0.01, z]], r + 7, (cell, d) => {
+    H[cell] += (y - H[cell]) * (1 - smoothstep(r, r + 7, d))
+    TR[cell] = Math.min(TR[cell], Math.round(Math.min(1, Math.max(0, d - r + ROAD_HW * 0.7) / 8) * 255))
+  })
+  return y
+}
+function place(kind, name, x, z, r, rot, y) {
+  const py = pad(x, z, r, y)
+  LM.push({ id: LM.length, kind, name, x: +x.toFixed(2), z: +z.toFixed(2), y: +py.toFixed(2), rot: +rot.toFixed(3), r })
+}
+// a spot `off` m from (x, z): the flattest of 12 directions, dry, off the tracks' beds
+function beside(x, z, off) {
+  let best = null, bs = 1e9
+  for (let a = 0; a < 12; a++) {
+    const px = x + Math.cos(a * 0.5236) * off, pz = z + Math.sin(a * 0.5236) * off
+    if (!inBox(px, pz, 110) || isWater(px, pz) || trailDist(px, pz) < ROAD_HW + 2.5) continue
+    const sl = slopeAt(px, pz) + 0.01 * Math.abs(height(px, pz) - height(x, z))
+    if (sl < bs) { bs = sl; best = [px, pz] }
+  }
+  return best
+}
+const high = [...ends].sort((a, b) => b.y - a.y)
+for (const e of high) {
+  if (count('tower') >= 2) break
+  if (!farFromLM(e.x, e.z, 1200)) continue
+  const p = beside(e.x, e.z, 10); if (!p) continue
+  place('tower', ['Lookout Peak', 'Ridge Lookout'][count('tower')], p[0], p[1], 6, face(p[0], p[1], e.x, e.z))
+}
+for (const e of high) {
+  if (count('view') >= 2) break
+  if (!farFromLM(e.x, e.z, 650)) continue
+  let drop = 0, lowA = 0, low = 1e9
+  for (let a = 0; a < 16; a++) {
+    const h = height(e.x + Math.cos(a * 0.3927) * 220, e.z + Math.sin(a * 0.3927) * 220)
+    drop += e.y - h
+    if (h < low) { low = h; lowA = a * 0.3927 }
+  }
+  if (drop / 16 < 22) continue
+  const p = beside(e.x, e.z, 8); if (!p) continue
+  place('view', ['Eagle Point', 'Valley View'][count('view')], p[0], p[1], 5, face(0, 0, Math.cos(lowA), Math.sin(lowA)))
+}
+const CABINS = ["Trapper's Cabin", 'Pond Cabin', 'Birch Hollow Cabin', 'Old Hut']
+for (const P of PONDS) {
+  if (count('cabin') >= 3) break
+  const R = Math.max(P.rx, P.rz)
+  const e = ends.filter((e) => Math.hypot(e.x - P.cx, e.z - P.cz) < R * 1.6 + 30).sort((a, b) => Math.hypot(a.x - P.cx, a.z - P.cz) - Math.hypot(b.x - P.cx, b.z - P.cz))[0]
+  if (!e || !farFromLM(e.x, e.z, 450)) continue
+  const p = beside(e.x, e.z, 12); if (!p) continue
+  place('cabin', CABINS[count('cabin')], p[0], p[1], 7, face(p[0], p[1], P.cx, P.cz))
+}
+{ // the cabin in the woods: a track point 250–900 m from the spawn deep in a forest stand
+  let best = null, bs = -1
+  for (const L of TRAIL_LINES) for (const q of L) {
+    const d = Math.hypot(q[0] - SP.x, q[1] - SP.z)
+    if (d < 250 || d > 900 || !farFromLM(q[0], q[1], 450)) continue
+    const f = maskAt(q[0], q[1], 3)
+    if (f > bs) { bs = f; best = q }
+  }
+  const p = best && beside(best[0], best[1], 12)
+  if (p) place('cabin', CABINS[count('cabin')], p[0], p[1], 7, face(p[0], p[1], best[0], best[1]))
+}
+{ // the FISHING SHACK: the track end nearest the big lake; on its beach facing the water, a dock out over it
+  const LK = meta.water.lake, inLake = (x, z) => { const c = Math.cos(LK.rot), s = Math.sin(LK.rot), dx = x - LK.cx, dz = z - LK.cz; return ((dx * c + dz * s) / LK.rx) ** 2 + ((-dx * s + dz * c) / LK.rz) ** 2 < 1 }
+  const e = [...ends].sort((a, b) => Math.hypot(a.x - LK.cx, a.z - LK.cz) - Math.hypot(b.x - LK.cx, b.z - LK.cz))[0]
+  if (e) {
+    let ux = LK.cx - e.x, uz = LK.cz - e.z
+    const l = Math.hypot(ux, uz); ux /= l; uz /= l
+    let t = 0
+    while (t < 400 && !inLake(e.x + ux * t, e.z + uz * t) && height(e.x + ux * t, e.z + uz * t) > LK.level + 0.2) t += 2
+    const sx = e.x + ux * Math.max(0, t - 9), sz = e.z + uz * Math.max(0, t - 9)
+    place('shack', 'Lakeside Shack', sx, sz, 5, face(sx, sz, LK.cx, LK.cz), Math.max(LK.level + 0.9, height(sx, sz)))
+  }
+}
+{ // the SAWMILL: a flat track point 350–1100 m from the spawn at a forest's edge
+  let best = null, bs = 1e9
+  for (const L of TRAIL_LINES) for (let i = 0; i < L.length; i += 2) {
+    const q = L[i], d = Math.hypot(q[0] - SP.x, q[1] - SP.z)
+    if (d < 350 || d > 1100 || !farFromLM(q[0], q[1], 400)) continue
+    const f = maskAt(q[0] + 30, q[1], 3) + maskAt(q[0] - 30, q[1], 3) + maskAt(q[0], q[1] + 30, 3) + maskAt(q[0], q[1] - 30, 3)
+    const sc = slopeAt(q[0], q[1]) * 8 + Math.abs(f - 1.6)
+    if (sc < bs) { bs = sc; best = q }
+  }
+  const p = best && beside(best[0], best[1], 19)
+  if (p) place('sawmill', 'Old Sawmill', p[0], p[1], 14, face(p[0], p[1], best[0], best[1]))
+}
+{ // the MINE: a rock formation whose rim is within 70 m of a track; its portal at the foot of the rock, facing the track
+  const F = [...meta.rocks].sort((a, b) => Math.hypot(a[0] - SP.x, a[1] - SP.z) - Math.hypot(b[0] - SP.x, b[1] - SP.z))
+  for (const [cx, cz, R] of F) {
+    if (count('mine') || !farFromLM(cx, cz, 500)) continue
+    let tp = null, td = 1e9
+    for (let i = 0; i < TRP.length; i += 2) { const d = Math.hypot(TRP[i] - cx, TRP[i + 1] - cz); if (d < td) { td = d; tp = [TRP[i], TRP[i + 1]] } }
+    if (!tp || td - R * 0.5 > 70 || td < R * 0.3) continue
+    // from the track toward the rock: the first steep step is its face; the portal 2 m before it
+    let ux = cx - tp[0], uz = cz - tp[1]
+    const l = Math.hypot(ux, uz); ux /= l; uz /= l
+    let t = 6
+    while (t < td && slopeAt(tp[0] + ux * t, tp[1] + uz * t) < 0.55) t += 1
+    if (t >= td) continue
+    const px = tp[0] + ux * (t - 1), pz = tp[1] + uz * (t - 1)
+    place('mine', 'Copper Mine', px, pz, 4, face(px, pz, tp[0], tp[1]))
+  }
+}
+let meteor = null
+{ // the METEORITE: a dry, flat, open meadow 600–1700 m from the spawn, ≥ 90 m from every track — a crater round it
+  let best = null, bs = 1e9
+  for (let x = ORG + 200; x < -ORG - 200; x += 48) for (let z = ORG + 200; z < -ORG - 200; z += 48) {
+    const d = Math.hypot(x - SP.x, z - SP.z)
+    if (d < 600 || d > 1700 || isWater(x, z) || maskAt(x, z, 3) > 0.2 || maskAt(x, z, 0) > 0.2 || !farFromLM(x, z, 500)) continue
+    const sl = slopeAt(x, z)
+    if (sl > 0.08) continue
+    const sc = sl + Math.abs(d - 1000) * 0.0001
+    if (sc < bs && trackFar(x, z) > 90) { bs = sc; best = [x, z] }
+  }
+  if (best) {
+    const [x, z] = best, y0 = height(x, z), R = 11
+    overLine([[x, z], [x + 0.01, z]], R + 7, (cell, d) => {
+      // a bowl 1.8 m deep, its rim thrown up 0.9 m, eased into the meadow
+      H[cell] = y0 + (d < R ? -1.8 * (1 - (d / R) ** 2) + 0.9 * (d / R) ** 4 : 0.9 * (1 - smoothstep(R, R + 7, d)))
+      TR[cell] = Math.min(TR[cell], Math.round(Math.min(1, Math.max(0, d - R + 1) / 8) * 255))
+    })
+    meteor = { x, z, R }
+    LM.push({ id: LM.length, kind: 'meteorite', name: 'Fallen Star', x: +x.toFixed(2), z: +z.toFixed(2), y: +(y0 - 1.8).toFixed(2), rot: 0, r: R })
+  }
+}
+// (no loose boulder on a pad)
+for (let i = boulders.length - 1; i >= 0; i--) if (LM.some((l) => Math.hypot(l.x - boulders[i][0], l.z - boulders[i][1]) < l.r + 5)) boulders.splice(i, 1)
+log(`  ${LM.length} landmarks: ${LM.map((l) => `${l.name} (${Math.round(l.x)}, ${Math.round(l.z)})`).join(', ')}`)
+
+// ------------------------------------------------------------------------------------------------------------ mud
+// MUD (2026-10-27, OTH's Wetlands: "broad swamps, muddy bogs"): `mud.bin` (R8 on the mask's 4 m grid, 0 … 1) — one
+// MARSH (the flattest, wettest low ground beside a track 450–1500 m from the spawn, ~120 m round, a patchwork of mud
+// and boggy hollows sunk 40 cm), MUD HOLES in the tracks' dips (a low point of the bed: where the rain stands) and mud
+// along the slow river banks. The ground paints it dark and glossy, the grass keeps off the thick of it, the tyres sink
+// and slip (Vehicle: Surf.Mud), the wheels throw dark clods (Dust).
+log('mud')
+const MUD = new Uint8Array(MN * MN * 2) // (R mud, G wildflowers — below)
+const vhash = (i, j, s) => { let h = (Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(s, 144665)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296 }
+const vnoise = (x, z, s) => {
+  const i = Math.floor(x), j = Math.floor(z), u = smooth01(x - i), v = smooth01(z - j)
+  return (vhash(i, j, s) * (1 - u) + vhash(i + 1, j, s) * u) * (1 - v) + (vhash(i, j + 1, s) * (1 - u) + vhash(i + 1, j + 1, s) * u) * v
+}
+const mudAdd = (x, z, a) => {
+  const i = Math.round((x - MG.origin) / MG.step), j = Math.round((z - MG.origin) / MG.step)
+  if (i < 0 || j < 0 || i >= MN || j >= MN) return
+  MUD[(j * MN + i) * 2] = Math.max(MUD[(j * MN + i) * 2], Math.round(clamp(a, 0, 1) * 255))
+}
+let marsh = null
+{
+  let bs = -1e9
+  for (let x = ORG + 300; x < -ORG - 300; x += 32) for (let z = ORG + 300; z < -ORG - 300; z += 32) {
+    const d = Math.hypot(x - SP.x, z - SP.z)
+    if (d < 450 || d > 1600 || isWater(x, z) || !farFromLM(x, z, 250)) continue
+    let wet = 0, sl = 0
+    for (let a = 0; a < 8; a++) { const px = x + Math.cos(a * 0.785) * 50, pz = z + Math.sin(a * 0.785) * 50; wet += maskAt(px, pz, 2); sl += slopeAt(px, pz) }
+    if (sl / 8 > 0.12 || wet / 8 > 0.92) continue
+    const tf = trackFar(x, z)
+    if (tf > 120) continue
+    const sc = wet / 8 * 1.5 - sl / 8 * 8 - maskAt(x, z, 3) * 0.6 - Math.abs(tf - 45) * 0.004
+    if (sc > bs) { bs = sc; marsh = { x, z, r: 120 } }
+  }
+}
+if (marsh) {
+  overLine([[marsh.x, marsh.z], [marsh.x + 0.01, marsh.z]], marsh.r * 1.35, (cell, d) => {
+    const x = ORG + (cell % N) * STEP, z = ORG + Math.floor(cell / N) * STEP
+    const warp = d * (0.8 + 0.5 * vnoise(x / 70, z / 70, 7))
+    const edge = 1 - smoothstep(marsh.r * 0.55, marsh.r * 1.25, warp)
+    const patch = clamp((vnoise(x / 22, z / 22, 8) * 0.7 + vnoise(x / 7, z / 7, 9) * 0.3 - 0.36) * 2.6, 0, 1)
+    const a = edge * patch
+    if (a <= 0) return
+    if (trailDist(x, z) > ROAD_HW + 1) H[cell] -= 0.4 * a * a // (the boggy hollows; the tracks keep their bed)
+    mudAdd(x, z, a)
+  })
+}
+let holes = 0
+for (let li = 0; li < TRAIL_LINES.length; li++) {
+  if ((meta.trails.rough ?? []).includes(li)) continue
+  const L = TRAIL_LINES[li]
+  for (let i = 3; i < L.length - 3; i++) {
+    const h0 = height(L[i][0], L[i][1])
+    if (!(h0 < height(L[i - 3][0], L[i - 3][1]) - 0.25 && h0 < height(L[i + 3][0], L[i + 3][1]) - 0.25)) continue
+    if (vhash(li, i, 11) > 0.6 || !farFromLM(L[i][0], L[i][1], 40)) continue // (not in a landmark's yard)
+    holes++
+    const [x, z] = L[i], R = 5 + vhash(li, i, 12) * 5
+    for (let dz = -R - 2; dz <= R + 2; dz += 2) for (let dx = -R - 2; dx <= R + 2; dx += 2) {
+      const d = Math.hypot(dx, dz)
+      mudAdd(x + dx, z + dz, (1 - smoothstep(R * 0.4, R + 2, d)) * (0.75 + 0.25 * vnoise((x + dx) / 4, (z + dz) / 4, 13)))
+    }
+  }
+}
+for (let j = 0; j < MN; j += 1) for (let i = 0; i < MN; i += 1) {
+  const x = MG.origin + i * MG.step, z = MG.origin + j * MG.step
+  if (!inBox(x, z, 20)) continue
+  const nr = nearestRiver(x, z), bank = nr.d - R.hw[nr.i]
+  if (bank < 1 || bank > 14) continue
+  const a = (1 - smoothstep(6, 14, bank)) * (1 - smoothstep(0.03, 0.1, slopeAt(x, z))) * clamp((vnoise(x / 18, z / 18, 14) - 0.45) * 3, 0, 1)
+  if (a > 0) mudAdd(x, z, a * 0.8)
+}
+// (the meteorite's crater floor: scorched, loose — dark like the mud)
+if (meteor) for (let dz = -meteor.R; dz <= meteor.R; dz += 2) for (let dx = -meteor.R; dx <= meteor.R; dx += 2) {
+  const d = Math.hypot(dx, dz)
+  mudAdd(meteor.x + dx, meteor.z + dz, (1 - smoothstep(meteor.R * 0.5, meteor.R, d)) * 0.7)
+}
+log(`  marsh ${marsh ? `(${marsh.x}, ${marsh.z})` : 'none'}, ${holes} mud holes on the tracks`)
+
+// ----------------------------------------------------------------------------------------------------- wildflowers
+// WILDFLOWERS (2026-10-27, the user: "the colour is the key"): mud.bin's G — where the grass grows blossoms. Whole
+// carpets on the hidden basins' floors (the Flower Hollow thickest; never in a pool or on the track), and drifts over
+// the lush meadows elsewhere — green (not straw) ground, off rock, water, tracks, mud and the forest's floor, in
+// patches 20–90 m across (a slow noise), ~1/8 of such ground. The grass picks the colours (Grass.ts).
+log('wildflowers')
+let bloomN = 0
+for (let j = 0; j < MN; j++) for (let i = 0; i < MN; i++) {
+  const x = MG.origin + i * MG.step, z = MG.origin + j * MG.step
+  if (!inBox(x, z, 30)) continue
+  const k = (j * MN + i) * 2
+  if (M[(j * MN + i) * 4 + 2] > 0.9 * 255 || MUD[k] > 60) continue // (water; mud)
+  const td = trailDist(x, z)
+  if (td < ROAD_HW + 0.8) continue
+  let a = 0
+  for (const h of HIDDEN) {
+    const d = Math.hypot(x - h.x, z - h.z)
+    if (d < h.r + 4) a = Math.max(a, (1 - smoothstep(h.r - 12, h.r + 2, d)) * (h.kind === 'meadow' ? 1 : 0.8) * (0.7 + 0.3 * vnoise(x / 9, z / 9, 21)))
+  }
+  const rock = M[(j * MN + i) * 4] / 255, dry = M[(j * MN + i) * 4 + 1] / 255, forest = M[(j * MN + i) * 4 + 3] / 255
+  const drift = clamp((vnoise(x / 60, z / 60, 22) * 0.75 + vnoise(x / 17, z / 17, 23) * 0.25 - 0.62) * 4, 0, 1)
+  a = Math.max(a, drift * (1 - smoothstep(0.3, 0.55, dry)) * (1 - smoothstep(0.2, 0.5, rock)) * (1 - smoothstep(0.3, 0.6, forest)))
+  a *= smoothstep(ROAD_HW + 0.8, ROAD_HW + 3, td)
+  if (a > 0.02) { MUD[k + 1] = Math.round(clamp(a, 0, 1) * 255); bloomN++ }
+}
+log(`  blossoms on ${(bloomN * MG.step * MG.step / 1e6).toFixed(2)} km²`)
+
 // -------------------------------------------------------------------------------------------------------- write
 log('write')
 const enc = (h, min, range) => clamp(Math.round(((h - min) / range) * 65535), 0, 65535)
@@ -491,11 +811,16 @@ for (const S of STREAMS) {
     fallsMeta.push({ x: +x.toFixed(1), z: +z.toFixed(1), y: +f.top.toFixed(2), bx: +bx.toFixed(1), bz: +bz.toFixed(1), by: +f.bottom.toFixed(2), hw: +(S.hw[f.k] * 0.85).toFixed(2) })
   }
 }
-const out = { ...meta, bridges, trails: { ...meta.trails, lines: TRAIL_LINES }, water: { ...meta.water, streams: streamsMeta, falls: fallsMeta }, scenery: { boulders } }
+for (const h of HIDDEN) {
+  if (h.fall) fallsMeta.push(h.fall)
+  if (h.stream && h.stream.x.length >= 2) streamsMeta.push(h.stream)
+}
+const out = { ...meta, bridges, trails: { ...meta.trails, lines: TRAIL_LINES }, water: { ...meta.water, streams: streamsMeta, falls: fallsMeta }, scenery: { boulders }, landmarks: LM, mud: { n: MN, step: MG.step, origin: MG.origin, marsh } }
 fs.writeFileSync(path.join(OUT, 'height.bin'), Buffer.from(hOut.buffer))
 fs.writeFileSync(path.join(OUT, 'far.bin'), Buffer.from(farRaw.buffer))
 fs.writeFileSync(path.join(OUT, 'mask.bin'), Buffer.from(M.buffer))
 fs.writeFileSync(path.join(OUT, 'trail.bin'), Buffer.from(TR.buffer))
+fs.writeFileSync(path.join(OUT, 'mud.bin'), Buffer.from(MUD.buffer))
 fs.writeFileSync(path.join(OUT, 'meta.json'), JSON.stringify(out))
 log(`wrote ${OUT}: ${STREAMS.length} streams (${streamsMeta.length} runs), ${fallsMeta.length} falls (tallest ${Math.max(0, ...fallsMeta.map((f) => f.y - f.by)).toFixed(1)} m), ${ROAD_LINES.length} roads, ${bridgesNew.length} new bridges, ${boulders.length} boulders`)
 

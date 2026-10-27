@@ -9,20 +9,26 @@ import { Dust } from './Dust'
 import { Falls } from './Falls'
 import { ChaseCam } from './ChaseCam'
 import { FlyCam } from './FlyCam'
+import { Glow } from './Glow'
 import { Grass } from './Grass'
 import { Horizon } from './Horizon'
+import { Landmarks } from './Landmarks'
 import { MapData } from './MapData'
+import { MapView } from './MapView'
 import { OthPhysics } from './Physics'
 import { createPaintTexture } from './noiseTex'
 import { Post } from './Post'
+import { Rain } from './Rain'
 import { Rocks } from './Rocks'
 import { pickTier } from './quality'
 import { Sky } from './Sky'
 import { Terrain } from './Terrain'
 import { TerrainShadow } from './TerrainShadow'
 import { Trees } from './Trees'
+import { TyreTracks } from './TyreTracks'
 import { Vehicle } from './Vehicle'
 import { Water } from './Water'
+import { Winch } from './Winch'
 
 /**
  * OVER THE HILL — a new world, its own renderer: no React, no shared world code. Boot: tier → map data → paint
@@ -44,7 +50,7 @@ async function boot() {
   // 6 km). three falls back to standard depth where the browser lacks EXT_clip_control. LOW draws to the canvas's
   // 24-bit depth: reversed there, no finer than before.
   const renderer = new THREE.WebGLRenderer({ antialias: tier.msaa && !tier.bloom, powerPreference: 'high-performance', stencil: false, reversedDepthBuffer: true })
-  renderer.setPixelRatio(Math.min(devicePixelRatio, tier.dpr))
+  renderer.setPixelRatio(Math.min(devicePixelRatio, num('maxdpr', tier.dpr)))
   renderer.setSize(innerWidth, innerHeight)
   const tm = q.get('tm') ?? 'neutral-hue'
   // (the default: Neutral with a hue-keeping toe — toneMap.ts; ?tm=neutral the original, ?tm=aces / agx)
@@ -58,7 +64,8 @@ async function boot() {
   const map = await MapData.load('/oth/valley', (f) => (status.textContent = `Loading the valley… ${Math.round(f * 100)}%`))
   const noise = createPaintTexture()
   const atmos = new Atmosphere(noise)
-  atmos.uniforms.uFogRange.value.set(tier.fogNear, tier.fogEnd)
+  atmos.uniforms.uFogRange.value.set(tier.fogNear, tier.haze)
+  atmos.hazeLen = tier.haze
   atmos.hour = num('hour', 15.5)
   // ?time=0 stops the clock (the shot harness); [ / ] an hour back / on, T stops / starts it
   if (q.get('time') === '0') atmos.dayMinutes = 0
@@ -68,9 +75,13 @@ async function boot() {
     if (e.code === 'BracketRight') atmos.hour = (atmos.hour + 1) % 24
     if (e.code === 'BracketLeft') atmos.hour = (atmos.hour + 23) % 24
     if (e.code === 'KeyT') atmos.dayMinutes = atmos.dayMinutes ? 0 : runMinutes
+    if (e.code === 'KeyK') toast(`Weather: ${atmos.stepWeather()}`)
   })
+  // ?weather=clear|cloudy|rain pins the weather (settled at once: the shot harness)
+  const wq = q.get('weather')
+  if (wq === 'clear' || wq === 'cloudy' || wq === 'rain') { atmos.weather = wq; atmos.settleWeather() }
 
-  const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.3, tier.far)
+  const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.3, num('far', tier.far)) // (?far= m: cost tests)
   const scene = new THREE.Scene()
   const shadow = new TerrainShadow(map)
   let shadowReady = false
@@ -87,14 +98,22 @@ async function boot() {
   // OCCLUSION CULLING: what the hills hide (trees, rocks, bushes behind them are skipped); ?occlusion=0 turns it off
   const horizon = new Horizon(map, Math.max(tier.treeReach, tier.rockReach))
   horizon.enabled = q.get('occlusion') !== '0'
-  trees.horizon = rocks.horizon = bushes.horizon = horizon
+  trees.horizon = rocks.horizon = bushes.horizon = terrain.horizon = horizon
   const bridges = new Bridges(map, atmos, shadow, tier, terrain.uniforms.uFarGrid.value)
-  scene.add(terrain.mesh, grass.group, rocks.group, trees.group, bushes.group, water.group, falls.group, bridges.group, sky.mesh)
+  const rain = new Rain(atmos, tier)
+  // without the post pass: the bloom and the god rays painted forward (Glow.ts)
+  const glow = tier.bloom ? null : new Glow(map, atmos)
+  atmos.uniforms.uGlow.value = glow ? 1 : 0
+  if (glow) scene.add(glow.group)
+  const landmarks = new Landmarks(map, atmos, shadow, tier, terrain.uniforms.uFarGrid.value)
+  landmarks.onDiscover = (l, n, total) => toast(`Discovered · ${l.name}   ${n} / ${total}`, 4200)
+  scene.add(landmarks.group, terrain.mesh, grass.group, rocks.group, trees.group, bushes.group, water.group, falls.group, bridges.group, sky.mesh, rain.mesh)
 
   // THE 4×4: the game's vehicle physics on this map's ground and rocks
   status.textContent = 'Loading the 4×4…'
   const physics = await OthPhysics.create(map, rocks)
   physics.trees = trees
+  physics.addLandmarks(landmarks.colliders)
   const car = new Vehicle(map, physics, atmos, shadow, tier, terrain.uniforms.uFarGrid.value)
   if (q.get('paint')) car.paint = '#' + q.get('paint')!.replace('#', '')
   await car.setCar(q.get('car') ?? 'gwagen')
@@ -102,6 +121,12 @@ async function boot() {
   // the tyres' dust and the exhaust smoke
   const dust = new Dust(map, atmos, tier)
   scene.add(dust.mesh)
+  const tyreTracks = new TyreTracks(map, tier)
+  scene.add(tyreTracks.mesh)
+  const winch = new Winch(map, car, trees, rocks)
+  winch.onMessage = (m) => toast(m)
+  scene.add(winch.mesh)
+  const mapView = new MapView(map, landmarks, camera, () => car.pos, () => car.sim?.heading ?? 0)
   const chase = new ChaseCam(camera, map, car, renderer.domElement)
   chase.snap()
   let driving = q.get('drive') !== '0'
@@ -128,8 +153,8 @@ async function boot() {
     else { camera.fov = THREE.MathUtils.clamp(camera.fov * k, 18, 80); camera.updateProjectionMatrix() }
   })
 
-  const post = tier.bloom ? new Post(tier.bloom, tier.msaa ? 4 : 0, num('bloom', 0.42), num('rays', 2.0)) : null
-  const baseDpr = Math.min(devicePixelRatio, tier.dpr)
+  const post = tier.bloom ? new Post(num('levels', tier.bloom), num('samples', tier.samples), num('bloom', 0.42), num('rays', 2.0), tier.bloomStart, tier.rayDiv) : null // (?levels= ?samples= ?rays=0: cost tests)
+  const baseDpr = Math.min(devicePixelRatio, num('maxdpr', tier.dpr)) // (?maxdpr=: the pixel-ratio cap, cost tests)
   let dprScale = 1, dprT = performance.now() + 4000
   // (phones only: on a PC / laptop the resolution never drops — the user: "don't reduce resolution automatically, turn it
   //  off on PC / laptop"; ?adaptive=1 forces it on, ?dpr=fixed / ?adaptive=0 off)
@@ -172,16 +197,23 @@ async function boot() {
     }
     last = now
     const dt = Math.min(clock.getDelta(), 0.1)
-    physics.pw.advance(dt, (fdt) => car.fixed(fdt))
+    car.wet = dust.wet = atmos.uniforms.uWet.value
+    physics.pw.advance(dt, (fdt) => { car.fixed(fdt); winch.fixed(fdt) })
     car.update(physics.pw.alpha)
     dust.update(dt, car)
-    car.lights(atmos)
+    tyreTracks.update(car, clock.elapsedTime)
+    car.lights(atmos, dt)
     if (driving) chase.update(dt)
     else fly.update(dt)
     ui.update(driving, atmos.clock)
     audio.update(dt, camera)
     atmos.tick(dt)
     atmos.update(camera.position, clock.elapsedTime)
+    rain.update()
+    glow?.update(camera, dt)
+    landmarks.update(dt, car.pos.x, car.pos.z)
+    mapView.update(dt)
+    winch.update(camera)
     shadow.update(atmos.uniforms.uSunDir.value)
     const t0 = performance.now()
     horizon.update(camera.position)
@@ -221,13 +253,19 @@ async function boot() {
     tier: tier.name,
     view: (x: number, z: number, h: number, yaw: number, pitch: number) => { driving = false; fly.place(x, z, h, yaw, pitch) },
     car,
+    rain,
+    winch,
+    tyreTracks,
+    scene,
+    post,
+    atmos,
     /** The sound's state (Audio.ts debug). */
     audio: () => audio.debug(),
     /** Drive mode on / off (the chase camera). */
     drive: (on: boolean) => { driving = on; if (on) chase.snap() },
     setHour: (h: number) => { atmos.hour = h; atmos.update(camera.position, 0) },
     sunDir: () => atmos.uniforms.uSunDir.value.toArray(),
-    stats: () => ({ fps: 1000 / frameMs, cpuMs, gpuMs, draws: renderer.info.render.calls, tris: renderer.info.render.triangles, patches: terrain.patches, blades: grass.blades, rocks: rocks.count, trees: trees.drawn.slice(), bushes: bushes.drawn.slice(), culled: { treeTiles: trees.occluded, rocks: { ...rocks.culled }, horizonBuilds: horizon.builds }, pos: camera.position.toArray().map((v) => +v.toFixed(1)), ground: +map.height(camera.position.x, camera.position.z).toFixed(1) }),
+    stats: () => ({ fps: 1000 / frameMs, cpuMs, gpuMs, draws: renderer.info.render.calls, tris: renderer.info.render.triangles, patches: terrain.patches, blades: grass.blades, rocks: rocks.count, trees: trees.drawn.slice(), bushes: bushes.drawn.slice(), culled: { terrainPatches: terrain.occluded, treeTiles: trees.occluded, rocks: { ...rocks.culled }, horizonBuilds: horizon.builds }, pos: camera.position.toArray().map((v) => +v.toFixed(1)), ground: +map.height(camera.position.x, camera.position.z).toFixed(1) }),
     height: (x: number, z: number) => map.height(x, z),
     rockNear: (x: number, z: number, r: number) => rocks.biggestNear(x, z, r),
     treeNear: (x: number, z: number, r: number, species: number, minH: number) => trees.nearest(x, z, r, species, minH),
@@ -349,7 +387,7 @@ function fullscreenButton(): void {
 function driveUi(car: Vehicle): { update: (driving: boolean, time: string) => void } {
   const box = document.createElement('div')
   box.id = 'drive'
-  box.innerHTML = '<div class="spd"><b>0</b><span>km/h</span><i></i><em></em></div><div class="help">W A S D drive · Space handbrake · Shift boost · R reset · 1 2 3 car · L lights · M sound · V free camera · + − zoom · [ ] time · T stop time · drag to look</div>'
+  box.innerHTML = '<div class="spd"><b>0</b><span>km/h</span><i></i><em></em></div><div class="help">W A S D drive · Space handbrake · Shift boost · E winch · R reset · Tab map · 1 2 3 car · L lights · K weather · M sound · V free camera · + − zoom · [ ] time · T stop time · drag to look</div>'
   document.body.appendChild(box)
   const spd = box.querySelector('b')!, gear = box.querySelector('i')!, clk = box.querySelector('em')!, help = box.querySelector('.help') as HTMLElement
   const touch = navigator.maxTouchPoints > 0 && matchMedia('(pointer: coarse)').matches
@@ -358,9 +396,10 @@ function driveUi(car: Vehicle): { update: (driving: boolean, time: string) => vo
     Object.assign(box.style, { top: '14px', left: '70px', right: 'auto', bottom: 'auto', textAlign: 'left' })
     const pad = document.createElement('div')
     pad.className = 'oth-touch'
-    pad.innerHTML = '<button data-k="left">◀</button><button data-k="right">▶</button><button data-k="reset">⟲</button><button data-k="brake">BRAKE</button><button data-k="gas">GAS</button>'
+    pad.innerHTML = '<button data-k="left">◀</button><button data-k="right">▶</button><button data-k="reset">⟲</button><button data-k="brake">BRAKE</button><button data-k="gas">GAS</button><button data-k="winch">WINCH</button>'
     document.body.appendChild(pad)
     for (const b of pad.querySelectorAll('button')) {
+      if (b.dataset.k === 'winch') { b.addEventListener('pointerdown', (e) => { e.preventDefault(); window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE' })) }); continue }
       const k = b.dataset.k as keyof Vehicle['touch'] | 'reset'
       const on = (v: number) => (e: Event) => { e.preventDefault(); if (k === 'reset') { if (v) car.reset() } else car.touch[k] = v }
       b.addEventListener('pointerdown', on(1)); b.addEventListener('pointerup', on(0)); b.addEventListener('pointercancel', on(0)); b.addEventListener('pointerleave', on(0))
@@ -380,3 +419,13 @@ boot().catch((e) => {
   status.textContent = `Failed: ${e?.message ?? e}`
   console.error(e)
 })
+
+/** A short message at the top of the screen (the weather, a discovery), fading out after a few seconds. */
+let toastEl: HTMLDivElement | null = null, toastT = 0
+export function toast(msg: string, ms = 2600): void {
+  if (!toastEl) { toastEl = document.createElement('div'); toastEl.className = 'oth-toast'; document.body.appendChild(toastEl) }
+  toastEl.textContent = msg
+  toastEl.classList.add('on')
+  clearTimeout(toastT)
+  toastT = window.setTimeout(() => toastEl!.classList.remove('on'), ms)
+}

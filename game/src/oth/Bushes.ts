@@ -49,7 +49,7 @@ export class Bushes {
     const mat = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
       uniforms: { ...atmos.uniforms, ...shadow.uniforms, uFarGrid: { value: new THREE.Vector4(map.far.n, map.far.step, map.far.origin, 0) }, uLeafTex: { value: leafTex } },
-      defines: { ...(tier.spec ? { OTH_SPEC: '' } : {}), ...(tier.msaa ? { A2C: '' } : {}) },
+      defines: { ...(tier.msaa ? { A2C: '' } : {}) }, // (no specular: leaves of roughness 0.9 never showed one)
       vertexColors: true,
       vertexShader: VERT,
       fragmentShader: FRAG,
@@ -213,6 +213,8 @@ out vec3 vN;
 out vec3 vAlb;
 out float vAo;
 out float vSun;
+out vec3 vMul;
+out vec3 vAdd;
 void main() {
   float c = cos(aB1.x), s = sin(aB1.x), S = aB0.w;
   vec3 p = position;
@@ -230,6 +232,15 @@ void main() {
   vec3 autumn = mix(vec3(0.35, 0.08, 0.02), vec3(0.7, 0.2, 0.04), 0.55 + j * 0.4);
   vAlb = aB1.y > 1.5 ? autumn : aB1.y > 0.5 ? juniper : green;
   vSun = sunVisibility(aB0.xz);
+  // THE LIGHT, PER VERTEX (2026-10-27, 400 fps at 1080p: the clumps are many cards deep): it is linear in the leaf's
+  // colour — the sun, the sky, the headlights' paint, the back-lit rim and the haze come down to a multiplier and an
+  // added haze here; the pixel keeps only what must be per pixel (the leaf texture's cut-out and tones)
+  vec3 Vv = normalize(uCamPos - vWorld);
+  vec3 M = shade(vec3(1.0), vN, Vv, 0.9, 0.03, mix(0.5, 1.0, vAo), vSun, 0.45) + headlight(vec3(1.0), vN, vWorld)
+         + uSunColor * pow(max(dot(-Vv, uSunDir), 0.0), 3.0) * 0.3 * vAo * vSun;
+  float f = fogAmount(vWorld);
+  vMul = M * (1.0 - f);
+  vAdd = fogColor(-Vv) * f;
   gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
 }
 `
@@ -244,9 +255,9 @@ in vec3 vN;
 in vec3 vAlb;
 in float vAo;
 in float vSun;
+in vec3 vMul;
+in vec3 vAdd;
 void main() {
-  vec3 N = normalize(vN);
-  vec3 V = normalize(uCamPos - vWorld);
   // tiny separate leaves, the gaps cut out
   vec4 lt = leafCard(vLeaf.xy, vLeaf.z);
   float alpha = 1.0;
@@ -257,11 +268,7 @@ void main() {
   if (lt.a < 0.5) discard;
 #endif
   vec3 albedo = vAlb * mix(0.35, 1.1, vAo) * (0.55 + 0.6 * lt.r) * (0.62 + 0.38 * lt.g) * (0.85 + 0.3 * fract(vLeaf.z));
-  vec3 c = shade(albedo, N, V, 0.9, 0.03, mix(0.5, 1.0, vAo), vSun, 0.45);
-  c += headlight(albedo, N, vWorld);
-  float back = pow(max(dot(-V, uSunDir), 0.0), 3.0);
-  c += albedo * uSunColor * back * 0.3 * vAo * vSun;
-  gl_FragColor = vec4(applyAtmos(c, vWorld), alpha);
+  gl_FragColor = vec4(albedo * vMul + vAdd, alpha);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }

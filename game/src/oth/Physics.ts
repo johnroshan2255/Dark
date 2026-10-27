@@ -1,6 +1,6 @@
 import type RAPIER from '@dimforge/rapier3d-compat'
 import * as THREE from 'three'
-import { group, Groups, PhysicsWorld } from '../physics/PhysicsWorld'
+import { group, Groups, PhysicsWorld, STATIC_MESH_FILTER } from '../physics/PhysicsWorld'
 import type { MapData } from './MapData'
 import type { Rocks } from './Rocks'
 import { TREE_STRIDE, type Trees } from './Trees'
@@ -39,20 +39,46 @@ export class OthPhysics {
     for (const [x, z, hx, hz] of [[h, 0, 2, h], [-h, 0, 2, h], [0, h, h, 2], [0, -h, h, 2]] as const) {
       this.pw.world.createCollider(R.ColliderDesc.cuboid(hx, 600, hz).setTranslation(x, 300, z).setCollisionGroups(group(Groups.Static, 0xffff)), walls)
     }
-    // the BRIDGES (Bridges.ts draws them): a deck box whose top is the planks, a curb log along each edge and a rail
-    // on the posts — oriented along the bridge
+    // the BRIDGES (Bridges.ts draws them): a deck box whose top is the planks, sloping y0 → y1 with its road (the
+    // bake carves the road onto both ends: no lip) and a RAIL on the posts (a guard wall).
+    // The DECK is GROUND (Groups.StaticMesh, as the game's own bridges): the drivetrain's wheel rays see the ground
+    // alone (VehicleSim GROUND_GROUPS) — as a plain Static prop the tyres went through it to the river and the car
+    // slid across on its belly. Every piece meets the car's convex HULLS, never its exact body mesh
+    // (STATIC_MESH_FILTER, as the game's bridges): a curb or the deck's edge that slipped into that hollow shell was
+    // pushed on from both sides and flipped the car
+    const Q = new THREE.Quaternion(), E = new THREE.Euler(), V = new THREE.Vector3()
     for (const br of map.meta.bridges ?? []) {
-      const dx = br.x1 - br.x0, dz = br.z1 - br.z0, L = Math.hypot(dx, dz), yaw = Math.atan2(dx, dz)
-      const rot = { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }
-      const mx = (br.x0 + br.x1) / 2, mz = (br.z0 + br.z1) / 2, ax = Math.cos(yaw), az = -Math.sin(yaw) // (across: local +x)
-      const piece = (ox: number, y: number, hx: number, hy: number, hz: number, friction: number) => this.pw.world.createCollider(
-        R.ColliderDesc.cuboid(hx, hy, hz).setTranslation(mx + ax * ox, y, mz + az * ox).setRotation(rot)
-          .setCollisionGroups(group(Groups.Static, 0xffff)).setFriction(friction), walls)
-      piece(0, br.y - 0.2, br.w / 2 + 0.1, 0.2, L / 2 + 0.3, 0.95)
-      for (const sd of [-1, 1]) {
-        piece(sd * (br.w / 2 - 0.14), br.y + 0.1, 0.12, 0.12, L / 2 + 0.2, 0.6)
-        piece(sd * (br.w / 2 + 0.18), br.y + 0.5, 0.12, 0.45, L / 2, 0.5)
+      const dx = br.x1 - br.x0, dz = br.z1 - br.z0, dy = br.y1 - br.y0, Lh = Math.hypot(dx, dz), L = Math.hypot(Lh, dy)
+      const yaw = Math.atan2(dx, dz), pitch = Math.atan2(dy, Lh)
+      Q.setFromEuler(E.set(-pitch, yaw, 0, 'YXZ'))
+      const rot = { x: Q.x, y: Q.y, z: Q.z, w: Q.w }
+      // (local axes: +x across, +y the deck's up, +z along)
+      const ax = new THREE.Vector3(1, 0, 0).applyQuaternion(Q), ay = new THREE.Vector3(0, 1, 0).applyQuaternion(Q)
+      const mid = new THREE.Vector3((br.x0 + br.x1) / 2, (br.y0 + br.y1) / 2, (br.z0 + br.z1) / 2)
+      const at = (ox: number, oy: number) => V.copy(mid).addScaledVector(ax, ox).addScaledVector(ay, oy)
+      const box = (ox: number, oy: number, hx: number, hy: number, hz: number, friction: number, groups: number = Groups.Static) => {
+        const c = at(ox, oy)
+        this.pw.world.createCollider(R.ColliderDesc.cuboid(hx, hy, hz).setTranslation(c.x, c.y, c.z).setRotation(rot)
+          .setCollisionGroups(group(groups, STATIC_MESH_FILTER)).setFriction(friction), walls)
       }
+      box(0, -0.2, br.w / 2 + 0.1, 0.2, L / 2 + 0.3, 0.95, Groups.Static | Groups.StaticMesh)
+      for (const sd of [-1, 1]) {
+        // (the rail as a GUARD WALL 1.5 m tall — the drawn rail is 0.9: a car that came at it sideways tripped on
+        //  the curb and rolled over the rail into the river; slick, it slides along. NO CURB collider (2026-10-27): a
+        //  car that drifted to the edge rode up the 22 cm curb log on one side while its flank leant on the wall, and
+        //  rolled onto its side along the deck — the wall alone keeps it on; the drawn curb stays)
+        box(sd * (br.w / 2 + 0.18), 0.75, 0.12, 0.75, L / 2, 0.2)
+      }
+    }
+  }
+
+  /** The LANDMARKS' colliders (Landmarks.ts): boxes; a dock's deck is GROUND (the wheel rays see it). */
+  addLandmarks(cols: { c: THREE.Vector3; h: THREE.Vector3; q: THREE.Quaternion; ground: boolean }[]): void {
+    const body = this.pw.world.createRigidBody(this.R.RigidBodyDesc.fixed())
+    for (const k of cols) {
+      this.pw.world.createCollider(this.R.ColliderDesc.cuboid(k.h.x, k.h.y, k.h.z).setTranslation(k.c.x, k.c.y, k.c.z)
+        .setRotation({ x: k.q.x, y: k.q.y, z: k.q.z, w: k.q.w })
+        .setCollisionGroups(group(k.ground ? Groups.Static | Groups.StaticMesh : Groups.Static, STATIC_MESH_FILTER)).setFriction(0.8), body)
     }
   }
 

@@ -20,24 +20,36 @@ export class Bridges {
     if (!list.length) return
     const b = new Builder(0x1b0a7d)
     for (const br of list) b.bridge(br, map)
-    const mat = new THREE.ShaderMaterial({
-      glslVersion: THREE.GLSL3,
-      uniforms: { ...atmos.uniforms, ...shadow.uniforms, uFarGrid: { value: farGrid } },
-      defines: tier.spec ? { OTH_SPEC: '' } : {},
-      vertexShader: VERT,
-      fragmentShader: FRAG,
-    })
-    const mesh = new THREE.Mesh(b.geometry(), mat)
+    const mesh = new THREE.Mesh(b.geometry(), woodMaterial(atmos, shadow, tier, farGrid))
     this.group.add(mesh)
   }
 }
 
-/** Collects boxes and logs (flat normals, a colour each) into one geometry. */
-class Builder {
+/** The wood's (and the landmarks') material: vertex colours, a stretched grain, this world's light; `glow` (a vertex
+ *  attribute) burns warm at night — a cabin's window, a lantern. */
+export function woodMaterial(atmos: Atmosphere, shadow: TerrainShadow, tier: Tier, farGrid: THREE.Vector4): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    uniforms: { ...atmos.uniforms, ...shadow.uniforms, uFarGrid: { value: farGrid } },
+    defines: tier.spec ? { OTH_SPEC: '' } : {},
+    vertexShader: VERT,
+    fragmentShader: FRAG,
+  })
+}
+
+/** Collects boxes, logs, quads and triangles (flat normals, a colour each, a night glow) into one geometry. */
+export class Builder {
   private readonly pos: number[] = []
   private readonly nor: number[] = []
   private readonly col: number[] = []
+  private readonly glw: number[] = []
   private readonly idx: number[] = []
+  private glowNow = 0
+  /** The glow of what's added from now on (0: none; 1: a lit window at night). */
+  setGlow(v: number): void {
+    while (this.glw.length < this.count) this.glw.push(this.glowNow)
+    this.glowNow = v
+  }
   private s: number
 
   constructor(seed: number) { this.s = seed >>> 0 }
@@ -110,25 +122,26 @@ class Builder {
   }
 
   bridge(br: Bridge, map: MapData): void {
-    const a = new THREE.Vector3(br.x0, br.y, br.z0), b = new THREE.Vector3(br.x1, br.y, br.z1)
+    // (the deck slopes from y0 to y1 with its road: planks square to it, posts and the ground plumb)
+    const a = new THREE.Vector3(br.x0, br.y0, br.z0), b = new THREE.Vector3(br.x1, br.y1, br.z1)
     const L = a.distanceTo(b), along = new THREE.Vector3().subVectors(b, a).normalize()
     const up = new THREE.Vector3(0, 1, 0), across = new THREE.Vector3().crossVectors(up, along).normalize()
+    const deckUp = new THREE.Vector3().crossVectors(along, across).normalize()
     const half = br.w / 2
     // PLANKS: across the bridge, ~0.26 m wide with a thin gap, each a little longer / shorter, skewed, its own tone
     const P = 0.29, n = Math.floor((L + 0.6) / P)
     for (let i = 0; i < n; i++) {
       const t = -0.3 + (i + 0.5) * ((L + 0.6) / n)
       const skew = (this.rnd() - 0.5) * 0.05
-      const ax = across.clone().applyAxisAngle(up, skew), al = along.clone().applyAxisAngle(up, skew)
+      const ax = across.clone().applyAxisAngle(deckUp, skew), al = along.clone().applyAxisAngle(deckUp, skew)
       const c = a.clone().addScaledVector(along, t).addScaledVector(across, (this.rnd() - 0.5) * 0.14)
-      c.y += -0.055 + (this.rnd() - 0.5) * 0.025
-      this.box(c, ax, up, al, half + (this.rnd() - 0.5) * 0.22, 0.055, 0.125, this.wood())
+      c.addScaledVector(deckUp, -0.055 + (this.rnd() - 0.5) * 0.025)
+      this.box(c, ax, deckUp, al, half + (this.rnd() - 0.5) * 0.22, 0.055, 0.125, this.wood())
     }
     // STRINGERS under the planks
     for (const o of [-half + 0.45, 0, half - 0.45]) {
-      const c = a.clone().addScaledVector(along, L / 2).addScaledVector(across, o)
-      c.y -= 0.11 + 0.14
-      this.box(c, across, up, along, 0.13, 0.14, L / 2 + 0.4, this.wood(0.75))
+      const c = a.clone().addScaledVector(along, L / 2).addScaledVector(across, o).addScaledVector(deckUp, -0.25)
+      this.box(c, across, deckUp, along, 0.13, 0.14, L / 2 + 0.4, this.wood(0.75))
     }
     // POSTS every ~6 m (and at both ends), a cap beam across each pair; the RAIL logs on top, a CURB log each edge
     const k = Math.max(2, Math.round(L / 6) + 1)
@@ -138,21 +151,49 @@ class Builder {
       for (const sd of [-1, 1]) {
         const p = c.clone().addScaledVector(across, sd * (half + 0.18))
         const ground = map.height(p.x, p.z)
-        this.log(new THREE.Vector3(p.x, Math.min(ground, br.y - 1) - 0.6, p.z), new THREE.Vector3(p.x, br.y + 0.95, p.z), 0.15, this.wood(0.8))
+        this.log(new THREE.Vector3(p.x, Math.min(ground, c.y - 1) - 0.6, p.z), new THREE.Vector3(p.x, c.y + 0.95, p.z), 0.15, this.wood(0.8))
       }
-      const cap = c.clone(); cap.y -= 0.11 + 0.28 + 0.13
-      this.box(cap, across, up, along, half + 0.35, 0.13, 0.16, this.wood(0.7))
+      const cap = c.clone().addScaledVector(deckUp, -0.52)
+      this.box(cap, across, deckUp, along, half + 0.35, 0.13, 0.16, this.wood(0.7))
     }
     for (const sd of [-1, 1]) {
       const e0 = a.clone().addScaledVector(across, sd * (half + 0.18)), e1 = b.clone().addScaledVector(across, sd * (half + 0.18))
-      this.log(e0.clone().setY(br.y + 0.82), e1.clone().setY(br.y + 0.82), 0.1, this.wood(0.9))
+      this.log(e0.setY(e0.y + 0.82), e1.setY(e1.y + 0.82), 0.1, this.wood(0.9))
       const c0 = a.clone().addScaledVector(across, sd * (half - 0.14)).addScaledVector(along, -0.2), c1 = b.clone().addScaledVector(across, sd * (half - 0.14)).addScaledVector(along, 0.2)
-      this.log(c0.setY(br.y + 0.1), c1.setY(br.y + 0.1), 0.12, this.wood(0.85))
+      this.log(c0.setY(c0.y + 0.1), c1.setY(c1.y + 0.1), 0.12, this.wood(0.85))
+    }
+  }
+
+  /** A flat quad p0 → p1 → p2 → p3 (counter-clockwise seen from its front), its normal from the winding. */
+  quad(p0: THREE.Vector3, p1: THREE.Vector3, p2: THREE.Vector3, p3: THREE.Vector3, color: [number, number, number]): void {
+    const n = new THREE.Vector3().subVectors(p1, p0).cross(new THREE.Vector3().subVectors(p2, p0)).normalize(), base = this.pos.length / 3
+    for (const p of [p0, p1, p2, p3]) { this.pos.push(p.x, p.y, p.z); this.nor.push(n.x, n.y, n.z); this.col.push(...color) }
+    this.idx.push(base, base + 1, base + 2, base, base + 2, base + 3)
+  }
+
+  /** A flat triangle (counter-clockwise from its front). */
+  tri(p0: THREE.Vector3, p1: THREE.Vector3, p2: THREE.Vector3, color: [number, number, number]): void {
+    const n = new THREE.Vector3().subVectors(p1, p0).cross(new THREE.Vector3().subVectors(p2, p0)).normalize(), base = this.pos.length / 3
+    for (const p of [p0, p1, p2]) { this.pos.push(p.x, p.y, p.z); this.nor.push(n.x, n.y, n.z); this.col.push(...color) }
+    this.idx.push(base, base + 1, base + 2)
+  }
+
+  /** Vertices added so far (a landmark transforms its own range into place). */
+  get count(): number { return this.pos.length / 3 }
+
+  /** Move vertices [from, count) by m (positions and normals). */
+  transform(from: number, m: THREE.Matrix4): void {
+    const v = new THREE.Vector3(), n3 = new THREE.Matrix3().getNormalMatrix(m)
+    for (let i = from; i < this.count; i++) {
+      v.fromArray(this.pos, i * 3).applyMatrix4(m).toArray(this.pos, i * 3)
+      v.fromArray(this.nor, i * 3).applyMatrix3(n3).normalize().toArray(this.nor, i * 3)
     }
   }
 
   geometry(): THREE.BufferGeometry {
+    this.setGlow(0)
     const g = new THREE.BufferGeometry()
+    g.setAttribute('glow', new THREE.Float32BufferAttribute(this.glw, 1))
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3))
     g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3))
     g.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3))
@@ -164,10 +205,13 @@ class Builder {
 
 const VERT = /* glsl */ `
 in vec3 color;
+in float glow;
 out vec3 vWorld;
 out vec3 vN;
 out vec3 vCol;
+out float vGlow;
 void main() {
+  vGlow = glow;
   vec4 w = modelMatrix * vec4(position, 1.0);
   vWorld = w.xyz;
   vN = normalize(mat3(modelMatrix) * normal);
@@ -184,6 +228,7 @@ ${SHADOW_GLSL}
 in vec3 vWorld;
 in vec3 vN;
 in vec3 vCol;
+in float vGlow;
 void main() {
   vec3 N = normalize(vN);
   vec3 V = normalize(uCamPos - vWorld);
@@ -193,6 +238,8 @@ void main() {
   float sun = sunVisibility(vWorld.xz);
   vec3 c = shade(albedo, N, V, 0.85, 0.03, 1.0, sun, 0.2);
   c += headlight(albedo, N, vWorld);
+  // a lit window / a lantern: warm light from dusk, above white at night (the bloom takes it)
+  c += vec3(1.0, 0.62, 0.28) * vGlow * (0.15 + 2.6 * uNight);
   gl_FragColor = vec4(applyAtmos(c, vWorld), 1.0);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
